@@ -51,11 +51,45 @@ for _, set_name in ipairs(icons.SETS) do
   end
 end
 
--- THE A2 DECISION, as a test: wa Icons is GLUED (no gap); every other set keeps the one space.
+-- THE LAYOUT, set by set (item 7, Victor 23/11): wa Icons is GLUED, and so is the unicode set now - "a
+-- terminal without our font looks the same except for the glyph shapes". nerd keeps its one space (19/11:
+-- that face draws its glyphs WIDER than their cell, so gluing them collides with the value), and ascii's
+-- glyphs are words, which carry their own separator.
 eq(icons.set("wa").gap, "", "wa is glued: the value starts in the icon's own cell")
-for _, set_name in ipairs({ "nerd", "unicode", "ascii" }) do
-  eq(icons.set(set_name).gap, " ", set_name .. " keeps the one space Victor chose for plain fonts")
+eq(icons.set("unicode").gap, "", "unicode is glued too: the no-font row has the SAME layout as ours")
+for _, set_name in ipairs({ "nerd", "ascii" }) do
+  eq(icons.set(set_name).gap, " ", set_name .. " keeps the space its own glyphs need")
 end
+
+-- EVERY GLYPH OF THE STOCK SET IS ONE OF THE MEASURED ONES (item 7). The characters below are what
+-- scripts/test-unicode-icons.py measured one cell wide in this node's stock monospace faces, and what the
+-- Unicode East-Asian-Width table calls Narrow or Neutral; a glyph swapped in without that measurement
+-- fails here, by name - this row cannot open a font file from Lua.
+local MEASURED_NARROW = { ["~"] = true, ["#"] = true, ["="] = true, ["+"] = true,
+  ["\226\128\186"] = true,  -- U+203A
+  ["\226\150\171"] = true,  -- U+25AB
+  ["\226\151\166"] = true,  -- U+25E6
+  ["\226\151\148"] = true,  -- U+25D4
+  ["\226\151\149"] = true,  -- U+25D5
+  ["\226\150\170"] = true,  -- U+25AA
+}
+for _, icon in ipairs(NAMES) do
+  local glyph = icons.set("unicode")[icon]
+  ok(MEASURED_NARROW[glyph] == true,
+    "unicode." .. icon .. " is a glyph measured one cell wide in the stock faces (" .. tostring(glyph) .. ")")
+end
+
+-- THE FONT ON THE DRAWING MACHINE (item 7): ONE line, from THIS build's node release - and nothing at all
+-- when no release can be named, because an unpinned guess is worse than no advice.
+local fetch = icons.fetch_line("v0123456789ab")
+ok(type(fetch) == "string" and fetch:find(
+  "https://github.com/Magaav/wasm-agent/releases/download/node-0123456789ab/waIcons-Regular.ttf", 1, true) ~= nil,
+  "the one line downloads this build's own font asset: " .. tostring(fetch))
+ok(type(fetch) == "string" and fetch:find("curl -fsSL", 1, true) == 1 and fetch:find("fc-cache", 1, true) ~= nil,
+  "with curl and the font cache rebuild, and nothing else: " .. tostring(fetch))
+eq(icons.fetch_line("unknown build"), nil, "an unnameable release prints no line")
+eq(icons.fetch_line(nil), nil, "and a caller with no label prints no line")
+eq(icons.fetch_line("node-0123456789ab"), fetch, "a release tag and a commit label give the same line")
 
 -- Nine states in every set that has a ball (the brief keeps all nine in wa/nerd/unicode).
 for _, set_name in ipairs({ "wa", "nerd", "unicode" }) do
@@ -238,8 +272,8 @@ ok(tostring(older.source):find("NERD", 1, true) == nil and tostring(older.source
 
 -- (c) a terminal nobody can identify: the unicode set, never the glued one.
 local blind = resolved_face(NO_TERMINAL, FOOT_INI)
-eq(blind.set, "unicode", "a terminal that cannot be identified gets the SPACED unicode set")
-eq(icons.set(blind.set).gap, " ", "and it is spaced")
+eq(blind.set, "unicode", "a terminal that cannot be identified gets the stock-font unicode set")
+eq(icons.set(blind.set).gap, "", "and it is GLUED like wa (item 7): one layout, so the no-font row looks the same")
 ok(tostring(blind.source):find("ancestry", 1, true) ~= nil,
   "and says what it could not see: " .. tostring(blind.source))
 

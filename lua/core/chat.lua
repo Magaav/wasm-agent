@@ -1198,6 +1198,14 @@ function M.run(argv)
         local set, source = view_lib.icon_set()
         ui.say("  icons " .. tostring(set) .. "  (" .. tostring(source) .. ")")
         ui.say("  choose: wa (wa Icons, glued), nerd, unicode, ascii")
+        -- THE FONT ON THE DRAWING MACHINE (item 7, Victor 23/11): while this window is not drawing wa Icons,
+        -- the one line that puts the font on the machine whose terminal shows these rows - a container cannot
+        -- install it for the window it is drawn in. Nothing is printed when no release can be named.
+        if tostring(set) ~= "wa" then
+          local icons_lib = dofile("lua/core/icons.lua")
+          local line = icons_lib.fetch_line(dofile("lua/core/build_identity.lua").label())
+          if line then ui.say("  wa Icons on this machine: " .. line) end
+        end
       else
         local chosen, why = view_lib.use_icons(asked)
         if not chosen then ui.say("  " .. tostring(why))

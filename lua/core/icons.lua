@@ -78,26 +78,37 @@ M.TABLE = {
     ballSevenEighths = "\243\176\170\164",
     ballFull = "\243\176\170\165",
   },
-  -- Glyphs a stock terminal font has, so this set needs nothing installed. The ball keeps NINE slots
-  -- but a stock font has five distinct circle pictures (U+25CB, U+25D4, U+25D1, U+25D5, U+25CF), so the
-  -- ladder repeats them - a coarser reading of the same number, never a different number. M.FILL is the
-  -- promise that makes the repetition honest: it never goes DOWN as the window fills.
+  -- THE STOCK-FONT SET, REBUILT FROM MEASUREMENT (item 7, Victor 23/11: "that is horrible ... our
+  -- quality should be the same everywhere"). The set this replaces drew U+25B8, U+25F7, U+21BB, U+25A4,
+  -- U+25D1, U+25CB and U+25CF: the first four are not in JetBrains Mono or Liberation Mono at all (the
+  -- terminal took them from a fallback face), U+25D1 is missing from JetBrains Mono, and every one of
+  -- them is East-Asian-Ambiguous - a CJK-locale terminal may spend two cells on one. It was also the one
+  -- set that kept a space after each icon, so the no-font row was WIDER than ours; it is GLUED like wa.
+  --
+  -- MEASURED (scripts/test-unicode-icons.py is the row that keeps this honest): every glyph below is
+  -- East-Asian Width Narrow or Neutral - never Ambiguous, never an emoji - is present in the stock
+  -- monospace faces installed on this node, and advances EXACTLY one cell in each: JetBrains Mono
+  -- 600/1000, Liberation Mono 1229/2048, Noto Sans Mono 600/1000, Adwaita Mono 600/1000. DejaVu Sans
+  -- Mono, Menlo, Consolas and Cascadia Code are NOT installed here; that row names them as unmeasured
+  -- rather than claiming them, and every glyph used here is ASCII, Latin-1 or a square/circle those
+  -- faces all carry. The nine slots use FIVE pictures, and M.FILL is the promise that makes the
+  -- repetition honest: it never goes DOWN as the window fills.
   unicode = {
-    gap = " ",
-    steps = "\226\150\184",                     -- U+25B8, a step forward
-    clock = "\226\151\183",                     -- U+25F7
-    turns = "\226\134\187",                     -- U+21BB
-    cache = "\226\150\164",                     -- U+25A4, a store
-    check = "\226\156\147",                     -- U+2713
-    ballEmpty = "\226\151\139",                 -- U+25CB
-    ballEighth = "\226\151\148",                -- U+25D4
-    ballQuarter = "\226\151\148",               -- U+25D4
-    ballThreeEighths = "\226\151\145",          -- U+25D1
-    ballHalf = "\226\151\145",                  -- U+25D1
-    ballFiveEighths = "\226\151\149",           -- U+25D5
+    gap = "",
+    steps = "\226\128\186",                     -- U+203A, a step forward
+    clock = "~",                                -- ASCII: elapsed
+    turns = "#",                                -- ASCII: a count of runs
+    cache = "=",                                -- ASCII: served from cache, the same as before
+    check = "+",                                -- ASCII: U+2713 is NOT in Liberation Mono or Noto
+    ballEmpty = "\226\150\171",                 -- U+25AB, white small square
+    ballEighth = "\226\151\166",                -- U+25E6, a ring
+    ballQuarter = "\226\151\166",               -- U+25E6
+    ballThreeEighths = "\226\151\148",          -- U+25D4, a quarter black
+    ballHalf = "\226\151\148",                  -- U+25D4
+    ballFiveEighths = "\226\151\149",           -- U+25D5, all but the upper-left quadrant
     ballThreeQuarters = "\226\151\149",         -- U+25D5
-    ballSevenEighths = "\226\151\143",          -- U+25CF
-    ballFull = "\226\151\143",                  -- U+25CF
+    ballSevenEighths = "\226\150\170",          -- U+25AA, black small square
+    ballFull = "\226\150\170",                  -- U+25AA
   },
   -- Words and brackets, for a terminal with nothing: no glyph can be missing, and the row still says
   -- the same thing.
@@ -262,6 +273,30 @@ function M.glyph(name, set_name)
   return glyph, set.gap
 end
 
+-- ---- the ONE line that puts the font on the DRAWING machine (item 7, Victor 23/11) ---------------
+--
+-- A container cannot install a font for the terminal that DRAWS its output: the font has to land on the
+-- machine with the window, which may have no wa at all. So the release carries the font itself
+-- (waIcons-Regular.ttf, an asset of every node release - scripts/publish-node-binaries.sh), the same
+-- bytes as assets/fonts/waIcons-Regular.ttf, and it is covered by that release SIGNED SHA256SUMS (the
+-- vault release-signing key signs that list, and a release without a valid signature is never published).
+--
+-- WHAT THE LINE DOWNLOADS, and from where: this build own node release - tag node-<sha12>, the tag the
+-- release index and the install path already trust - at
+--   https://github.com/<repo>/releases/download/node-<sha12>/waIcons-Regular.ttf
+-- one font file, no installer, no shell pipeline and no token. Where no release can be named (a dev tree
+-- whose label is not a commit) it says nothing: an unpinned guess is worse than no advice.
+M.FONT_ASSET = "waIcons-Regular.ttf"
+M.FONT_REPO = "Magaav/wasm-agent"
+M.FONT_TAG_PREFIX = "node-"
+function M.fetch_line(label)
+  local tag = tostring(label or ""):gsub("%s", ""):gsub("^v", "")
+  if tag:sub(1, #M.FONT_TAG_PREFIX) == M.FONT_TAG_PREFIX then tag = tag:sub(#M.FONT_TAG_PREFIX + 1) end
+  if not tag:match("^%x%x%x%x%x%x%x%x%x%x%x%x$") then return nil end
+  return string.format(
+    "curl -fsSL https://github.com/%s/releases/download/%s%s/%s -o ~/.local/share/fonts/%s && fc-cache -f ~/.local/share/fonts",
+    M.FONT_REPO, M.FONT_TAG_PREFIX, tag, M.FONT_ASSET, M.FONT_ASSET)
+end
 -- The nine balls, in context_ball's order.
 function M.balls(set_name)
   local set, why = M.set(set_name)

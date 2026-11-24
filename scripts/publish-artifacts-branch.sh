@@ -116,6 +116,16 @@ for triple in $TRIPLES; do
 done
 ASSETS="$ASSETS node-$SHORT.manifest"
 [ -f "$MANIFEST" ] || fail "manifest_missing: $MANIFEST" 2
+# THE ICON FONT travels with the binaries (item 7, Victor 23/11): the publisher writes waIcons-Regular.ttf
+# beside them and names it in SHA256SUMS, so a commit without it would ship sums that point at a file nobody
+# can download - and `/icons` prints a curl of that file. Its pin is the publisher's own row, verified below
+# like every other asset; a set built before this change has none, which is said and not refused.
+if [ -f "$OUT/waIcons-Regular.ttf" ]; then
+  ASSETS="$ASSETS waIcons-Regular.ttf"
+  ROWS="$ROWS$(wa_node_sha256 "$OUT/waIcons-Regular.ttf")  $(wc -c < "$OUT/waIcons-Regular.ttf" | tr -d '[:space:]')  waIcons-Regular.ttf"$'\n'
+else
+  say "font_absent: $OUT/waIcons-Regular.ttf is not in this set, so this release ships no icons (a set built before item 7 has none)"
+fi
 ROWS="$ROWS$(wa_node_sha256 "$MANIFEST")  $(wc -c < "$MANIFEST" | tr -d '[:space:]')  node-$SHORT.manifest"$'\n'
 # ---- 1a. the pins, before the signed sums join the list ---------------------------------------------
 # `SHA256SUMS` is the flat form of THESE rows (`<sha>  <bytes>  <name>`, what `sha256sum -c` reads), so the

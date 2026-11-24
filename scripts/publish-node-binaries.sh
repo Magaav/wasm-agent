@@ -407,6 +407,10 @@ if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
 fi
 
 mkdir -p "$OUT" || fail "bundle_unwritable: $OUT"
+# The font rides beside the binaries: one page of glyphs, the same bytes the tree commits, in this release's
+# assets and in its signed SHA256SUMS (see asset_list).
+cp "$ROOT/assets/fonts/waIcons-Regular.ttf" "$OUT/waIcons-Regular.ttf" \
+  || fail "font_missing: $ROOT/assets/fonts/waIcons-Regular.ttf" 2
 
 # ---- the artifact set, from a build here or from --from --------------------------------------------
 emit_manifest() { # <out dir> -> manifest path, after every member is checked
@@ -702,7 +706,11 @@ done
 say "bundle: $OUT"
 say "release tag: $TAG (source_commit $COMMIT)"
 say "pins: $OUT/node-$SHORT.manifest"
-assets="$(asset_list) node-$SHORT.manifest"
+# THE ICONS THE DRAWING MACHINE NEEDS (item 7, Victor 23/11) ride beside the binaries and inside this
+# release's SHA256SUMS - the list the vault's release-signing key signs - so `/icons` can print a curl of a
+# SIGNED asset (lua/core/icons.lua M.fetch_line names the URL). NOT in asset_list(): that list is the
+# manifest's binary set, which a set built on another host is verified against, and a font is not a binary.
+assets="$(asset_list) node-$SHORT.manifest waIcons-Regular.ttf"
 # SHA256SUMS for the node release, built from the bytes about to be uploaded: the manifest is the pin a
 # deploy verifies (source_commit + sha256/size per triple), and this is the same set in the flat form every
 # other release of this project publishes, so a mirror, an audit or a human with `sha256sum -c` needs no
