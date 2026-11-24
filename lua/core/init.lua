@@ -165,14 +165,28 @@ if command == "update" or command == "--update" then
     local feed = updater.run({ check = true })
     if feed.release and feed.release.state == "behind" then print(redact.text("release feed: " .. feed.release.message)) end
     -- (b)(i), Fable 24/11: "is there a published artifact for the commit I am on, and for the one I am
-    -- behind by", answered locally from the release list this node already has. `listing` makes no
-    -- request; a list it cannot read is reported as unreadable, never guessed at.
-    if report.tree then
-      local banner_ok, banner = pcall(dofile, "lua/core/update_banner.lua")
-      if banner_ok and type(banner) == "table" and type(banner.listing) == "function" then
-        local listing = banner.listing({ installed = report.installed, target = report.target, tree = report.tree })
-        for _, line in ipairs(listing.lines or {}) do print(redact.text(line)) end
+    -- behind by". Two things the first version got wrong, both fixed here:
+    --   * IT REFRESHES FIRST. `--check` is the one place a person ASKS, and it answered from a list three
+    --     days old. Bounded (`banner.REFRESH_SECONDS`), and a failed refresh is named with the old list's
+    --     own date - never silently skipped, never read as "this is current".
+    --   * IT NAMES THE RELEASE THE INSTALLER WOULD TAKE. "no published binary for <sha>" is true by name
+    --     and false in effect: the installer also accepts a release built from the same compiled inputs.
+    --     `listing` runs that lookup (`M.covering`) and prints the tag it finds; when the lookup cannot
+    --     run, its own fallback sentence says what the installer will do at install time.
+    local banner_ok, banner = pcall(dofile, "lua/core/update_banner.lua")
+    if banner_ok and type(banner) == "table" and type(banner.listing) == "function" then
+      local refreshed = { ok = false, reason = "refresh_unavailable" }
+      if type(banner.refresh) == "function" then
+        refreshed = banner.refresh({ tree = report.tree, seconds = banner.REFRESH_SECONDS })
       end
+      local listing = banner.listing({
+        installed = report.installed, target = report.target, tree = report.tree,
+        read = refreshed.ok and "just now" or nil,
+        refresh_failed = (not refreshed.ok) and tostring(refreshed.reason or "refresh_failed") or nil,
+        cache_root = updater.install_dir() .. "/node-binaries",
+        seconds = banner.REFRESH_SECONDS,
+      })
+      for _, line in ipairs(listing.lines or {}) do print(redact.text(line)) end
     end
     return
   end

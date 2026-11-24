@@ -141,6 +141,61 @@ The four Lua rows this change could reach - `test-build-identity`, `test-cli-not
 No other wording changed: `unknown build`, the release tag, the `(pinned)` suffix and `/health`'s empty-record
 fallback are as they were, and `scripts/test-version-prints-once.sh` holds them.
 
+## Second request on this branch (Fable, 24/11): `--check` refreshes, and names the covering release
+
+Fable ran `wa update --check` for real and got two things wrong:
+
+    release list: 5 entries, read 2026-11-21 01:42Z, newest node-e4e40405d89b
+    this node (fe108a8c): no published binary for fe108a8c on x86_64-unknown-linux-gnu
+
+1. The list was three days old and `--check` decided from it. `--check` is the one place a person ASKS, so
+   it now refreshes first (`update_banner.M.refresh`), bounded to `M.REFRESH_SECONDS` (10 s), and the line
+   says `read just now`. A failed refresh is named with the old list's own date:
+
+       release list: 5 entries, read 2026-11-21 01:42Z, newest node-e4e40405d89b; the refresh just now
+                     failed (feed_unreachable), so this is the list as it stood
+
+2. `no published binary for <sha>` was true by name and false in effect. `update_banner.M.covering` runs
+   the INSTALLER's own lookup - the same `wa_node_release_digest_search` call from the same
+   `scripts/lib/node-binaries.sh` the deploy sources, bounded in seconds, in the installer's cache root -
+   and the answer names what it finds:
+
+       no binary is published under <sha12>'s own name; the installer downloads node-<sha12>, built from
+       the same inputs
+
+   When the lookup cannot run (no tree, no target, or a node told to stay offline), the installer's own
+   fallback sentence is printed instead, and a commit the list does not NAME keeps its honest "the release
+   list cannot say whether ..." first half rather than being called unpublished.
+
+Row: `scripts/test-check-listing.lua` (a Lua row, so the fast path's inventory carries it automatically),
+10 checks, all green, driving the SAME `M.refresh` then `M.listing` that `wa update --check` calls, with the
+functions' own seams (a fixture feed instead of a request, a `covering` answer instead of a digest walk):
+
+    ok   the list line says 'read just now' after a refresh
+    ok   refresh: a failing feed is refused by name (feed_unreachable)
+    ok   the list line keeps the OLD date when the refresh failed
+    ok   a covering release is NAMED: behind by (ccccccccdddd): no binary is published under
+         ccccccccdddd's own name; the installer downloads node-9a0c589adfa0, built from the same inputs
+    ok   a lookup that cannot run says what the installer will still do
+    ok   a published commit still reads as published
+    ok   a commit the list does not name keeps its honest first half and ADDS the installer's release
+    ok   and it does not claim the commit is unpublished
+    check listing ok (10 checks)
+
+Red on the base (the same row, `WASM_AGENT_LUA_ROOT` at the canonical checkout):
+`lua error: attempt to call a nil value (field 'refresh')` - the function does not exist there.
+
+`scripts/test-update-follow.sh`'s `--check` case now asserts the installer's fallback sentence (it runs with
+`WA_UPDATE_CHECK=0 WA_OFFLINE=1`, so the digest walk refuses by name); the whole row is green (8 cases).
+
+Texts to approve (this request):
+
+3. `release list: <n> entries, read just now, newest <tag>`
+4. `; the refresh just now failed (<reason>), so this is the list as it stood` (appended to that line)
+5. `no binary is published under <sha12>'s own name; the installer downloads <tag>, built from the same inputs`
+6. `no binary is published under <sha12>'s own name; the installer also accepts one built from the same inputs and looks for it at install time`
+7. `; the installer accepts <tag>, built from the same inputs` (appended when the list does not name the commit)
+
 ## Limits
 
 - The row proves the READER. It does not run a deploy: it writes the record shape `scripts/deploy.sh`
