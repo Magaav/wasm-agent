@@ -240,3 +240,31 @@ Every check reads what the product itself wrote: the two homes are the nodes' ow
 the store files are the ones `memory.store_image` wrote under `paths.data()/attachments`, the peer's
 operation record is its own `operations/<id>/state.json`, and the mesh verdict is the peer's own audit
 line. Nothing was created by hand, and no host capability was stood in for.
+
+## The rows, measured
+
+Every row below was run singly with the binary `scripts/fast.sh` builds for this tree
+(`/home/victor/wasm-agent/target/m-run-images-two-node/release/wa`, built from this tree at
+`b5275831`, code-mode assets embedded), against this tree and against a worktree of the base commit
+(`git worktree add /tmp/base-two-node HEAD` - never a stash):
+
+| row | this tree | base tree |
+| --- | --- | --- |
+| `scripts/test-two-node-images.lua` | pass, 38 checks, 0 skips | fails: `a picture from a peer is not refused: {... reason:"unknown_caller" ...}` |
+| `scripts/test-mesh-attest-text.lua` | pass, 19 checks | fails: `a managed node admits a capability off the list when the attestation arrives as text: {"error":"capability_not_granted"}` |
+| `scripts/test-remote-image.lua` | pass, 47 checks | fails: `... expected remote_image_batch_unsupported, got remote_image_transport_unsupported` |
+| `scripts/test-peer-bash-changes.lua` | pass, 17 checks | fails: 4 of 17, first `the caller emits one row per file: 0` |
+
+**The narrowed runner run did not complete, and this is what stopped it.** `scripts/fast.sh` narrowed to
+`/tmp/rows-run-images-two-node.txt` was started three times under the suite lock. The first was killed
+by a node install (the deploy pause that replaced this session's owner: `operation_owner_not_attached`,
+nothing ran). The second ran and reported 31/33: it built this tree's binary with code-mode assets, and
+its two failures were the two faults this branch then fixed (`d1982e9e` - the batch's byte answer was
+not refused, and the row's image check said only "0"). The third waited 10 minutes behind two other
+missions' runs that held `~/Work/missions/.suite.lock` (32 and 22 minutes at the time of writing) and
+was cancelled rather than left queued when this session ended: no work of this branch is running.
+So the contract checks and the never-dropped core rows have no runner verdict from this session - the
+first run's own verdict for them was green (31/33 with exactly the two rows above red). The run's
+other red, `esc-stops-pty` (`scripts/test-esc-stops-pty.mjs`, a pty row this branch does not touch),
+is PRE-EXISTING and measured: `17 ok, 1 failed` with `FAIL - bash: Esc ends the run at once ...` in
+this tree AND in the base worktree `/tmp/base-two-node`, same check, same words.
