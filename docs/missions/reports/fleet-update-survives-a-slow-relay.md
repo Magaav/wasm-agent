@@ -268,22 +268,49 @@ for one id**, and the first call does not answer `already`.
 Plus the assertion Fable asked for: **a refused role leaves no accept record** (the role check is the
 first thing `serve()` does), in the same row. `scripts/test-remote-update.lua` is 146 checks.
 
-### 8.4 Review c (the real row) - OPEN, and why I did not hand in a half-version
+### 8.4 Review c (the real row) - DONE: two real processes, green here, red on base
 
-The two-real-process row is **not written**. I had a first attempt (deleted, uncommitted) with the wire
-stubbed, and Fable is right that it proves nothing about the path the fleet step uses; I stopped rather
-than land it. What it needs, with what this session measured while failing at it:
+`scripts/test-accept-two-process.lua` (commit `f0ad8a31`, wired into `scripts/test.sh` beside
+`test-remote-pending`). It starts the fleet's own path on this machine and touches no live node:
 
-* processes: the row's own `wa` process (master, REAL `host.http`, no stub), a relay process on a fresh
-  127.0.0.1 port (holds the first `update` answer longer than the master's deadline, then answers the
-  relay's own `{ok:true,status:504,body:'{"error":"relay_request_timeout"}'}`, and re-serves the stored
-  answer to a retry of the same rid), and a real `wa serve` for the peer with its own scratch HOME;
-* the peer needs authorization to admit the master: the cheapest honest route is the one
-  `scripts/test-two-node-images.lua` already built - a scratch `wa rendezvous`, both nodes registered, the
-  admin list applied, a signed roster (`wa fleet keygen` / `wa fleet sign`) - plus, for the deploy to get
-  past `preconditions`, a fixture `wa-sentinel` (preflight JSON + a `request deploy` that writes a request
-  file) and a real two-commit scratch git repo as the runtime tree;
-* two traps measured here, so the next session does not pay for them again: loading `lua/core/nodes.lua`
-  with the transport names answered before the load **blocks in the load** (nothing printed, `host.http`
-  never reached), and installing a virtual clock (`host.sleep` advancing the test's time) before loading
-  `lua/core/update.lua` **blocks in that load**. Load first, stub afterwards.
+* THIS process is the master - a real `wa`, the real `lua/core/nodes.lua` remote_call, the real signed
+  body and relay loop, real `host.http`;
+* a real `wa serve` peer, its own HOME and ports, running the real `remote_update.serve`, whose accept
+  starts a real `wa update --accept <id>` child through the node's own operation manager;
+* a real relay PROCESS on its own port that forwards the signed call and withholds the answer past the
+  master's deadline, then answers the relay's own 504;
+* the product's own discovery and authority - a scratch `wa rendezvous`, this node promoted to master in
+  it, and a signed roster for the pair;
+* a REAL two-commit git repository as the peer's tree (the accept really fast-forwards it) and a fixture
+  `wa-sentinel` that answers the real preflight shape and performs the deploy it is handed.
+
+What it asserts: the master reads NOT KNOWN YET (`refused` false, the id travels, and 6 s of real relay
+hold elapsed), the id reads back, the phase goes accepted -> installed with `installed.txt` naming the
+commit that was asked for, the peer's own tree is on that commit, exactly ONE deploy request exists, and
+a retry with the same id is answered from the record with no second request. 39 checks.
+
+* GREEN: `accept two process ok (39 checks): 6 s of relay hold, one deploy, the peer on <sha>`.
+* RED on the base, verified in a worktree of `origin/main` with this row copied in:
+  `FAIL a relayed deadline is reported as NOT KNOWN YET - got nil, want true`.
+
+FIVE PRODUCT LINES THE ROW FORCED (Fable reads the diff; these are the ones to look at):
+
+1. `lua/core/accepted.lua` `M.start_operation`: the HOST's operation `kind` is an allow-list
+   (`command`, `build`, `test`, `deploy`); this module passed its own vocabulary and every start was
+   refused with `operation_kind_unknown:remote-update`. The caller's word stays in the record and the host
+   is told `command`.
+2. `lua/core/accepted.lua` `M.detach`: `ok` now means the work is RUNNING. A refused start wrote a record
+   with a `start_problem` and still returned `ok=true`, so the caller answered "accepted" for a request
+   nothing would ever do.
+3. `lua/core/remote_update.lua` `read_status`: a REFUSED deploy is reported failed, not `queued` forever
+   (`outcome_of` answers `queued` for a record whose install it cannot see).
+4. `lua/core/remote_update.lua` `run_accepted`: a claim that could not be MADE settles the accept failed
+   with that reason instead of answering "already" (your review of a+b).
+5. `lua/core/remote_update.lua` `accept_phase`: the phase detail is a sentence, never the table the
+   accepting call stored (a summary line printed `table: 0x...`).
+
+The row also settled the earlier blockers: the peer's data dir is `<WASM_AGENT_HOME>/.wasm-agent`, so
+`wa node` and the serve must be given the SAME `WASM_AGENT_HOME` (two identities for one home was measured
+first), the scratch repository needs a real `refs/remotes/origin/main` (a push alone leaves FETCH_HEAD),
+and every module must be LOADED BEFORE any host stub (a stubbed clock or transport makes the load itself
+block).
