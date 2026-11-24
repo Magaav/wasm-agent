@@ -2,7 +2,7 @@
 
 Mission: `whatsapp-acceptance` (brief in the mission directory; Fable 23/11 ~18:00Z, rows added 23/11
 ~23:00-23:55Z and ~19:55Z). Branch `change/whatsapp-acceptance`, rebased onto `origin/main`
-`18b83398` - which CONTAINS the gate the brief waited for, `d2fbd140` (land-quick merge of
+`ffb5153e` - which CONTAINS the gate the brief waited for, `d2fbd140` (land-quick merge of
 `change/whatsapp-read-return`, "whatsapp-read-is-consistent" with `full_text`/`text_cut`'s real
 equivalents; see §4).
 
@@ -47,30 +47,30 @@ contract's names are `transcript_full` (a pointer object `{tool: "whatsapp_messa
 the cut marker in the body itself, and `text_reason` (`transcript_pending`, `ocr_pending`,
 `unsupported`); the row that covers them is `row/long-body-pointer` in §4.
 
-## 3. The table (this node, `--mode scratch`, against `origin/main` 18b83398)
+## 3. The table (this node, `--mode scratch`, against `origin/main` ffb5153e)
 
 ```
 site      tool                          verdict  ms     bytes  what the model receives / why
 --------  ----------------------------  -------  -----  -----  ---------------------------------------------
-account   mcp_whatsapp_contacts         NOT-RUN  2087   879    no paired device on this machine: the capability queued the question as job 1 and answered whatsapp_contacts_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
+account   mcp_whatsapp_contacts         NOT-RUN  2096   879    no paired device on this machine: the capability queued the question as job 1 and answered whatsapp_contacts_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
 account   mcp_whatsapp_search           NOT-RUN  2042   869    no paired device on this machine: the capability queued the question as job 2 and answered whatsapp_search_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
-account   mcp_whatsapp_read             NOT-RUN  2050   859    no paired device on this machine: the capability queued the question as job 3 and answered whatsapp_read_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
-account   mcp_whatsapp_reactions        NOT-RUN  2050   884    no paired device on this machine: the capability queued the question as job 4 and answered whatsapp_reactions_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
-account   mcp_whatsapp_media            NOT-RUN  2053   864    no paired device on this machine: the capability queued the question as job 5 and answered whatsapp_media_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
-account   mcp_whatsapp_download         NOT-RUN  10050  879    no paired device on this machine: the capability queued the question as job 6 and answered whatsapp_download_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
-account   mcp_whatsapp_backfill         NOT-RUN  2039   879    no paired device on this machine: the capability queued the question as job 7 and answered whatsapp_backfill_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
-account   mcp_whatsapp_send             PASS     33     283    {attempts:number,id:number,note:string(95),ok:boolean,queue_state:string(6),reads:number,resume:
-account   mcp_whatsapp_send_status      PASS     23     151    {attempts:number,id:number,ok:boolean,reads:number,reason:string(33),served_by:string(7),state:s
-account   mcp_whatsapp_approve          PASS     16     111    {drafts:{},ok:boolean,root:string(53),status:number,waiting:number}
-account   mcp_whatsapp_send (same mes…  PASS     61     283    {attempts:number,id:number,note:string(95),ok:boolean,queue_state:string(6),reads:number,resume:
-account   mcp_whatsapp_send (cancel a…  PASS     28     189    {attempts:number,cancelled:boolean,effect:string(34),id:number,ok:boolean,reason:string(33),serv
-account   mcp_whatsapp_search (order:…  PASS     2046   869    {detail:string(80),effect:string(4),error:string(20),fix:string(216),id:number,input:string(80),
-account   mcp_whatsapp_search (an unk…  PASS     12     508    {detail:string(33),effect:string(4),error:string(25),fix:string(198),input:string(33),message:st
+account   mcp_whatsapp_read             NOT-RUN  2037   859    no paired device on this machine: the capability queued the question as job 3 and answered whatsapp_read_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
+account   mcp_whatsapp_reactions        NOT-RUN  2022   884    no paired device on this machine: the capability queued the question as job 4 and answered whatsapp_reactions_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
+account   mcp_whatsapp_media            NOT-RUN  2037   864    no paired device on this machine: the capability queued the question as job 5 and answered whatsapp_media_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
+account   mcp_whatsapp_download         NOT-RUN  10032  879    no paired device on this machine: the capability queued the question as job 6 and answered whatsapp_download_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
+account   mcp_whatsapp_backfill         NOT-RUN  2021   879    no paired device on this machine: the capability queued the question as job 7 and answered whatsapp_backfill_slow (rust/wa-capabilities/src/whatsapp_query.rs: nothing settles whatsapp.query without the component paired to a phone)
+account   mcp_whatsapp_send             PASS     30     283    {attempts:number,id:number,note:string(95),ok:boolean,queue_state:string(6),reads:number,resume:
+account   mcp_whatsapp_send_status      PASS     20     151    {attempts:number,id:number,ok:boolean,reads:number,reason:string(33),served_by:string(7),state:s
+account   mcp_whatsapp_approve          PASS     14     111    {drafts:{},ok:boolean,root:string(53),status:number,waiting:number}
+account   mcp_whatsapp_send (same mes…  PASS     54     283    {attempts:number,id:number,note:string(95),ok:boolean,queue_state:string(6),reads:number,resume:
+account   mcp_whatsapp_send (cancel a…  PASS     24     189    {attempts:number,cancelled:boolean,effect:string(34),id:number,ok:boolean,reason:string(33),serv
+account   mcp_whatsapp_search (order:…  PASS     2043   869    {detail:string(80),effect:string(4),error:string(20),fix:string(216),id:number,input:string(80),
+account   mcp_whatsapp_search (an unk…  PASS     13     508    {detail:string(33),effect:string(4),error:string(25),fix:string(198),input:string(33),message:st
 account   mcp_whatsapp_search (no nar…  PASS     12     524    {detail:string(36),effect:string(4),error:string(27),fix:string(202),input:string(36),message:st
-account   mcp_whatsapp_read (a malfor…  PASS     13     593    {detail:string(90),effect:string(4),error:string(22),fix:string(192),input:string(80),message:st
-account   whatsapp_read (an older spe…  PASS     2      493    {effect:string(4),error:string(21),fix:string(103),input:string(34),message:string(99),note:stri
+account   mcp_whatsapp_read (a malfor…  PASS     11     593    {detail:string(90),effect:string(4),error:string(22),fix:string(192),input:string(80),message:st
+account   whatsapp_read (an older spe…  PASS     1      493    {effect:string(4),error:string(21),fix:string(103),input:string(34),message:string(99),note:stri
 account   mcp_whatsapp_native_read_ne…  PASS     1      484    {effect:string(4),error:string(21),fix:string(103),input:string(2),message:string(99),note:strin
-account   whatsapp_operator (retired)   PASS     1      478    {effect:string(4),error:string(21),fix:string(76),input:string(2),message:string(89),note:string
+account   whatsapp_operator (retired)   PASS     2      478    {effect:string(4),error:string(21),fix:string(76),input:string(2),message:string(89),note:string
 account   read_snapshot (component na…  NOT-RUN  1      0      not offered by the one surface: rust/components/mcp-whatsapp/src/main.rs tools() exposes it, and lua/core/whatsapp.lua M.renamed answers it with mcp_whatsapp_search
 account   read_newest (component name)  NOT-RUN  1      0      not offered by the one surface: rust/components/mcp-whatsapp/src/main.rs tools() exposes it, and lua/core/whatsapp.lua M.renamed answers it with mcp_whatsapp_read
 account   list_chats (component name)   NOT-RUN  1      0      not offered by the one surface: rust/components/mcp-whatsapp/src/main.rs tools() exposes it, and lua/core/whatsapp.lua M.renamed answers it with mcp_whatsapp_contacts
@@ -80,44 +80,44 @@ account   lookup_self (component name)  NOT-RUN  1      0      not offered by th
 account   inspect_chat (component nam…  NOT-RUN  1      0      not offered by the one surface: rust/components/mcp-whatsapp/src/main.rs tools() exposes it, and lua/core/whatsapp.lua M.renamed answers it with mcp_whatsapp_read
 account   download_audio (component n…  NOT-RUN  1      0      not offered by the one surface: rust/components/mcp-whatsapp/src/main.rs tools() exposes it, and lua/core/whatsapp.lua M.renamed answers it with mcp_whatsapp_download
 account   send_message (component nam…  NOT-RUN  1      0      not offered by the one surface: rust/components/mcp-whatsapp/src/main.rs tools() exposes it, and lua/core/whatsapp.lua M.renamed answers it with mcp_whatsapp_send
-laptop    mcp_whatsapp_contacts         NOT-RUN  63     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_search           NOT-RUN  45     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_read             NOT-RUN  44     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_reactions        NOT-RUN  45     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_media            NOT-RUN  42     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_download         NOT-RUN  39     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_backfill         NOT-RUN  41     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_send             NOT-RUN  41     733    the step it resumes answered no job id here: reuse_unavailable:send
+laptop    mcp_whatsapp_contacts         NOT-RUN  57     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_search           NOT-RUN  39     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_read             NOT-RUN  36     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_reactions        NOT-RUN  36     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_media            NOT-RUN  34     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_download         NOT-RUN  30     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_backfill         NOT-RUN  31     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_send             NOT-RUN  36     733    the step it resumes answered no job id here: reuse_unavailable:send
 laptop    mcp_whatsapp_send_status      NOT-RUN  0      0      the step it resumes answered no job id here: reuse_unavailable:send
-laptop    mcp_whatsapp_approve          NOT-RUN  106    755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-laptop    mcp_whatsapp_send (same mes…  NOT-RUN  82     733    the send it repeats never queued here, so there is no job to dedupe (see the send cell)
+laptop    mcp_whatsapp_approve          NOT-RUN  81     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+laptop    mcp_whatsapp_send (same mes…  NOT-RUN  65     733    the send it repeats never queued here, so there is no job to dedupe (see the send cell)
 laptop    mcp_whatsapp_send (cancel a…  NOT-RUN  0      0      the send it cancels never queued here, so there is no job to take out (see the send cell)
-laptop    mcp_whatsapp_search (order:…  NOT-RUN  45     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
-laptop    mcp_whatsapp_search (an unk…  NOT-RUN  43     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
-laptop    mcp_whatsapp_search (no nar…  NOT-RUN  39     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
-laptop    mcp_whatsapp_read (a malfor…  NOT-RUN  41     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
-laptop    whatsapp_read (an older spe…  PASS     2      493    {effect:string(4),error:string(21),fix:string(103),input:string(34),message:string(99),note:stri
-laptop    mcp_whatsapp_native_read_ne…  PASS     2      484    {effect:string(4),error:string(21),fix:string(103),input:string(2),message:string(99),note:strin
+laptop    mcp_whatsapp_search (order:…  NOT-RUN  42     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+laptop    mcp_whatsapp_search (an unk…  NOT-RUN  35     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+laptop    mcp_whatsapp_search (no nar…  NOT-RUN  31     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+laptop    mcp_whatsapp_read (a malfor…  NOT-RUN  30     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+laptop    whatsapp_read (an older spe…  PASS     1      493    {effect:string(4),error:string(21),fix:string(103),input:string(34),message:string(99),note:stri
+laptop    mcp_whatsapp_native_read_ne…  PASS     1      484    {effect:string(4),error:string(21),fix:string(103),input:string(2),message:string(99),note:strin
 laptop    whatsapp_operator (retired)   PASS     1      478    {effect:string(4),error:string(21),fix:string(76),input:string(2),message:string(89),note:string
-work      mcp_whatsapp_contacts         NOT-RUN  59     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-work      mcp_whatsapp_search           NOT-RUN  43     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-work      mcp_whatsapp_read             NOT-RUN  40     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-work      mcp_whatsapp_reactions        NOT-RUN  41     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-work      mcp_whatsapp_media            NOT-RUN  49     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-work      mcp_whatsapp_download         NOT-RUN  47     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-work      mcp_whatsapp_backfill         NOT-RUN  35     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_contacts         NOT-RUN  48     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_search           NOT-RUN  34     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_read             NOT-RUN  31     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_reactions        NOT-RUN  29     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_media            NOT-RUN  31     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_download         NOT-RUN  30     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_backfill         NOT-RUN  31     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
 work      mcp_whatsapp_send             NOT-RUN  42     733    the step it resumes answered no job id here: reuse_unavailable:send
 work      mcp_whatsapp_send_status      NOT-RUN  0      0      the step it resumes answered no job id here: reuse_unavailable:send
-work      mcp_whatsapp_approve          NOT-RUN  101    755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
-work      mcp_whatsapp_send (same mes…  NOT-RUN  83     733    the send it repeats never queued here, so there is no job to dedupe (see the send cell)
+work      mcp_whatsapp_approve          NOT-RUN  96     755    the hop was admitted by the signed roster (mesh decision=allow) and the account node refused the caller's role (lua/core/server.lua:1034 verify_peer -> forbidden_role): a scratch rendezvous has no master to grant; the tool itself was not reached
+work      mcp_whatsapp_send (same mes…  NOT-RUN  87     733    the send it repeats never queued here, so there is no job to dedupe (see the send cell)
 work      mcp_whatsapp_send (cancel a…  NOT-RUN  0      0      the send it cancels never queued here, so there is no job to take out (see the send cell)
-work      mcp_whatsapp_search (order:…  NOT-RUN  44     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
-work      mcp_whatsapp_search (an unk…  NOT-RUN  41     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
-work      mcp_whatsapp_search (no nar…  NOT-RUN  41     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
-work      mcp_whatsapp_read (a malfor…  NOT-RUN  40     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+work      mcp_whatsapp_search (order:…  NOT-RUN  40     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+work      mcp_whatsapp_search (an unk…  NOT-RUN  36     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+work      mcp_whatsapp_search (no nar…  NOT-RUN  35     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
+work      mcp_whatsapp_read (a malfor…  NOT-RUN  37     755    the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site
 work      whatsapp_read (an older spe…  PASS     1      493    {effect:string(4),error:string(21),fix:string(103),input:string(34),message:string(99),note:stri
-work      mcp_whatsapp_native_read_ne…  PASS     2      484    {effect:string(4),error:string(21),fix:string(103),input:string(2),message:string(99),note:strin
-work      whatsapp_operator (retired)   PASS     2      478    {effect:string(4),error:string(21),fix:string(76),input:string(2),message:string(89),note:string
+work      mcp_whatsapp_native_read_ne…  PASS     1      484    {effect:string(4),error:string(21),fix:string(103),input:string(2),message:string(99),note:strin
+work      whatsapp_operator (retired)   PASS     1      478    {effect:string(4),error:string(21),fix:string(76),input:string(2),message:string(89),note:string
 
 row                                     verdict  ms     why / code
 --------------------------------------  -------  -----  ---------------------------------------------
@@ -284,8 +284,14 @@ call - there is none today.
 - `76fd4820` - the report naming the commits that built it.
 - `da233b24` - the table re-run against the read contract (origin/main `4615449f`, the gate `d2fbd140`), the
   four contract cells, the twelve covered rows, the synthetic probe's one exception, and §10.
-- the commit that carries this second rebase: the same table re-run on `18b83398` (same 18 pass / 48
-  not-run / 0 fail, orphan-tests green with 361 wired), and this section.
+- `1b9a4be0` - the same table re-run on `18b83398` (same 18 pass / 48 not-run / 0 fail, orphan-tests green
+  with 361 wired).
+- the commit that carries the third rebase: re-run on `ffb5153e` (one further landing, the selfloop ledger
+  upgrade, touching lua/core/selfloop.lua, subagents.lua and scripts/fast.sh) - the same 18 pass / 48
+  not-run / 0 fail, no verdict changed, orphan-tests green with 362 wired.
+
+The table has now been measured on three consecutive main tips (`4615449f`, `18b83398`, `ffb5153e`) with
+identical verdicts, which is what makes it a property of the tree rather than of one checkout.
 
 The commit trailers name the model as `claude`: the session carries no exact model id, and inventing one
 would be a false record.
