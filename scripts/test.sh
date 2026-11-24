@@ -2077,6 +2077,11 @@ WA_SCRIPT=scripts/test-opening.lua "$BIN" --db "$DB.opening" | grep "opening: ok
 # memory the render tests use (wa_term::scroll::vt). The row SKIPS - by name, never as a pass - when the
 # gate hands it no binary to drive.
 gate_run env WA_BIN="$BIN" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test opening
+# THE COLLAPSE LANDS WHERE THE CHAT DRAWS, AND NOTHING MOVES IT (Fable, 24/11: the one-row flick). At 80x24,
+# 120x40 and 200x60, frame by frame in a real pty: the star's cell in the opening's LAST frame, in the
+# chat's FIRST frame and on the settled screen is the same, and no frame in between draws it anywhere else -
+# the assertion a comparison of settled screens cannot make. It SKIPS by name without WA_BIN.
+gate_run env WA_BIN="$BIN" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test collapse
 # The ICON SETS, each rendered through the same view (item 4 of the wa-fonts mission, Victor 19/11):
 # wa Icons is GLUED and one cell per icon, nerd keeps the one space, unicode needs no font and ascii
 # needs no glyph at all. The proof is a CELL count - the glued row must be exactly its gapped icons

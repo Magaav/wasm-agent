@@ -515,6 +515,8 @@ function M.run(argv)
       continued = resume_last or session_id ~= nil,
       workspace = view.workspace,
       branch = view.branch,
+      -- The lines under the banner, written in the SAME frame as it (see above).
+      notes = under_banner,
       -- The banner is the last place a user can be told before they type: a thread
       -- that was cut off mid-answer looks like one that is simply quiet, and the
       -- recovery below (the model is told in its context) is invisible from here.
@@ -528,26 +530,24 @@ function M.run(argv)
     -- layout); the opening needs the very same bytes for its last beat, and it needs them now, long
     -- before its 2 s are up - it holds on the turning cloud until they arrive, and skips the
     -- translation if they never do, which is a slower start's honest ending.
-    -- THE LINES UNDER THE BLOCK, BEFORE IT IS HANDED OVER (Victor, 23/11). The opening paints the block
-    -- this start wrote (`view:welcome_painted`), and a note added AFTER the hand-over is in the chat's
-    -- block but not in the animation's - one row of difference, and the star lands one row off.
+    -- THE LINES UNDER THE BANNER ARE COMPUTED BEFORE IT (Fable, 24/11: the one-row flick). Written by
+    -- `view:note` AFTER `view:welcome` they were a second write and so a second frame, and because the
+    -- transcript is bottom-anchored the block drew one row short in the first one: the welcome star landed
+    -- a row lower for one paint and jumped up in the next. They now travel with the block (`notes =`), so
+    -- the chat FIRST paint is the block the opening LAST frame paints.
+    local under_banner = {}
     local icons_notice = cli_view.icons_notice()
     if icons_notice and icons_notice ~= "" then
       -- Once at start, and only while the font cannot be measured here (item 6, Victor 23/11): a container
       -- or an ssh session has no terminal in its ancestry, so wa says which glyphs it is drawing and the
       -- one command that makes them ours. A config line silences it (`/icons wa` writes one).
-      view:note(cli_view.paint("  " .. icons_notice, "dim", view.live))
+      under_banner[#under_banner + 1] = cli_view.paint("  " .. icons_notice, "dim", view.live)
     end
     -- The reload source, said on the line under the banner as well as on the status bar: a reader who is
     -- about to edit a command file needs to know that this session will pick the edit up, and from where.
-    -- Written ABOVE the hand-over for the same reason the icons notice is (Victor, 23/11): it is a line of
-    -- the block, and the block the opening paints is the block this start wrote.
     if reload.status() then
-      -- A line of the welcome block, so it is drawn again with the block when the window changes width
-      -- (`METHODS:note`): printed straight to the terminal it was the same stale-width row the banner
-      -- rule was, one line quieter.
-      view:note(cli_view.paint("  \194\183 " .. reload.status() .. ": the UI and commands come from "
-        .. tostring(reload.root()), "warning", view.live))
+      under_banner[#under_banner + 1] = cli_view.paint("  \194\183 " .. reload.status()
+        .. ": the UI and commands come from " .. tostring(reload.root()), "warning", view.live)
     end
     if opening and host.opening_header then
       local painted = view:welcome_painted()

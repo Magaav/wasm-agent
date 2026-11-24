@@ -2342,10 +2342,16 @@ function METHODS:render_welcome()
   -- `tail_nl` says how many newlines the last write ended with, and a clear has just made that
   -- unknowable: starting the block with an open line rather than a gap is the honest state.
   self.tail_nl = 0
-  self:write(text .. "\n")
-  -- The lines that belong to the block and come after it (the reload source, `METHODS:note`): kept
-  -- with it, so the redraw puts them back instead of leaving them at the width they were written at.
-  for _, line in ipairs(self.welcome_notes or {}) do self:write(line .. "\n") end
+  -- ONE WRITE, ONE FRAME (Fable, 24/11: the one-row flick). The banner and the lines that belong under it
+  -- (the reload source, the icons notice - `opts.notes` and `METHODS:note`) are written as ONE string. Written
+  -- a call at a time they were two frames, and since the transcript is BOTTOM-anchored the block drew one row
+  -- short in the first one: the welcome star landed a row lower for one paint and jumped up in the next. The
+  -- opening already paints banner+notes as one block (`welcome_painted`), so this makes the chat's first paint
+  -- that same block - the star's cell equal in the last opening frame, the first chat frame and the settled one.
+  local lines = { text }
+  for _, line in ipairs(self.welcome_notes or {}) do lines[#lines + 1] = line end
+  for _, line in ipairs(stored.notes or {}) do lines[#lines + 1] = line end
+  self:write(table.concat(lines, "\n") .. "\n")
   return true
 end
 
@@ -2372,7 +2378,11 @@ function METHODS:welcome_painted()
   -- own frame, so a hand-over that left them out handed the opening a block one or two rows shorter than
   -- the one the chat draws - and the star it collapsed into was exactly that many rows off the cell the
   -- chat prints it in. This is also why the notes are written BEFORE the block is handed over (chat.lua).
-  local notes = self.welcome_notes or {}
+  local notes = {}
+  for _, line in ipairs(self.welcome_notes or {}) do notes[#notes + 1] = line end
+  -- `opts.notes`: the lines this start already knows when it asks for the block (chat.lua hands the icons
+  -- notice and the reload source that way, so they are part of the SAME write - and so of the same frame).
+  for _, line in ipairs((stored.notes) or {}) do notes[#notes + 1] = line end
   if #notes > 0 then block = block .. "\n" .. table.concat(notes, "\n") end
   return block
 end
