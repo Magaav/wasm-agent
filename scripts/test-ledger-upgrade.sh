@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# THE UPGRADE FROM THE LAST RELEASE (Fable 25/11, from the live stall).
+# THE UPGRADE FROM THE LAST RELEASE (Fable 24/11, from the live stall).
 #
 # MEASURED on the live node: `run_id` was declared inside `CREATE TABLE IF NOT EXISTS self_wakes` only, so a ledger
 # created by an older build kept its old columns - and the tick's first call raised "no such column: run_id"
@@ -32,6 +32,19 @@ HELP="$ROOT/$HELP_REL"
 # 1. THE RELEASED LEDGER. Two ways, both the release's own code: the published binary when a caller names one,
 #    otherwise the lua core of tag v0.1.1 (the file the released binary carries), run under this binary.
 OLD_SOURCE=""
+# THE RELEASED ARTIFACT FIRST (Fable, 24/11): the published v0.1.1 / node-2104a4d88a37 binary's own setup is the
+# gate's default, because the artifact - not the tag's source - is what a node actually runs. The source at the
+# tag is the fallback for a machine that has no asset, and the row PRINTS which of the two it used.
+RELEASED_ASSET=""
+for candidate in "${WA_RELEASED_BIN:-}" \
+                 "${WA_RELEASES_DIR:-}/v0.1.1/wa" "${WA_RELEASES_DIR:-}/node-2104a4d88a37/wa" \
+                 "$HOME/.wasm-agent/releases/v0.1.1/wa" "$HOME/.wasm-agent/releases/node-2104a4d88a37/wa" \
+                 "$ROOT/build/release/v0.1.1/wa" "$ROOT/build/release/node-2104a4d88a37/wa"; do
+  [ -n "$candidate" ] && [ -x "$candidate" ] && { RELEASED_ASSET="$candidate"; break; }
+done
+if [ -n "$RELEASED_ASSET" ]; then
+  WA_RELEASED_BIN="$RELEASED_ASSET"
+fi
 if [ -n "${WA_RELEASED_BIN:-}" ] && [ -x "${WA_RELEASED_BIN}" ]; then
   RELEASED="$WA_RELEASED_BIN"; OLD_HOW="the published binary $RELEASED"
   cat > "$HELP/make-old.lua" <<'LUA'
@@ -65,9 +78,30 @@ cat > "$HELP/upgrade.lua" <<'LUA'
 local json = dofile("lua/vendor/json.lua")
 local function decode(raw) if type(raw) == "string" then return json.decode(raw) end return raw end
 local function rows(sql) return decode(host.sql_query(sql, "[]")) end
+local SETUPS = { "selfloop", "enrollment", "agent_control", "done_gate", "event_ledger", "provider", "turn_journal" }
+local function setup_all()
+  local done = {}
+  for _, name in ipairs(SETUPS) do
+    local ok, module = pcall(dofile, "lua/core/" .. name .. ".lua")
+    if ok and type(module) == "table" and type(module.setup) == "function" then
+      local called, err = pcall(module.setup)
+      if not called then print("SETUP_FAILED " .. name .. ": " .. tostring(err)); os.exit(1) end
+      done[#done + 1] = name
+    end
+  end
+  return done
+end
 local selfloop = dofile("lua/core/selfloop.lua")
-selfloop.setup()
-local tables = { "self_wakes", "self_notes", "self_notes_archive", "self_wake_pauses" }
+-- THE LAZILY CREATED TABLES ARE THE UPGRADE TOO (Fable, 24/11): a serve does not create access_events,
+-- access_requests, agent_control, done_checks, done_gates, ledger_events, provider_serving or turn_notes, so a row
+-- that only calls selfloop.setup() never looks at them - and a missing column there is the same stall one table over.
+-- Every module's setup is called here, exactly as the subsystems call them on a real node.
+local created = setup_all()
+print("SETUPS " .. table.concat(created, ","))
+local tables = {}
+for _, row in ipairs(rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")) do
+  tables[#tables + 1] = tostring(row.name)
+end
 local function sorted(list)
   for i = 2, #list do
     local value, j = list[i], i - 1
@@ -100,10 +134,27 @@ LUA
 cat > "$HELP/fresh.lua" <<'LUA'
 local json = dofile("lua/vendor/json.lua")
 local function decode(raw) if type(raw) == "string" then return json.decode(raw) end return raw end
+local SETUPS = { "selfloop", "enrollment", "agent_control", "done_gate", "event_ledger", "provider", "turn_journal" }
+local function setup_all()
+  local done = {}
+  for _, name in ipairs(SETUPS) do
+    local ok, module = pcall(dofile, "lua/core/" .. name .. ".lua")
+    if ok and type(module) == "table" and type(module.setup) == "function" then
+      local called, err = pcall(module.setup)
+      if not called then print("SETUP_FAILED " .. name .. ": " .. tostring(err)); os.exit(1) end
+      done[#done + 1] = name
+    end
+  end
+  return done
+end
 local selfloop = dofile("lua/core/selfloop.lua")
-selfloop.setup()
+setup_all()
 local out = {}
-for _, table in ipairs({ "self_wakes", "self_notes", "self_notes_archive", "self_wake_pauses" }) do
+local names_list = {}
+for _, row in ipairs(decode(host.sql_query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", "[]"))) do
+  names_list[#names_list + 1] = tostring(row.name)
+end
+for _, table in ipairs(names_list) do
   local names = {}
   for _, row in ipairs(decode(host.sql_query("PRAGMA table_info(" .. table .. ")", "[]"))) do names[#names + 1] = tostring(row.name) end
   for i = 2, #names do
