@@ -67,7 +67,8 @@ Every claim below cites one of those (`git log -S`, `git show`).
 
 ## The layout follow-up (Fable, 24/11): a blank row, and a real column bug
 
-Two things Fable asked for after reading the captures, both in this branch's last code commit:
+Two things Fable asked for after reading the captures, both in `de12a7b4` (code, tests, snapshots and this
+section in one commit):
 
 1. **The two folded rows stand after a blank row.** They used to follow the last `User MCPs` row with nothing
    between them, so `1 retired` read like another connector of this node. `lua/core/mcp_command.lua`
