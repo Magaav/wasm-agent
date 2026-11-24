@@ -69,6 +69,35 @@ check(tostring((wake_status(mid_op) or {}).status)=='cancelled',
  'the wake scheduled for it is WITHDRAWN, so it cannot start a second turn: '..json.encode(wake_status(mid_op) or {}):sub(1,200))
 check(wake_text(mid_op):find('announced in turn',1,true)~=nil,'and the row says why it is cancelled: '..wake_text(mid_op))
 
+-- A2. IN FLIGHT: the wake's OWN turn is running - the status the product calls 'dispatching' (selfloop.lua,
+-- claim_due) - and that turn's first script must NOT say the same news again in pending_settled. This is the
+-- case the first cut missed: with a status the store never writes, the script inside the wake's own turn
+-- announced the handle a second time, in the same turn.
+local inflight=pending.invoke(dispatch,opts,'bash',{command='sleep 1; echo in-flight'},'{"command":"sleep 1; echo in-flight"}',0)
+local inflight_op=tostring(inflight.op)
+if host.sleep then host.sleep(2600) end
+handle_wake.sweep()
+local claim_row=selfloop.claim_due(sid,owner)
+check(type(claim_row)=='table' and tostring(claim_row.id)=='handle:'..inflight_op,
+ 'a real dispatch claims it: '..json.encode(claim_row or {}):sub(1,160))
+-- THE CASE THE FIRST CUT MISSED, asserted before anything names a status: the turn holds the wake and is
+-- telling the model, so its own scripts must say nothing. On the previous tip this is where the news arrived
+-- twice in one turn.
+local in_turn=pending.announce(scope)
+local repeated_in_flight=false
+for _,entry in ipairs(type(in_turn)=='table' and in_turn or {})do if tostring(entry.op)==inflight_op then repeated_in_flight=true end end
+check(repeated_in_flight==false,'a script INSIDE the wake\'s own turn does not repeat what that turn is telling: '
+ ..json.encode(in_turn or {}):sub(1,200))
+check(selfloop.handle_wake_state(inflight_op)==selfloop.STATUS_DISPATCHING,
+ 'and the row is IN FLIGHT - the status this store writes while the turn runs: '..tostring(selfloop.handle_wake_state(inflight_op)))
+selfloop.finish(claim_row,true,'the wake delivered it',{now=host.now()})
+check(selfloop.handle_wake_state(inflight_op)==selfloop.STATUS_DELIVERED,
+ 'and the turn\'s end writes delivered: '..tostring(selfloop.handle_wake_state(inflight_op)))
+local after_in_flight=pending.announce(scope)
+local again_after=false
+for _,entry in ipairs(type(after_in_flight)=='table' and after_in_flight or {})do if tostring(entry.op)==inflight_op then again_after=true end end
+check(again_after==false,'after it is delivered the handle is still never announced in a script: exactly one notice')
+
 -- B. IDLE: nobody is in a script, so the wake IS the notice - one row, one message, delivered once.
 local idle=pending.invoke(dispatch,opts,'bash',{command='sleep 1; echo while-idle'},'{"command":"sleep 1; echo while-idle"}',0)
 local idle_op=tostring(idle.op)

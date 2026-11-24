@@ -1305,6 +1305,29 @@ function M.resource_refused(text)
   return false
 end
 
+-- THE STATUS OF A WAKE ROW, NAMED ONCE (review 24/11). Two modules act on this vocabulary: selfloop writes it
+-- (claim_due -> dispatching, finish -> delivered/failed, a withdrawal -> cancelled) and
+-- lua/core/codemode_pending.lua reads it to decide whether the wake or a script has already told the model. It
+-- was spelled as string literals in both places once, and they drifted on the first try: the reader tested a
+-- status ("claimed") that does not exist, so a wake that was IN FLIGHT - 'dispatching', its own turn holding it
+-- and running right now - was not recognised as the notice, and that turn's first script said the same news a
+-- second time. One name, one reader, no drift.
+M.STATUS_PENDING = "pending"
+M.STATUS_DISPATCHING = "dispatching"   -- claimed by a turn that is running right now
+M.STATUS_DELIVERED = "delivered"
+
+-- Is a wake in this status ALREADY the notice to the model? 'dispatching' means a turn holds it and is telling
+-- the model at this moment; 'delivered' means it has told it. In both, a script must say nothing.
+function M.wake_is_notice(status)
+  status = tostring(status or "")
+  return status == M.STATUS_DISPATCHING or status == M.STATUS_DELIVERED
+end
+
+-- Is a wake in this status still OWED - i.e. withdrawable by a script that has just told the model itself?
+function M.wake_is_owed(status)
+  return tostring(status or "") == M.STATUS_PENDING
+end
+
 -- THE WAKE THAT CARRIED THIS HANDLE'S NEWS IS NOT OWED ANY MORE (G blocker, Fable 24/11).
 --
 -- A script that has just been told (lua/core/codemode_pending.lua, M.announce) means the model already knows

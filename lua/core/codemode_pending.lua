@@ -1413,8 +1413,9 @@ function M.begin(dispatch, opts)
   return index
 end
 
--- The wake that carried this handle's news, as the store sees it ("pending"/"claimed"/"delivered"/
--- "cancelled"/"failed"/nil). Resolved lazily: this module is loaded BY lua/core/handle_wake.lua, which loads
+-- The wake that carried this handle's news, as the store sees it - one of selfloop.STATUS_* ("pending",
+-- "dispatching", "delivered", "cancelled", "failed", "unknown") or nil when no wake was ever scheduled.
+-- Resolved lazily: this module is loaded BY lua/core/handle_wake.lua, which loads
 -- selfloop, so a top-level require would be a cycle; a read that cannot reach the store answers nil, which
 -- means "no wake", the same as no wake at all.
 -- dofile RE-EXECUTES the file on every call, and announce() asks this once per settled handle at the end of
@@ -1438,6 +1439,24 @@ end
 
 -- Withdraw the pending wake for a handle this script has just announced (never an error for the caller: a
 -- wake that cannot be reached is a wake the runner's own idempotence still protects).
+-- Both questions are answered by the store that writes the statuses (selfloop.STATUS_*, wake_is_notice,
+-- wake_is_owed), so this module cannot drift from it. A store this process cannot load answers "not the
+-- notice" - the side that still tells the model: one announcement too many is cheaper than silence, and the
+-- withdrawal is then a no-op the store ignores anyway.
+function M.wake_is_notice(status)
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.wake_is_notice) ~= "function" then return false end
+  local called, answer = pcall(selfloop.wake_is_notice, status)
+  return called and answer == true
+end
+
+function M.wake_is_owed(status)
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.wake_is_owed) ~= "function" then return false end
+  local called, answer = pcall(selfloop.wake_is_owed, status)
+  return called and answer == true
+end
+
 function M.withdraw_wake(op)
   local selfloop = wake_store()
   if not selfloop or type(selfloop.withdraw_handle_wake) ~= "function" then return false end
@@ -1453,13 +1472,14 @@ function M.announce(scope)
     if record.state ~= "running" and record.state ~= "unknown" and record.reported == false then
       -- THE IN-TURN NOTICE AND THE WAKE ARE ONE NOTICE (G blocker, Fable 24/11). Three orders are possible,
       -- and each must tell the model exactly once:
-      --   * the wake was already DELIVERED (or claimed by a turn now running): that turn was the notice, so
-      --     this script says nothing and marks it reported;
+      --   * the wake is IN FLIGHT ('dispatching': a turn holds it and is running now) or DELIVERED: that turn is
+      --     the notice, so this script says nothing and marks it reported. In flight is the case that was
+      --     missed first - the wake's own turn's scripts would otherwise repeat the news in pending_settled;
       --   * a wake is still PENDING: this script is the notice, so the row is withdrawn here and delivers
       --     nothing new - zero extra turns;
       --   * no wake at all: this script is the notice, as it always was.
       local wake = M.handle_wake_state(record.op)
-      if wake == "delivered" or wake == "claimed" then
+      if M.wake_is_notice(wake) then
         record.reported = true
         changed = true
       else
@@ -1474,7 +1494,7 @@ function M.announce(scope)
         out[#out + 1] = entry
         record.reported = true
         changed = true
-        if wake == "pending" then M.withdraw_wake(record.op) end
+        if M.wake_is_owed(wake) then M.withdraw_wake(record.op) end
       end
     end
   end
