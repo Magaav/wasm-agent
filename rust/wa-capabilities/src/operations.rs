@@ -1521,7 +1521,18 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     "a start of {seconds}s is a workload, not a control call: the two reserved slots are kept for short calls (status, list, cancel, short reads, at most {}s)",
                     wa_operation::CONTROL_MAX_SECONDS));
             }
-            for key in ["cwd", "cwd_requested", "cwd_source", "effective_cwd", "cwd_substitution", "cwd_note"] {
+            // WHOSE OPERATION IT IS, AS THE NODE RECORDED IT (mission federated-connector-read, 24/11).
+            // A caller names an owner on the start, but the runtime owner of THIS THREAD can decide it
+            // instead (`configure_spec`: a relayed call is owned by `relay:<rid>`, a child task by its
+            // child session), and nothing ever told the caller which name won. A connector's read session
+            // asks for `mcp-read-session` and then names that same name on its own wait - and over the
+            // relay its operation had recorded `relay:<rid>`, so the wait was refused
+            // `operation_not_yours`: every federated connector read failed with
+            // `mcp_session_startup_failed` while leaving a 3600 s session running (measured on two scratch
+            // nodes: main -> main, main -> v0.1.1 and v0.1.1 -> v0.1.1 all identically).
+            // The answer is not to widen who owns what - it is to ANSWER what was recorded, so a caller can
+            // observe the operation it just started by the name the node actually holds.
+            for key in ["cwd", "cwd_requested", "cwd_source", "effective_cwd", "cwd_substitution", "cwd_note", "owner", "session"] {
                 if let Some(value) = state.get(key) { receipt[key] = value.clone(); }
             }
             return Ok(receipt);

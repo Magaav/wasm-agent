@@ -147,11 +147,24 @@ function M.invoke(input,ctx,directory)
  local slot_owner=ctx.session_id or 'mcp-read-session'
  local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=slot_owner,vault_env=vault_env,vault_approval=vault_approval})))
   if not start or start.error or not start.operation_id then return failure('mcp_session_not_started',{detail=start}) end
-  slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token,owner=slot_owner};pool[key]=slot
+  -- THE OWNER THE NODE RECORDED, NOT THE ONE THIS PROCESS ASKED FOR (24/11). When the call arrives
+ -- through the relay (a `relay:<rid>` runtime owner) or from a child task, the thread's own owner decides
+ -- what the operation records, and the start receipt answers it. Naming the name we ASKED for here is what
+ -- made every federated connector read fail its own first wait with `operation_not_yours`.
+  slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token,
+   owner=start.owner or slot_owner};pool[key]=slot
   for _=1,math.min(36000,20+math.ceil((input.server.timeout_seconds or 30)*10)) do
    local raw=host.read_file(ready_file);if raw then slot.ready=decode(raw);break end
    local state=decode(host.operation('wait',json.encode({id=slot.operation_id,wait_ms=100,owner=slot.owner})))
-   if state and (state.settled or state.error) then return failure('mcp_session_startup_failed',{operation_id=slot.operation_id,detail=state}) end
+   if state and (state.settled or state.error) then
+    -- A STARTUP THAT FAILED LEAVES NOTHING RUNNING (24/11): the session is a 3600 s workload, and a refusal
+    -- here used to park it on the node for an hour with nobody able to collect it (measured: its row stayed
+    -- accepted/unsettled after the call answered). The cancel names the owner the start receipt answered,
+    -- so it acts on the row this call started and on nothing else.
+    pcall(host.operation,'cancel',json.encode({id=slot.operation_id,owner=slot.owner}))
+    pool[key]=nil
+    return failure('mcp_session_startup_failed',{operation_id=slot.operation_id,detail=state})
+   end
   end
   if not slot.ready or slot.ready.token~=slot.token or not tostring(slot.ready.url):match('^http://127%.0%.0%.1:%d+$') then return failure('mcp_session_not_ready',{operation_id=slot.operation_id}) end
  end
