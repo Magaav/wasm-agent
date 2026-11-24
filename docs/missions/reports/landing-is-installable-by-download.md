@@ -1,14 +1,20 @@
 # landing-is-installable-by-download (24/11)
 
-Branch `change/landing-is-installable-by-download` from `origin/main` 345e51be. Five commits, one per item.
+Branch `change/landing-is-installable-by-download`, rebased onto `origin/main` 65e3daef. Five commits, one
+per item, plus a report commit, a probe fix, the release-list addition and a rebase commit (de476ed8). The
+hashes below are the ones on the branch AFTER that rebase (`git log 65e3daef..HEAD`); the hashes quoted
+inside a measured output block are kept verbatim, because they are what the run printed.
 
 | commit | item |
 | --- | --- |
-| 9722cad0 | 5 - the harness: `scripts/test-installable-by-download.sh` (the cut condition), and its row in `scripts/test.sh` |
-| 55e5f652 | 4 - the `wa-remap-rustc` "Permission denied" class, and the at-once refusal of a node that cannot build |
-| 8a5717a7 | 2 - publish completeness: `scripts/lib/release-completeness.sh` + `scripts/check-release-complete.sh` |
-| d3a5bd9c | 1 - the landing also publishes the components bundle, OFF behind `WA_PUBLISH_COMPONENTS=1` |
-| 69a309e0 | 3 - the deploy's first lines and `wa update --check` say it before anything is touched |
+| 251356c1 | 5 - the harness: `scripts/test-installable-by-download.sh` (the cut condition), and its row in `scripts/test.sh` |
+| 64fcb703 | 4 - the `wa-remap-rustc` "Permission denied" class, and the at-once refusal of a node that cannot build |
+| 00e4f54d | 2 - publish completeness: `scripts/lib/release-completeness.sh` + `scripts/check-release-complete.sh` |
+| 13aadad3 | 1 - the landing also publishes the components bundle, OFF behind `WA_PUBLISH_COMPONENTS=1` |
+| 4330f01d | 3 - the deploy's first lines and `wa update --check` say it before anything is touched |
+| e8e308d4 | the harness asks the channel the way a node does (gh first), so a rate-limited API is not a skip |
+| 8a5e1104 | the release list: newest by publish time, a stated bound, and what the five were |
+| de476ed8 | rebase onto 65e3daef: a covering release is a legitimate answer, and the deploy's second turn refusal |
 
 ## What was measured, before and after
 
@@ -40,7 +46,7 @@ Between 21:19Z and 21:50Z the operator published `node-39e862d60bad` (21:25Z) an
 (21:36Z); the green above is that same commit with those assets in place. Nothing in this branch published
 anything.
 
-## Item 5 - the row that was missing (9722cad0)
+## Item 5 - the row that was missing (251356c1)
 
 `scripts/test-installable-by-download.sh [<40-hex commit>]` runs the node's own path, not a description of it:
 `wa_node_binaries_prepare` (exact tag, else the newest release whose compiled inputs cover the commit - the
@@ -60,7 +66,7 @@ What it does NOT prove: `scripts/verify-install.sh` is not run. That verifier ch
 proven by the proof a deploy runs on a candidate instead, and this report says so rather than calling it
 "verify-install green".
 
-## Item 1 - the landing publishes the components bundle too, OFF (d3a5bd9c)
+## Item 1 - the landing publishes the components bundle too, OFF (13aadad3)
 
 `scripts/lib/landing-components-publish.sh` (new) holds `components_step` and `publish_report`, sourced by
 `scripts/publish-node-binaries.sh` from BESIDE THE SCRIPT (a copy of the publisher in a fixture keeps working;
@@ -74,7 +80,7 @@ over an existing tag.
 `scripts/test-publish-components-at-landing.sh`: 20 rows, 0 failed. gh is a recording shim (an external
 service); every byte check is the real publisher's.
 
-## Item 2 - publish completeness (8a5717a7)
+## Item 2 - publish completeness (00e4f54d)
 
 `bash scripts/check-release-complete.sh [<commit>] [--json] [--components] [--manifest-dir DIR] [--repo DIR]`
 asks, by HEAD (and a one-byte range GET where HEAD is refused): `node-<sha12>.manifest`, `SHA256SUMS`,
@@ -123,7 +129,7 @@ machine-readable row is preferred over the existing `row()` shape, `--json` prin
 `{"sha":...,"at":...,"installable":"no","missing":"components-x/agent-core.wasm","verdict":"..."}` and the
 orchestrator can append that line verbatim.
 
-## Item 3 - say it before anything is touched (69a309e0)
+## Item 3 - say it before anything is touched (4330f01d)
 
 `wa_components_preflight` (scripts/lib/deploy-components.sh) answers, in order: local bytes (installed and
 matching, or a cache entry for this lock - no network), then the channel, then "can this node build one".
@@ -149,7 +155,7 @@ and never a `binary_source`, `deploy: building` or `deploy: compiled` line.
 script, or a question that cannot be answered, is `unknown` - never "fine". Every field that was there
 before is unchanged.
 
-## Addition (24ddc690) - the release list line: what the five were, and newest by publish time
+## Addition (8a5e1104) - the release list line: what the five were, and newest by publish time
 
 Fable, from the node's own output on 39e862d6: the check printed a five-entry release list whose "newest"
 was `node-d2fbd140934e` while node-9a0c589adfa0 and node-525780e13623 were newer. Measured on this node's
@@ -197,7 +203,7 @@ New string to approve (9): `release list: <n> entries, read <when>, newest <tag>
 ordered by publish time, out of at most <bound> asked for[ (so anything older than the oldest entry here is
 not in it)]`.
 
-## Item 4 - `wa-remap-rustc` Permission denied on work (55e5f652)
+## Item 4 - `wa-remap-rustc` Permission denied on work (64fcb703)
 
 The old install trusted two things it had not measured: that a file it found at the wrapper's path was
 executable (`-f` was the whole test) and that the directory it chose would allow executing anything at all.
