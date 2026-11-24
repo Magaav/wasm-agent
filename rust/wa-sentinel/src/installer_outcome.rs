@@ -139,21 +139,29 @@ pub(crate) fn verdict(id: &str) -> Option<Outcome> {
 /// would still take that commit; otherwise it asks for what this queue installs anyway - origin/main - with no
 /// pin, and says which of the two absences it is.
 fn retry_hint(request: &Value) -> String {
-    let reason = request.get("reason").and_then(Value::as_str).unwrap_or("").replace('\'', "");
+    let asked = request.get("reason").and_then(Value::as_str).unwrap_or("");
+    let reason = asked.replace('\'', "");
     let expected = request.get("expected_sha").and_then(Value::as_str).unwrap_or("");
-    if !expected.is_empty() && deploy_protocol::expected_sha_accepted(expected) {
-        return format!(
-            "re-request with: wa-sentinel request deploy --reason '{reason}' --expected-sha {expected} (that commit is still exactly origin/main, so deploy.sh accepts it)"
-        );
-    }
-    format!(
-        "re-request with: wa-sentinel request deploy --reason '{reason}' (no --expected-sha: {})",
-        if expected.is_empty() {
-            "this request demanded no commit, and a commit it only recorded when it was written is not a pin deploy.sh would accept"
-        } else {
-            "the commit it demanded is not exactly origin/main now, and deploy.sh refuses an expected SHA that is not"
-        }
-    )
+    let accepted = !expected.is_empty() && deploy_protocol::expected_sha_accepted(expected);
+    let pin = if accepted { format!(" --expected-sha {expected}") } else { String::new() };
+    // A REQUEST /update WROTE IS RE-ASKED WITH THE VERB THE PERSON USED (Fable, 24/11). /update prefixes its own
+    // reason ("/update: …", lua/core/update.lua), so the hint can tell the two apart: a person who typed
+    // /update must not be handed the sentinel's internal verb first, and must not have to know that
+    // `request deploy` is what /update does. The same command, in the operator's own words, then the sentinel's
+    // spelling for anyone scripting it.
+    let command = if asked.trim_start().starts_with("/update") {
+        format!("run wa update again (or: wa-sentinel request deploy --reason '{reason}'{pin})")
+    } else {
+        format!("re-request with: wa-sentinel request deploy --reason '{reason}'{pin}")
+    };
+    let why = if accepted {
+        " - that commit is still exactly origin/main, so deploy.sh accepts it"
+    } else if expected.is_empty() {
+        " - no --expected-sha: this request demanded no commit, and a commit it only recorded when it was written is not a pin deploy.sh would accept"
+    } else {
+        " - no --expected-sha: the commit it demanded is not exactly origin/main now, and deploy.sh refuses an expected SHA that is not"
+    };
+    format!("{command}{why}")
 }
 
 /// THE REQUEST A SPAWNED INSTALLER NEVER FINISHED ENDS HERE: `failed/` with the installer's own reason, one queue

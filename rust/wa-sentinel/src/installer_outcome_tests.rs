@@ -282,7 +282,19 @@ fn the_retry_hint_never_offers_a_commit_deploy_sh_would_refuse() {
         "target_commit": later, "reason": REASON}));
     assert!(!pins(&detail, &later), "a recorded target is not a demand: {detail}");
     assert!(detail.contains("demanded no commit"), "said plainly: {detail}");
+    // 5. A REQUEST /update WROTE IS RE-ASKED WITH THE VERB THE PERSON USED (Fable, 24/11): /update prefixes its
+    // own reason ("/update: …", lua/core/update.lua:475 and :860), so the hint leads with `wa update again` and
+    // names the sentinel's door second. A person must not be handed the internal verb first.
+    let detail = refuse("1795475320000000000-4242-00000000000000000014", json!({"verb": "deploy",
+        "id": "1795475320000000000-4242-00000000000000000014", "queued_at": 1795475320u64,
+        "expected_sha": later, "reason": "/update: deploy /srv/tree through the gate"}));
+    assert!(detail.contains("run wa update again (or: wa-sentinel request deploy --reason '/update: deploy /srv/tree through the gate' --expected-sha "),
+        "the product verb leads, and the sentinel's door follows it: {detail}");
+    assert!(!detail.contains("re-request with:"), "and the internal verb is never the lead: {detail}");
+    // Printed so the review reads the composed sentence, not a description of it (cargo test -- --nocapture).
+    println!("retry hint for a /update request: {detail}");
 }
+
 
 /// 6. `fail_unobserved` ends the request where the operator and the landing both read it: `failed/` with the
 /// reason, one queue record, and ONE re-queue - and it does that once, not on every tick.

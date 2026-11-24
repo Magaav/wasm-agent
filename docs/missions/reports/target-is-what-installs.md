@@ -60,6 +60,11 @@ request against a 40-character record as "not installed").
   checkout whose HEAD is the recorded commit), and the unreadable-tree message says what could not be read;
 * the pause line, the "did not happen" line and the release line already take their commit from the request's own
   field; `scripts/test-deploy-target.sh` now proves what they print, end to end.
+* when the request was written by `/update` (`lua/core/update.lua:475` and `:860` prefix their own
+  reason with `/update: `), the hint LEADS with the verb the person used - `run wa update again (or:
+  wa-sentinel request deploy --reason '{reason}' ...)` - so nobody is handed the sentinel's internal verb first or
+  has to know that `request deploy` is what `/update` does. A request with any other reason keeps the
+  sentinel-first line, which is the door a script uses.
 
 ## Rows (passed / total), and what each is on the base
 
@@ -140,16 +145,21 @@ gap that is not this branch's (their RED is the hand run recorded above, from th
    (`main.rs:3288`; was `no target commit recorded: origin/main of the deploy tree could not be read`)
 2. `target commit {commit} recorded (what a deploy now would install; a later move of main does not change this request)`
    (`main.rs:3353`; was `… (origin/main now; a later move of main does not change this request)`)
-3. `re-request with: wa-sentinel request deploy --reason '{reason}' --expected-sha {expected} (that commit is still exactly origin/main, so deploy.sh accepts it)`
-4. `re-request with: wa-sentinel request deploy --reason '{reason}' (no --expected-sha: this request demanded no commit, and a commit it only recorded when it was written is not a pin deploy.sh would accept)`
-5. `re-request with: wa-sentinel request deploy --reason '{reason}' (no --expected-sha: the commit it demanded is not exactly origin/main now, and deploy.sh refuses an expected SHA that is not)`
-   (the old text was `re-request with: wa-sentinel request deploy --expected-sha {recorded target} --reason '{reason}'`)
-6. `docs/DEPLOY-TARGET.md` - new file: the one statement of the rule, plus the two places the halves are
+3. `re-request with: wa-sentinel request deploy --reason '{reason}' --expected-sha {expected} - that commit is still exactly origin/main, so deploy.sh accepts it`
+4. `re-request with: wa-sentinel request deploy --reason '{reason}' - no --expected-sha: this request demanded no commit, and a commit it only recorded when it was written is not a pin deploy.sh would accept`
+5. `re-request with: wa-sentinel request deploy --reason '{reason}' - no --expected-sha: the commit it demanded is not exactly origin/main now, and deploy.sh refuses an expected SHA that is not`
+6. `run wa update again (or: wa-sentinel request deploy --reason '{reason}'{ --expected-sha <sha>}) - <the same three explanations as above>`
+   - and only for a request whose reason is `/update`'s own form (`/update: …`, `lua/core/update.lua:475` and `:860`),
+   so a person who typed `/update` is never handed the sentinel's verb first. Composed, observed
+   (`cargo test … installer_outcome_tests::the_retry_hint -- --nocapture`):
+   `the installer ended and nothing was installed: deploy: refused(component_proof_failed): nothing installed; it is re-queued automatically once, when this node is next quiet; run wa update again (or: wa-sentinel request deploy --reason '/update: deploy /srv/tree through the gate' --expected-sha 15465eec3345f7dc56751654e29b293cef05f3e5) - that commit is still exactly origin/main, so deploy.sh accepts it`
+   (the old text was `re-request with: wa-sentinel request deploy --expected-sha {recorded target} --reason '{reason}'`);
+7. `docs/DEPLOY-TARGET.md` - new file: the one statement of the rule, plus the two places the halves are
    deliberately weaker and the note that the recorded target is advisory.
-7. `scripts/deploy.sh` rule 2 comment, new paragraph (operator-visible in the installer):
+8. `scripts/deploy.sh` rule 2 comment, new paragraph (operator-visible in the installer):
    `THE RULE IS STATED ONCE, in docs/DEPLOY-TARGET.md, and the sentinel's recorded target (rust/wa-sentinel/src/deploy_protocol.rs, target_commit_at) follows that statement: a change to it belongs in both places in one commit. Measured 24/11: the sentinel recorded a host bundle's main seven days behind because it read the named remote instead of the rule below, while this loop installed HEAD - and every text that spoke by the record named the stale commit.`
-8. `SKIP test-deploy-target: no wa binary: set WA_BIN, or build rust/wa-host` / `SKIP test-deploy-target: no wa-sentinel binary: build rust/wa-sentinel` / `SKIP test-deploy-target: no writable /tmp for a scratch home outside the operator store` / `SKIP test-deploy-target: the scratch base is the operator store` / `SKIP test-deploy-target: no scratch directory under /tmp` (the row's own honest skips)
-9. `deploy target ok (<n> checks)` (the row's success line, the shape its neighbours print)
+9. `SKIP test-deploy-target: no wa binary: set WA_BIN, or build rust/wa-host` / `SKIP test-deploy-target: no wa-sentinel binary: build rust/wa-sentinel` / `SKIP test-deploy-target: no writable /tmp for a scratch home outside the operator store` / `SKIP test-deploy-target: the scratch base is the operator store` / `SKIP test-deploy-target: no scratch directory under /tmp` (the row's own honest skips)
+10. `deploy target ok (<n> checks)` (the row's success line, the shape its neighbours print)
 
 ## What I did not do, and what is not verified
 
