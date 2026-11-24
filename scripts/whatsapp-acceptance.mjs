@@ -72,7 +72,7 @@ const FIXTURE = {
   chat: "120363000000000001@g.us",
   message: "3EB0ACCEPTANCE01",
   query: "boleto",
-  text: "acceptance one",
+  text: "wa acceptance test - ignore",
   foreign_chat: "000000000000000@s.whatsapp.net",
 };
 

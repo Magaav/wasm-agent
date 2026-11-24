@@ -143,9 +143,21 @@ check(driver.includes("chat_less_allowed(record.tool, args)"), "the default-deny
 check(script.includes("refusing to run"), "a run that would write in the node home refuses");
 check(script.includes("REAL_HOME"), "the refusal is about the operator's own node home");
 
+// ---- 7. the one real message text, and the dedupe row uses the same one -------------------------
+// Fable 24/11: the live run sends exactly one message, and its text is this sentence. The dedupe row is
+// the SAME text on purpose - a different text would be a second job (and a second message), not a dedupe.
+const REAL_TEXT = "wa acceptance test - ignore";
+check(script.includes(JSON.stringify(REAL_TEXT)), "the script carries the one real message text verbatim", REAL_TEXT);
+const textUses = (script.match(/FIXTURE\.text/g) || []).length;
+check(textUses >= 2, "both the send and the dedupe step take the text from the one constant", String(textUses));
+const fixtureBlock = script.split("const FIXTURE = {")[1].split("};")[0];
+const textLines = [...fixtureBlock.matchAll(/text: "([^"]*)"/g)].map((match) => match[1]);
+check(textLines.length === 1 && textLines[0] === REAL_TEXT,
+  "the only message text in the fixtures is the sentence Fable named", textLines.join(" | "));
+
 if (problems.length) {
   console.error("test-whatsapp-acceptance: FAIL (" + problems.length + " of " + checks + ")");
   for (const problem of problems) console.error("  - " + problem);
   process.exit(1);
 }
-console.log("test-whatsapp-acceptance: ok (" + checks + " checks: every surface verb is a row, live mode refuses a missing or malformed target, the own-chat guard runs before the call, the driver redacts, and a run in the node home refuses)");
+console.log("test-whatsapp-acceptance: ok (" + checks + " checks, including: every surface verb is a row, live mode refuses a missing or malformed target and is default-deny for a step with no chat, the own-chat guard runs before the call, the driver redacts, the one real message text is the sentence Fable named, and a run in the node home refuses)");
