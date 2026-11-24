@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import cp from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {isMain} from './lib/main-module.mjs';
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
 const WASM='d4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9';
 const PRELUDE='57c8dc8c0e812117d82167fa751bc368f249d5aaee56d321066fc5280c785281';
@@ -237,7 +238,7 @@ export function qualifyWave(root,receiptFile,generation,openedAt,installedBinary
  requireValue(sha(fs.readFileSync(binary))===digest&&sha(fs.readFileSync(receiptFile))===sha(raw),'wave_candidate_changed_during_inspection');
  return {ok:true,binary:fs.realpathSync(binary),binary_sha256:digest,installed_sha256:installed,receipt:fs.realpathSync(receiptFile),receipt_sha256:sha(raw),source_commit:r.source_commit,source_tree:r.source_tree,platform:process.platform,arch:process.arch,generation,build_generation:r.wave_generation,evidence:r.evidence,inspection:'existing verified build receipt + physical bytes; no runtime tests'};
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+if(isMain(import.meta.url)){
  try{
   const [action,root,...extra]=process.argv.slice(2);requireValue(root&&path.isAbsolute(root),'absolute_source_root_required');
   if(action==='assets-path'){requireValue(extra.length===0,'usage');console.log(assetPath(root));}

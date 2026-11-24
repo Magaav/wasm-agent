@@ -26,6 +26,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
+import {isMain} from './lib/main-module.mjs';
 
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
 const fail = reason => { throw new Error(reason); };
@@ -188,7 +189,7 @@ export function revert(dir, id) {
   } finally { db.close(); }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && isMain(import.meta.url)) {
   const [action, dir, id, actor] = process.argv.slice(2);
   try {
     if (!dir) fail('usage: plan DIR [ID] | apply DIR ID [ACTOR] | revert DIR ID');

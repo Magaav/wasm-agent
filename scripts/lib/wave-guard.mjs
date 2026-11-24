@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {isMain} from './main-module.mjs';
 export function checkWaveAdmission(repo,{phase='produce',recovery=null}={}) {
   try {
     const r=spawnSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{cwd:repo,encoding:'utf8',windowsHide:true});
@@ -21,7 +22,7 @@ export function checkWaveAdmission(repo,{phase='produce',recovery=null}={}) {
     return proof;
   } catch(error){return {ok:false,wave_verified:false,reason:'wave_admission_unverifiable: '+error.message};}
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(isMain(import.meta.url)) {
   const proof=checkWaveAdmission(path.resolve(process.argv[2]||'.'),{phase:process.argv[3]||'produce'});
   console.log(JSON.stringify(proof));if(!proof.ok)process.exitCode=2;
 }

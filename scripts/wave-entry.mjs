@@ -11,6 +11,7 @@ import {create,inspect,advance} from './wave-lifecycle.mjs';
 import {waveActivity,activitySource,isolatedRepository} from './lib/wave-activity.mjs';
 import {recoveryAdmission} from './lib/wave-recovery.mjs';
 import {finishedWave} from './lib/wave-withdrawal.mjs';
+import {isMain} from './lib/main-module.mjs';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const key=x=>{const p=path.resolve(x).replaceAll('\\','/');return process.platform==='win32'?p.toLowerCase():p;};
 function git(repo,...args){const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8',windowsHide:true});if(r.status!==0)throw Error('wave_git_identity_unavailable');return r.stdout.trim();}
@@ -165,7 +166,7 @@ export function watcherDefinition(repo) {
     action:{kind:'run',script:path.join(JSON.parse(fs.readFileSync(row.config,'utf8')).install,'scripts/wave-monitor.sh'),timeout_seconds:10800},
     controls:{},description:'Bounded external owner recovery; complete or blocked disables scheduling; unknown effects never replay.'};
 }
-if(!process.execArgv.some(arg=>arg==='-e' || arg==='--eval') && process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(!process.execArgv.some(arg=>arg==='-e' || arg==='--eval') && process.argv[1] && isMain(import.meta.url)) {
   try {
     const [verb,repo,a,b]=process.argv.slice(2);let result;
     if(verb==='check')result=checkAdmission(repo,{phase:a || 'produce'});

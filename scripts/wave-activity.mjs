@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {activityInventory, activityStore, POSITIVE_CLAIM, readResolutions, sourceOfConfig} from './lib/wave-activity.mjs';
+import {isMain} from './lib/main-module.mjs';
 const fail = reason => { throw new Error(reason); };
 export const REFUSAL = 'exact_owner_settlement_and_drain_unavailable';
 const recovery = 'Owning runtime: inspect operation status and await full settlement (not shell exit); inspect retained resource claims and reconcile unknown effects with exact owner/run evidence through the sanctioned operator resource path. Preserve claims and receipts. See docs/CONCURRENCY.md and docs/EXECUTION.md.';
@@ -40,7 +41,7 @@ export function resolve(configFile, session, evidence, flags = {}) {
   // SAFETY_CREATION: never persist an unsupported settlement, including idempotent prose.
   fail(`${REFUSAL}:${session}:${recovery}`);
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && isMain(import.meta.url)) {
   const [action, config, session, evidence] = process.argv.slice(2);
   try {
     if (!config) fail('usage: observe CONFIG | resolve CONFIG SESSION EVIDENCE (unsupported settlement refuses)');

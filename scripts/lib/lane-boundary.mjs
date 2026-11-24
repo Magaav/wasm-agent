@@ -35,6 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
+import {isMain} from './main-module.mjs';
 
 export const BOUNDARY_PHASES=['enter','exit'];
 const POLICY_FILE='lane-policy.json';
@@ -153,7 +154,7 @@ export function assertBoundary(repo,{phase,timeoutMs}={}) {
   return verdict;
 }
 
-if(process.argv[1] && import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href) {
+if(isMain(import.meta.url)) {
   const [repo,phase]=process.argv.slice(2);
   const verdict=boundary(repo ?? '.',{phase});
   process.stdout.write(`${JSON.stringify(verdict,null,2)}\n`);

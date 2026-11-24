@@ -11,6 +11,7 @@ import {fullProof,findFullProof} from './lib/full-gate-proof.mjs';
 import {boundary} from './lib/lane-boundary.mjs';
 import {waveActivity,activitySource,isolatedRepository} from './lib/wave-activity.mjs';
 import {finishedWave,validateWithdrawal,withdrawNeverAdmitted,withdrawalPlan} from './lib/wave-withdrawal.mjs';
+import {isMain} from './lib/main-module.mjs';
 
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
 const requiredChecks = ['operations','claims','runtime','registries','deliveries','owners'];
@@ -333,7 +334,7 @@ export function resume(dir,id,evidence) {
     event(db,id,'resolution_observed',{evidence}); return {ok:true,state:'pending'};
   }); } finally { db.close(); }
 }
-if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if (process.argv[1] && isMain(import.meta.url)) {
   const [action,dir,id,file]=process.argv.slice(2);
   try {
     let result;

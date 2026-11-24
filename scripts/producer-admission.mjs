@@ -7,6 +7,7 @@ import {deliveryFiles,runDeliveryProof,verifyDeliveryProof,skipped} from './lib/
 import {fullProof} from './lib/full-gate-proof.mjs';
 import {catalog} from './gate-checks.mjs';
 import {executeChecks,hash,checkVerdict} from './gate-check.mjs';
+import {isMain} from './lib/main-module.mjs';
 function git(repo,...args) {
   const r=spawnSync('git',args,{cwd:repo,encoding:'utf8',windowsHide:true,maxBuffer:16*1024*1024});
   if(r.status!==0)throw Error(r.stderr||r.error?.message||'git failed');return r.stdout.trim();
@@ -159,7 +160,7 @@ export async function runFocused(repo,{jobs=1,output=null,focusedScope=null}={})
   const target=path.resolve(repo,git(repo,'rev-parse','--git-path','wa-producer-check.json'));
   fs.writeFileSync(target,JSON.stringify(receipt,null,2)+'\n');return {...verifyFocused(repo,receipt),receipt:target};
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(isMain(import.meta.url)) {
   const [mode,directory,tip,...args]=process.argv.slice(2),repo=path.resolve(directory||'.');
   try {
     let result;

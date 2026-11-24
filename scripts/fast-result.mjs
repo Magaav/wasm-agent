@@ -26,6 +26,7 @@
 // value: "" and "not installed" must not look the same to a reader.
 import fs from 'node:fs';
 import path from 'node:path';
+import {isMain} from './lib/main-module.mjs';
 
 export const SCHEMA = 1;
 
@@ -114,7 +115,7 @@ function main(argv) {
 }
 
 // Importable (the test does) and runnable (the runner does).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+if (isMain(import.meta.url)) {
   try { main(process.argv.slice(2)); } catch (error) {
     console.error(`fast-result: ${error.message}`);
     process.exitCode = 2;

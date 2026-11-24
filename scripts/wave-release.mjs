@@ -37,6 +37,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {findFullProof} from './lib/full-gate-proof.mjs';
+import {isMain} from './lib/main-module.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -118,7 +119,7 @@ export function release({repo, sha, wave, checkOnly, tag, at = new Date()}) {
   return {verdict: 'released', revision, tree, gate, tag: tagResult, release_verified: true};
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && isMain(import.meta.url)) {
   let exitCode = 4;
   try {
     const options = parseArgs(process.argv.slice(2));

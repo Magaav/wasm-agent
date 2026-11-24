@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {isMain} from './lib/main-module.mjs';
 function git(repo,...args){const r=spawnSync('git',args,{cwd:repo,encoding:'utf8',windowsHide:true});if(r.status!==0)throw Error(r.stderr||r.error?.message);return r.stdout.trim();}
 // `git worktree list --porcelain` as blocks of lines. `-z` (NUL-separated, safe for any path) needs git
 // 2.36+; Ubuntu 22.04 ships 2.34 (mail, 13/11: "error: unknown switch `z'" refused every deploy there).
@@ -32,6 +33,6 @@ export function canonicalRuntime(repo,expectedHead='HEAD',mainRef=process.env.WA
   if(git(root,'rev-parse','HEAD')!==main||git(root,'status','--porcelain'))throw Error(`canonical main checkout must be clean and equal to fetched ${mainRef}`);
   return path.resolve(root);
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(process.argv[1]&&isMain(import.meta.url)) {
   try{console.log(canonicalRuntime(path.resolve(process.argv[2]||'.')));}catch(error){console.error(error.message);process.exitCode=2;}
 }
