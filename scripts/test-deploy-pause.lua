@@ -318,6 +318,81 @@ local closed_e = pause.sweep_records(now, {
 ok(closed_e == 0 and #errored_removed == 0,
   "a lookup that raises keeps the record: a transient error is not a dead session",
   json.encode({ closed = closed_e, removed = errored_removed }))
+-- THE ONE INVARIANT, ONE TEST PER LOST STATE (r5, 24/11), each seeded from a REAL row.
+--
+-- dispatching: ae2a9231's shape (status dispatching, attempts 1, resume_chain 0, last_error
+--   'deploy ended: resumed now', no message after the pause) - reconcile owns that bound, but the seam's plan owns
+--   the other tick path, so a node whose component bytes are older never reconciles;
+-- pending: the 22/11 row (due 2026-11-22 10:45Z, attempts 1, last_error 'deploy_waiting: waiting for the install of
+--   unknown ...'), which the tick re-stamps on every install and never dispatches.
+local function invariant_ledger(rows)
+  local self_ = { rows = rows, updates = {}, parked = {} }
+  function self_.q(sql, params)
+    params = params or {}
+    if sql:find("FROM self_wake_pauses", 1, true) then return {} end
+    if sql:find("FROM self_wakes", 1, true) then
+      if sql:find("status IN ('pending','dispatching')", 1, true) then return {} end
+      local cutoff = tonumber(params[2]) or 0
+      local out = {}
+      for _, row in ipairs(self_.rows) do
+        local lost = row.status == "unknown" or row.status == "failed"
+          or (row.status == "cancelled" and tostring(row.last_error):find("cancelled before execution", 1, true) ~= nil)
+        if lost and tonumber(row.created_at or 0) >= cutoff then out[#out + 1] = row end
+      end
+      return out
+    end
+    return {}
+  end
+  function self_.ex(sql, params)
+    self_.updates[#self_.updates + 1] = { sql = sql, params = params }
+    return { changes = 1 }
+  end
+  return self_
+end
+
+-- 1. A `dispatching` ROW THAT NEVER RAN A TURN IS LOST, not dispatching for ever: past `stale_seconds` it becomes
+-- `unknown` and then the chain rule re-arms it inside the window.
+local dispatching = invariant_ledger({ { id = "ae2a9231", session_id = "sess-ae2a", owner = "master",
+  attempts = 1, resume_chain = 0, status = "unknown", created_at = fresh(),
+  last_error = "deploy ended: resumed now" } })
+local armed_d, schedule_d = scheduler()
+local out_d = pause.ensure_resumes(now, { read = function() return nil end, exec = dispatching.ex,
+  query = dispatching.q, schedule = schedule_d, session_exists = function() return true end,
+  migrated = function() return true end, stale_seconds = 300 })
+local reclaimed = false
+for _, row in ipairs(dispatching.updates) do
+  local sql = tostring(row.sql)
+  if sql:find("status='unknown'", 1, true) and sql:find("status='dispatching'", 1, true) then reclaimed = true end
+end
+ok(reclaimed, "a dispatching row past the stale bound is reclaimed as unknown, not left dispatching")
+ok(out_d.rearmed == 1 and armed_d[1].session == "sess-ae2a",
+  "and the reclaimed resume is re-armed inside the window", json.encode(out_d))
+
+-- 2. A `pending` ROW OVERDUE PAST THE WINDOW CAN NEVER FIRE (the 22/11 row): it is retired, not re-stamped for ever.
+local pending = invariant_ledger({})
+local out_p = pause.ensure_resumes(now, { read = function() return nil end, exec = pending.ex, query = pending.q,
+  schedule = function() error("nothing may be armed for a dead row") end, session_exists = function() return true end,
+  migrated = function() return true end, stale_seconds = 300 })
+local fired = nil
+for _, row in ipairs(pending.updates) do
+  local sql = tostring(row.sql)
+  if sql:find("too old to fire", 1, true) then fired = row end
+end
+ok(fired ~= nil, "an overdue pending row past the window is retired: " .. json.encode({ updates = #pending.updates }))
+ok(tostring(fired and fired.sql):find("status='pending'", 1, true) ~= nil,
+  "and the statement is scoped to pending rows only: " .. tostring(fired and fired.sql))
+ok(out_p.rearmed == 0, "nothing is armed for it", json.encode(out_p))
+
+-- 3. A WAITING DEPLOY neither re-arms nor retires: the two states above are handled BEFORE that gate, so a stuck
+-- row is not held hostage by a deploy that never ends, and a live one is not touched while it waits.
+local waiting_rows = invariant_ledger({ { id = "w2", session_id = "sess-w2", owner = "master", attempts = 3,
+  resume_chain = 0, status = "unknown", created_at = fresh() } })
+local armed_w, schedule_w = scheduler()
+local held_w = pause.ensure_resumes(now, { read = marker_read, exec = waiting_rows.ex, query = waiting_rows.q,
+  schedule = schedule_w, session_exists = function() return true end, migrated = function() return true end })
+ok(held_w.waiting == true and held_w.rearmed == 0 and #armed_w == 0,
+  "a waiting deploy still re-arms nothing", json.encode(held_w))
+ok(#waiting_rows.updates > 0, "but the invariant statements ran first (the reclaim and the retire)")
 local refusal_text = pause.refuse(now, { read = marker_read })
 ok(type(refusal_text) == "string" and refusal_text:find("retry when idle", 1, true) ~= nil,
   'a refusal ends in retry-when-idle, so a runner can tell it from a failure', tostring(refusal_text))

@@ -988,3 +988,70 @@ record sweep, because it is the same question ("is this still a promise?") asked
    is gone, the young and half-written ones are there, the overdue row is `superseded` with that sentence, and
    `/health`/the log shows the sweep. It fails on today's code for the exact reason the live node is silent.
 5. Same rows as r4 plus the new one; `scripts/test-selfloop-pause.lua` and `test-deploy-pause.lua` extended.
+
+### r5: the state table of a resume row, and the one invariant
+
+Read from the code (`lua/core/selfloop.lua`, `lua/core/deploy_pause.lua`); line numbers are the write sites.
+
+| status | moved IN by | moved OUT by | longest it may stay |
+| --- | --- | --- | --- |
+| `pending` | `schedule` INSERT (446/481); `defer_refused` (1251); `run_wake`'s deferrals (1284, 1293, 1330); `finish` for a repeating row (1228); the tick's `not_started` receipt (1520) | the tick's claim -> `dispatching` (1200, 1509); `cancel` (621) / due-cancel and park (831) -> `cancelled`; the repair or the migration -> `superseded`; the r5 invariant -> `superseded: too old to fire` | until its `due_at`, then its own backoff; while a deploy waits the tick only re-stamps it (1386-1391), so **before r5: for ever** - now the invariant retires it once it is older than the window |
+| `dispatching` | the tick's claim (1200, 1509); `run_wake`'s own claim | `finish` -> `delivered`/`failed` (1228, 1232); `cancel_claimed` -> `cancelled` (1271, `cancelled before execution`); reconcile -> `unknown` (1469); the r5 invariant reclaims it at the same bound | `stale_seconds` (300 s) - but reconcile lives in the tick's inline path while the seam's plan owns the other, so on a node whose component is older than that code: **for ever**. That is ae2a9231 |
+| `unknown` | reconcile (1469, `dispatch interrupted; not replayed`); `run_wake`'s unknown receipt (1524) | the repair re-arms it inside the window (chain rule) or retires it outside | one tick: seconds |
+| `failed` | `finish` (1232) | the repair re-arms it inside the window; terminal otherwise | as `unknown` |
+| `cancelled` | an operator's `cancel` (621), the due-cancel/park (831), and the NODE's own `cancel_claimed` (1271) | the repair re-arms **only** the node's kind (`cancelled before execution`); everything else is final | terminal |
+| `delivered` | `finish` ok (1232) | - (a repeating row goes back to `pending`) | terminal |
+| `superseded` | the repair ("a newer resume was armed"), the migration ("too old to resume"), the r5 invariant ("too old to fire") | - | terminal |
+| `resume_abandoned` | the repair when the chain is spent | - | terminal |
+
+**THE INVARIANT (r5).** EVERY RESUME ROW REACHES A TERMINAL STATE WITHIN THE WINDOW. Stated as a bound: a row
+created t ago is `delivered`/`failed`/`resume_abandoned`/`superseded` by t = WINDOW (6 h) at the latest, and in
+practice by t = stale (300 s) + chain (2 re-arms, 30 s and 60 s). `deploy_pause.ensure_resumes` enforces it before
+anything else, in both tick paths and regardless of the seam:
+
+1. `dispatching` past `stale_seconds` -> `unknown` ("dispatch interrupted; not replayed") - the same rule and the
+   same sentence reconcile uses, applied by the module that runs on both paths;
+2. `pending` whose `created_at` is older than the window -> `superseded: too old to fire` (the 22/11 row);
+3. then the existing pass: a lost row (`unknown`/`failed`/node-cancelled) inside the window is re-armed under the
+   chain rule (max 2, 30 s/60 s backoff), and outside it is retired.
+
+### Q1-Q3, read-only
+
+* **Q1 - has the sweep run live?** Yes, on every tick, and it could not delete: it asked for `host.delete_file`
+  (deploy_pause.lua:515) while the host exposes `host.remove_file` (host.rs:1690), so `remover` was nil, `closed`
+  stayed 0 and the log line (inside `if closed > 0`) never fired. The tick itself demonstrably reaches its end - the
+  22/11 row's `updated_at = 01:18:06Z` is written by the `deploy_waiting` branch of the same tick (1385-1391).
+  **Now proven:** r5 uses `host.remove_file`, says so once when the capability is missing, and writes ONE line a day
+  even when it closes nothing: `deploy pause: sweep ran: <n> record(s) seen, <m> closed` (stamped in
+  `<data>/pause-sweep.last`, so the line is daily and not per tick).
+* **Q2 - the 22/11 pending row.** It is re-stamped every tick by the `deploy_waiting` branch while a deploy waits
+  (1386-1391) and never dispatched; the r3 repair never looked at it because it selects `unknown`/`failed`/node-
+  cancelled rows only. r5 retires it (`superseded: too old to fire`) because a row that can never fire must not
+  stay `pending` - and it does so BEFORE the waiting gate, so a deploy that never ends cannot hold it hostage.
+* **Q3 - the `dispatching` row (ae2a9231).** `last_error='deploy ended: resumed now'`, attempts 1, chain 0, no
+  message after the pause: its dispatch was interrupted and reconcile - the only owner of that bound - lives in the
+  inline tick path, so with the seam's plan owning the live path nothing reclaimed it. r5's invariant reclaims it at
+  `stale_seconds` and the chain rule re-arms it inside the window.
+
+### Tests (one per non-terminal state, seeded from real rows)
+
+| state | fixture |
+| --- | --- |
+| `dispatching` | ae2a9231's shape - asserts the reclaim statement (`status='dispatching'` -> `unknown`) and the re-arm |
+| `pending` overdue | the 22/11 row's shape - asserts the retire statement is scoped to `pending` and that nothing is armed for it |
+| `unknown`/`failed` (inside the window) | r4's real-attempts fixtures: exactly one re-arm, then the chain cap |
+| `cancelled` | operator cancel stays, node cancel re-arms (attempts 73 and 464) |
+| live-shaped sweep, no injected capability | `scripts/test-selfloop-pause.lua`: real `deploy-paused/*.json` files and `selfloop.tick` with no options - an old record goes, a young one with a REAL session stays, a half-written young one stays |
+
+`scripts/test-deploy-pause.lua`: **93 checks**; `scripts/test-selfloop-pause.lua`: **116 checks** (was 113);
+`scripts/test-deploy-bound.sh`: `deploy bound ok`; `scripts/test-deploy-wait.sh`: `deploy wait ok`.
+
+One flake named again (unchanged): `test-deploy-wait.sh` step 6 failed once in one of these runs and passed on the
+re-run; the same step, the same behaviour as the four earlier observations today.
+
+### Texts to approve (r5)
+
+27. `deploy pause: the sweep has no host.remove_file, so no pause record can be closed` (once per run, when the
+    capability is missing)
+28. `deploy pause: sweep ran: <n> record(s) seen, <m> closed` (once a day, even when nothing was closed)
+29. `superseded: too old to fire` - the `last_error` of a resume row the invariant retires

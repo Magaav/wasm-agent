@@ -340,6 +340,12 @@ M.MIGRATION_MARKER = "resume-migration-1"
 -- must agree about which rows are debts.
 local LOST_WHERE = "reason=? AND (status IN ('unknown','failed') OR (status='cancelled' AND last_error LIKE 'cancelled before execution%'))"
 
+local function sweep_stamp_path()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok then return nil end
+  return paths.data() .. "/pause-sweep.last"
+end
+
 local function marker_path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
   if not ok then return nil end
@@ -415,7 +421,26 @@ function M.ensure_resumes(now, opts)
         migration, M.RESUME_WINDOW_SECONDS))
     end
   end
-  if M.waiting(now, opts) then return { waiting = true, rearmed = 0, migration = migration } end
+  -- THE ONE INVARIANT (r5, 24/11): EVERY RESUME ROW REACHES A TERMINAL STATE INSIDE THE WINDOW.
+  --
+  -- A row that is not terminal and is past its own bound is LOST, not waiting: inside the window it is re-armed
+  -- (under the chain rule below); outside it, it is retired. Two states can be lost without anything else noticing:
+  --
+  --   * `dispatching` with no turn started: reconcile is the owner of that answer (`selfloop.lua`, `stale_seconds`,
+  --     300 s by default), but it lives in the tick's inline path while the seam's plan owns the other one, so a node
+  --     whose component bytes are older than that code never reconciles. MEASURED: ae2a9231 held `dispatching`,
+  --     attempts 1, chain 0, last_error `deploy ended: resumed now`, and never ran a turn.
+  --   * `pending` long past its due time: while a deploy waits the tick re-stamps every overdue row and dispatches
+  --     none (`selfloop.lua:1386-1391`). MEASURED: a 22/11 row, due 2026-11-22 10:45Z, attempts 1, last_error
+  --     `deploy_waiting: ...`, rewritten by every install since.
+  local stale_secs = tonumber(opts.stale_seconds) or 300
+  local reclaimed = 0
+  local killed = pcall(exec, [[UPDATE self_wakes SET status='unknown', last_error='dispatch interrupted; not replayed',
+    updated_at=? WHERE reason=? AND status='dispatching' AND updated_at<?]], { now, M.RESUME_REASON, now - stale_secs })
+  if killed then reclaimed = reclaimed + 1 end
+  pcall(exec, [[UPDATE self_wakes SET status='superseded', due_at=NULL, last_error='superseded: too old to fire',
+    updated_at=? WHERE reason=? AND status='pending' AND created_at<?]], { now, M.RESUME_REASON, cutoff })
+  if M.waiting(now, opts) then return { waiting = true, rearmed = 0, migration = migration, stale = reclaimed } end
   -- THE CHAIN IS `resume_chain`, NOT `attempts` (24/11): `attempts` counts dispatch attempts and reaches the
   -- hundreds on a real ledger, so reading it here abandoned 46 live resumes on the first tick after an install.
   local lost = query([[SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE ]] .. LOST_WHERE
@@ -512,7 +537,17 @@ function M.sweep_records(now, opts)
       return type(row) == "table"
     end
   end
-  local remover = opts.remove or (host and host.delete_file)
+  -- THE CAPABILITY THAT EXISTS (r5, 24/11). This asked for `host.delete_file`, which the host does not have (the
+  -- name is `host.remove_file`, rust/wa-capabilities/src/host.rs:1690), so `remover` was nil on every live tick and
+  -- the sweep silently closed nothing, for nine minutes and 39 stale records. A sweep that cannot remove is a
+  -- fact an operator must read once, not a silent 0.
+  local remover = opts.remove or (host and host.remove_file)
+  if type(remover) ~= "function" then
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, "deploy pause: the sweep has no host.remove_file, so no pause record can be closed")
+    end
+    return 0
+  end
   local closed = 0
   for _, entry in ipairs(decoded.entries or {}) do
     local name = tostring(entry.name or "")
@@ -540,11 +575,30 @@ function M.sweep_records(now, opts)
         local modified = tonumber(entry.modified) or 0
         by_age = modified > 0 and ((now - modified) > M.RESUME_WINDOW_SECONDS) or false
       end
+      -- A RECORD THAT CANNOT BE DATED IS JUDGED ONLY BY ITS FILE (24/11, Fable's rule): with no `since` there is no
+      -- session to be sure of either - the name may belong to a file caught mid-write - so "gone" may not close it.
       local looked, verdict = pcall(exists, session)
-      local gone = looked and verdict == false
+      local gone = since > 0 and looked and verdict == false
       if (by_age or gone) and type(remover) == "function" then
         if pcall(remover, path) then closed = closed + 1 end
       end
+    end
+  end
+  -- A SWEEP THAT RAN MUST BE VISIBLE (r5, Fable's Q1): `closed 0` and `never ran` were the same output for nine
+  -- minutes on the live node. One line a day even when it closes nothing, so `/health`'s counts and the log can be
+  -- compared with a fact.
+  local day = math.floor(now / 86400)
+  local stamp_reader = opts.read_file or (host and host.read_file)
+  local stamp_writer = opts.write_file or (host and host.write_file)
+  local last_day = opts.last_sweep_day
+  if last_day == nil and type(stamp_reader) == "function" then
+    local ok, text = pcall(stamp_reader, sweep_stamp_path())
+    last_day = ok and tonumber(text) or nil
+  end
+  if tonumber(last_day) ~= day and type(stamp_writer) == "function" then
+    pcall(stamp_writer, sweep_stamp_path(), tostring(day))
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, string.format("deploy pause: sweep ran: %d record(s) seen, %d closed", #(decoded.entries or {}), closed))
     end
   end
   if closed > 0 and type(host) == "table" and type(host.log) == "function" then

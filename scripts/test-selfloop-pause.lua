@@ -279,6 +279,36 @@ check(tostring(refused_row.last_error):find("deploy_waiting", 1, true) ~= nil,
 eq(selfloop.defer_refused({ id = "no-such-wake", attempts = 0 }, refusal, { now = T0 + 10 }).error, "wake_not_pending",
   "a row that is not pending is refused by name, never guessed at")
 
+-- THE SWEEP ON A LIVE-SHAPED TICK, THROUGH THE REAL HOST (r5, 24/11). The r4 sweep asked for `host.delete_file`,
+-- which does not exist (the capability is `host.remove_file`), so it closed nothing on the live node for nine minutes
+-- and the unit test did not notice because it INJECTED the remover - the fixture replaced exactly the thing that was
+-- wrong. Here nothing is injected: real files in `<data>/deploy-paused`, and `selfloop.tick` with no options.
+--
+-- The oldest record must go, the young one and the half-written one must stay, and the sweep must say it ran.
+local data_dir = dofile("lua/core/paths.lua").data()
+local paused = data_dir .. "/deploy-paused"
+local now_s = os.time()
+local function write_record(name, body)
+  pcall(host.write_file, paused .. "/" .. name, body)
+  return paused .. "/" .. name
+end
+local function exists(path)
+  local ok, text = pcall(host.read_file, path)
+  return ok and type(text) == "string"
+end
+dofile("lua/core/deploy_pause.lua").paused_dir = function() return paused end
+local old_path = write_record("old-record.json", json.encode({ session = "sess-old", since = now_s - 7 * 3600 }))
+-- A REAL session, because the sweep closes a record whose session is gone - a made-up id would be "positively
+-- gone" and the case would prove the opposite of what it says.
+local live_session = memory.start_session("local", "chat",
+  { user_id = "master", node_id = "test-node", title = "a live pause record" })
+local young_path = write_record("young-record.json", json.encode({ session = live_session, since = now_s - 60 }))
+local half_path = write_record("half-record.json", "{\"session\":\"sess-half\"")
+selfloop.tick({ now = now_s })
+check(not exists(old_path), "a record older than the window is closed on a live tick (the capability's real name)")
+check(exists(young_path), "a young record whose session is live is kept")
+check(exists(half_path), "a half-written YOUNG record is kept: unreadable is not dead")
+for _, path in ipairs({ old_path, young_path, half_path }) do pcall(host.remove_file, path) end
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end
