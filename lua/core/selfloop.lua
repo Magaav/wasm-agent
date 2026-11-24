@@ -114,29 +114,40 @@ local SCHEMA = {
   )]],
 }
 
+-- COLUMNS THE CODE READS THAT AN OLDER LEDGER DOES NOT HAVE (Fable 25/11, from the live stall).
+--
+-- MEASURED: `run_id` (r8a) was declared inside `CREATE TABLE IF NOT EXISTS self_wakes` ONLY. `IF NOT EXISTS`
+-- leaves an existing table exactly as it was, so every node installed from an older build and then updated kept a
+-- `self_wakes` without that column - and the tick's first call, `deploy_pause.ensure_resumes`, raises
+-- "no such column: run_id" before the claim loop. On the live node that cost 2.5 hours of zero dispatch (the
+-- raise was swallowed by a bare pcall, see lua/core/subagents.lua). The `kind` column and `resume_chain` were
+-- added one ALTER at a time, which is exactly how one gets forgotten: the CREATE and the upgrade are two lists.
+--
+-- From here they are ONE list. A new column goes in the CREATE above and in THIS table, and a row asserts that an
+-- upgraded ledger's column set equals a fresh ledger's for every table (scripts/test-ledger-upgrade.sh).
+local UPGRADE_COLUMNS = {
+  { table = "self_wake_pauses", column = "kind", definition = "TEXT NOT NULL DEFAULT 'pause'" },
+  { table = "self_wakes", column = "resume_chain", definition = "INTEGER NOT NULL DEFAULT 0" },
+  { table = "self_wakes", column = "run_id", definition = "INTEGER" },
+}
+
 -- Create the five tables once per interpreter. `IF NOT EXISTS` makes a second interpreter safe; the
 -- flag keeps the (write-locking) DDL off every call.
 function M.setup()
   if ready then return true end
   for _, statement in ipairs(SCHEMA) do exec(statement, {}) end
-  -- `kind` arrived with the park (22/11): `CREATE TABLE IF NOT EXISTS` leaves an existing ledger's table
-  -- exactly as it is, so the column is added by a conditional ALTER. Without it every ledger older than
-  -- this line would read a park as a pause - and a pause is lifted by coming back to the session, which
-  -- is the one thing a park must never be.
-  local has_kind = false
-  for _, row in ipairs(query("PRAGMA table_info(self_wake_pauses)", {})) do
-    if tostring(row.name or "") == "kind" then has_kind = true end
+  -- EVERY COLUMN THE CODE READS, BY THE ONE LIST ABOVE. The pair (column, definition) cannot be added in one
+  -- place and forgotten in the other: one loop reads PRAGMA and adds what is missing, and the row that upgrades a
+  -- released ledger asserts the result equals a fresh one, table by table.
+  for _, column in ipairs(UPGRADE_COLUMNS) do
+    local present = false
+    for _, row in ipairs(query("PRAGMA table_info(" .. column.table .. ")", {})) do
+      if tostring(row.name or "") == column.column then present = true end
+    end
+    if not present then
+      exec("ALTER TABLE " .. column.table .. " ADD COLUMN " .. column.column .. " " .. column.definition, {})
+    end
   end
-  if not has_kind then exec("ALTER TABLE self_wake_pauses ADD COLUMN kind TEXT NOT NULL DEFAULT 'pause'", {}) end
-  -- A RESUME'S OWN CHAIN COUNT (24/11): `attempts` counts dispatch attempts and reaches the hundreds on a real
-  -- ledger (measured 24/11: 2,3,4,5,6,7,9,11,13,73,82,199,249,308,464,486,533 across 16 sessions), so reading it as a
-  -- re-arm count abandoned 46 live resumes on the first tick after an install. This column is written by
-  -- deploy_pause.ensure_resumes alone and means one thing: how many times THIS pause's resume has been re-armed.
-  local has_chain = false
-  for _, row in ipairs(query("PRAGMA table_info(self_wakes)", {})) do
-    if tostring(row.name or "") == "resume_chain" then has_chain = true end
-  end
-  if not has_chain then exec("ALTER TABLE self_wakes ADD COLUMN resume_chain INTEGER NOT NULL DEFAULT 0", {}) end
   ready = true
   return true
 end
