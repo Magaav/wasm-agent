@@ -225,6 +225,11 @@ fn queue_sessions_health(pending: &[PendingRun]) -> serde_json::Value {
             "node_thread": entry.node_thread,
             "kind": entry.kind,
             "waited_ms": now_ms().saturating_sub(entry.since_ms),
+            // RED BY NAME PAST THE BOUND (r7c): a completion that has waited longer than the bound is the defect
+            // this round exists for, and /health names its session and how long, instead of leaving it to be
+            // inferred from a number nobody compares.
+            "over_bound": now_ms().saturating_sub(entry.since_ms) >= completion_wait_bound_seconds().saturating_mul(1000),
+            "bound_seconds": completion_wait_bound_seconds(),
         })).collect::<Vec<_>>(),
     })
 }
@@ -297,6 +302,31 @@ fn build_core(bridge: Option<&'static CoreBridge>, factory: &(dyn Fn() -> Lua + 
 static POOL: OnceLock<Pool> = OnceLock::new();
 static NODE_THREAD_BEATS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
 static NODE_THREAD_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new();
+/// Which run lanes are LENT to background work (r7c). A borrow is held for the run, not for a clock, and it is
+/// handed back when that run ends (`end_work`), so a person's next run never waits behind a wake for longer than
+/// the wake itself - and at most `borrowable_reserve()` lanes are ever lent at once.
+static BORROWED_LANES: OnceLock<Vec<std::sync::atomic::AtomicBool>> = OnceLock::new();
+
+fn borrowed_reserve(index: usize) -> bool {
+    BORROWED_LANES.get().and_then(|lanes| lanes.get(index)).map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false)
+}
+
+fn mark_borrowed(index: usize) {
+    if let Some(lanes) = BORROWED_LANES.get() {
+        if let Some(flag) = lanes.get(index) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn release_borrow(index: usize) {
+    if let Some(lanes) = BORROWED_LANES.get() {
+        if let Some(flag) = lanes.get(index) {
+            flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Which session each node-thread is currently running, if any.
 ///
 /// This is what makes concurrent *runs* safe. A run is routed by session: the same session always goes to
@@ -382,6 +412,26 @@ fn run_capacity() -> usize {
 fn is_control_route(request: &Request) -> bool {
     let path = split_path(&request.path).0;
     path == "/subagents" || (request.method == "POST" && matches!(path.as_str(), "/provider" | "/model" | "/reasoning"))
+}
+
+/// BACKGROUND MAY BORROW ONE RESERVE LANE (r7c, Fable 24/11). A single background lane is not a pool: when its
+/// one turn legitimately works for twenty minutes, every other session's wake waits behind it, and "the lane has
+/// made no progress" does not help because there is nowhere else to go. The rule, as a number: with a reserve of
+/// `interactive_reserve()` lanes, at most `borrowable()` of them may be lent to background work, so a person's next
+/// run always finds a lane of its own; a borrowed lane is handed back the moment the background run ends, and
+/// `borrowed_reserve()` (the borrow is held for the run, not for a time) is what /health reports.
+fn borrowable_for(reserve: usize) -> usize {
+    if reserve <= 1 { 0 } else { 1 }
+}
+
+fn borrowable_reserve() -> usize {
+    borrowable_for(interactive_reserve())
+}
+
+/// The bound past which a waiting completion is RED in /health: a wake that has queued longer than this is the
+/// defect class this round exists for, and the line names it.
+fn completion_wait_bound_seconds() -> u64 {
+    env_usize("WASM_AGENT_COMPLETION_WAIT_SECONDS", 30) as u64
 }
 
 /// The admission deadline, including queue residence and resolver wait. It never holds the listener.
@@ -825,9 +875,16 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
             .filter(|index| *index < floor && *index <= ceiling && !claimed.contains(index)
                 && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
             .collect();
-        if let Some(index) = reserve.first().copied() {
-            eprintln!("[placement] no run lane is eligible (every one stalled or busy): background run takes reserve node-thread {index}");
-            return Some(index);
+        if borrowable_reserve() > 0 {
+            if let Some(index) = reserve.first().copied() {
+                let borrowed = reserve.iter().filter(|lane| borrowed_reserve(**lane)).count();
+                if borrowed < borrowable_reserve() {
+                    mark_borrowed(index);
+                    eprintln!("[placement] no background lane is eligible (busy or stalled): background run borrows reserve node-thread {index} ({borrowed} already borrowed); it is handed back when the run ends");
+                    return Some(index);
+                }
+                eprintln!("[placement] no background lane is eligible and the borrow is spent ({}/{}); refusing rather than queueing behind a busy lane", borrowed, borrowable_reserve());
+            }
         }
     }
     // No idle node-thread: grow the pool if the ceiling allows. `spawn_node_thread` never reuses node-thread 0 (it is
@@ -930,6 +987,8 @@ fn begin_work(label: String) {
 
 fn end_work() {
     let index = node_thread_id();
+    // A borrowed lane goes back the moment its run ends (r7c): the borrow is for the run, never for a clock.
+    release_borrow(index);
     if index == 0 {
         if let Ok(mut slot) = IN_FLIGHT.lock() {
             *slot = None;
@@ -1357,6 +1416,17 @@ fn execution_path_health() -> serde_json::Value {
 
 #[cfg(test)]
 mod execution_path_tests {
+    /// r7c (Fable, 24/11): one background lane is not a pool. With a reserve of two lanes, exactly one may be lent
+    /// to background work, so a person's next run always finds a lane of its own; with a reserve of one, nothing is
+    /// lent, because lending it would leave the person with no lane at all.
+    #[test]
+    fn background_borrows_at_most_one_reserve_lane() {
+        assert_eq!(super::borrowable_for(1), 0, "a single reserve lane is never lent");
+        assert_eq!(super::borrowable_for(2), 1, "two reserve lanes: one may be lent");
+        assert_eq!(super::borrowable_for(4), 1, "more reserve lanes still lend only one");
+        assert!(super::completion_wait_bound_seconds() > 0, "the wait bound is a real number of seconds");
+    }
+
     /// r7c (24/11): the beat says the loop is turning, not that the work advances. MEASURED live: one lane sat
     /// 29 minutes inside a completion while its label never changed, /health called it busy, and placement kept
     /// offering it. Progress is the test, and this is the rule - pure, because the busy table is process-wide and
@@ -1481,6 +1551,7 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     // it, with the label, the session and how long it has been held, so it is not invisible again.
                     "state": if age >= stall_seconds() * 1000 || node_thread_is_stalled(index) { "stalled" } else if age < 1000 { "alive" } else { "busy" },
                     "stalled": node_thread_is_stalled(index),
+                    "borrowed": borrowed_reserve(index),
                     "stalled_after_seconds": node_stall_seconds(),
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
@@ -2459,6 +2530,7 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
     // inside the first millisecond of the process, so 0 would be ambiguous between "never" and "at time 0".
     let _ = NODE_THREAD_BEATS.set((0..=ceiling).map(|_| AtomicU64::new(u64::MAX)).collect());
     let _ = NODE_THREAD_BUSY.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = BORROWED_LANES.set((0..=ceiling).map(|_| std::sync::atomic::AtomicBool::new(false)).collect());
     let _ = NODE_THREAD_SESSION.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = NODE_THREAD_RUN.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = POOL.set(Pool {

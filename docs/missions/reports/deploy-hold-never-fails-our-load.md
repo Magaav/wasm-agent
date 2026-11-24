@@ -1763,3 +1763,37 @@ branch. Everything else rebased cleanly (`git merge-tree` against main: 0 confli
 
 Rows re-run on the rebased tip (`build=0`): deploy-resume 25, deploy-pause 101, selfloop 109 (ok), selfloop-component
 30, selfloop-pause 185, handle-wake 17, cli-wake-row 30, deploy-bound ok, deploy-wait ok.
+
+### r7c-fix: a second place for background work (Fable's gap, 24/11 ~07:50Z)
+
+Fable is right: with one background lane the defer fixes BLOCKED and not BUSY. A's resumed turn can legitimately
+work for twenty minutes, and every other session's wake waits behind it - "no progress counts as busy" cannot help
+when there is nowhere else to go.
+
+**Choice: (b), the smaller one.** Background may **borrow one idle reserve lane** when no background lane is eligible
+(busy or stalled), and hands it back in `end_work` - the borrow is held for the run, never for a clock. Sizing is a
+pure rule:
+
+    borrowable_for(reserve) = 0 if reserve <= 1 else 1     // interactive_reserve() defaults to 2
+
+and the lines it writes:
+
+    [placement] no background lane is eligible (busy or stalled): background run borrows reserve node-thread N (0 already borrowed); it is handed back when the run ends
+    [placement] no background lane is eligible and the borrow is spent (1/1); refusing rather than queueing behind a busy lane
+
+**Interactive latency risk, stated:** at most ONE reserve lane is ever lent, so with the default reserve of two a
+person's next run still has a lane of its own; on an idle node the borrow never triggers at all (the background lane
+is eligible), so the added latency there is **zero by construction**. In the saturated case the worst added wait is
+the duration of one background run on a borrowed lane, never more than one run. MEASURED where it can be measured
+here: the two timing-sensitive rows pass unchanged (`deploy bound ok`, `deploy wait ok`).
+
+**/health:** each waiting completion already carried `waited_ms`, `session`, `kind`, `node_thread`; it now carries
+`over_bound` and `bound_seconds` (default 30 s, `WASM_AGENT_COMPLETION_WAIT_SECONDS`), so anything waiting past the
+bound is red by name rather than inferred. Each lane carries `borrowed` next to `stalled`.
+
+**Tests:** `background_borrows_at_most_one_reserve_lane` (reserve 1 lends nothing; 2 lends one; 4 still lends one)
+and `a_lane_that_beats_but_does_not_progress_is_stalled`. Serve module: **47 passed, 0 failed**.
+
+**Still not done:** the node-level B test in both shapes needs a spawned `serve` (A attended; A's resume plus B's
+wake; B starts within the bound). This round proves the rule, not the node. (4) the tick spin and (5) the sentinel
+remain open, as reported.
