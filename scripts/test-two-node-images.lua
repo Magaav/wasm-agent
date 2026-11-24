@@ -330,8 +330,15 @@ local function body()
     end
     -- A failure here must say WHY: the block's own answer and the tool text are the two facts that
     -- tell a refused picture from a run block that never reached the peer.
-    ok(#parts == 1, "the provider request on this node carries one image part for the peer's picture, got "
-      .. #parts .. "; tool text: " .. tostring(tool_text):sub(1, 400))
+    if #parts ~= 1 then
+      -- SAY WHAT HAPPENED: a second round that never came (the run block still pending under load) and a
+      -- round that came without the picture are different faults, and the row must not reduce both to "0".
+      local roles = {}
+      for _, message in ipairs(captured or {}) do roles[#roles + 1] = tostring(message.role) end
+      error(string.format("the provider request on this node carries one image part for the peer's "
+        .. "picture, got %d; rounds=%d captured=%s roles=[%s] tool text: %s", #parts, rounds,
+        tostring(captured ~= nil), table.concat(roles, ","), tostring(tool_text):sub(1, 300)), 0)
+    end
     local payload = tostring(parts[1] and parts[1].image_url and parts[1].image_url.url or "")
       :match("^data:[^;]+;base64,(.*)$")
     ok(payload == source_b64, "and it is that picture, byte for byte")
