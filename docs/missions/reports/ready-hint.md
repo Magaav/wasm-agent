@@ -8,7 +8,7 @@ commits are untouched, this one is appended. Nothing pushed, nothing installed, 
 
 | commit | what |
 | --- | --- |
-| `PENDING` | `installer_outcome::retry_hint`: a request `/update` wrote is re-asked with the verb the person used |
+| `f2a7621d` | `installer_outcome::retry_hint`: a request `/update` wrote is re-asked with the verb the person used |
 
 Measured first, so the branch condition is a fact and not a guess: `/update` prefixes its own reason -
 `lua/core/update.lua:475` returns `"/update: deploy " .. where .. " through the gate"` and `:860` prefixes an
