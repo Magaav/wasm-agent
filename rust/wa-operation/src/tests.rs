@@ -1703,8 +1703,8 @@ fn a_handle_whose_owner_is_gone_names_its_output_and_cancels_at_once() {
     assert_eq!(state["stdout_bytes"], 30, "the stdout SIZE is the file's, not a zero: {state}");
     assert_eq!(state["stderr_bytes"], 19, "and stderr's: {state}");
     assert_eq!(state["output_bytes"], 49, "the total is those two: {state}");
-    assert!(state["owner_gone_note"].as_str().unwrap_or("").contains("readable by id"),
-        "and the answer says where to read it: {state}");
+    assert!(state["owner_gone_note"].as_str().unwrap_or("").contains("tools.operation({action:\"read\", id})"),
+        "and the answer spells the call that reads it, not prose: {state}");
     // The bytes really are readable BY ID through the manager, which is the point of naming them.
     let page = reader.read(id, "stdout", 0, 4096).unwrap();
     assert!(page["content"].as_str().unwrap_or("").contains("suite row 1 ok"), "{page}");

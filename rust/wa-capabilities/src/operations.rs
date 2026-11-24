@@ -833,8 +833,10 @@ fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
 /// same thing about the same event (item 4, 23/11).
 fn promoted_note(id: &str, milliseconds: u64, code: i64) -> String {
     let seconds = milliseconds as f64 / 1000.0;
+    // SPELLED (Fable, 23/11): the sentence names the call a reader copies, `wait("op-...")`, not the prose
+    // "await it".
     format!(
-        "moved to the background after {seconds:.1}s: operation {id}, await it. The shell itself exited with code {code} and its descendants are still supervised under the original timeout; stdout/stderr below are what they had written when this answer was taken, and more may follow."
+        "moved to the background after {seconds:.1}s: operation {id}, wait(\"{id}\"). The shell itself exited with code {code} and its descendants are still supervised under the original timeout; stdout/stderr below are what they had written when this answer was taken, and more may follow."
     )
 }
 /// The names this node's policy re-grants to tool children: "tool_env_allow": ["GH_TOKEN", ...] in the
@@ -3273,8 +3275,8 @@ mod promotion_says_so {
         let note = result["moved_to_background_note"].as_str().unwrap_or("");
         assert!(note.starts_with("moved to the background after "),
             "the sentence names the move: {note}");
-        assert!(note.contains(&format!("operation {id}, await it")),
-            "and the id to await, in the same sentence: {note}");
+        assert!(note.contains(&format!("operation {id}, wait(\"{id}\")")),
+            "and the CALL that waits for it, spelled, in the same sentence: {note}");
         assert!(note.contains("more may follow"),
             "and that the output is not complete: {note}");
         assert!(result["moved_to_background_after_ms"].is_u64(),

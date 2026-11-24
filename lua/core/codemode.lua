@@ -614,6 +614,10 @@ local function attach_result_images(result,images)
  return result
 end
 
+-- The operation actions that only READ a record (see settle_call): their answer's `ok`/`error` are facts
+-- about the operation, never a failed delivery of the read itself.
+local OPERATION_READ_ACTIONS = { status = true, read = true, await = true, wait = true, list = true }
+
 local function settle_call(s,call)
  local value,success,admitted
  local ctx=s.ctx
@@ -659,6 +663,45 @@ local function settle_call(s,call)
       end
       result=bash_result.slim_for(call.tool,params,result)
       value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
+      -- A READ-ONLY OPERATION ANSWER IS A RECORD, NOT A FAILED CALL (P1, 23/11). `operation status/read/
+      -- await/wait/list` answers the OPERATION's own record, and that record's `ok`/`error` describe the
+      -- WORK - a handle whose owner process is gone is `ok:false` with `error` naming why, and a failed
+      -- command's record carries its own. Marking that delivery failed made the guest REJECT the promise,
+      -- so the script raised with the record as its error text instead of being handed it: measured on a
+      -- build containing this mission's work, five raises in one worker's log
+      -- (`tools.operation({action:"status",id})` -> "raised instead of answering: operation_owner_not_attached"),
+      -- which cost that worker four re-runs of its rows because "what did that run print" had no answer.
+      --
+      -- An ALLOW-LIST, not a "not an effect" guess: these five actions are reads. `start`/`cancel` keep the
+      -- strict rule, because they report about an effect the script asked for, and a refusal there must
+      -- still be a refusal.
+      -- MEASURED, and this is the whole rule: the sandbox rejects a delivered payload that carries an
+      -- `error` key (a `read` on a missing operation raised "No such file or directory (os error 2)" at the
+      -- script while a `read` with bytes answered). A dead handle's record carries `ok:false` AND `error`
+      -- naming why the owner is gone, so it was raised instead of handed over.
+      --
+      -- The call SUCCEEDED - it read the record. So for these five read-only actions the record travels
+      -- with the OPERATION's own failure under `operation_error` (and the same sentence under `reason`,
+      -- because a reader looks for that word), and without an `error` key. `start`/`cancel` are NOT in
+      -- this allow-list: a refused start is a refusal of what the script asked for and must still raise.
+      if call.tool=='operation' and OPERATION_READ_ACTIONS[tostring(params and params.action or 'status')] then
+        -- ONLY A RECORD travels this way. A refusal OF THE READ ITSELF is not a record: "operation <id> is not
+        -- your operation" carries `not_your_operation` and no `state`, and it must stay a refusal of the call
+        -- (otherwise a session could read another session's log by catching the answer instead of the raise).
+        local is_record = type(value)=='table' and value.state~=nil and value.not_your_operation~=true
+        if is_record then success=true end
+        if is_record and (value.error~=nil or value.ok==false) then
+          local record={}
+          for key,item in pairs(value) do record[key]=item end
+          if value.error~=nil then
+            record.operation_error=value.error
+            record.reason=value.reason or value.error
+            record.error=nil
+          end
+          if value.ok==false then record.operation_ok=false; record.ok=nil end
+          value=record
+        end
+      end
       -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one
       -- comes back with `prior:{call, age_s, same}`, and the repeat is counted in telemetry.
       value=session_results.record(ctx,s.journal,{id=call.id,tool=call.tool,args=host.sha256(call.args or '{}'),

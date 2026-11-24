@@ -1083,14 +1083,94 @@ local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
 end
 
+-- THE CALLER'S DIRECTORY GOES WITH A PEER CALL (24/11). A peer runs under the synthetic session
+-- `peer:<node_id>`, which has no worktree and no recorded directory on the RECEIVING node, so its bash or
+-- operation otherwise starts in whatever directory that node's serving process happens to be in - measured:
+-- the canonical checkout. The caller's own directory is a fact this side has, so it travels as an ordinary
+-- `cwd` argument (the receiving side records it as `source = "explicit"`, honestly: it came from the
+-- caller, not from a session there). Nothing is invented: no directory on this side means no cwd is added,
+-- and the peer's answer says the node's own directory was used.
+-- Forward declaration: a Lua local is in scope only from its definition, and this file is one chunk, so the
+-- helper below would otherwise call the GLOBAL of that name, which is nil (measured: tools.lua:1097, caught by
+-- scripts/test-federation.lua before this shipped). Assigned right after session_cwd is defined.
+local session_cwd_for_peer
+local function peer_args_with_cwd(memory, ctx, capability, args)
+  if capability ~= "bash" and capability ~= "operation" then return args end
+  if type(args) ~= "table" then return args end
+  if args.cwd ~= nil and args.cwd ~= "" then return args end
+  local cwd = session_cwd_for_peer and session_cwd_for_peer(memory, ctx) or ""
+  if cwd == "" then return args end
+  local copy = {}
+  for key, value in pairs(args) do copy[key] = value end
+  copy.cwd = cwd
+  copy.cwd_source = "caller_session"
+  return copy
+end
+
 -- The directory this session's tools operate in. "" is the node's own working directory - the
 -- behavior every session had before a session could own a worktree - so an untouched session is
 -- unchanged. `memory` may be nil (a schema-only dispatch), which is why this is guarded.
+-- The session's directory AND where it came from, so a receipt can be honest about it (24/11):
+-- "worktree" (a bound checkout), "run" (the directory its first run was served from) or "node" (nothing
+-- recorded - the node's own directory, which is the old behaviour and now the ONLY case that borrows it).
+local function session_dir(memory, ctx)
+  if not memory or not ctx or not ctx.session_id then return "", "node" end
+  if memory.session_worktree then
+    local ok, path = pcall(memory.session_worktree, ctx.session_id)
+    if ok and type(path) == "string" and path ~= "" then return path, "worktree" end
+  end
+  if memory.session_cwd then
+    local ok, run = pcall(memory.session_cwd, ctx.session_id)
+    if ok and type(run) == "string" and run ~= "" then return run, "run" end
+  end
+  return "", "node"
+end
+
 local function session_cwd(memory, ctx)
-  if not memory or not ctx or not ctx.session_id or not memory.session_worktree then return "" end
-  local ok, path = pcall(memory.session_worktree, ctx.session_id)
-  if not ok or type(path) ~= "string" then return "" end
-  return path
+  if not memory or not ctx or not ctx.session_id then return "" end
+  if memory.session_worktree then
+    local ok, path = pcall(memory.session_worktree, ctx.session_id)
+    if ok and type(path) == "string" and path ~= "" then return path end
+  end
+  -- THE DIRECTORY THE SESSION'S FIRST RUN WAS SERVED FROM (24/11). With no worktree this used to answer
+  -- "" - "the node's own directory" - and the child inherited whatever process served the turn, so the
+  -- same session ran in its mission directory under the CLI and in the canonical checkout when the NODE
+  -- served it (resume after a deploy pause, a wake, a peer's call). Measured by change/worker-write-guard
+  -- (docs/missions/reports/worker-write-guard.md, section 15). A worktree still WINS: a bound checkout is a
+  -- stronger statement than a starting directory.
+  if memory.session_cwd then
+    local ok, run = pcall(memory.session_cwd, ctx.session_id)
+    if ok and type(run) == "string" and run ~= "" then return run end
+  end
+  return ""
+end
+
+-- A SESSION DIRECTORY THAT IS GONE IS REFUSED BY NAME (24/11), never silently replaced. The node's own
+-- directory is not this session's: substituting it is how an operation came to run in the canonical
+-- checkout, and a silent substitution also turns "your worktree was released" into a write in the wrong
+-- tree. Answers nil when there is nothing to refuse (no directory, or it is there).
+session_cwd_for_peer = session_cwd
+
+local function session_cwd_refusal(path)
+  if type(path) ~= "string" or path == "" then return nil end
+  if not host.list_dir then return nil end
+  local ok, raw = pcall(host.list_dir, path)
+  if not ok then return nil end
+  -- Three shapes, each decided explicitly: a table (this host), a JSON string (the shape the workspace
+  -- preflight reads), or something this code does not understand - and an answer it cannot read is NOT
+  -- "gone", because refusing a valid directory is worse than letting the launch fail loudly.
+  local decoded = raw
+  if type(decoded) == "string" then
+    local good
+    good, decoded = pcall(json.decode, raw)
+    if not good then return nil end
+  end
+  if type(decoded) ~= "table" then return nil end
+  if decoded.error == nil then return nil end
+  return { error = "session_cwd_gone", cwd = path, cwd_source = "session_run", effect = "none",
+    note = "this session's directory (" .. path .. ") is not there any more, so nothing was started. The node "
+      .. "does not substitute its own directory for a session's: bind a worktree (session_worktree) or pass "
+      .. "cwd explicitly." }
 end
 
 -- Resolve a tool path against the session's directory. An absolute path is left alone; a relative
@@ -1310,13 +1390,22 @@ local function required_workspace_error(memory, ctx, name, args)
   return nil
 end
 
-local function launch_cwd(memory, ctx, requested)
+local function launch_cwd(memory, ctx, requested, asked_source)
   local workspace = memory and ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id)
   -- `session` is not a launch detail: it is WHOSE work this is. The operation record carries it, so the
   -- shell an agent starts belongs to the session that asked and to no other (session isolation,
   -- findings 1 and 2). An empty value stays empty - a call nobody names is nobody's.
-  return {requested=requested or "", source=(requested and requested~="") and "explicit" or
-    ((session_cwd(memory,ctx) or "")~="" and "session_workspace" or "node"),
+  -- THE SOURCE IS A FACT, NOT A GUESS (24/11): explicit | caller_session (a peer's directory travelled with
+  -- the call) | session_workspace | session_run (the directory the session's first run was served from) |
+  -- node (nothing recorded - the node's own directory, the only case that borrows it).
+  local source
+  if requested ~= nil and requested ~= "" then
+    source = (asked_source == "caller_session") and "caller_session" or "explicit"
+  else
+    local _, from = session_dir(memory, ctx)
+    source = (from == "worktree") and "session_workspace" or (from == "run") and "session_run" or "node"
+  end
+  return {requested=requested or "", source=source,
     required=workspace and workspace.required == true or false, session=(ctx and ctx.session_id) or ""}
 end
 
@@ -1437,7 +1526,7 @@ local function remote_batch(memory, args, role, ctx)
   if not node then return { error = "unknown_node:" .. tostring(args.node), online_nodes = online_nodes(), effect = "none" } end
   local function one(entry)
     if node.local_node then return M.dispatch(memory, entry.capability, entry.args, role, ctx) end
-    return nodeslib.remote_call(node.node_id or args.node, entry.capability, entry.args)
+    return nodeslib.remote_call(node.node_id or args.node, entry.capability, peer_args_with_cwd(memory, ctx, entry.capability, entry.args))
   end
   local results, round_trips, fallback = {}, 0, nil
   if node.local_node then
@@ -1898,8 +1987,15 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       -- it runs at low CPU priority unless a caller that DOES wait for a while says otherwise
       -- (18/11 round 2, finding 9).
       if args.background == nil then args.background = true end
-      args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
-      if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end
+      args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd,args.cwd_source)
+      if args.cwd == nil or args.cwd == "" then
+        local from_session = session_cwd(memory,ctx)
+        -- Same rule as `bash`: a session directory that is gone refuses the start by name instead of
+        -- launching the operation in the node's own directory (24/11).
+        local gone = session_cwd_refusal(from_session)
+        if gone then return gone end
+        args.cwd = from_session
+      end
       -- The same two walls `bash` has had since the 11/11 home wipe: the text is refused before
       -- anything is launched, and the shell runs a command whose resolved targets refuse too. This
       -- path had neither - `host.exec` is wrapped by `path_guard.install`, `operation start` was not -
@@ -2146,7 +2242,14 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- An explicit `args.cwd` still wins; a session's worktree is the default, and "" keeps the
     -- node's own cwd.
     local cwd = args.cwd
-    if cwd == nil or cwd == "" then cwd = session_cwd(memory, ctx) end
+    local cwd_from_session = false
+    if cwd == nil or cwd == "" then cwd = session_cwd(memory, ctx); cwd_from_session = true end
+    -- A directory the session recorded that is GONE is refused here, before anything runs: a shell in the
+    -- node's checkout is the defect this guard exists for (24/11).
+    if cwd_from_session then
+      local gone = session_cwd_refusal(cwd)
+      if gone then return gone end
+    end
     -- A common `git commit` path gets a bounded, opt-in pre-commit review. The first
     -- attempt with unread leads returns them without executing the command. A repeated
     -- attempt on the same patch is allowed so a false positive cannot trap the agent;
@@ -2719,7 +2822,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         -- answers exactly what it answered before, and the refusal below is unchanged (an old node keeps
         -- working; nothing is assumed about the peer's build).
         local sent = call.capability == "read" and dofile('lua/core/remote_image.lua').request(call.args) or call.args
-        result=nodeslib.remote_call(call.node, call.capability, sent, options)
+        result=nodeslib.remote_call(call.node, call.capability, peer_args_with_cwd(memory, ctx, call.capability, sent), options)
       end
       if type(result) == "table" and REMOTE_REFUSALS[result.error] then
         result.online_nodes = online_nodes()
