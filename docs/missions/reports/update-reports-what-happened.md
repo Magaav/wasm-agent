@@ -1,6 +1,8 @@
 # update-reports-what-happened - SLICE 1: `wa update` follows the install it asked for
 
-Branch `change/update-reports-what-happened`, base `origin/main` = 5bb28d8a. This round implements the
+Branch `change/update-reports-what-happened`, rebased onto `origin/main` = 2cdc2dc1 (started from 5bb28d8a;
+the branch moved 16 commits while this round ran, one of them `change/one-turn-wired` - the orphan row this
+report names below is fixed on the new base). This round implements the
 **slice 1** the brief names (Fable/Victor 24/11 ~15:40Z) and the two additions Fable sent at ~16:05Z and
 ~16:10Z. The rest of the Job (items 1-6, the real-pty acceptance test, the release-channel decision) is
 NOT in this branch; what it still needs is listed at the end.
@@ -28,10 +30,11 @@ Read on this node, 24/11:
 
 ## What changed
 
-| commit | what |
+| commit (after the rebase onto 2cdc2dc1) | what |
 | --- | --- |
-| `51a4e192` | `lua/core/update_follow.lua` (new), `update_banner.published/release_list/listing`, the `wa update` dispatch in `init.lua`, the remote follow in `remote_update.lua`, `scripts/test-update-follow.sh` |
-| (this commit) | `scripts/test.sh` wiring, `lua/core/cli_help.lua` usage lines, `docs/RELEASE-UPDATE.md`, `docs/REMOTE-UPDATE.md`, this report |
+| `8df6d571` | `lua/core/update_follow.lua` (new), `update_banner.published/release_list/listing`, the `wa update` dispatch in `init.lua`, the remote follow in `remote_update.lua`, `scripts/test-update-follow.sh` |
+| `8ad50cff` | `scripts/test.sh` wiring, `lua/core/cli_help.lua` usage lines, `docs/RELEASE-UPDATE.md`, `docs/REMOTE-UPDATE.md`, this report |
+| (the report's last commit) | the measurements below, the runner defect, the pre-existing red row |
 
 ### `lua/core/update_follow.lua`
 
