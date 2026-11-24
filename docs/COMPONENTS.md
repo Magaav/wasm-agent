@@ -409,9 +409,9 @@ enter the bytes.
 
 Two things it does **not** buy you: a component without C (`mesh`, `hooks`, `memory`, `selfloop`,
 `codemode`) builds without it - measured 18/11 on avell, `bash scripts/build-components.sh mesh`
-with `WASI_SDK` unset succeeds and installs the same 211,918 bytes - and the *pinned* bytes are still
-the build of one machine (a repin is `scripts/publish-components.sh --from <the bytes>`, not a
-rebuild on another node). What it buys is the rows `scripts/fast.sh` and `scripts/test.sh` otherwise
+with `WASI_SDK` unset succeeds and installs the same 211,918 bytes - and the SDK on its own does not make a component
+reproducible: the compiler and the build root are pinned beside it, and a pin is the build of all three
+("Reproducible builds" below, and components.lock "HOW THESE LINES ARE REPRODUCED"). What it buys is the rows `scripts/fast.sh` and `scripts/test.sh` otherwise
 skip: with no SDK the fast path prints `fast: components SKIPPED (graph hooks memory selfloop mesh
 codemode svc-echo): error: component graph needs wasi-sdk` and every seam suite runs as a SKIP.
 
@@ -464,6 +464,26 @@ measured:
 outside: rustc combines every `-C metadata` it is given, so a fixed one in `RUSTFLAGS` only adds a
 constant to Cargo's part.
 
+`-C metadata` cannot be pinned from outside - so the build makes it constant instead, by building at one
+path. How all three inputs are pinned, measured 23/11 on avell (main 0d8657e5):
+
+| input | what it used to be | where it is pinned now |
+| --- | --- | --- |
+| the compiler | the node's default rustc: 1.99.1 when the pins were made, 1.100.0 on 23/11 | `scripts/build-components.sh` asks rustup for **1.99.1** by name (and installs it when the node lacks it) and exports `RUSTUP_TOOLCHAIN`; `components.lock` records it; every run prints `component toolchain: rustc 1.99.1 ...; wasi-sdk: 34.0` |
+| the build root | whatever checkout the build ran in | `$WA_COMPONENT_BUILD_ROOT/src` - `/tmp/wa-component-build/src` by default: one path for every checkout |
+| wasi-sdk | the newest `~/wasi-sdk*` found | named in `components.lock` (34.0) and printed by every run |
+
+The compiler is not a detail: one source, `agent-core`, is 393,860 bytes / `68c5d849…` under rustc
+1.100.0 and the pinned 392,561 / `b24672b2…` under 1.99.1. Eight of the eleven pins carry
+`58cf8f9c35b3…` (1.99.1's commit hash) and three carry 1.100.0's `0ef1bc38…`, so before this the lock
+needed two compilers at once and a node could only ever reproduce part of it. `WA_COMPONENT_TOOLCHAIN=node`
+builds with the node's default compiler and `WA_COMPONENT_STABLE_ROOT=0` builds in the checkout: both are
+named diagnosis aids, and neither produces shipped bytes.
+
+Measured with all three pinned: the same eleven components build to the same eleven sha256 from two
+different checkout paths, and `bash scripts/publish-components.sh` with no `--from` prints
+`all 11 match components.lock`.
+
 **Status, measured (06/11, cargo 1.98.1, wasi-sdk 34, two checkout paths):** a component without a path
 dependency reproduces byte for byte - `svc-echo` 194,439 bytes, sha256 `480d8bed…` from both paths, the
 same bytes the `.cmd` produced before this change, so the compiled twin does exactly what the script
@@ -471,6 +491,10 @@ did. A component with a **path dependency** still does not: `graph` 8,216,117 by
 no path string in either (`764ce5fb…` vs `39be1068…`) and `wa-whatsapp` 8,362,334 vs 8,362,462 bytes
 (`2aa885af…` vs `7e6d1c55…`). The difference is ordering, not content: the code section shifts (7,795,727
 of 8,362,334 bytes differ, from offset 4,164, which is why the size barely moves).
+
+**23/11: that gap is closed for this tree** - the build no longer runs in the checkout at all ("How the
+build root is pinned", above and below). The status paragraph above is kept because it is the
+measurement the fix was judged against, not because it still holds.
 
 **That gap is Cargo's, not the wrapper's - measured, correcting an earlier guess in this file.** Both
 builds ran the *same installed wrapper*, and what differs between them is Cargo's own metadata:
@@ -495,10 +519,15 @@ Not done. What would close it, in the order worth trying:
   workspaces (measured: `package … is a member of the wrong workspace`), so this needs
   `rust/Cargo.toml` to give up `wa-graph` (and `wa-whatsapp-outbox`, `wa-whatsapp-index`) - a
   workspace decision, not a build-script one.
-* Build inside a **content-addressed copy** at a fixed path: a copy is not a symlink, so the canonical
-  path is stable for every checkout of the same source. A junction is not enough (measured: Cargo
-  canonicalises it and the metadata stayed the tree's). Costs a copy per build, a shared target dir
-  and disk per source revision.
+* Build inside a copy at a **fixed path** - **this is what the build does now (23/11)**. A copy is not a
+  symlink, so the canonical path is stable for every checkout; a junction is not enough (measured:
+  Cargo canonicalises it and the metadata stayed the tree's). `scripts/build-components.sh` copies the
+  tree to `$WA_COMPONENT_BUILD_ROOT/src` (`/tmp/wa-component-build/src`) under a lock held for the whole
+  run and builds there, so every checkout canonicalises to one root. It is re-extracted rather than
+  rebuilt file by file, so mtimes survive and Cargo's cache stays warm, and it is one directory rather
+  than one per revision; where flock is missing the copy is `src-<hash of the tree>`, which needs no
+  lock at the price of a cold build per changed tree. Measured after the change: one commit in two
+  checkout paths, all eleven artifacts identical, `graph` included.
 * Upstream Cargo: a source identity for path packages that does not embed the checkout path, or
   `trim-paths` reaching `-C metadata` (still nightly-only here: `feature \`trim-paths\` is required`).
 
@@ -506,7 +535,9 @@ Not done. What would close it, in the order worth trying:
 named paths (`clone-a` and a deeper, longer `clone-b-deeper-path`), builds the named components in each
 with this same script, greps both artifacts for a leaked path, and compares the sha256 of every
 artifact - including a component with C inside (`graph`). It exits 1 while anything differs and says
-whether the difference is a leaked path or Cargo's metadata. It is not in `scripts/fast.sh`: it needs
+whether the difference is a leaked path or Cargo's metadata. **Both halves pass now**: with the constant
+build root and the pinned compiler, `graph` - C inside and a path dependency - reproduces byte for byte
+from two differently named paths (measured 23/11). It is not in `scripts/fast.sh`: it needs
 wasi-sdk and two full component builds (minutes), and a landing does not have to wait for it.
 
 ## The pin is checked against the source, and the bytes against the seam
@@ -558,10 +589,15 @@ pin: `$WA_PINNED_COMPONENTS_DIR`, the component directory the core reads, `build
 this worktree's git dir, or the public release `components-<lock sha12>` (fetched and verified the way a
 deploy verifies it).
 
-A rebuild is deliberately **not** part of this: with a `path =` dependency the bytes are not
-reproducible across checkout paths (previous section), so "does a rebuild match the pin" would be a
-check that fails for the right code. The pin names one build; half 2 proves the bytes this node would
-install are that build, and - for `wa-whatsapp` - that those bytes are a build of the shipped seam.
+A rebuild is deliberately **not** part of this: half 2 judges the bytes a deploy would install, from
+whatever copy of them is at hand, and it has to work on a node with no toolchain at all. "Does a fresh
+build match the pin" is `scripts/test-component-lock-rebuild.sh` (23/11) instead: it builds the named
+components - `agent-core hooks mesh graph` by default, `--all` for the eleven - through the shipped
+pipeline into a private directory, compares each artifact's sha256 AND size to its own line, greps it
+for a leaked checkout or build-root path, and rebuilds one component without the constant build root to
+prove the copy is a location and not an input. It runs in `scripts/test.sh` (it needs wasi-sdk and
+minutes), not in `scripts/fast.sh`. Measured both ways: on the base commit it fails (`hooks` 217,693
+bytes against the pinned 215,897 - the compiler), on this tree all four pass.
 
 **When every line moves at once.** A repin of all eleven components is `scripts/publish-components.sh`
 from the reviewed tree (it prints every drifted line in one run, not one per run), the lock committed
