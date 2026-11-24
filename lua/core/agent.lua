@@ -1980,6 +1980,20 @@ function M:run(text, images)
   -- end and the next run try again.
   pcall(function() telemetry.flush_audit() end)
   self.run_id=host.uuid()
+  -- THE RUN RECORDS ITS DIRECTORY ON THE SESSION (24/11). The tool layer used to have no directory to name
+  -- for a session without a worktree (`session_cwd` answered ""), so an operation inherited whichever
+  -- process served the turn - the canonical checkout when the NODE served it (a resumed session after a
+  -- deploy pause, a wake, a peer's call). Measured by change/worker-write-guard
+  -- (docs/missions/reports/worker-write-guard.md, section 15). The FIRST run decides, and a later run does
+  -- not overwrite it: the user's shell was where the session began. Inside a pcall because a ledger that
+  -- refuses must not stop the turn - the record is a fact about where work starts, not a precondition.
+  pcall(function()
+    local memory = dofile('lua/core/memory.lua')
+    local id = self.session_id
+    if type(id) ~= 'string' or id == '' then return end
+    if type(memory.session_cwd) ~= 'function' or type(memory.set_session_cwd) ~= 'function' then return end
+    if memory.session_cwd(id) == '' then memory.set_session_cwd(id, M.workdir(id)) end
+  end)
   -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11).
   --
   -- Measured twice on this laptop (sentinel.log 22/11 09:43Z and 10:01Z): a deploy request sat in the

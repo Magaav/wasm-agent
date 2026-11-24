@@ -293,6 +293,13 @@ local function migrate()
   -- exactly as it did before sessions could own one, so this column changes nothing until a
   -- session opts in. See docs/SESSION-FIRST.md.
   add_column("sessions", "worktree", "TEXT NOT NULL DEFAULT ''")
+  -- THE DIRECTORY THE SESSION'S FIRST RUN WAS SERVED FROM (24/11). A session with no worktree still has
+  -- a directory, and before this column the tool layer had none to name: `session_cwd` answered "" and the
+  -- child inherited whatever process happened to serve the turn - the canonical checkout when the NODE
+  -- served it (a resumed session after a deploy pause, a wake, a peer's call). Measured by
+  -- change/worker-write-guard (docs/missions/reports/worker-write-guard.md, section 15). '' keeps the old
+  -- behaviour for a session that never ran, because nothing has been recorded yet.
+  add_column("sessions", "run_cwd", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "workspace_required", "INTEGER NOT NULL DEFAULT 0")
   add_column("sessions", "workspace_state", "TEXT NOT NULL DEFAULT 'unbound'")
   add_column("sessions", "workspace_branch", "TEXT NOT NULL DEFAULT ''")
@@ -1002,6 +1009,24 @@ end
 function M.set_session_worktree(session_id, path)
   path = tostring(path or "")
   exec("UPDATE sessions SET worktree=? WHERE id=?", {path, session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return path
+end
+
+-- The directory this session's runs start in, when it has no worktree. '' means "nothing recorded".
+function M.session_cwd(session_id)
+  local rows = query("SELECT run_cwd FROM sessions WHERE id=?", {session_id})
+  local value = rows[1] and rows[1].run_cwd
+  return type(value) == "string" and value or ""
+end
+
+-- Record it once, at the session's first run: the directory a session is served from is a fact about the
+-- session, not about whichever process serves the next turn. A later call does not overwrite it (the first
+-- answer is the one the user's shell was in); a worktree binding still wins over it in `session_cwd`
+-- (lua/core/tools.lua), because a bound checkout is a stronger statement than a starting directory.
+function M.set_session_cwd(session_id, path)
+  path = tostring(path or "")
+  exec("UPDATE sessions SET run_cwd=? WHERE id=?", {path, session_id})
   M.journal("session", session_id, M.session(session_id))
   return path
 end
