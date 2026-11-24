@@ -652,7 +652,7 @@ function M.ensure_resumes(now, opts)
   end
 
   -- 4. A LOST ROW INSIDE THE WINDOW IS RE-ARMED under the chain rule; outside it, the migration has retired it.
-  local lost = query([[SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE ]] .. LOST_WHERE
+  local lost = query([[SELECT id, session_id, owner, resume_chain, run_id FROM self_wakes WHERE ]] .. LOST_WHERE
     .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff })
   lost = rows_of(lost) or {}
   -- THE PROBE (24/11): the query, its ENCODED params and the raw answer, from inside the call.
@@ -712,7 +712,29 @@ function M.ensure_resumes(now, opts)
             tostring(session), tostring(alive), #parked, #live, shown, tostring(row.resume_chain), tostring(tonumber(row.created_at))))
         end
       end
-      if #parked == 0 and #live == 0 then
+      -- A RESUME WHOSE RUN IS QUEUED OR RUNNING IS LIVE, NOT LOST (r8a, Fable 24/11). MEASURED live: runs 1350,
+      -- 1351 and 1352 of session 587c16b6 sat QUEUED on node-thread 2 while the reclaim re-armed a duplicate that
+      -- queued BEHIND - two more paid turns for one pause. `run_id` on the row says which run it became (written by
+      -- selfloop's dispatch), and host.run_state says whether that run is still queued or running; no clock is
+      -- involved, and a genuine loss (unknown) is still repaired below. (8) also holds: a session whose OWN run is
+      -- running holds its claim, and claim_state reports that, so it is live too.
+      local live_run = nil
+      local ask_state = opts.run_state or (type(host) == "table" and host.run_state) or nil
+      if row.run_id ~= nil and type(ask_state) == "function" then
+        local asked, answer = pcall(ask_state, tonumber(row.run_id))
+        if asked and type(answer) == "string" then
+          local ok_state, decoded = pcall(json.decode, answer)
+          local state = ok_state and type(decoded) == "table" and tostring(decoded.state) or "unknown"
+          if type(answer) == "string" and (answer == "running" or answer == "queued") then state = answer end
+          if state == "queued" or state == "running" then live_run = state end
+        end
+      end
+      local held_by_own_run = false
+      if live_run == nil then
+        local asked, state = pcall(function() return M.claim_state(session, opts) end)
+        held_by_own_run = asked and state == "held"
+      end
+      if #parked == 0 and #live == 0 and live_run == nil and not held_by_own_run then
         local chain = (tonumber(row.resume_chain) or 0) + 1
         if chain > M.RESUME_MAX_REARMS then
           pcall(exec, [[UPDATE self_wakes SET status='resume_abandoned', last_error=?, updated_at=? WHERE id=?]],
