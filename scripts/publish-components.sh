@@ -79,6 +79,7 @@ fi
 # guesses a component: a wasm that is not pinned cannot be published by this script.
 names="$(awk '/^[[:space:]]*(#|$)/ {next} $1 != "" && $2 ~ /^[0-9a-f]+$/ {print $1}' "$REPO_ROOT/components.lock")"
 [ -n "$names" ] || fail "components_lock_empty: no pinned component in $REPO_ROOT/components.lock"
+pinned_count="$(printf '%s\n' $names | grep -c .)"
 
 # The bundle directory is what ships: the build writes it, `--from` copies artifacts another machine
 # built into it, and `--check --from` only reads them where they are (nothing is written). Everything is
@@ -160,7 +161,6 @@ done
 if [ -n "$drift" ]; then
   drifted_names="$(printf '%s' "$drift" | awk '{printf "%s ", $1}')"
   drifted_count="$(printf '%s' "$drift" | grep -c .)"
-  pinned_count="$(printf '%s\n' $names | grep -c .)"
   say "$drifted_count of $pinned_count pinned component(s) are not the build of this tree. Commit these lines with the component change that caused each one:"
   printf '%s' "$drift" >&2
   if [ "$drift_sha" = 1 ]; then
@@ -168,6 +168,11 @@ if [ -n "$drift" ]; then
   fi
   fail "artifact_not_pinned: ${drifted_names% } - the pinned size, not the pinned bytes; the lines above are what to commit" 6
 fi
+
+# THE ACCEPTANCE LINE (docs/COMPONENTS.md, "Reproducible builds"): every pinned name was measured
+# against its own line in THIS run, in the directory that ships, from this tree's sources. Nothing is
+# called verified that the loop above did not measure, and the count is the lock's own.
+say "all $pinned_count match components.lock"
 
 # The lock travels with the artifacts: it is the bundle's identity (the deploy compares it to its own
 # before it caches or stages anything), and the tag is derived from it.

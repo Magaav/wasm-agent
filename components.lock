@@ -13,6 +13,40 @@
 # installs; what a node actually routes to is `policy.json`'s `features` section (docs/FEATURES.md).
 # **Installed is not enabled**: pinning a component here installs it, and leaves it off.
 #
+# HOW THESE LINES ARE REPRODUCED (re-measured 23/11 on avell, main 0d8657e5). A fresh build of this tree
+# matches every line here, and `scripts/publish-components.sh` with no `--from` proves it: it builds all
+# eleven in the bundle directory and judges each against its line, then prints `all 11 match
+# components.lock`. Two inputs that used to be ambient are pinned instead:
+#
+#   TOOLCHAIN. rustc 1.99.1 (58cf8f9c3 2026-10-13), wasi-sdk 34.0. Eight of the eleven lines were made
+#   with 1.99.1 (their artifacts carry that commit hash) and the three repinned on 14-22/11 (mesh,
+#   wa-whatsapp, codemode) with 1.100.0 - so this file has always needed one compiler per line, and a
+#   node whose default rustc moved could match only some of it. Measured: one source, agent-core 393,860
+#   bytes under rustc 1.100.0 against the pinned 392,561 under 1.99.1. `scripts/build-components.sh`
+#   installs and uses 1.99.1 by name (WA_COMPONENT_TOOLCHAIN=node builds with the node's default and
+#   never reproduces these bytes) and each run prints `component toolchain: rustc ...; wasi-sdk: ...`.
+#
+#   BUILD ROOT. The build happens in a copy at ONE constant path - $WA_COMPONENT_BUILD_ROOT/src,
+#   default /tmp/wa-component-build/src - never in the checkout, because Cargo's source identity for a
+#   `path =` package is its canonical absolute path and that hash reaches the artifact through
+#   `-C metadata`. Measured on one commit: `libwa_mesh_core-8ee54b00c7a6cacd.rlib` in one checkout and
+#   `-cf7108a003359ad6.rlib` in another, mesh 211,918 bytes 4769e631... against 871179cc... . With the
+#   constant root, all eleven build to the same eleven sha256 from two different checkout paths
+#   (measured 23/11), which is the property a pin needs.
+#
+# WHAT THAT COST, on 23/11: five lines moved, and only three of them are a source change.
+#   codemode, mesh    the compiler. codemode's source has not changed since its 22/11 pin (99e817a8),
+#                     and mesh's only changed file since 18/11 is `wa-grant-policy/src/tests.rs`, which
+#                     is not in the module. Both were pinned from a 1.100.0 build; these are their
+#                     1.99.1 bytes.
+#   graph, wa-email,  the source - and this file had not noticed. `rust/wa-graph/src/store.rs`,
+#   wa-whatsapp       `rust/wa-queue/src/queue.rs` and fourteen files of wa-whatsapp's tree and its
+#                     outbox/index have changed since those lines were set (13/11 for graph and
+#                     wa-email, 17/11 for wa-whatsapp), so a deploy of main was installing bytes older
+#                     than main. These lines are the build of main 0d8657e5.
+# A repin is still never a hand edit of a sha: these are the lines `scripts/publish-components.sh`
+# printed, from a build that two different checkout paths reproduced.
+#
 # WHAT IS NOT PINNED, and why. Test fixtures are built by the gate, never shipped: `svc-*`,
 # `memory-crash`, `memory-wedge`, `mcp-echo`. `mcp-whatsapp` is a registry definition an operator
 # enables with `mcp put`/`enable`, not a core component. A name is shipped by being pinned here;
@@ -23,6 +57,9 @@
 # wasm32-wasip2, so they do not depend on the CPU - the same artifact runs on arm64 and x86_64 - and
 # building it once here is what makes every node's deploy one command.
 #
+# 23/11: everything up to the next blank comment line describes the build that made these bytes on
+# 13/11, and no longer describes this tree - the checkout path is out of the build now. See "HOW
+# THESE LINES ARE REPRODUCED" above.
 # Reproducible within one checkout, and still not across two (re-measured 13/11 on the archive repin:
 # two builds in this path gave 8,582,128 bytes / `f3d60624…` twice, and the same tree copied to another
 # path gave 8,582,132 bytes / `cb410807…`). Measured first on the repin below: two builds
@@ -175,8 +212,8 @@ agent-core b24672b26ae4585f53bb6d4f5d9ab3cde61a663148385099eba4951ce8b57d53 3925
 # budget - and the two `codemode_sleep_*` refusal codes come with it. That moves the wasm bytes; everything
 # else in the component is the file above. Built with scripts/build-components.sh codemode at wasi-sdk 34:
 # 225,184 bytes.
-codemode 9091cd796ecceaf186c1a5a49619986c02d9422f79149f3f43c083a82d3829f9 225184
-graph 54779c7d61e163145c69ec4502397a4adf0d75c544c883639989affb6574288a 8186393
+codemode 35cfcfe1145b3436a13b5bf4abb6e1cd6fb322fda3aab0d294d0d5c4dbd29960 216485
+graph 4e907b1f36dd7c94f3e70865b1c0ed571f7e6f21046bbbae7d53b666559339d7 8187401
 hooks f5fef7083eedac3269aecb50590297935be53e522d282f70bfa97e4bfa7e3e30 215897
 memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
 # 18/11 repin of mesh alone (change/components-toolchain: wa-mesh-core's peer-address rule - the
@@ -189,12 +226,12 @@ memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
 # `scripts/publish-components.sh --from <artifacts>` measured and printed. Every other pin is
 # unchanged and its bytes are the ones published in components-fcd4661c1eb2; nothing was published
 # for this lock.
-mesh 53c0e385bb3d4c21e2e874c57e907f22f27bc98edbc5e03d02e409a37a842489 211918
+mesh e55ec2d792482e5952fbc82a8dc39b04c958efb1d44177dda0d20c9480867b1e 209983
 model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 404558
 selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
-wa-email ddbe326a5d394a0dc50a0c947740a1364e4cdeda348286666a3ba21569893915 565827
+wa-email 5416bba36ea34c1d8d5060e2483042cab2457bc509ec08f7ef6bd7ccdd379721 566412
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
 # its bytes are the ones published in components-033542eb9a37.
-wa-whatsapp 6e083809ec471fff249ac72c581138e81b6d280540979ed817f32c0ecf07b1f6 8840589
+wa-whatsapp 972a6a50575504665ec6878a8caf2f47e2ec89c8348db70e2fd9957aa6911d49 8815450
