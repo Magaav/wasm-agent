@@ -695,6 +695,13 @@ end
 -- installed commit with origin/main (a fetch, no merge); a release install asks the bootstrap's verified
 -- check. Read-only either way. The release feed alone could not answer for a tree install - it records a
 -- commit, not a tag - so it said "cannot tell" on every tree node.
+-- THE BOUND THE COMPONENTS QUESTION RUNS TO (Fable, 24/11): 10 seconds, the same bound the release-list
+-- refresh uses (M.REFRESH_SECONDS in lua/core/update_banner.lua) - a check is a question a person is
+-- waiting on, so a channel that accepts a connection and then says nothing answers UNKNOWN inside this
+-- bound instead of holding the command open. scripts/check-release-complete.sh --components states the
+-- same 10 seconds on its own curl calls; `timeout` below keeps the bound even if that is bypassed.
+local CHECK_COMPONENTS_SECONDS = 10
+
 -- CAN THIS COMMIT BE INSTALLED BY DOWNLOAD? - the question `wa update --check` did not ask (24/11).
 --
 -- MEASURED on work at 20:56Z: `wa update` downloaded and verified node-9a0c589adfa0, found no components bundle
@@ -711,7 +718,14 @@ local function publishability(tree, commit)
   local script = slashes(tree) .. "/scripts/check-release-complete.sh"
   local present = shell("test -f " .. quote(script) .. " && echo yes")
   if not present or (present.code or 1) ~= 0 then return nil end
-  local run = shell("bash " .. quote(script) .. " " .. quote(commit) .. " --components 2>&1")
+  -- BOUNDED, and by TWO guards: the script's own curl bound (10 s per request, --components) and this
+  -- `timeout`, which holds even if the script is an older one that has no bound of its own. `timeout`
+  -- is not everywhere; without it the script's own bound still applies and the answer says which ran.
+  local guard = ""
+  local have = shell("command -v timeout >/dev/null 2>&1 && echo yes")
+
+  if have and (have.code or 1) == 0 then guard = "timeout " .. tostring(CHECK_COMPONENTS_SECONDS + 5) .. " " end
+  local run = shell(guard .. "bash " .. quote(script) .. " " .. quote(commit) .. " --components 2>&1")
   local text = trim(run and run.stdout or "")
   if text == "" then return nil end
   local fields = {}

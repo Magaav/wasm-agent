@@ -20,6 +20,18 @@
 #
 # Sourced by scripts/check-release-complete.sh, scripts/publish-node-binaries.sh and scripts/deploy.sh.
 
+# THE BOUND EVERY REQUEST HERE RUNS TO, in seconds. A question this file asks is worth seconds, not a
+# hang: `wa update --check` asks it while a person waits (24/11 - its refresh runs to 10 s,
+# M.REFRESH_SECONDS in lua/core/update_banner.lua), and a channel that accepts a connection and then says
+# nothing must become `unknown` inside that bound rather than hold the command open. WA_RELEASE_SECONDS
+# is how a caller states its own; the check's --components mode asks for 10.
+wa_release_seconds() {
+  local seconds="${WA_RELEASE_SECONDS:-20}"
+  case "$seconds" in ''|*[!0-9]*) seconds=20 ;; esac
+  [ "$seconds" -ge 1 ] || seconds=1
+  printf '%s\n' "$seconds"
+}
+
 wa_release_api_base() { printf '%s\n' "${WA_RELEASE_API_BASE:-https://api.github.com}"; }
 wa_release_download_base() { printf '%s\n' "${WA_RELEASE_DOWNLOAD_BASE:-https://github.com}"; }
 
@@ -34,14 +46,20 @@ wa_release_asset_url() { # <slug> <tag> <asset>
 # used because GitHub's download URLs redirect to a canonical asset host, and the status of the FINAL hop is
 # what a node's fetch sees.
 wa_release_http_status() { # <url>
-  local url="$1" code
+  local url="$1" code rc
   command -v curl >/dev/null 2>&1 || { printf 'unknown (no curl)\n'; return 2; }
-  code="$(curl -s -o /dev/null -I -L -m 20 -w '%{http_code}' "$url" 2>/dev/null)"
+  code="$(curl -s -o /dev/null -I -L -m "$(wa_release_seconds)" -w '%{http_code}' "$url" 2>/dev/null)"; rc=$?
+  # A TRANSFER THAT DID NOT COMPLETE IS NOT AN ANSWER (measured 24/11): a host that accepts the connection
+  # and then sends nothing makes curl PRINT the 200 it read from the headers and EXIT 28 when -m cuts the
+  # transfer - so the status code alone would call an asset published that the host never sent. The exit
+  # status is asked first, and a cut request is `unknown`, never a 200.
+  [ "$rc" = 0 ] || { printf 'unknown (the request did not complete: curl %s)\n' "$rc"; return 2; }
   case "$code" in
-    2??|3??|4??|5??) [ "$code" = 200 ] && { printf '200\n'; return 0; } ;;
+    200) printf '200\n'; return 0 ;;
   esac
   if [ "$code" = 000 ] || [ -z "$code" ] || [ "$code" = 405 ] || [ "$code" = 501 ] || [ "$code" = 403 ]; then
-    code="$(curl -s -o /dev/null -L -m 20 -r 0-0 -w '%{http_code}' "$url" 2>/dev/null)"
+    code="$(curl -s -o /dev/null -L -m "$(wa_release_seconds)" -r 0-0 -w '%{http_code}' "$url" 2>/dev/null)"; rc=$?
+    [ "$rc" = 0 ] || { printf 'unknown (the request did not complete: curl %s)\n' "$rc"; return 2; }
   fi
   case "$code" in
     200|206) printf '200\n'; return 0 ;;
@@ -55,12 +73,14 @@ wa_release_http_status() { # <url>
 # A gh that FAILS is not an answer (a token can be missing while the release exists), so the API is asked
 # next - and gh is never asked when the caller pointed the lib somewhere else.
 wa_release_tag_state() { # <slug> <tag>
-  local slug="$1" tag="$2" code
+  local slug="$1" tag="$2" code rc
   if [ -z "${WA_RELEASE_API_BASE:-}" ] && command -v gh >/dev/null 2>&1; then
     if gh release view "$tag" -R "$slug" >/dev/null 2>&1; then printf 'published\n'; return 0; fi
   fi
   command -v curl >/dev/null 2>&1 || { printf 'unknown (no curl, and gh could not answer)\n'; return 2; }
-  code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$(wa_release_api_base)/repos/$slug/releases/tags/$tag" 2>/dev/null)"
+  code="$(curl -s -o /dev/null -m "$(wa_release_seconds)" -w '%{http_code}' "$(wa_release_api_base)/repos/$slug/releases/tags/$tag" 2>/dev/null)"; rc=$?
+  # The exit status first, for the same reason as the asset check: a request cut by the bound is not a 200.
+  [ "$rc" = 0 ] || { printf 'unknown (the release API did not answer: curl %s)\n' "$rc"; return 2; }
   case "$code" in
     200) printf 'published\n'; return 0 ;;
     404) printf 'missing\n'; return 1 ;;
@@ -121,7 +141,7 @@ wa_release_node_assets() { # <repo> <commit> [workdir]
     slug="$(wa_release_repo_slug "$repo")" || return 2
     file="$(wa_release_asset_url "$slug" "node-$short" "node-$short.manifest")"
     mkdir -p "$work" 2>/dev/null || return 2
-    curl -fsSL -m 30 "$file" -o "$work/node-$short.manifest" 2>/dev/null || return 2
+    curl -fsSL -m "$(wa_release_seconds)" "$file" -o "$work/node-$short.manifest" 2>/dev/null || return 2
     manifest="$work/node-$short.manifest"
   fi
   wa_release_manifest_assets "$manifest"

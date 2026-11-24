@@ -58,6 +58,10 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-release-complete.XXXXXX")" || { echo 'chec
 trap 'rm -rf "$WORK"' EXIT
 
 if [ "$COMPONENTS_ONLY" = 1 ]; then
+  # A CHECK RUNS TO A STATED BOUND (24/11, Fable): 10 seconds, the same bound the update refresh uses
+  # (M.REFRESH_SECONDS in lua/core/update_banner.lua), so an unreachable or silent channel answers
+  # "unknown" inside it instead of holding `wa update --check` open. A caller may state its own.
+  WA_RELEASE_SECONDS="${WA_RELEASE_SECONDS:-10}"; export WA_RELEASE_SECONDS
   # THE SENTENCE A CHECK AND A DEPLOY SAY FIRST (24/11, work at 20:56Z): "this commit needs
   # components-<x>, which is not published; this node cannot build it" - before 117 s were spent, not after.
   tag="$(wa_release_components_tag "$ROOT" "$COMMIT" 2>/dev/null)"

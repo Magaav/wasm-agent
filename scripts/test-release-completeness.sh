@@ -42,6 +42,8 @@ HOME="$REAL_HOME" wa_scratch_home_guard "$W/home" || exit 2
 export WASM_AGENT_HOME="$HOME"
 
 checks=0; failed=0
+skip_row() { skipped=$((skipped + 1)); printf '  SKIP %s%s\n' "$1" "${2:+ - $2}"; }
+skipped=0
 ok()   { checks=$((checks + 1)); if [ "$1" = "1" ]; then printf '  ok   %s\n' "$2"; else failed=$((failed + 1)); printf '  FAIL %s%s\n' "$2" "${3:+ - $3}"; fi; }
 command -v python3 >/dev/null 2>&1 || { echo 'test-release-completeness: needs python3 for the local stand-in'; exit 2; }
 
@@ -186,6 +188,32 @@ touch "$W/srv/api/repos/Magaav/wasm-agent/releases/tags/$LOCK_TAG"
 out="$(PATH="$NO_TOOLCHAIN" bash "$ROOT/scripts/check-release-complete.sh" "$COMMIT" --repo "$REPO" --components 2>&1)"; rc=$?
 ok "$([ "$rc" = 0 ] && echo 1)" "and rc 0 with components=published when the bundle is there" "rc=$rc $out"
 ok "$(printf '%s' "$out" | grep -q 'components=published' && echo 1)" "naming the state in a field" "$out"
+
+# ---- 8. a channel that accepts and then says nothing: UNKNOWN inside the stated bound, never a hang ------
+# The --components question runs while a person waits for `wa update --check`, so it runs to a STATED bound
+# (10 s: scripts/check-release-complete.sh --components, the same bound as the update refresh). A closed
+# port refuses in milliseconds and would prove nothing about the bound, so the channel here ACCEPTS the
+# connection and sends nothing (scripts/lib/http-stub.py: a file with a `.stall` sidecar of 0 bytes).
+STUBROOT="$W/stub"; mkdir -p "$STUBROOT/repos/Magaav/wasm-agent/releases/tags"
+STUBTAG="$STUBROOT/repos/Magaav/wasm-agent/releases/tags/$LOCK_TAG"
+printf '{}' > "$STUBTAG"; printf '0' > "$STUBTAG.stall"
+STUBPORTFILE="$W/stub.port"; rm -f "$STUBPORTFILE"
+python3 "$ROOT/scripts/lib/http-stub.py" "$STUBROOT" "$STUBPORTFILE" >"$W/stub.log" 2>&1 &
+STUB_PID=$!
+for _ in $(seq 1 50); do [ -s "$STUBPORTFILE" ] && break; sleep 0.1; done
+STUBPORT="$(cat "$STUBPORTFILE" 2>/dev/null)"
+if [ -z "$STUBPORT" ]; then
+  skip_row "the stated bound" "scripts/lib/http-stub.py did not come up"
+else
+  started=$(date +%s)
+  out="$(WA_RELEASE_API_BASE="http://127.0.0.1:$STUBPORT" bash "$ROOT/scripts/check-release-complete.sh" "$COMMIT" --repo "$REPO" --components 2>&1)"; rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  ok "$([ "$rc" = 2 ] && echo 1)" "a channel that accepts and answers nothing is unknown, not a wait" "rc=$rc ${elapsed}s $out"
+  ok "$(printf '%s' "$out" | grep -q 'components=unknown' && echo 1)" "and the fields say components=unknown" "$out"
+  ok "$([ "$elapsed" -ge 8 ] && echo 1)" "it waited for the stated bound rather than giving up early (elapsed ${elapsed}s, bound 10s)" "elapsed=${elapsed}s"
+  ok "$([ "$elapsed" -le 20 ] && echo 1)" "and did NOT hang past it (elapsed ${elapsed}s, bound 10s + 5s guard)" "elapsed=${elapsed}s"
+  kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; STUB_PID=""
+fi
 
 printf 'release completeness ok (%d checks, %d failed)\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
