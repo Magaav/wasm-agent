@@ -165,9 +165,17 @@ Enter opens a connector · Esc or ← closes
   between groups, no `1.`, the selection/Down/Enter indices unchanged, a menu still numbered) and
   `a_page_of_groups_carries_its_headings_and_its_unnumbered_flag` (wa-cli-views: the fields travel through
   `panel_spec`, absent means numbered, a 201-character heading is refused).
-- **Discriminating**: the new row and the three changed ones cannot pass on the base - `mcp_list.lua` does not
-  exist there (`dofile` fails), the CLI verb does not exist there, and the assertions the other three gained
-  are about rows the base does not draw. `scripts/test-discriminates.sh` is the gate's own check of this.
+- **Discriminating, measured**: `scripts/test-discriminates.sh origin/main` run on this branch names all
+  four changed Lua rows `unrevertable` - its own rule, because the branch changes `rust/` and a Lua row would
+  run against this tree's binary rather than the base's - so I judged them the way that rule asks, by hand:
+  a worktree at the base commit (`345e51be`, never `git stash`) with ONLY the branch's four test files copied
+  in, run with the base tree's Lua (`WASM_AGENT_LUA_ROOT=<base>`) and this tree's binary as the host, each in
+  its own scratch home. Every one FAILS on the base code:
+  `test-mcp-command.lua` - `the list is titled MCP servers: Services`;
+  `test-cli-balloon.lua` - `25 failed of 94 checks` (`the list no longer says: services - `, `- 1.`, `on this
+  node` ...); `test-hotreload.lua` - `3 of 217 checks failed` (`the NEXT /mcp shows the changed page`);
+  `test-mcp-list.lua` - `lua_root_unreadable: .../lua/core/mcp_list.lua`, the module the base does not have.
+  The base worktree was removed afterwards.
 - **What I ran** on this node (avell), never on a peer. The narrowed fast path, under the suite lock
   (`flock -o ~/Work/missions/.suite.lock`), with `WA_FAST_ROWS` naming the nine rows that touch this change:
   `38 of 375 Lua rows`, `37/38 passed` - the one Lua failure is `scripts/test-release-channel-e2e.lua`, a musl
