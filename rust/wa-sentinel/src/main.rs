@@ -1126,18 +1126,43 @@ fn unit_ownership(unit: &str, load_state: &str, exec_start: &str, binary: &Path)
 fn owning_unit(binary: &Path) -> Option<String> {
     let unit = std::env::var("WA_SERVICE_UNIT").ok().filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "wa-serve.service".to_string());
-    let show = |field: &str| -> String {
-        std::process::Command::new("systemctl")
+    // EITHER MANAGER (r8b (i), Fable 24/11): this laptop's node is a `systemd --user` unit, and `systemctl show`
+    // without `--user` cannot see one - so the ownership question would answer "no unit" on the very node the
+    // bug was measured on, and recovery would fall back to the pid refusal. Both managers are asked, system
+    // first, and the first that reports the unit loaded answers.
+    let show = |user: bool, field: &str| -> String {
+        let mut command = std::process::Command::new("systemctl");
+        if user { command.arg("--user"); }
+        command
             .args(["show", &unit, "-p", field, "--value"])
             .output()
             .ok()
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
             .unwrap_or_default()
     };
-    match unit_ownership(&unit, &show("LoadState"), &show("ExecStart"), binary) {
-        Ownership::Unit(unit) => Some(unit),
-        Ownership::Spawn => None,
+    for user in [false, true] {
+        if show(user, "LoadState") != "loaded" { continue; }
+        if let Ownership::Unit(unit) = unit_ownership(&unit, "loaded", &show(user, "ExecStart"), binary) {
+            return Some(unit);
+        }
     }
+    None
+}
+
+/// The manager a unit lives in: false for the system manager, true for the user manager. Read, never guessed -
+/// `systemctl show` of the unit answers which one knows it at all.
+#[cfg(target_os = "linux")]
+fn unit_is_user(unit: &str) -> bool {
+    let loaded = |user: bool| -> bool {
+        let mut command = std::process::Command::new("systemctl");
+        if user { command.arg("--user"); }
+        command.args(["show", unit, "-p", "LoadState", "--value"])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "loaded")
+            .unwrap_or(false)
+    };
+    !loaded(false) && loaded(true)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1150,7 +1175,10 @@ fn owning_unit(_binary: &Path) -> Option<String> {
 /// this process guessed.
 #[cfg(target_os = "linux")]
 fn start_via_unit(unit: &str) -> Result<u32> {
-    let output = std::process::Command::new("systemctl")
+    let user = unit_is_user(unit);
+    let mut restart = std::process::Command::new("systemctl");
+    if user { restart.arg("--user"); }
+    let output = restart
         .args(["restart", unit])
         .output()
         .context("run systemctl restart")?;
@@ -1161,7 +1189,9 @@ fn start_via_unit(unit: &str) -> Result<u32> {
              this watcher will not spawn a second serve beside it - run `sudo systemctl restart {unit}`"
         );
     }
-    let pid = std::process::Command::new("systemctl")
+    let mut show = std::process::Command::new("systemctl");
+    if user { show.arg("--user"); }
+    let pid = show
         .args(["show", unit, "-p", "MainPID", "--value"])
         .output()
         .ok()
@@ -2097,7 +2127,11 @@ fn verb_recover(reason:&str)->Result<String> {
     // serves on one port is the 61,117-restart incident). The unit IS the supervisor, so recovery is a fact
     // asked of it: `systemctl restart <unit>` stops what it owns and starts the same bytes, and the MainPID it
     // reports becomes the record. When no unit owns this install the pid path below runs exactly as before.
-    if let Some(unit) = owning_unit(&binary) {
+    let owner = owning_unit(&binary);
+    say(&format!("recover: the node's owner is {} (unit {}, installed {})",
+        match &owner { Some(unit) => format!("the unit {unit}"), None => "no unit: this watcher spawns it".to_string() },
+        std::env::var("WA_SERVICE_UNIT").unwrap_or_else(|_| "wa-serve.service".into()), binary.display()));
+    if let Some(unit) = owner {
         say(&format!("asking {unit} to restart the node (the OS owns it, not this watcher)"));
         let pid = start_via_unit(&unit)?;
         let mut up = false;
