@@ -186,3 +186,18 @@ selfloop to reach the pending index for an op whose SCOPE it does not know (the 
 not on the wake row). That is a small contract of its own - a `codemode_pending.clear_reported(op)` that walks
 the scope indexes - and it is a separate, reviewable change rather than a line smuggled into this one. Named
 here so the next reader measures it instead of assuming the one-notice contract covers it.
+
+
+### The narrowed run after the review fix (final tip)
+
+    flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa \
+      WA_FAST_ROWS=/tmp/rows-wake.txt bash scripts/fast.sh
+
+**`fast result ok (137 checks, 0 failed, 0 skipped)`**, `fast path ok (137 checks, 0 skipped, 655s)`, `EXIT=0`.
+Log `/tmp/wake-fast2.out`, result
+`/home/victor/wasm-agent/checkout/.git/worktrees/wt61/wa-fast-result.json`. The plan selected 39 of 365 Lua rows
+(the new row, `test-handle-wake`, `test-handle-wake-turn`, `test-codemode-pending`, `test-codemode-wait-shape`,
+`test-operation-survives-turn`, `test-cli-wake-row`, `test-deploy-pause`, `test-selfloop-pause`, `test-selfloop`,
+plus the never-dropped core rows); every contract check ran, including `test-refusal-contract` (no new refusal
+code, so its inventory is current) and `test-discriminates`, which is where the new row's base failure is measured
+by the gate. Nothing failed, so no pre-existing red is carried by this branch.
