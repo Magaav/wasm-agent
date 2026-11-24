@@ -241,14 +241,18 @@ fail() {
 # request was performed when the machine still cannot perform the next one.
 fail_installed() { # <what> <the one command that starts the watcher>
   local what="$1" command="$2"
+  # RECORDED, NOT EXITED (24/11, Fable's item 2). This is the last refusal left on the far side of the swap:
+  # it fired when the watcher would not start and TOOK THE REST OF THE INSTALL WITH IT - the scripts are
+  # shipped after this point, so work's `/tmp`-era half state was reproduced by it in the covering-release row
+  # (a final record, and no scripts/lib beside the install). The node is installed and answering by now, so the
+  # deploy goes on, ships everything else, writes the command that starts the watcher into the RECORD, and
+  # finishes as "installed, with problems" (exit 3) - the same outcome the rest of the far side now has.
+  post_swap_problem "$what (no watcher is running: $command)"
   echo "deploy: $what" >&2
   echo "deploy: the node is installed and answering; start its watcher with: $command" >&2
-  wa_status_unfollow
+  printf 'watcher_command=%s\n' "$command" >> "$INSTALL_DIR/installed.txt" 2>/dev/null || true
   wa_status installed "no watcher is running: $command"
-  printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" \
-    "$what (no watcher is running: $command)" >> "$INSTALL_DIR/deploy.log" 2>/dev/null
-  write_result false "$what (the node is installed and answering; no watcher is running: $command)"
-  exit 1
+  return 0
 }
 
 # The other half of "a refusal is evidence": a check that *could not run* is evidence too, and it must look
