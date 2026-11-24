@@ -70,7 +70,6 @@ const SITES = ["account", "laptop", "work"];
 // test fixture (`tests/fixtures` convention) - the live mode never uses any of them as a target.
 const FIXTURE = {
   chat: "120363000000000001@g.us",
-  chat_alt: "72103978127547@lid",
   message: "3EB0ACCEPTANCE01",
   query: "boleto",
   text: "acceptance one",
@@ -83,39 +82,68 @@ const FIXTURE = {
 const FLOWS = [
   {id: "flow/voice-reply", title: "voice note in -> transcript stored -> (posting on, own chat) reply posted",
     code: "rust/components/wa-whatsapp/src/guest.rs (transcript -> tx/ record), src/posting.rs",
+    covered: "index::tests::a_voice_note_is_found_by_its_transcript_and_keeps_its_duration; view::tests::a_voice_note_with_a_transcript_answers_with_the_transcript_and_its_way_to_the_whole",
     brief: "whatsapp-transcription-works, whatsapp-posting-toggle"},
   {id: "flow/deleted-after-index", title: "a message deleted after it is indexed -> content kept + flagged",
     code: "rust/components/wa-whatsapp/src/index.rs (the delete event), rust/wa-whatsapp-index/src/lib.rs",
+    covered: "index::tests::a_delete_keeps_the_content_and_flags_it_beside_it; view::tests::a_deleted_message_says_so_and_carries_no_text",
     brief: "whatsapp-hold-not-silent"},
   {id: "flow/voice-deleted-before-reply", title: "a voice note deleted before its reply -> the reply is skipped",
     code: "rust/components/wa-whatsapp/src/posting.rs (the gate reads the source record)",
+    covered: "outbox::tests::a_clean_quote_goes_out_and_no_deletion_refuses_a_send (the deletion fence, the send half)",
     brief: "whatsapp-hold-not-silent"},
   {id: "flow/picture-ocr", title: "a picture -> OCR text on the record",
     code: "rust/components/wa-whatsapp/src/ocr.rs, src/guest.rs ocr_tick",
+    covered: "ocr::tests::an_image_is_ocred_attached_and_found_by_its_text; view::tests::media_is_metadata_with_a_name_a_size_and_the_caption",
     brief: "whatsapp-transcription-works"},
   {id: "flow/large-image-one-call", title: "a 120 KB image fetched from a peer in ONE call",
     code: "rust/wa-capabilities/src/whatsapp_query.rs ask_download (MAX_DOWNLOAD_BYTES 512 KiB)",
+    covered: "whatsapp_query tests (the download path over a real queue); the 512 KiB bound is seam::MAX_DOWNLOAD_BYTES",
     brief: "run-images-two-node"},
   {id: "flow/send-from-work", title: "a send from work arrives",
     code: "lua/core/whatsapp.lua M.send -> M.routed -> rust/wa-capabilities/src/whatsapp_send.rs",
+    covered: "whatsapp_send tests (queue, dedupe, cancel) - the peer half is the row this table could not measure",
     brief: "whatsapp-acceptance (this one) - it is the row that proves the peer hop"},
-  // The rows Fable added on 23/11.
-  {id: "row/send-then-search", title: "send, then search the chat: the sent message is first, or pending (order stated)",
-    code: "rust/components/wa-whatsapp/src/index.rs search order (newest first)", brief: "whatsapp-read-is-consistent"},
-  {id: "row/empty-chat-freshness", title: "an empty chat read answers nothing new as of <time>; node received a message Ns ago",
-    code: "rust/components/wa-whatsapp/src/alerts.rs, src/index.rs freshness fields", brief: "whatsapp-read-is-consistent"},
+  // The rows Fable added on 23/11 ~23:00-23:55Z, on the read contract whatsapp-read-is-consistent landed.
+  {id: "row/send-then-search", title: "send, then search the chat: the sent message is first, or listed as pending (order stated)",
+    code: "rust/components/wa-whatsapp/src/index.rs read_paced/search_paced (order {key, direction, cursor}), src/guest.rs (the eager write before the send answers)",
+    covered: "index::tests::a_message_this_node_sent_is_in_search_the_moment_its_record_is_written; index::tests::a_chat_scoped_search_answers_newest_first_and_says_so",
+    brief: "whatsapp-read-is-consistent"},
+  {id: "row/empty-chat-freshness", title: "an empty chat read answers nothing new as of <time>; node received a message Ns ago (as_of, last_received_s, connected, index state)",
+    code: "rust/components/wa-whatsapp/src/guest.rs receive_freshness, src/index.rs index_state/order_block",
+    covered: "index::tests::a_read_says_how_fresh_it_is_and_two_reads_in_a_row_never_go_backwards; the transport half (connected) is the canary's read_no_connected/read_no_receive_freshness stages",
+    brief: "whatsapp-read-is-consistent"},
   {id: "row/text-and-voice", title: "a text then a voice note: read returns both in order, the note WITH its transcript inline",
-    code: "rust/components/wa-whatsapp/src/view.rs message shape (transcript field)", brief: "whatsapp-transcription-works"},
-  {id: "row/cross-chat-labels", title: "a read across chats labels every row with its chat",
-    code: "rust/components/wa-whatsapp/src/view.rs hit_json (chat_name per row)", brief: "whatsapp-read-is-consistent"},
+    code: "rust/components/wa-whatsapp/src/view.rs message shape (text IS the transcript; text_reason when it is not)",
+    covered: "index::tests::a_chat_whose_last_two_messages_are_a_text_and_a_voice_note_reads_both_with_the_transcript_inline",
+    brief: "whatsapp-transcription-works"},
+  {id: "row/cross-chat-labels", title: "a read across chats labels every row with its chat (a search does; a read never mixes chats)",
+    code: "rust/components/wa-whatsapp/src/view.rs hit_json (chat + chat_name per hit); index.rs read refuses without a chat",
+    covered: "index::tests::a_search_that_mixes_chats_labels_every_hit_with_its_chat_and_a_read_never_mixes_them",
+    brief: "whatsapp-read-is-consistent"},
   {id: "row/send-then-read", title: "send-then-read: the sent message is in the next read",
-    code: "lua/core/whatsapp.lua M.settle -> the read that follows", brief: "whatsapp-read-is-consistent"},
-  {id: "row/three-reads", title: "three reads in a row are never older than the one before",
-    code: "lua/core/whatsapp.lua M.call (read), rust/wa-whatsapp-index/src/lib.rs", brief: "whatsapp-read-is-consistent"},
-  {id: "row/voice-text-in-read-and-search", title: "a voice record's text appears in read and in search (not empty)",
-    code: "rust/components/wa-whatsapp/src/index.rs (transcript is indexed as text)", brief: "whatsapp-transcription-works"},
-  {id: "row/both-id-forms", title: "both id forms of one chat (@s.whatsapp.net and @lid) give the same messages",
-    code: "rust/components/wa-whatsapp/src/index.rs alias table", brief: "whatsapp-read-is-consistent"},
+    code: "rust/components/wa-whatsapp/src/guest.rs (the outbox Ok(message_id) arm writes the record before the send answers); lua/core/whatsapp.lua carries in_history",
+    covered: "index::tests::a_message_this_node_sent_is_in_search_the_moment_its_record_is_written (the read half is the same test); outbox::tests::status_says_whether_the_sent_message_is_in_the_history",
+    brief: "whatsapp-read-is-consistent"},
+  {id: "row/three-reads", title: "three reads in a row are never older than the one before (as_of_regressed when they are)",
+    code: "rust/components/wa-whatsapp/src/index.rs observe_as_of + as_of_regressed",
+    covered: "index::tests::a_read_says_how_fresh_it_is_and_two_reads_in_a_row_never_go_backwards",
+    brief: "whatsapp-read-is-consistent"},
+  {id: "row/voice-text-in-read-and-search", title: "a voice record's text appears in read AND in search (not empty)",
+    code: "rust/components/wa-whatsapp/src/index.rs (the transcript is indexed as text), src/view.rs stand_in (text_reason instead of an empty text)",
+    covered: "index::tests::a_voice_note_is_found_by_its_transcript_and_keeps_its_duration; view::tests::a_voice_note_with_no_transcript_says_so_instead_of_an_empty_text",
+    brief: "whatsapp-transcription-works"},
+  {id: "row/both-id-forms", title: "both id forms of one chat (@s.whatsapp.net and @lid) give the same messages (resolved_form, addresses)",
+    code: "rust/components/wa-whatsapp/src/index.rs read (ix/al alias merge), answer addresses/resolved_form",
+    covered: "index::tests::one_chat_is_one_history_under_both_of_its_addresses; index::tests::alias_pairs_are_one_lid_and_one_phone_number",
+    brief: "whatsapp-read-is-consistent"},
+  // The long-body contract: a long message is a POINTER to its stored text, never a silent cut. The names
+  // Fable's note uses (full_text/text_cut) are not fields in this tree - the pointer is transcript_full,
+  // and text_reason names a text that is pending or unsupported (rust/components/wa-whatsapp/src/view.rs).
+  {id: "row/long-body-pointer", title: "a long message answers a pointer to its stored text, never a silent cut (transcript_full / whatsapp_message)",
+    code: "rust/components/wa-whatsapp/src/view.rs (the cut marker + transcript_full {tool: whatsapp_message})",
+    covered: "view::tests::a_long_message_is_a_pointer_to_its_stored_text; index::tests::a_cut_transcript_says_so_and_the_two_exact_ops_return_it_whole",
+    brief: "whatsapp-read-is-consistent"},
 ];
 
 // ---- arguments -------------------------------------------------------------------------------------
@@ -251,6 +279,14 @@ function planFor(site, ownChat) {
     {id: "send_status", tool: "mcp_whatsapp_send_status", args: {}, reuse: {id: "send", key: "id"}},
     {id: "approve", tool: "mcp_whatsapp_approve", args: {action: "list"}},
     {id: "approve/policy", tool: "mcp_whatsapp_approve", args: {action: "policy"}},
+    // The landed read contract's own refusals (whatsapp-read-is-consistent): an unknown search order, a
+    // search with no narrowing, and a malformed chat are refused BY NAME by the seam before any queue, so
+    // these cells are measurable on a machine with no device - and a regression in that refusals is
+    // exactly what a canary should catch.
+    {id: "search/order-newest", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, chat, order: "newest", limit: 5}},
+    {id: "search/order-unknown", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, order: "sideways"}},
+    {id: "search/no-narrowing", tool: "mcp_whatsapp_search", args: {}},
+    {id: "read/malformed-chat", tool: "mcp_whatsapp_read", args: {chat: "1-2-3@g.us", limit: 1}, synthetic: true},
     // THE GUARD ROW: a target that is not the configured own chat. In live mode this MUST be refused
     // before any call; in scratch mode the own chat is empty and the row says so (not a pass).
     {id: "guard/other-chat", tool: "mcp_whatsapp_read", args: {chat: FIXTURE.foreign_chat, limit: 1}},
@@ -499,6 +535,29 @@ function collect(cells, flows, site, rows, ownChat) {
     verdict: cancel.ok === true ? "PASS" : send.ok === true ? "FAIL" : "NOT-RUN", ms: cancel.ms || 0, bytes: cancel.bytes || 0,
     shape: (cancel.shape || "").slice(0, 96),
     why: cancel.ok === true ? "the queued job was taken out of the queue before any worker held it (rust/wa-capabilities/src/whatsapp_send.rs, the cancel branch)" : send.ok === true ? ((cancel.fields && cancel.fields.error) || "cancel refused") : "the send it cancels never queued here, so there is no job to take out (see the send cell)"});
+  // The refusals the landed read contract answers by name, with no device: each cell is PASS only when the
+  // answer is the word the seam promises (rust/wa-whatsapp-index/src/lib.rs, whatsapp_query.rs).
+  const contract = [
+    ["mcp_whatsapp_search (order: newest accepted)", "search/order-newest", null],
+    ["mcp_whatsapp_search (an unknown order refused by name)", "search/order-unknown", "whatsapp_search_bad_order"],
+    ["mcp_whatsapp_search (no narrowing refused by name)", "search/no-narrowing", "whatsapp_search_empty_query"],
+    ["mcp_whatsapp_read (a malformed chat refused by name)", "read/malformed-chat", "whatsapp_read_bad_chat"],
+  ];
+  for (const [label, id, expected] of contract) {
+    const row = byId.get(id) || {};
+    const got = row.fields && row.fields.error;
+    // "accepted" means it travelled: the seam queued it (its slow answer names the job) rather than
+    // refusing the word.
+    const ok = expected === null ? (row.ok === true || /_slow$/.test(got || "")) : got === expected;
+    // The same fleet admission as every other peer cell: the answer is the account node's own refusal of
+    // the caller's role, not this contract's answer.
+    const peerRole = got === "remote_refused" || row.error === "refused_not_own_chat";
+    cells.push({site, tool: label, verdict: ok ? "PASS" : peerRole ? "NOT-RUN" : "FAIL", ms: row.ms || 0, bytes: row.bytes || 0,
+      shape: (row.shape || "").slice(0, 96),
+      why: ok ? (expected === null ? "the order travelled: the seam queued the search (no device settles it here)" : "refused by name with " + expected)
+        : peerRole ? (got === "remote_refused" ? "the account node refused the caller's role (lua/core/server.lua:1034); the contract was not reached from this site" : "the own-chat guard refused the target before the call, which is what a live run must do")
+        : "answered " + (got || "nothing") + ", expected " + (expected || "an accepted order")});
+  }
   // The three names that must never run: an older spelling, a name the component exposes, and a retired
   // operator tool. Each answers one sentence that names the replacement - proved, not assumed.
   const names = [
@@ -539,8 +598,9 @@ function cell(map, tool) {
 // the run's own measurement: `read` answered `whatsapp_read_slow` (nothing settles whatsapp.query
 // without the component connected), which is exactly why no message can be read, sent or transcribed here.
 function flowWhy(flow, site) {
-  return "no paired device here (rust/components/wa-whatsapp/src/guest.rs pairs with a phone), so this "
-    + "runs on the account's own node at G; code " + flow.code + "; owner " + flow.brief;
+  return "no paired device here (rust/components/wa-whatsapp/src/guest.rs pairs with a phone), so the "
+    + "tool-level cell is the G run's; on this main the contract is covered by " + (flow.covered || "no test named")
+    + "; code " + flow.code + "; owner " + flow.brief;
 }
 
 main().catch((error) => { stopChildren(); fail(5, String(error && error.stack || error)); });

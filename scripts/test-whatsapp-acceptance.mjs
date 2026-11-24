@@ -67,6 +67,11 @@ check(/own_chat ~= "" and type\(args\.chat\) == "string" and args\.chat ~= own_c
 check(driver.indexOf("refused_not_own_chat") < driver.indexOf("pcall(tools.dispatch"),
   "the guard runs BEFORE the dispatch, so nothing is called for another chat");
 check(script.includes("guard/other-chat"), "the plan exercises the guard with a target that is not the own chat");
+// The ONE bypass is a validation probe on a shape no account can own: a synthetic step is allowed past the
+// guard only when its chat is NOT a well-formed JID, so no well-formed foreign chat can ever reach a call.
+check(/step\.synthetic == true and type\(args\.chat\) == "string" and not args\.chat:match\(WELL_FORMED\)/.test(driver),
+  "the synthetic bypass is limited to a chat that is not a well-formed JID");
+check(driver.includes('^%d+@(s%.whatsapp%.net|lid|g%.us)$'), "the well-formed test is the exact chat shape the surface accepts");
 check(script.includes("FIXTURE.foreign_chat"), "the guard row uses a fixture target, never a real one");
 check(/000000000000000@s\.whatsapp\.net/.test(script), "the fixture target is a chat no account can own");
 

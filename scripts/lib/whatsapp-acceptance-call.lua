@@ -115,7 +115,12 @@ for _, step in ipairs(plan.steps) do
   end
   -- THE OWN-CHAT GUARD (live mode). One allow-list, checked before anything is called: with an own
   -- chat configured, a step that names any other chat is refused here, by name, and nothing runs.
-  if own_chat ~= "" and type(args.chat) == "string" and args.chat ~= own_chat then
+  -- A "synthetic" step targets a shape no account can own (a validation probe: a malformed chat the
+  -- seam must refuse by name). The guard still applies to every WELL-FORMED chat, so the one bypass is the
+  -- one that cannot name a person: the seam refuses the shape before anything is queued (the cell proves it).
+  local WELL_FORMED = "^%d+@(s%.whatsapp%.net|lid|g%.us)$"
+  local synthetic = step.synthetic == true and type(args.chat) == "string" and not args.chat:match(WELL_FORMED)
+  if own_chat ~= "" and type(args.chat) == "string" and args.chat ~= own_chat and not synthetic then
     record.ok = false
     record.error = "refused_not_own_chat"
     record.state = "refused"
