@@ -669,13 +669,15 @@ function M.call(name, args)
         node = peer.name, node_id = peer.node_id, tool = tool.name,
         headline = name .. ' runs a build that cannot serve connector calls for another node; update ' .. name,
         detail = 'operation_not_yours',
-        owner = tostring(cause.operation_id or ''),
+        -- THE ID, NOT AN "OWNER": this field carries cause.operation_id, and an id under a name that means
+        -- "who may act on it" is a trap for whoever reads the answer next (Fable, 25/11).
+        operation_id = tostring(cause.operation_id or ''),
         peer_detail = inner,
         message = name .. ' runs a build that cannot serve connector calls for another node; update ' .. name,
-        note = 'the connector server on ' .. name .. ' was not contacted and the tool did not run: that node '
-          .. 'refused to observe the read session it had just started, under the runtime owner that node '
-          .. 'recorded. A caller cannot observe or cancel an operation another node owns, so nothing was '
-          .. 'replayed and nothing is left for this node to stop.',
+        note = 'the connector server on ' .. name .. ' was not contacted and the tool did not run, so '
+          .. 'nothing needs undoing. ' .. name .. ' could not follow the session it started for this call '
+          .. '(operation_not_yours), a defect of its build in calls from another node. Retrying from here '
+          .. 'fails the same way until ' .. name .. ' is updated.',
         fix = 'update that node to a build that can serve connector calls for another node, then retry; '
           .. 'until then this tool cannot work from here',
         tool_call_issued = false, outcome = 'not_submitted' }

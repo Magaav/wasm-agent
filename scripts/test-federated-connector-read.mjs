@@ -216,12 +216,20 @@ async function main() {
   check(true, 'the peer is attached to the relay (its calls arrive in the relay lane)');
 
   // The connector: mcp.control put -> probe -> enable, the three steps /mcp <id> probe and on run.
-  const setup = script('peer', 'setup');
+  // A connector whose server will never become ready: the registry is filled with a speaking stub (so the
+  // probe passes and the product's own route enables it) and then that program is replaced by a silent one.
+  const MUTE_STUB = path.join(work, 'mute.mjs');
+  fs.copyFileSync(STUB, MUTE_STUB);
+  const setup = script('peer', 'setup', {WA_FED_MUTE_STUB: MUTE_STUB});
   const tool = setup.tool;
   const writeTool = setup.write_tool;
-  check(setup.step === 'done' && typeof tool === 'string' && typeof writeTool === 'string',
-    'the peer publishes the stub read tool and the stub write tool', JSON.stringify(setup));
-  if (!tool || !writeTool) return finish(1);
+  const muteTool = setup.mute_tool;
+  check(setup.step === 'done' && typeof tool === 'string' && typeof writeTool === 'string' &&
+    typeof muteTool === 'string',
+    'the peer publishes the stub read tool, the stub write tool and the stub mute tool', JSON.stringify(setup));
+  if (!tool || !writeTool || !muteTool) return finish(1);
+  // From here the mute connector's program says nothing, ever: a stdio MCP server that never answers.
+  fs.writeFileSync(MUTE_STUB, "setInterval(()=>{}, 60000);\n");
 
   const control = script('peer', 'local', {WA_FED_TOOL: tool});
   check(control.control && control.control.ok === true && control.control.session_mode === 'persistent-read',
@@ -289,6 +297,15 @@ async function main() {
     rows.map(row => row.owner).join(', '));
   check(relayed.every(row => row.session === '' || typeof row.session === 'string'),
     'the read session rows carry the session the node recorded', JSON.stringify(rows.map(row => ({owner: row.owner, session: row.session}))));
+
+  // THE SERVER NEVER BECOMES READY (Fable, 25/11): the session is started and never writes its ready file, so
+  // the failure happens BETWEEN the start and the rest of the call - the one return that an exit defined after
+  // the start block would miss. The call must fail AND leave nothing running.
+  const mute = script('caller', 'call', {WA_FED_TOOL: muteTool, WA_FED_PEER: identity.peer.node_id,
+    WASM_AGENT_RENDEZVOUS: service, WASM_AGENT_RELAY: service});
+  const muted = mute.call || {};
+  check(muted.ok !== true, 'a connector whose server never becomes ready fails the call, and says so',
+    JSON.stringify(muted).slice(0, 400));
 
   // (a) OWNERSHIP IS NOT LOOSENED. The recorded owner is the one the row above names, and NOTHING ELSE may
   // observe that operation: a second relay id is refused, by name, on exactly the row the first one started.

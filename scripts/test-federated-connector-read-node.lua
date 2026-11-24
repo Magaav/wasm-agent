@@ -50,8 +50,22 @@ if action == 'setup' then
   if not probed.ok then print(json.encode({ step = 'probe_write', answer = probed })); return end
   local on = mcp.control({ action = 'enable', id = 'stubwrite', expected_revision = revision() }, ctx)
   if not on.ok then print(json.encode({ step = 'enable_write', answer = on })); return end
+  -- A THIRD CONNECTOR WHOSE SERVER WILL NEVER BECOME READY (Fable, 25/11): the registry is filled while the
+  -- program still speaks MCP (so the probe passes and the operator's own route enables it), and the row then
+  -- overwrites that program with one that never answers. A timeout of 2 s keeps the case short; the ready wait
+  -- is what has to be exercised, not the tool call.
+  local mute = { id = 'stubmute', name = 'Stub mute connector', transport = 'stdio',
+    program = tostring(host.getenv('WA_FED_NODE_PROGRAM')),
+    args = { tostring(host.getenv('WA_FED_MUTE_STUB')), '--log', tostring(host.getenv('WA_FED_STUB_LOG')) },
+    timeout_seconds = 2, tools = { echo = 'read' } }
+  local put_mute = mcp.control({ action = 'put', expected_revision = revision(), definition = mute }, ctx)
+  if not put_mute.ok then print(json.encode({ step = 'put_mute', answer = put_mute })); return end
+  local probe_mute = mcp.control({ action = 'probe', id = 'stubmute', expected_revision = revision() }, ctx)
+  if not probe_mute.ok then print(json.encode({ step = 'probe_mute', answer = probe_mute })); return end
+  local on_mute = mcp.control({ action = 'enable', id = 'stubmute', expected_revision = revision() }, ctx)
+  if not on_mute.ok then print(json.encode({ step = 'enable_mute', answer = on_mute })); return end
   print(json.encode({ step = 'done', tool = mcp.namespace('stubconn', 'echo'),
-    write_tool = mcp.namespace('stubwrite', 'echo') }))
+    write_tool = mcp.namespace('stubwrite', 'echo'), mute_tool = mcp.namespace('stubmute', 'echo') }))
 elseif action == 'local' then
   -- THE CONTROL. Same node, same connector, same binary, same Lua: the only thing absent is the relay
   -- lane, which is the runtime owner a relayed call imposes on the thread. Without it the read session

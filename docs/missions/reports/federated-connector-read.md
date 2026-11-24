@@ -250,27 +250,41 @@ Fable's G-blocker round, with the measurements in `ready-fix.md`:
   `hold_for` answers `None` and the request is `ready`, not `held: node busy`. The ~30 s hold of (g) belongs
   to a *live* session on a *running* node, not to a restarted one. This is reported for Fable to decide;
   the branch fixes the federated bug (b) and nothing else.
+- **`done()` sits BEFORE the start block** (Fable, 25/11 — it used to be defined after it): EVERY return
+  after `host.operation('start')` cancels the operation on a peer call, including the ready-wait timeout
+  between the start and the rest of the function (`mcp_session_not_ready`), which is the case an exit placed
+  below the block would have leaked. The three returns that stay bare are all *before* a successful start
+  (`mcp_seed_not_written`, `mcp_node_runtime_unresolved`, `mcp_session_not_started`), where there is no
+  operation to cancel. The row gains the case: **the server never becomes ready**.
+- **The known price**: one server start per federated read. A peer call closes its session on the way out, so
+  it cannot be reused by the next call; a node's own turn still pools its session, which is where the reuse
+  was ever worth anything. Measured: the row's federated read+write arm is 3.8 s for the whole two-node
+  fixture, so the price is a handshake, not a stall.
 - **The fix** is one exit in `lua/core/mcp_session.lua` (`done()`): a peer call closes the session it
   started, on success, on every failure return and on timeout, under the owner the start receipt answered.
   A node's own turn keeps its pooled session. `Caller::owns` is untouched, and the row proves it: a second
   relay id is refused by name on the first one's operation.
+- **(g) Busy for maintenance: YES, ~30 s per failed call.** The measured `/health` body carries the
+  operation id in `operations` for that window, which is the field `activity_of` reads; the request is held
+  with "the node is busy: a run, a subagent or an operation is in flight", rendered `held: node busy`.
 - **The old peer is named, not excused** (`lua/core/federation.lua`, allow-listed on exactly
   `mcp_session_startup_failed` + `operation_not_yours`): `<peer> runs a build that cannot serve connector
-  calls for another node; update <peer>`, with the inner cause, the owner, and the statement that the
-  connector server was not contacted. A caller cannot cancel an operation another node owns, and does not
-  pretend to.
-- **The row is 13 checks** now: the read through `federation.call` (the model's route), the write door, the
+  calls for another node; update <peer>`, with the inner cause and the statement that the connector server
+  was not contacted. The id it carries is `operation_id` (it used to be called `owner`, the wrong name for
+  an id — Fable, 25/11). A caller cannot cancel an operation another node owns, and does not pretend to: the
+  note says exactly what you approved for the model.
+- **The row is 14 checks** now (13 + the never-ready case): the read through `federation.call` (the model's route), the write door, the
   relay lane's owner, the foreign relay id refused by name, and nothing left running. `WA_FED_PEER_BIN`
   runs the same row against an un-updated peer (11 checks).
 - **Red on `2d7ac300`** (the base Fable named), matched build + its own Lua: **3 of 13** — the read, the
   write, and "nothing the federated read started is still running on the peer".
-- **Still not proved**: the direct (non-relay) carrier and the mesh carrier (the scratch peer never got an
+- **Still not proved**: **the direct (non-relay) arm is NOT measured**, and neither is the mesh carrier (the scratch peer never got an
   endpoint into the roster), and the sentinel's own `request` command was not run — the hop from the
   measured `/health` body to "held: node busy" is its code, cited line by line.
 
 ## 7. What this report does NOT claim
 
-- **The direct (non-relay) cross-node arm was not proved.** In the scratch fixture the peer's roster entry
+- **the direct (non-relay) arm is NOT measured.** In the scratch fixture the peer's roster entry
   carried no endpoint (the heartbeat announced none for the scratch node), so `nodes.lua` fell back to the
   relay and every "direct" attempt still arrived in the relay lane. What is proved is the relay carrier —
   the reported one — and the local control with no lane at all.
