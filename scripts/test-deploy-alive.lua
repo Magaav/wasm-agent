@@ -147,6 +147,83 @@ local done_row = rows("SELECT prompt FROM self_wakes WHERE id=?", { armed.wake.i
 check((done_row.prompt or ""):find(pause.UNKNOWN, 1, true) ~= nil,
   "and the line says what it can (no pause record here, so: the pause ended): " .. tostring(done_row.prompt):sub(1, 120))
 
+
+-- ---- 3. THE STAMP IS ONCE PER RELEASE, NOT ONCE PER TICK (Fable 24/11, the blocker on 6ae677dd) ---------------
+-- MEASURED in review of that commit: taking the `due_at > now` filter off made EVERY pending resume selectable, and
+-- `release_due` runs on every tick (2 s). A released row that stays pending - its session's lane busy with a kept
+-- message, the plan's limit, anything - was stamped again every tick: ~300 copies and ~100 KB in a 10-minute lane.
+local function release_opts(extra)
+  local opts = {
+    exec = function(sql, params) return json.decode(host.sql_exec(sql, json.encode(params))) end,
+    query = function(sql, params) return json.decode(host.sql_query(sql, json.encode(params))) end,
+    install = "/nonexistent-install-r8c",
+  }
+  for key, value in pairs(extra or {}) do opts[key] = value end
+  return opts
+end
+-- ONE LINE PER RELEASE: every release text starts with the same 9 bytes, so counting those lines counts releases.
+local function release_lines(text)
+  local n = 0
+  for line in tostring(text or ""):gmatch("[^\n]+") do if line:sub(1, 9) == "[deploy] " then n = n + 1 end end
+  return n
+end
+local function released_notes(session)
+  local path = pause.log_path()
+  if type(path) ~= "string" then return 0 end
+  local ok, body = pcall(host.read_file, path)
+  if not ok or type(body) ~= "string" then return 0 end
+  local n = 0
+  for line in body:gmatch("[^\n]+") do
+    if line:find('"released"', 1, true) and line:find(session, 1, true) then n = n + 1 end
+  end
+  return n
+end
+
+-- (i) RELEASE, THEN TEN MORE TICKS WITH THE SESSION'S LANE BUSY: the line is stamped ONCE.
+local busy = memory.start_session("local", "chat", { id = "r8c-busy", user_id = "master", title = "busy" })
+local busy_row = selfloop.schedule({ in_seconds = 60, reason = pause.RESUME_REASON, prompt = "resume" },
+  { session_id = busy, user_id = "master" })
+check(busy_row and busy_row.ok, "a resume is owed for the busy-lane case: " .. json.encode(busy_row))
+host.sql_exec([[UPDATE self_wakes SET due_at=? WHERE id=?]], json.encode({ T0 + 600, busy_row.wake.id }))
+local stamped = pause.release_due(T0 + 5, release_opts())
+eq(stamped, 1, "the release stamps the one pending resume")
+local after_one = rows("SELECT prompt FROM self_wakes WHERE id=?", { busy_row.wake.id })[1]
+eq(release_lines(after_one.prompt), 1, "the row carries ONE release line")
+local again = 0
+for i = 1, 10 do again = again + (tonumber(pause.release_due(T0 + 5 + i, release_opts())) or 0) end
+eq(again, 0, "ten further ticks with the lane still busy stamp NOTHING")
+local after_ten = rows("SELECT prompt FROM self_wakes WHERE id=?", { busy_row.wake.id })[1]
+eq(release_lines(after_ten.prompt), 1, "the prompt still carries the line exactly once, not eleven times")
+eq(#after_ten.prompt, #after_one.prompt, "and not one byte more")
+eq(released_notes(busy), 1, "the pause log has ONE released for the session")
+print(string.format("row (i): one release + 10 ticks with the lane busy -> %d release line(s), %d -> %d bytes, %d 'released' note(s)",
+  release_lines(after_ten.prompt), #after_one.prompt, #after_ten.prompt, released_notes(busy)))
+
+-- (ii) PAUSE -> RELEASE -> PAUSE AGAIN -> RELEASE: one line per release, the newest first.
+pcall(pause.record_pause, { to = "aaaa1111aaaa1111", source = "install" }, T0 + 20, busy, "master",
+  { installed = { commit = "aaaa1111aaaa1111" } })
+local rearmed = selfloop.schedule({ in_seconds = 60, reason = pause.RESUME_REASON, prompt = "resume after the second pause" },
+  { session_id = busy, user_id = "master" })
+check(rearmed and rearmed.ok, "the second pause re-arms the session: " .. json.encode(rearmed))
+eq(tostring(rearmed.wake.id), tostring(busy_row.wake.id), "on the SAME row (the pause rewrites it)")
+local cleared = rows("SELECT prompt FROM self_wakes WHERE id=?", { busy_row.wake.id })[1]
+eq(release_lines(cleared.prompt), 0, "and the pause's own rewrite CLEARS the release mark")
+local second = pause.release_due(T0 + 25, release_opts({ record = { commit = "bbbb5555bbbb5555" } }))
+eq(second, 1, "the second release stamps again")
+local two = tostring(rows("SELECT prompt FROM self_wakes WHERE id=?", { busy_row.wake.id })[1].prompt)
+-- ONE RELEASE LINE IN THE ROW, AND IT IS THE NEWEST - not two, and not two of the first. The pause arms a resume by
+-- REPLACING the row's prompt (`lua/core/selfloop.lua:592`, "SET status='pending', prompt=?"): the row is ONE
+-- continuation document per cycle, so the earlier cycle's line does not survive the re-arm and prompts cannot grow
+-- install after install. What must not happen - and does not - is the FIRST cycle's line appearing twice.
+eq(release_lines(two), 1, "the second cycle's prompt carries ONE release line, not two")
+local first_line = two:match("^([^\n]*)")
+check(first_line:find(pause.INSTALLED, 1, true) == 1,
+  "and it is the NEWEST release's line (installed: bbbb5555bbbb was aaaa1111aaaa): " .. first_line:sub(1, 120))
+check(two:find(pause.UNKNOWN, 1, true) == nil, "not two of the first: the earlier release's line went with the prompt it was part of")
+eq(released_notes(busy), 2, "while the pause log keeps one released per release, which is where the audit trail lives")
+print(string.format("row (ii): pause -> release -> pause -> release -> %d release line(s), newest first: %s; %d 'released' note(s)",
+  release_lines(two), first_line:sub(1, 44), released_notes(busy)))
+
 print("deploy alive ok (" .. checks .. " checks, " .. skipped .. " skipped): a running deploy holds a paused session, a dead one "
   .. "releases it at once, and the release says what it can")
 

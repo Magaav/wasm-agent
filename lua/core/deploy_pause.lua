@@ -1226,14 +1226,7 @@ function M.release_due(now, opts)
     if type(row) == "table" and tostring(row.session_id or "") ~= "" then held[tostring(row.session_id)] = true end
   end
   local function is_held(session) return session ~= "" and held[session] == true end
-  -- The other half of the pause log (M.note): the install is done, so the wait each paused session paid ends
-  -- here. Logged before the rows are updated, because a row that is updated is a wait that ended.
-  for _, row in ipairs(waiting) do
-    if type(row) == "table" then
-      local session = tostring(row.session_id or "")
-      if not is_held(session) then M.note("released", session, { wake = row.id, at = now }) end
-    end
-  end
+
   -- ONE RESUME ROW PER SESSION - PER SESSION, NOT PER TABLE (Fable 24/11, the blocker).
   --
   -- MEASURED in review of 9a7edd49: this statement's first version kept the earliest pending resume in the WHOLE
@@ -1274,7 +1267,22 @@ function M.release_due(now, opts)
   -- the install directory says now. `install_moved` is true only for two records that disagree; nil (cannot tell) is
   -- never read as installed.
   local now_identity = M.installed_identity(opts)
+  -- THE STAMP IS ONCE PER RELEASE, BECAUSE THE ROW'S OWN PROMPT IS THE MARK (Fable 24/11, the blocker).
+  --
+  -- MEASURED in review of 6ae677dd: taking the `due_at > now` filter off made EVERY pending resume selectable, and
+  -- `release_due` runs on every tick (2 s). A released row that stays pending - its session's lane busy with a kept
+  -- message, the plan's limit, anything - was therefore stamped again every tick: a 10-minute busy lane is ~300
+  -- copies of the line, ~100 KB of prompt, a paid turn on that, and a "released" log line per tick.
+  --
+  -- The mark is the first line of `prompt`: the release PREPENDS its line ([deploy] installed / [deploy] the update did
+  -- not happen / [deploy] the pause ended - all of them start with `[deploy] `), and a later pause of the same session
+  -- REWRITES the prompt through `selfloop.schedule` ("SET status='pending', prompt=?..."), which is what clears the
+  -- mark for the next cycle - the same write that re-arms the row. `last_error` was NOT used: the dispatcher writes
+  -- it on a pending row every time it defers (`lua/core/selfloop.lua:1594`, :1654, :1826, :1976), so the mark would be
+  -- erased by a refusal and the line stamped twice. No new column: the store's grant is read/write on this table's
+  -- rows, not DDL.
   local released = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=?
+    AND substr(coalesce(prompt,''),1,9)<>'[deploy] '
     ORDER BY due_at, created_at]], { M.RESUME_REASON })
   local changes = 0
   for _, row in ipairs(type(released) == "table" and released or {}) do
@@ -1297,7 +1305,11 @@ function M.release_due(now, opts)
       local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
         prompt = ? || char(10) || char(10) || prompt
         WHERE id=? AND status='pending']], { now, now, text, tostring(row.id) })
-      changes = changes + (tonumber(type(changed) == "table" and changed.changes or 0) or 0)
+      local stamped = tonumber(type(changed) == "table" and changed.changes or 0) or 0
+      changes = changes + stamped
+      -- The other half of the pause log (M.note): the wait this session paid ends HERE, and here is once per
+      -- release - a row already stamped is not selected above, so a busy lane writes no second line.
+      if stamped > 0 then M.note("released", session, { wake = row.id, at = now }) end
     end
   end
   return changes

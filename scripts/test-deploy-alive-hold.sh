@@ -91,6 +91,9 @@ createServer((request, response) => {
     // A WAKE'S TURN IS THE RESUME, and its words are the wake's own: the row's prompt, whose first line is the
     // release's '[deploy] ...' (a wake turn reads '[self-wake · <reason>]\n<the row's prompt>').
     const resume = /^\[self-wake/.test(lastText.trim()) || lastText.includes('[deploy] ');
+    // THE RESUMED PROMPT ITSELF IS RECORDED (Fable 24/11, row (iii)): the release line is counted in the BYTES the
+    // stub was sent, not only in the ledger, so a second copy prepended by a later tick would show up here.
+    if (resume) appendFileSync(process.argv[4], lastText + '\n');
     const head = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' };
     const send = (payload) => response.write('data: ' + JSON.stringify(payload) + '\n\n');
     response.writeHead(200, head);
@@ -113,7 +116,8 @@ createServer((request, response) => {
 }).listen(port, '127.0.0.1', () => console.log('listening'));
 JS
 COUNT="$WORK/requests.txt"; : > "$COUNT"
-node "$WORK/model.mjs" "$MP" "$COUNT" > "$WORK/model.log" 2>&1 & MODEL=$!
+RESUMED="$WORK/resumed-prompts.txt"; : > "$RESUMED"
+node "$WORK/model.mjs" "$MP" "$COUNT" "$RESUMED" > "$WORK/model.log" 2>&1 & MODEL=$!
 for _ in $(seq 1 60); do grep -q listening "$WORK/model.log" 2>/dev/null && break; sleep 0.1; done
 wait_requests() { # <n> <seconds>
   local want=$1 budget=$2
@@ -238,6 +242,12 @@ esac
 RESUMES=$(ledger "SELECT COUNT(*) FROM self_wakes WHERE reason='deploy pending: resume after the node swap';")
 [ "${RESUMES:-0}" = "3" ] || { echo "  FAIL: the ledger has $RESUMES resume rows, expected 3 (one per paused session, none armed twice)"; exit 1; }
 echo "  ok: the first line is '[deploy] installed', naming bbbb5555eeee; three sessions, three resume rows"
+# ONE LINE PER RESUME, COUNTED IN THE BYTES THE MODEL WAS SENT and in the row that produced them.
+AT_STUB=$(grep -o '\[deploy\] installed' "$RESUMED" 2>/dev/null | wc -l | tr -d ' ')
+[ "${AT_STUB:-0}" = "3" ] || { echo "  FAIL: the stub was sent $AT_STUB '[deploy] installed' line(s) for three resumed requests, expected 3"; exit 1; }
+TWICE=$(ledger "SELECT COUNT(*) FROM self_wakes WHERE reason='deploy pending: resume after the node swap' AND (length(prompt)-length(replace(prompt,'[deploy] installed',''))) > length('[deploy] installed');")
+[ "${TWICE:-x}" = "0" ] || { echo "  FAIL: $TWICE resume row(s) carry the release line more than once"; exit 1; }
+echo "  ok: each resumed request carries ONE '[deploy] installed' line (counted at the stub and in the ledger)"
 
 # ===================================================================================== (2) the deploy is KILLED
 # Same timeline, and the deploy dies during the compile: the running state's pid is gone, so the NEXT tick releases,
