@@ -193,3 +193,29 @@ base worktree of `origin/main` (`esc-stops pty: -1 ok, 1 failed`), and which thi
 Every row singly on this tip: `start-instant ok`, `operation cwd ok (31 checks)`, boundary seed
 `665 checks ok` + restart `43 checks ok`, `network outage recovery ok (34 checks)`, `session-isolation 141
 checks, 0 failed`, `remote pending ok (90 checks)`, `handle wake: 17 checks`.
+
+
+## Final: rebased onto the tip of main, and the narrowed run is green
+
+Main moved twelve commits while this was in flight, so the branch was rebased onto it (clean, no conflict) and
+everything was re-measured there rather than argued from the earlier base.
+
+| row, singly on the rebased tip | verdict |
+| --- | --- |
+| `scripts/test-start-instant.lua` | `start-instant ok` |
+| `scripts/test-operation-cwd.lua` | `operation cwd ok (31 checks)` |
+| `scripts/test-codemode-model-boundary.lua` | seed `665 checks ok`, restart `43 checks ok` |
+| `scripts/test-network-outage-recovery.lua` | `network outage recovery ok (34 checks)` |
+| `scripts/test-session-isolation.lua` | 141 checks, 0 failed |
+| `scripts/test-remote-pending.lua` | `remote pending ok (90 checks)` |
+| `scripts/test-handle-wake.lua` | `handle wake: 17 checks` |
+
+**The narrowed run:**
+
+    fast result ok (136 checks, 0 failed, 0 skipped)
+    fast path ok (136 checks, 0 skipped, 633s)
+
+Zero failures - including `check-esc-stops-pty`, `check-tmp-cleanliness` and `check-install-guards`, which were
+red at the earlier tips (the first two were main's own state and have since been fixed on main by other
+missions; the third stopped failing once the machine was idle, exactly as the load-sensitive row is designed
+not to be trusted under load).
