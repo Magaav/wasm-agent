@@ -213,12 +213,25 @@ dir_a="$(mkrel relA "$COMMIT_A" 55000000)"
 SHORT_A="${COMMIT_A:0:12}"
 printf '300000' > "$dir_a/wa-$X64-$SHORT_A.rate"
 cache_a="$WORK/cache-a"
+# The phase file a follower reads, begun the way scripts/deploy.sh begins it (deploy.sh:413).
+wa_status_begin "$ROOT" "$COMMIT_A"
+wa_phase fetching
+: > "$WORK/phases.txt"
 started="$(date +%s)"
 (
   WA_NODE_BINARIES_URL="$(base_for "$COMMIT_A")" wa_node_binary_download "$ROOT" "$COMMIT_A" "$X64" "$cache_a" \
     > "$WORK/row-a.out" 2>&1
 ) &
 runner=$!
+last_phase=""
+while kill -0 "$runner" 2>/dev/null; do
+  phase="$(sed -n 's/.*"phase":"\([^"]*\)".*/\1/p' "$WA_STATUS_FILE" 2>/dev/null)"
+  if [ -n "$phase" ] && [ "$phase" != "$last_phase" ]; then
+    printf '%s\n' "$phase" >> "$WORK/phases.txt"
+    last_phase="$phase"
+  fi
+  sleep 0.25
+done
 wait "$runner"; rc=$?
 elapsed=$(( $(date +%s) - started ))
 out="$(cat "$WORK/row-a.out")"
@@ -231,6 +244,17 @@ ok
 # The .complete marker is written AFTER every pin, hash and machine check passed (wa_node_binary_download),
 # so its presence is the verifier's own answer about these bytes - not a claim of this test.
 [ -f "$cache_a/$SHORT_A/$X64/.complete" ] || fail "the 55 MB download left no verified cache entry"
+ok
+
+# ---- f. progress: the phase line a follower reads, at most one every few seconds ---------------------
+grep -cE '^downloading wa-x86_64-unknown-linux-gnu: [0-9]+ of 55 MB$' "$WORK/phases.txt" > "$WORK/progress.count" \
+  || true
+progress="$(tr -d '[:space:]' < "$WORK/progress.count")"
+[ "${progress:-0}" -ge 3 ] || fail "the download reported $progress progress line(s), not the at least 3 a 183 s transfer must give: $(cat "$WORK/phases.txt")"
+ok
+budget=$(( elapsed / 3 + 3 ))
+[ "$progress" -le "$budget" ] \
+  || fail "the download wrote $progress progress lines in ${elapsed}s: more than the one-per-3s throttle allows ($budget)"
 ok
 
 # The same label rule the line above depends on, stated once.

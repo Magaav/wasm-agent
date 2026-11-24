@@ -20,6 +20,9 @@
 #   * A REFUSAL THAT SAYS WHY: curl's exit code with its meaning in words, the HTTP status, bytes received
 #     of bytes expected, seconds, attempts. Never the URL - a release URL can carry a token or a signed
 #     query, and a refusal is written to a log.
+#   * PROGRESS through the phase file the follow already reads (`wa_status`, scripts/lib/build-status.sh):
+#     `downloading wa-x86_64-unknown-linux-gnu: 31 of 55 MB`, at most one line every
+#     WA_DOWNLOAD_PROGRESS_SECONDS (3) seconds.
 #
 # The BYTES are not verified here, and that is the caller's gate on purpose: every release asset is checked
 # against the signed SHA256SUMS / the manifest AFTER it lands (wa_node_verify_dir, wa_component_download),
@@ -76,6 +79,15 @@ wa_download_label() {
   printf '%s' "$name"
 }
 
+# <phase text> -> one line into the phase file a follower already reads. A no-op when nothing sourced
+# scripts/lib/build-status.sh (scripts/publish-node-binaries.sh, a tree-less install) or before its
+# wa_status_begin: progress is a report, never a gate, so it can never fail a download.
+wa_download_phase() {
+  command -v wa_status >/dev/null 2>&1 || return 0
+  wa_status building "$1" >/dev/null 2>&1 || true
+  return 0
+}
+
 # <file> -> its size in bytes, 0 when it does not exist. Written as a function because a bare
 # `wc -c < "$f"` reports "No such file or directory" on the caller's stderr when a failed attempt left no
 # partial file - a message that reads like a defect of the downloader rather than the fact that nothing
@@ -120,14 +132,15 @@ wa_download_asset() {
   local part="$dest.part" hdr="$dest.part.hdr" code="$dest.part.code" err="$dest.part.err"
   local attempts="${WA_DOWNLOAD_ATTEMPTS:-3}" attempt=0 pause="${WA_DOWNLOAD_RETRY_PAUSE:-2}"
   local connect="${WA_DOWNLOAD_CONNECT_TIMEOUT:-15}" speed_limit="${WA_DOWNLOAD_SPEED_LIMIT:-51200}"
-  local speed_time="${WA_DOWNLOAD_SPEED_TIME:-30}"
-  local rc=0 http got want offset started secs reason retry pid
+  local speed_time="${WA_DOWNLOAD_SPEED_TIME:-30}" progress_every="${WA_DOWNLOAD_PROGRESS_SECONDS:-3}"
+  local rc=0 http got want offset started secs reason retry pid last now seen
   local -a args
   case "$attempts" in ''|*[!0-9]*|0) attempts=3 ;; esac
   case "$pause" in ''|*[!0-9]*) pause=2 ;; esac
   case "$connect" in ''|*[!0-9]*|0) connect=15 ;; esac
   case "$speed_limit" in ''|*[!0-9]*|0) speed_limit=51200 ;; esac
   case "$speed_time" in ''|*[!0-9]*|0) speed_time=30 ;; esac
+  case "$progress_every" in ''|*[!0-9]*|0) progress_every=3 ;; esac
   command -v curl >/dev/null 2>&1 \
     || { printf 'node_release_unreachable: %s: no curl on this host, so nothing can be fetched\n' "$label"; return 8; }
   mkdir -p "${dest%/*}" 2>/dev/null \
@@ -143,8 +156,25 @@ wa_download_asset() {
     [ "$offset" -gt 0 ] && args+=( -C - )
     curl "${args[@]}" "$url" </dev/null > "$code" 2> "$err" &
     pid=$!
-    # Wait for the transfer. The exit code is read from `wait`, never from the file it writes.
-    while [ ! -s "$code" ] && kill -0 "$pid" 2>/dev/null; do sleep 0.5; done
+    last="$started"
+    # PROGRESS, AT MOST ONCE EVERY progress_every SECONDS, and only while bytes are arriving: the phase file
+    # the follow reads says how far a 55 MB asset is, so a slow minute reads as slow instead of as silent.
+    while [ ! -s "$code" ] && kill -0 "$pid" 2>/dev/null; do
+      now="$(_wa_download_now)"
+      if [ $((now - last)) -ge "$progress_every" ]; then
+        seen="$(_wa_download_size "$part")"
+        if [ "$seen" -gt "$offset" ]; then
+          want="$(_wa_download_total "$hdr" "$offset")"
+          if [ -n "$want" ] && [ "$want" -gt 0 ]; then
+            wa_download_phase "downloading $label: $((seen / 1000000)) of $((want / 1000000)) MB"
+          else
+            wa_download_phase "downloading $label: $((seen / 1000000)) MB"
+          fi
+          last="$now"
+        fi
+      fi
+      sleep 0.5
+    done
     wait "$pid" 2>/dev/null
     rc=$?
     http="$(tr -dc '0-9' < "$code" 2>/dev/null)"
