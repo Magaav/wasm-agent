@@ -14,6 +14,33 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# --- THE COMPILER IS AN INPUT, and it is pinned -----------------------------------------------
+# A component's bytes are the bytes of the compiler that built it. Measured on avell 23/11, one
+# source (`agent-core` at main 0d8657e5): rustc 1.100.0 gives 393,860 bytes / `68c5d849...`, rustc
+# 1.99.1 gives the pinned 392,561 bytes / `b24672b2...`. Eight of the eleven pins in components.lock
+# carry `58cf8f9c35b3...` - rustc 1.99.1's commit hash, the same way 1.100.0's `0ef1bc38...` shows up in
+# a build of today - so those pins were made with 1.99.1, and a node whose default toolchain has moved
+# on can no longer rebuild them. This build asks rustup for that toolchain by name instead of taking
+# the node's default; components.lock records the pin. Installing it is provisioning, like wasi-sdk:
+# rustup fetches it once per node.
+# WA_COMPONENT_TOOLCHAIN=node builds with the node's default compiler. That is a diagnosis aid - it
+# shows what the compiler contributes - and never where a pinned artifact comes from.
+COMPONENT_TOOLCHAIN="${WA_COMPONENT_TOOLCHAIN:-1.99.1}"
+if [ "$COMPONENT_TOOLCHAIN" != node ]; then
+  command -v rustup >/dev/null 2>&1 || {
+    echo "error: component builds are pinned to rustc $COMPONENT_TOOLCHAIN (components.lock) and rustup is not on PATH; install rustup, or WA_COMPONENT_TOOLCHAIN=node for a build whose bytes are not the pinned ones" >&2
+    exit 2
+  }
+  if ! rustup toolchain list 2>/dev/null | grep -q "^$COMPONENT_TOOLCHAIN"; then
+    echo "component toolchain $COMPONENT_TOOLCHAIN is not installed; fetching it (rustup toolchain install, with both wasm targets)" >&2
+    rustup toolchain install "$COMPONENT_TOOLCHAIN" --profile minimal --target wasm32-wasip2 --target wasm32-wasip1 >&2 || {
+      echo "error: cannot install rustc $COMPONENT_TOOLCHAIN (offline?); the pinned component bytes need it" >&2
+      exit 2
+    }
+  fi
+  export RUSTUP_TOOLCHAIN="$COMPONENT_TOOLCHAIN"
+fi
+
 # THE ONE BUILD ROOT (docs/ONEROOT.md): every build kind on this node resolves its cargo target dir
 # through `scripts/lib/build-target.sh`. A caller that names CARGO_TARGET_DIR keeps it; otherwise this
 # tree's child of the one root is used, exported so the `cargo build` below and the lookup after it
@@ -30,6 +57,12 @@ if ! command -v wa_build_host_lock >/dev/null 2>&1 && [ -f "$PWD/scripts/lib/bui
   . "$PWD/scripts/lib/build-target.sh"
 fi
 : "${CARGO_TARGET_DIR:=$PWD/rust/target}"
+# A relative CARGO_TARGET_DIR is resolved ONCE, here, against the checkout: the build moves to the
+# constant build root below, and resolving it there would put the target directory inside the copy.
+case "$CARGO_TARGET_DIR" in
+  /*|[A-Za-z]:/*|[A-Za-z]:\*) ;;
+  *) CARGO_TARGET_DIR="$PWD/$CARGO_TARGET_DIR"; export CARGO_TARGET_DIR ;;
+esac
 one_build_target="$CARGO_TARGET_DIR"
 
 # The two spellings a path can have for the toolchain on this machine: `C:/a/b` (mixed, what
@@ -69,6 +102,12 @@ if [ -n "$SDK" ] && [ -d "$SDK/share/wasi-sysroot" ]; then
   export WASI_SYSROOT="$SDK/share/wasi-sysroot" WASI_SDK_PATH="$SDK"
 fi
 
+# What built these bytes, on the record: a build that does not match the pin is diagnosed by these two
+# versions first, and a run that reports them cannot be mistaken for one that used another toolchain.
+sdk_record='none'
+if [ -n "${SDK:-}" ]; then sdk_record="$(head -1 "$SDK/VERSION" 2>/dev/null)"; sdk_record="${sdk_record:-$SDK}"; fi
+printf 'component toolchain: %s (pinned: %s); wasi-sdk: %s\n' "$(rustc -V 2>/dev/null)" "${COMPONENT_TOOLCHAIN:-default}" "$sdk_record" >&2
+
 # --- Reproducible bytes: the checkout path is not an input ------------------------------------
 # Rust embeds source paths where the guest can see them: panic locations (`file!()` on a path
 # dependency is absolute), `module_path!()`-style strings, and the debuginfo of every crate. C
@@ -92,8 +131,6 @@ fi
 # `RUSTC_WRAPPER` value, is one string for every checkout. That is not what makes a component with a
 # path dependency differ still - that is Cargo's `-C metadata` (docs/COMPONENTS.md, "Reproducible
 # builds", measured) - but a build input that can be one constant should not be a per-checkout path.
-sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
-sha_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
 
 # Install the wrapper where every checkout of the same wrapper source shares exactly one path, and
 # print that directory. Content-addressed: a changed wrapper is a different path, an unchanged one is
@@ -126,6 +163,67 @@ install_wrapper() {
   fi
   printf '%s\n' "$dir"
 }
+
+# The byte helpers, before anything uses them (the build root below hashes a tree; the install hashes
+# the module it wrote).
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
+sha_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
+
+# --- The build root is a CONSTANT path, never this checkout's ----------------------------------
+# Cargo's source identity for a `path =` package is its canonical absolute path; that hash travels into
+# every dependent's `-C metadata`, and rustc combines `-C metadata` into symbol names. So the same
+# source in two checkouts builds to two different files, with the same size and a different sha256.
+# Measured on avell 23/11, one commit, two paths, same toolchain: `libwa_mesh_core-8ee54b00c7a6cacd.rlib`
+# against `libwa_mesh_core-cf7108a003359ad6.rlib`, and `mesh` 211,918 bytes `4769e631...` against
+# `871179cc...`. Five of the pinned components have such a dependency (`graph` -> wa-graph, `mesh` ->
+# wa-mesh-core, `model-gateway` -> wa-model-gateway, `wa-email` -> outbox+index, `wa-whatsapp` ->
+# outbox+index), and it is exactly those five that no rebuild could match (docs/COMPONENTS.md,
+# "Reproducible builds"). No wrapper can take that input over: it is not a flag that is added, and
+# rustc combines every `-C metadata` it is given, so Cargo's own part cannot be replaced from outside.
+#
+# What does close it: build from a copy at ONE path, the same for every checkout. A real directory, not
+# a symlink - Cargo canonicalises a symlink back to the tree (measured: the metadata stayed the tree's).
+# The copy is the whole tree except `.git`, `build/` and every `target/`, so every input the build has is
+# inside it.
+#
+# Two shapes of the same answer:
+#  * with flock: one path, `$WA_COMPONENT_BUILD_ROOT/src`, re-extracted for each run under an exclusive
+#    lock held for the whole script (`flock -o` re-exec: the lock belongs to the flock process, so no
+#    cargo child inherits the descriptor and holds it after the build). Re-extracting instead of
+#    rebuilding the tree file by file keeps every mtime, so Cargo's cache stays warm between runs: an
+#    unchanged tree is `Fresh`, a changed one recompiles only what changed.
+#  * without flock (no POSIX lock on this host): `$WA_COMPONENT_BUILD_ROOT/src-<hash of the tree>`, which
+#    needs no lock because it is never written twice - the price is a cold build per changed tree.
+# WA_COMPONENT_STABLE_ROOT=0 turns both off and builds in the checkout, which is how the path's
+# contribution is shown (like WA_COMPONENTS_REPRO=0 for the remapping).
+BUILD_ROOT="${WA_COMPONENT_BUILD_ROOT:-${TMPDIR:-/tmp}/wa-component-build}"
+copy_tree() { # <destination>: this checkout's whole build input, as it is now
+  local dst="$1"
+  rm -rf "$dst" && mkdir -p "$dst" || return 1
+  tar -C "$PWD" --exclude=.git --exclude=build --exclude=target -cf - . | tar -C "$dst" -xf - || return 1
+}
+if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ] && [ "${WA_COMPONENT_STABLE_ROOT:-1}" != 0 ]; then
+  case "$BUILD_ROOT" in
+    "$PWD"|"$PWD"/*) echo "error: WA_COMPONENT_BUILD_ROOT ($BUILD_ROOT) is inside this checkout; the build root must live outside the tree it copies" >&2; exit 2 ;;
+  esac
+  mkdir -p "$BUILD_ROOT" || { echo "error: cannot create the build root $BUILD_ROOT" >&2; exit 2; }
+  if [ -z "${WA_COMPONENT_SRC_ROOT:-}" ] && command -v flock >/dev/null 2>&1; then
+    exec flock -o "$BUILD_ROOT/.src.lock" env WA_COMPONENT_SRC_ROOT="$BUILD_ROOT/src" "$0" "$@"
+  fi
+  if [ -n "${WA_COMPONENT_SRC_ROOT:-}" ]; then
+    BUILD_SRC="$WA_COMPONENT_SRC_ROOT"
+    copy_tree "$BUILD_SRC" || { echo "error: cannot copy this tree into $BUILD_SRC" >&2; exit 2; }
+  else
+    stage="$(mktemp -d "$BUILD_ROOT/.stage-XXXXXX")" || { echo "error: cannot stage under $BUILD_ROOT" >&2; exit 2; }
+    copy_tree "$stage" || { rm -rf "$stage"; echo "error: cannot copy this tree into $stage" >&2; exit 2; }
+    tree_hash="$( { cd "$stage" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; } | sha_stdin | cut -c1-16)"
+    BUILD_SRC="$BUILD_ROOT/src-$tree_hash"
+    if [ -d "$BUILD_SRC" ]; then rm -rf "$stage"; else mv "$stage" "$BUILD_SRC" || { echo "error: cannot install $BUILD_SRC" >&2; exit 2; }; fi
+  fi
+  cd "$BUILD_SRC" || { echo "error: cannot enter the build root $BUILD_SRC" >&2; exit 2; }
+  printf 'component build root: %s
+' "$BUILD_SRC" >&2
+fi
 
 if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ]; then
   CHECKOUT="$(tree_path "$(pwd)")"
