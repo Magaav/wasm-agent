@@ -215,3 +215,23 @@ ffd2a0a5`, `scripts/regenerate.sh` with nothing left to commit, `gen-refusal-cod
 The underlying defect still needs the one-token factory fix from the round-1 note (`|| true` on the `F=`
 assignment); the state above is a workaround that keeps this branch landable without touching a factory
 script, without weakening a test, and without a test row changing.
+
+## The worker, and the model id
+
+This round was worked by the `wasm-agent` runtime on `avell`, running the model
+**`deepseek-v4.1-flash`** (provider `opencode-go`), which is what `wa status` on this node answers for
+its own session:
+
+```
+wa status  ->  model     deepseek-v4.1-flash  provider=opencode-go  configured=yes
+```
+
+The trailers on this round's final commit therefore read
+`Agent: wasm-agent mission=wasi-only-plan` and
+`Co-Authored-By: wa worker (deepseek-v4.1-flash) <wa-worker@noreply.invalid>`. The earlier commits carry
+`wa worker (wasm-agent)` because the round-1 fix used `_orch/add-trailers.sh` with that placeholder before
+the real id was known; the landing rewrites them to this id.
+
+The owner's address is out of this file and out of every commit of this branch that carried it: it is
+referred to as "the owner", and the whole branch's patches were rebuilt so no earlier revision of this
+report contains it (`grep -rl` in the tree: nothing; `git log --format=%B` over the branch: nothing).
