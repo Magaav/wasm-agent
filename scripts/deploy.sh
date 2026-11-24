@@ -1476,24 +1476,25 @@ echo "deploy: $COMPONENT_COUNT pinned component(s) staged:$COMPONENT_SET"
 # The pair has to answer, not merely load: a component built for another engine, or a core whose
 # graph path is broken, fails here with nothing installed.
 COMPONENT_PROOF_HOME="$(mktemp -d)"
-# THE GRAPH IS OFF BY DEFAULT (docs/GRAPH.md, 23/11) AND THIS PROOF STILL HAS TO PROVE THE COMPONENT. The
-# switch below is the documented per-process one: with it, `host.graph_*` answers through the STAGED
-# component exactly as a node that uses the graph does; without it, the call is refused as dormant before
-# the component is touched - which would prove nothing at all about the bytes being installed. The proof
-# itself refuses by name if the switch is missing (`scripts/check-graph-component.lua`), so it cannot
-# silently degrade back into proving nothing.
+# TWO PROPERTIES, AND NEITHER DEPENDS ON AN OPTIONAL FEATURE (Fable, 24/11). The proof asks: (1) does the
+# candidate binary answer a call through a STAGED component - through `memory`, whose feature is on by
+# default on every node and whose bytes `components.lock` pins for every install kind, so no switch is ever
+# set here; and (2) does a DORMANT feature refuse BY NAME - the graph is off by default (docs/GRAPH.md) and
+# the proof asserts `graph_dormant` comes back from THIS binary, which is the state every node ships in.
+# scripts/check-component-proof.lua holds both; a proof that had to switch a feature on could not prove the
+# state a node is actually in.
 if ! WA_COMPONENTS_DIR="$COMPONENT_STAGE" WASM_AGENT_HOME="$COMPONENT_PROOF_HOME" WASM_AGENT_MANAGED=0 \
-  WA_GRAPH_WATCH=0 WA_GRAPH_COMPONENT=1 WA_SCRIPT="$ROOT/scripts/check-graph-component.lua" \
+  WA_SCRIPT="$ROOT/scripts/check-component-proof.lua" \
   env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY -u WA_GRAPH_ROOT -u WA_GRAPH_DB \
   "$NEW" --db "$COMPONENT_PROOF_HOME/proof.db" >"$COMPONENT_PROOF_HOME/proof.log" 2>&1; then
   tail -5 "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null | sed 's/^/  component: /' >&2
   rm -rf "$COMPONENT_PROOF_HOME"
-  fail "refused(component_proof_failed): the candidate binary did not answer a graph call through the staged component; nothing installed"
+  fail "refused(component_proof_failed): the candidate binary did not answer a call through the staged component (or a dormant feature did not refuse by name); nothing installed"
 fi
-COMPONENT_PROOF="$(grep -c 'graph component ok' "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null)"
+COMPONENT_PROOF="$(grep -c 'component proof ok' "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null)"
 rm -rf "$COMPONENT_PROOF_HOME"
-[ "$COMPONENT_PROOF" = "1" ] || fail "refused(component_proof_failed): the graph proof did not print its verdict; nothing installed"
-echo "deploy: the candidate binary answers graph calls through the staged component"
+[ "$COMPONENT_PROOF" = "1" ] || fail "refused(component_proof_failed): the component proof did not print its verdict; nothing installed"
+echo "deploy: the candidate binary answers through the staged component, and its dormant graph refuses by name"
 
 wa_phase proving
 SCRATCH=$((PORT + 40))
@@ -2279,7 +2280,8 @@ ship_file "$ROOT/scripts/check-disk-floor.sh" "$INSTALL_DIR/scripts/check-disk-f
 ship_file "$ROOT/scripts/lib/proc-use.mjs" "$INSTALL_DIR/scripts/lib/proc-use.mjs" "the reclaim pass's process evidence"
 ship_file "$ROOT/components.lock" "$INSTALL_DIR/components.lock" "components.lock beside deploy.sh (the pins this install verified)"
 ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
-ship_file "$ROOT/scripts/check-graph-component.lua" "$INSTALL_DIR/scripts/check-graph-component.lua" "the graph component proof the deploy runs"
+ship_file "$ROOT/scripts/check-component-proof.lua" "$INSTALL_DIR/scripts/check-component-proof.lua" "the component proof the deploy runs"
+ship_file "$ROOT/scripts/check-graph-component.lua" "$INSTALL_DIR/scripts/check-graph-component.lua" "the graph component answer check an operator (and scripts/test-deploy-component-proof.lua) can run"
 ship_file "$ROOT/scripts/check-embedded-runtime.lua" "$INSTALL_DIR/scripts/check-embedded-runtime.lua" "embedded source and native asset readiness checker"
 ship_file "$ROOT/scripts/verify-install.sh" "$INSTALL_DIR/scripts/verify-install.sh" "installation verifier"
 ship_file "$ROOT/scripts/sentinel-install-proof.mjs" "$INSTALL_DIR/scripts/sentinel-install-proof.mjs" "request-bound installation proof"

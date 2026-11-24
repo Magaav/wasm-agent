@@ -354,7 +354,7 @@ merge was clean, with no conflict at all: this branch's seam in `lua/core/tools.
 different places, and the graph's five gate call sites are unchanged (`rg -c graph_offered lua/core/tools.lua`
 = 5).
 
-## 10. The G blocker: the deploy's graph proof against a dormant node (commit `6a0d3811`)
+## 10. The G blocker: the deploy's proof must not depend on an optional feature
 
 The landing of `ad3fb3c5` made every install refuse:
 
@@ -364,28 +364,47 @@ deploy: refused(component_proof_failed): the candidate binary did not answer a g
 component; nothing installed
 ```
 
-The deploy proves the staged `graph` component on the candidate binary before anything is installed
-(`scripts/deploy.sh`, step 3e, running `scripts/check-graph-component.lua`). With the graph off by default,
-that proof process answered `graph_dormant` *before* the component was touched - a proof of nothing, and a
-refusal that blocked every install. Two edits, one per half of the mistake:
+The deploy proved the staged `graph` component on the candidate binary before installing anything (step 3e,
+`scripts/check-graph-component.lua`), and with the graph off by default that proof answered `graph_dormant`
+before the component was touched. My first repair set `WA_GRAPH_COMPONENT=1` for the proof - and Fable's
+steer ruled exactly that out: **a deploy proof must not depend on an optional feature at all**. The final
+shape, on `change/deploy-component-proof`:
 
-* `scripts/deploy.sh`: the proof process now sets `WA_GRAPH_COMPONENT=1`, the documented per-process switch. A
-  node that USES the graph has it on; what the proof proves is the staged component, not the node's default.
-* `scripts/check-graph-component.lua`: it now refuses BY NAME when the switch is missing
-  (`... the graph is switched off in THIS process ..., so the staged component cannot be proved - the refusal
-  is the switch, not the component`), so the proof can never silently degrade back into proving nothing, and
-  a future reader can tell "dormant" from "broken bytes".
+* `scripts/check-component-proof.lua` (new, and the deploy now runs it instead of the graph proof) proves two
+  properties, with no feature switch anywhere:
+  1. **the candidate binary answers a call through a staged component** - through `memory`, and not by taste:
+     its feature is on by default on every node (`rust/wa-features` FEATURES, `default_enabled: true`),
+     `components.lock` pins it for every install kind (the deploy stages exactly `wa_components_shipped`),
+     and its seam is one capability call with a JSON answer, so it needs no runtime assets, no model and no
+     network. (`codemode` is default-on too, but proving it means proving a JS guest *and* its assets - a
+     second subject for one question.) The call goes through `lua/core/memory.lua`'s own seam, so a staged
+     set that is missing, unpinned or built for another engine falls back to the native path and the proof
+     refuses instead of passing;
+  2. **a dormant feature refuses BY NAME** - the graph is off by default, and the proof asserts
+     `graph_dormant` with `effect: none` (and the `next` that names the switch) comes back from THIS binary.
+     That is the state every node ships in; the enabled branch of the same check answers instead, so the
+     proof does not depend on the graph being dormant either way.
+* `scripts/deploy.sh`: `WA_GRAPH_COMPONENT` is gone from the proof, `WA_SCRIPT` points at the new proof, and
+  the two refusals and the success line now name a *call through a staged component* and the dormant refusal
+  rather than a graph call.
+* `scripts/check-graph-component.lua` stays in the tree and stays shipped, and is **no longer part of the
+  deploy**: what it adds is the graph component's own answers (index -> query -> explain -> status), which a
+  broken `graph.wasm` would otherwise only fail in the gate's graph rows. It cannot be switch-free, so it
+  runs only where a node uses the graph: `scripts/test-deploy-component-proof.lua`'s last direction.
 
-`scripts/test-deploy-graph-proof.lua` (new row, 16 checks, wired in `scripts/test.sh` beside the graph rows and
-picked up by the fast path like every `scripts/test-*.lua`) holds all three directions, each in its own scratch
-home with its own staged copy of the component: **the deploy's own invocation passes** through the staged
-component on a node whose graph is dormant; **without the switch it fails by name** and never prints the
-verdict; and **a component whose bytes are not its pin still fails it**. The row's first version passed a
-proof that never ran - `env -u WA_GRAPH_COMPONENT ... true` ran `true` - which is the same class of mistake the
-proof exists to prevent, and it is why the row asserts the verdict string as well as the exit code.
+`scripts/test-deploy-component-proof.lua` (renamed from `test-deploy-graph-proof.lua`, 21 checks, wired in
+`scripts/test.sh` and picked up by the fast path) holds all four directions in its own scratch homes with its
+own staged copies: **passes with the graph dormant** (the deploy's own invocation) and **passes with it
+enabled** (a policy file in the proof's home), **fails when the staged component's bytes are not its pin**,
+and **the dormant refusal is by name** (`graph_dormant` asserted on the output, not inferred from an exit
+code). Its first version passed a proof that never ran - `env -u WA_GRAPH_COMPONENT ... true` ran `true` -
+which is the same class of mistake the proof exists to prevent, and why the row asserts the verdict text as
+well as the exit code.
 
-Measured, narrowed run (139 checks): `scripts/test-deploy-graph-proof.lua` **pass**, all graph and feature
-rows **pass**. Two checks were red in that run: `esc-stops-pty` (the load-sensitive pty row named in §9) and
-`scripts/test-graph-quarantine-evidence.lua`, which the watchdog killed at 120 s under load - and which **fails
-identically on main `ffd2a0a5`'s own tree at load 1.9**, with its own component set, so it is main's red and
-not this branch's.
+Measured, the deploy's proof line run verbatim (no switch, staged components, fresh home):
+
+```
+component proof ok: memory answered through the staged component (bf469e8ce4af), and the dormant graph
+refused by name (graph_dormant, effect none) from this binary
+exit 0
+```
