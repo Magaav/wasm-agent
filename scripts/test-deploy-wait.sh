@@ -192,6 +192,10 @@ inside_first_call() { # <calls-before>
   return 1
 }
 
+# A 7b case gets its OWN ledger: a tick dispatches at most eight due rows, so six cases sharing one ledger
+# measured each other's backlog instead of the resume under test (measured 24/11: the dispatch assertion moved
+# between cases from run to run).
+lua_db() { DW_MODE="$1" WA_SCRIPT="scripts/lib/deploy-wait-e2e.lua" "$BIN" --db "$2" 2>&1 | grep -v 'served natively'; }
 lua() { # <mode> [extra env...]
   DW_MODE="$1" WA_SCRIPT="scripts/lib/deploy-wait-e2e.lua" "$BIN" --db "$DB" 2>&1 | grep -v 'served natively'
 }
@@ -478,25 +482,36 @@ step "7b. a pause whose RESUME WAS LOST is re-armed and resumed: three session k
 for ending in install withdraw; do
   for kind in served worker selfwake; do
     clear_request; marker_down 2>/dev/null || true
-    out="$(DW_KIND="$kind" DW_COUNT=1 lua pause-lost)"
+    DW7="$WORK/7b-$kind-$ending.db"
+    rm -f "$DW7"
+    out="$(DW_KIND="$kind" DW_COUNT=1 lua_db pause-lost "$DW7")"
     session="$(printf '%s' "$out" | sed -n 's/^sessions=//p' | cut -d, -f1)"
     if [ -n "$session" ]; then ok "$kind/$ending: a paused session whose resume row is unknown";
     else fail "$kind/$ending: the fixture wrote no paused session: $out"; fi
     write_request
     [ "$ending" = "install" ] && marker_up
-    tick="$(lua tick)"
+    tick="$(lua_db tick "$DW7")"
     same "$(field "$tick" dispatched)" "0" "$kind/$ending: nothing runs while the deploy waits"
     same "$(field "$tick" rearmed)" "0" "$kind/$ending: and nothing is re-armed while it waits"
     [ "$ending" = "install" ] && marker_down
     clear_request
-    tick="$(lua tick)"
+    tick="$(lua_db tick "$DW7")"
     same "$(field "$tick" rearmed)" "1" "$kind/$ending: the lost resume is re-armed by the NODE, with no watchdog"
     # The re-armed row is scheduled one second out (`selfloop.schedule` never arms a past time), so the tick that
     # re-arms it RELEASES it and the next one dispatches it: measured `rearmed=1 dispatched=0`, then
     # `dispatched=1 released=1`. The guarantee is the resume, not which tick of the 200 ms loop performs it.
-    [ "$(field "$tick" dispatched)" = "0" ] && tick="$(lua tick)"
+    # The re-armed row is one second out, so the tick that arms it releases it and a LATER tick dispatches it;
+    # how many ticks that takes is the node's business (the real cadence is 200 ms, and a tick dispatches at most
+    # eight rows, so other sessions' rows can be ahead of this one). The guarantee is the resume, so it is
+    # allowed twelve ticks and no more: a real node ticks five times a second, and a tick dispatches at most
+    # eight rows, so the rows of the earlier cases can be ahead of this one for a few ticks.
+    tries=0
+    while [ "$(field "$tick" dispatched)" = "0" ] && [ "$tries" -lt 12 ]; do
+      tries=$((tries + 1))
+      tick="$(lua_db tick "$DW7")"
+    done
     neq "$(field "$tick" dispatched)" "0" "$kind/$ending: and the resumed turn is dispatched"
-    tick2="$(lua tick)"
+    tick2="$(lua_db tick "$DW7")"
     same "$(field "$tick2" rearmed)" "0" "$kind/$ending: once, not once per tick"
   done
 done

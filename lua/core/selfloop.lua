@@ -122,6 +122,15 @@ function M.setup()
     if tostring(row.name or "") == "kind" then has_kind = true end
   end
   if not has_kind then exec("ALTER TABLE self_wake_pauses ADD COLUMN kind TEXT NOT NULL DEFAULT 'pause'", {}) end
+  -- A RESUME'S OWN CHAIN COUNT (24/11): `attempts` counts dispatch attempts and reaches the hundreds on a real
+  -- ledger (measured 24/11: 2,3,4,5,6,7,9,11,13,73,82,199,249,308,464,486,533 across 16 sessions), so reading it as a
+  -- re-arm count abandoned 46 live resumes on the first tick after an install. This column is written by
+  -- deploy_pause.ensure_resumes alone and means one thing: how many times THIS pause's resume has been re-armed.
+  local has_chain = false
+  for _, row in ipairs(query("PRAGMA table_info(self_wakes)", {})) do
+    if tostring(row.name or "") == "resume_chain" then has_chain = true end
+  end
+  if not has_chain then exec("ALTER TABLE self_wakes ADD COLUMN resume_chain INTEGER NOT NULL DEFAULT 0", {}) end
   ready = true
   return true
 end
@@ -1519,6 +1528,11 @@ function M.tick(opts)
       end
     end
   end
+  -- AND THE RECORDS THAT CAN NEVER BE RESUMED ARE CLOSED (24/11): the health line counts what is left, so a
+  -- graveyard of 53 records from a day of deploys cannot pass for work in flight. LAST, after every dispatch
+  -- decision: housekeeping must never stand between a due row and the scheduler.
+  local closed = dep("deploy_pause").sweep_records(now, { read = opts.deploy_marker })
+  if tonumber(closed) and tonumber(closed) > 0 then out.pause_records_closed = tonumber(closed) end
   return out
 end
 
