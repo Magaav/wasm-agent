@@ -1069,17 +1069,36 @@ function wa_subagents(body, session)
 end
 
 local completions=dofile('lua/core/completions.lua')
+-- One entry per phase that met a lock: `{streak, until_ms}` (see `phase` below).
+local PHASE_BACKOFF = {}
+local PHASE_BACKOFF_BASE_MS = 2000
+local PHASE_BACKOFF_MAX_MS = 16000
 local sqlite_busy=dofile('lua/core/sqlite_busy.lua')
 -- One phase of the tick. A phase that meets a LOCK is deferred: the next tick is two seconds away, so
 -- losing this one is free, and raising would fail the call for weather (`[placement] lua/core/
 -- completions.lua:28: database is locked`, measured 2026-11-12 in serve.log). Any other failure keeps
 -- failing loudly - a bug must not become a quiet line.
 local function phase(name,fn)
+  -- A PHASE THAT MEETS A LOCK BACKS OFF, IT DOES NOT RE-TRY IN A LOOP (r7c, Fable 24/11). The node's own
+  -- placement thread calls this tick every two seconds; when the database is busy a phase that keeps asking is
+  -- CPU spent on a question hit already has an answer to, and MEASURED on the live node that thread ran at ~49 %
+  -- of a core for 29 minutes. The backoff is per phase, doubles from one skip to eight, and resets on the first
+  -- phase that succeeds - so a busy minute costs a handful of attempts instead of hundreds, and a healthy node is
+  -- untouched (the branch is only entered when a lock was actually seen).
+  local now_ms = tonumber(host.now and host.now())
+  local skip_until = PHASE_BACKOFF[name] and PHASE_BACKOFF[name].until_ms or 0
+  if now_ms and now_ms < skip_until then return end
   local ok,problem=pcall(fn)
-  if ok then return end
+  if ok then
+    if PHASE_BACKOFF[name] then PHASE_BACKOFF[name] = nil end
+    return
+  end
   local text=tostring(problem)
   if not sqlite_busy.is_busy(text) then error(problem,0) end
-  if host.log then pcall(host.log,'tick '..name..' deferred: '..text) end
+  local streak = (PHASE_BACKOFF[name] and PHASE_BACKOFF[name].streak or 0) + 1
+  local wait_ms = math.min(PHASE_BACKOFF_MAX_MS, PHASE_BACKOFF_BASE_MS * 2 ^ (streak - 1))
+  PHASE_BACKOFF[name] = { streak = streak, until_ms = (now_ms or 0) + wait_ms }
+  if host.log then pcall(host.log,'tick '..name..' deferred: '..text..' (skip '..wait_ms..' ms)') end
 end
 function wa_orchestrator_tick()
   phase('orchestrator',function() dofile("lua/core/orchestrator.lua").tick(M) end)

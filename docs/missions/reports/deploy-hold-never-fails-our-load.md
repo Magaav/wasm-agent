@@ -1797,3 +1797,46 @@ and `a_lane_that_beats_but_does_not_progress_is_stalled`. Serve module: **47 pas
 **Still not done:** the node-level B test in both shapes needs a spawned `serve` (A attended; A's resume plus B's
 wake; B starts within the bound). This round proves the rule, not the node. (4) the tick spin and (5) the sentinel
 remain open, as reported.
+
+### r7c final round: the node-level B test (shape 1), and the spin measured and handed to H (24/11 ~08:20Z)
+
+**(A) The node-level test exists and is green: `scripts/test-placement-defer.sh`.** It starts a REAL scratch `wa
+serve` (own home, own db, own ports), writes the fixture through the real modules
+(`scripts/lib/placement-fixture.lua`: session A with a resume wake, session B with a time wake), then has a SECOND
+process take A's claim the way an attended turn does (`scripts/lib/placement-hold.lua`, `resources.begin` + a long
+`host.sleep`, released on exit). Measured output on the branch:
+
+    placement defer ok (B started in 2s, A deferred, no lane stalled)
+    queue_ok=1 count=0
+
+and the node's own journal from that run:
+
+    [completion] admitted run 2 of session placement-b to node-thread 2
+    [placement] no background lane is eligible (busy or stalled): background run borrows reserve node-thread 0 ...
+    [lua] selfloop: wake ... of session placement-a deferred: another run holds the session claim
+
+So B ran on the background lane while A's completion took a borrowed reserve lane, A deferred with its line, and
+`/health` reported `count=0` waiting completions - `over_bound` never true.
+
+**What this does NOT prove, said plainly.** Shape 2 (A's resume running a LONG turn on the only background lane)
+is **not** delivered: the node has no provider stub that can sleep inside a turn, so no row can make a lane busy for
+minutes. And the "must fail on 4c720beb" requirement is **not met**: I built main's binary and ran the same row
+against it - it **fails only on the admission line**, which does not exist on main, while its behavioural assertions
+(B started in seconds, A deferred) **pass** there, because shape 1 does not need the borrow when the background lane
+is free. The borrow is therefore proven by its unit rule and by this shape-1 run, not by a saturated node. Shape 2
+needs a stub provider first; that is the next step, not a claim I can make now.
+
+**(4) The spin: one attempt, measured, then stopped as instructed.**
+* Baseline, idle scratch node, 30 s sample of the `wa-placement` LWP from `/proc/<tid>/stat`: **2060 ms CPU = 6 %**.
+* The attempt: `phase` in `lua/core/subagents.lua` now backs off per phase on a lock (2 s doubling to 16 s, reset on
+  the first success) instead of asking again on the next two-second tick.
+* After: **1940 ms CPU = 6 %**. The busy branch is never entered on a healthy node, so the idle cost did not move.
+* Verdict: **the first attempt does not hold; the idle cost moves to H** with these numbers. The backoff stays
+  because it is correct and free, but it is not the fix for an idle thread burning 6 % of a core - that is the
+  tick's own queries every two seconds, and it needs H's "idle costs nothing" work.
+* The 49 % seen live was a node with four queued completions and a stalled lane: work, not an idle spin.
+
+**(5) The sentinel stays with H week 1, as instructed.**
+
+**Rows:** deploy-resume 25, deploy-pause 101, selfloop 109, selfloop-pause 185, handle-wake 17, cli-wake-row 30,
+placement defer ok.
