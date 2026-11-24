@@ -83,7 +83,7 @@ exit 0"
     [ "${WA_FAKE_BUILD_NO_BINARY:-0}" = 1 ] && rm -f "$bin"
     bin_sha=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
     if [ -n "$target" ]; then target_json="\"$target\""; else target_json=null; fi
-    printf '%s\n' "{\"build_schema\":1,\"kind\":\"codemode-offline-build\",\"ok\":true,\"target\":$target_json,\"binary\":\"$bin\",\"binary_sha256\":\"$bin_sha\",\"source_commit\":\"$sha\",\"source_tree\":\"$tree\",\"source_dirty\":false,\"root\":\"$(CDPATH= cd -- \"$root\" && pwd -P)\"}"
+    printf '%s\n' "{\"build_schema\":1,\"kind\":\"codemode-offline-build\",\"ok\":true,\"target\":$target_json,\"binary\":\"$bin\",\"binary_sha256\":\"$bin_sha\",\"source_commit\":\"$sha\",\"source_tree\":\"$tree\",\"source_dirty\":false,\"root\":\"$(CDPATH= cd -- "$root" && pwd -P)\"}"
     exit 0 ;;
 esac
 exec "$WA_REAL_NODE" "$@"
@@ -140,18 +140,23 @@ local function install_real_chain()
   local files = { "scripts/release-linux.sh", "scripts/publish-linux-channel.sh", "scripts/codemode-build.mjs",
     "scripts/install.sh", "scripts/linux/bootstrap.sh", "lua/core/mcp.lua", "rust/Cargo.toml",
     "rust/wa-sentinel/Cargo.toml" }
-  -- THE RECEIPT READERS are the thing this row is about, so they are copied when the tree has them: a tree that
-  -- predates them stages the bundle from a guessed target directory, and that tree is exactly what this row must
-  -- catch (it fails on the old defect, not on a missing fixture file).
-  local optional = { "scripts/lib/build-receipt.mjs", "scripts/lib/cargo-executable.mjs" }
+  -- THE LIBRARY IS COPIED BY RULE, NOT BY A LIST (Fable, 24/11). This row used to copy two .mjs files by name
+  -- (scripts/lib/build-receipt.mjs, scripts/lib/cargo-executable.mjs) and ce1feb5b made build-receipt.mjs import
+  -- scripts/lib/main-module.mjs: the fixture then ran a receipt reader whose own import was missing and the row
+  -- went red on a missing FIXTURE file instead of on the release it judges (measured 24/11: ERR_MODULE_NOT_FOUND
+  -- .../land-fixture/repo/scripts/lib/main-module.mjs, imported from .../scripts/lib/build-receipt.mjs).
+  -- A list of names cannot be kept true by hand, so the rule is the directory: everything beside the chain in the
+  -- tree under test comes with it, and the next import a reader grows is carried without anyone remembering this
+  -- line. It is also right for an OLD tree, which is the other half of this row: a tree that predates the receipt
+  -- readers copies the lib it has (and no build-receipt.mjs), stages the bundle from the guessed directory, and
+  -- is caught for exactly the defect this row exists for. "Copy what is there" is the rule for both trees.
   for _, relative in ipairs(files) do
     local dir = relative:match("^(.*)/[^/]+$")
     if dir then must("mkdir -p '" .. repo .. "/" .. dir .. "'", "mkdir for " .. relative) end
     must("cp -f '" .. tree_root .. "/" .. relative .. "' '" .. repo .. "/" .. relative .. "'", "copy " .. relative)
   end
-  for _, relative in ipairs(optional) do
-    shell("cp -f '" .. tree_root .. "/" .. relative .. "' '" .. repo .. "/" .. relative .. "' 2>/dev/null")
-  end
+  must("mkdir -p '" .. repo .. "/scripts/lib' && cp -Rf '" .. tree_root .. "/scripts/lib/.' '" .. repo .. "/scripts/lib/'",
+    "copy scripts/lib by rule - the directory every import in the chain resolves against")
   -- The MCP runtime the bundle names (lua/core/mcp.lua M.RUNTIME): release-linux.sh refuses a bundle without it.
   local runtime = must("sed -n '/^M.RUNTIME={/,/}/p' '" .. repo .. "/lua/core/mcp.lua' | grep -o \"'[^']*\\.mjs'\" | tr -d \"'\"")
   for file in runtime:gmatch("%S+") do
