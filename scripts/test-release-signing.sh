@@ -280,6 +280,14 @@ stub_release() { # <base> <sign: yes|no|flip|other-key>
   dir="$base"; mkdir -p "$dir"
   elf 62 "$dir/wa-$TRIPLE-$SHORT"            # 0x3e = EM_X86_64
   elf 62 "$dir/wa-sentinel-$TRIPLE-$SHORT"
+  # AND THE ICON FONT, because a real set from this tree carries it (item 7, Victor 23/11):
+  # scripts/publish-node-binaries.sh:412-413 copies assets/fonts/waIcons-Regular.ttf beside the binaries and
+  # refuses a set without it (font_missing), and :713 puts it in $assets, so the release's SHA256SUMS names
+  # it and the vault signs that row with the rest. A fixture that left it out modelled a set this publisher
+  # can no longer produce - and the publisher was right to rewrite the sums and refuse the stale signature
+  # (measured 24/11: release_signature_invalid, then signature_stale, exit 6). The fixture set now holds
+  # every file a real one does, so the signed sums it stands up are the sums the publisher verifies.
+  install -m644 "$ROOT/assets/fonts/waIcons-Regular.ttf" "$dir/waIcons-Regular.ttf"
   {
     printf 'source_commit=%s\n' "$COMMIT"
     # The REAL digest of this commit's compiled inputs: publish-node-binaries.sh refuses a manifest whose
@@ -411,6 +419,18 @@ for asset in SHA256SUMS SHA256SUMS.sig; do
 done
 WA_RELEASE_ROOT="$ROOT" wa_release_verify_sums "$WORK/shipped" "$WORK/node-keys.txt" >/dev/null 2>&1 \
   || fail "the shipped release does not verify against the key that signed it"
+ok
+
+# THE ICON FONT RIDES IN THAT SAME SIGNED SET (item 7, Victor 23/11). waIcons-Regular.ttf is an asset of
+# every node release: scripts/publish-node-binaries.sh:412-413 copies it beside the binaries and refuses a
+# set without it, :713 puts it in $assets so the sums name it, and :800-826 uploads that whole list. A
+# release whose sums named a file the ref did not carry would be unverifiable from the commit alone - the
+# exact defect this suite exists for - so both halves are checked here, on the shipped bytes.
+printf '%s\n' "$listed" | grep -qx "waIcons-Regular.ttf" \
+  || fail "the shipped ref $ref does not carry waIcons-Regular.ttf (holds: $(printf '%s' "$listed" | tr '\n' ' '))"
+ok
+grep -q "  waIcons-Regular.ttf$" "$WORK/shipped/SHA256SUMS" \
+  || fail "the shipped SHA256SUMS does not name waIcons-Regular.ttf, so the font ships unsigned"
 ok
 
 say "ok ($checks checks)"
