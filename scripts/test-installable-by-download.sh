@@ -135,10 +135,21 @@ note "component, binary and bundle caches are empty ($INSTALL)"
 # ---- the release channel answers at all --------------------------------------------------------
 # A 404 for one asset is the answer this row exists for; a channel nobody can reach is a skip, and the two
 # are never the same sentence.
-if ! curl -fsS -m 20 -o /dev/null "https://api.github.com/repos/Magaav/wasm-agent" 2>/dev/null; then
-  say "SKIP: the release channel (api.github.com) is not reachable from here; nothing was installed and nothing is claimed"
+# WHO ANSWERS: a node fetches a release asset with gh when it has one and with the public URL otherwise, so
+# this asks the same two. The PUBLIC API is rate limited per address - measured here 24/11 21:44Z: HTTP 403
+# with 0 of 60 left while the authenticated gh had 4,868 - and a rate-limited probe is not "the channel is
+# down". Both failing is the only skip.
+reach=""
+if command -v gh >/dev/null 2>&1 && gh api "repos/Magaav/wasm-agent" --jq .full_name >/dev/null 2>&1; then
+  reach="gh (authenticated)"
+elif curl -fsS -m 20 -o /dev/null "https://api.github.com/repos/Magaav/wasm-agent" 2>/dev/null; then
+  reach="the public release API"
+fi
+if [ -z "$reach" ]; then
+  say "SKIP: neither gh nor the public release API could answer from here (the public API is rate limited per address); nothing was installed and nothing is claimed"
   exit 3
 fi
+note "the release channel answered through $reach"
 
 . "$ROOT/scripts/lib/node-binaries.sh"
 . "$ROOT/scripts/lib/deploy-components.sh"
