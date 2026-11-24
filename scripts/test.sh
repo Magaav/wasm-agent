@@ -578,6 +578,15 @@ gate_run bash scripts/test-deploy-components.sh
 # and that a PATH without cargo/rustup refuses the component stage AT ONCE with component_build_impossible
 # instead of starting a build. No network, no cargo, no node.
 gate_run bash scripts/test-component-build-wrapper.sh
+# IS A PUBLISHED COMMIT INSTALLABLE BY DOWNLOAD? (24/11). Publishing is per landing and covered the node
+# binary only, while a node also needs the components bundle named by the sha256 of components.lock - so a
+# landing that moved the lock published a binary whose bundle was never made (components-df6f97708c72: HTTP
+# 404) and every node without a toolchain refused the update, with nothing saying which asset was missing.
+# This row asks every URL the node release and that commit's lock name for a HEAD, against a LOCAL stand-in
+# of the channel (no network, no gh, no node): complete, the 24/11 shape (bundle absent), a missing
+# signature, a missing manifest, a channel that does not answer (unknown, never complete), and that the tag
+# asked for is the one the COMMIT's lock names rather than the working tree's.
+gate_run bash scripts/test-release-completeness.sh
 # The shipped set: a component is shipped by being PINNED (`components.lock`), and a deploy installs,
 # records and rolls back that whole set (docs/FEATURES.md). Proves the lock (production set, no fixture),
 # the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built
