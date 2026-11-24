@@ -533,7 +533,15 @@ function M.environment_note(role, opts)
 end
 
 -- The directory a session works in: its own worktree when it has one, else the node's cwd.
+-- THE DIRECTORY EACH SESSION RUNS IN, as THIS process decided it, and whether the ledger still owes the row.
+-- Declared here, above their first reader: a Lua local is in scope only from its definition, and a reader
+-- placed above them would call a nil global (the trap that cost a round on the wake branch).
+local run_dirs, run_dirs_owed = {}, {}
+
 function M.workdir(session_id)
+  -- The directory this process already decided for the session: no ledger read on the turn's start path (the
+  -- reads are cheap, but the start path should not need them at all once the run has decided).
+  if run_dirs[session_id] then return run_dirs[session_id] end
   local ok, worktree = pcall(memory.session_worktree, session_id)
   if ok and type(worktree) == "string" and worktree ~= "" then return worktree end
   -- THE SAME DIRECTORY THE COMMANDS RUN IN (Fable 24/11, item 3). This is what the system prompt's
@@ -569,12 +577,42 @@ end
 -- :2931 "interactive"/"control"/"background" when the NODE serves the run; :2997 "remote" for a peer's
 -- call; :406 "job" for a job). So attended = "cli" or "completion" - the terminal's own process.
 -- Answers the directory the session now records.
+-- See the declarations above M.workdir: the decision is kept in memory and the ledger write is deferred
+-- (M.flush_run_directory).
 function M.record_run_directory(session_id, origin)
   if type(session_id) ~= "string" or session_id == "" then return "" end
   if type(memory.session_cwd) ~= "function" or type(memory.set_session_cwd) ~= "function" then return "" end
   local attended = origin == "cli" or origin == "completion"
-  if not attended and memory.session_cwd(session_id) ~= "" then return memory.session_cwd(session_id) end
-  return memory.set_session_cwd(session_id, process_directory(session_id))
+  local recorded = memory.session_cwd(session_id)
+  local decided
+  if attended or recorded == "" then
+    decided = process_directory(session_id)
+  else
+    decided = recorded
+  end
+  run_dirs[session_id] = decided
+  run_dirs_owed[session_id] = (decided ~= recorded) or nil
+  return decided
+end
+
+-- THE START PATH DOES NOT WRITE THE LEDGER (red on main, 24/11). Recording the directory used to call
+-- memory.set_session_cwd right at the run's start, and a held write lock makes that UPDATE wait for the whole
+-- hold: measured 7654 ms behind an 8 s hold (reads are free - session_worktree and session_cwd both answered
+-- in 0 ms), and scripts/test-start-instant.lua measured 1143 ms of it before the first model call, against its
+-- contract that a turn starts the model in under 1 s whatever the ledger is doing.
+--
+-- So the decision is made from data the run already has and kept in memory (the turn itself is consistent:
+-- M.workdir reads the same cache), and the ONE write happens when the run has ENDED - the place where the run
+-- already writes its own record, and where waiting for a busy ledger costs the end of a turn instead of its
+-- start. A process killed before its run ends leaves the old row: the next node-served turn then behaves as it
+-- did before this mission (the node's own directory) until a run of that session finishes and records it.
+function M.flush_run_directory(session_id)
+  if type(session_id) ~= "string" or not run_dirs_owed[session_id] then return false end
+  local directory = run_dirs[session_id]
+  if type(directory) ~= "string" or directory == "" then return false end
+  local ok = pcall(memory.set_session_cwd, session_id, directory)
+  if ok then run_dirs_owed[session_id] = nil end
+  return ok
 end
 
 local function parent_dir(dir)
@@ -2236,6 +2274,9 @@ function M:run(text, images)
       done_gate.note_turn(self.gate, { run_id = self.run_id })
     end)
   end
+  -- The directory this run decided on, recorded now that the run has ended (see M.flush_run_directory: the start
+  -- path must not wait for a busy ledger).
+  pcall(M.flush_run_directory, self.session_id)
   provider.unpin()
   self.reserve_summary=nil
   self.on_call_start=nil
