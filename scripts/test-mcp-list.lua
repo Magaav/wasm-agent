@@ -83,6 +83,14 @@ do
     .. tostring(gated and gated.hint))
   ok(row_of('native_reads', plan.sections[2]).hint == 'not reachable', 'a failing connector: '
     .. tostring(row_of('native_reads', plan.sections[2]).hint))
+  -- A state word says what is MISSING (Fable, 24/11): the built-in surface with no node holding the account
+  -- says `no account`; a registry connector that reported a state nothing recognises keeps its own word,
+  -- because its problem is not a missing account.
+  ok(mcp_list.state_word('unknown', { key = 'whatsapp', scope = 'built-in', state_label = 'unknown' }) == 'no account',
+    'the built-in surface with no account node says what is missing')
+  ok(mcp_list.state_word('unknown', { key = 'x', scope = 'local' }) == 'unknown',
+    'a registry connector with an unrecognised state keeps its own word')
+  ok(mcp_list.tools_phrase(0) == 'no tools', 'a connector with no tool says "no tools": ' .. mcp_list.tools_phrase(0))
   -- A name is a name.
   local long = row_of('reports', plan.sections[2])
   ok(long and width_of(long.name) <= mcp_list.NAME_LIMIT,
@@ -101,7 +109,7 @@ do
     'and its page names the connector AND the node: ' .. table.concat(peer_labels, ','))
   ok(folds.retired and folds.retired.label == '1 retired', 'a retired entry is folded too: '
     .. tostring(folds.retired and folds.retired.label))
-  ok(folds.retired and #folds.retired.lines == 1 and has(folds.retired.lines[1], 'not offered'),
+  ok(folds.retired and #folds.retired.lines == 1 and has(folds.retired.lines[1], 'no longer offered'),
     'and its page says why: ' .. tostring(folds.retired and folds.retired.lines[1]))
 end
 

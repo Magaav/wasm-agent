@@ -571,7 +571,9 @@ function M.tools_page(entry, links, back)
   options[#options + 1] = { label = 'Back', hint = 'the connector', back = true }
   local lines = {
     string.format('%s \u{b7} %s', tostring(entry.key),
-      #(entry.tools or {}) == 0 and 'no tool' or tools_phrase(#(entry.tools or {}))),
+      -- The count phrase of the row above, so the two pages cannot say "no tools" and "no tool" about
+      -- the same connector (Fable 24/11).
+      tools_phrase(#(entry.tools or {}))),
   }
   if #(entry.tools or {}) == 0 then
     lines[#lines + 1] = 'This connector gives the model no tool: it has not been probed, or it exposes none.'
@@ -714,7 +716,7 @@ function M.views(view, opts)
     hint = 'Enter opens a connector \u{b7} Esc or \u{2190} closes' })
   pages[1] = list
   if #(view.connectors or {}) == 0 then
-    list.lines[#list.lines + 1] = 'none: no connector is registered on this node, and no peer exports one.'
+    list.lines[#list.lines + 1] = 'no MCP servers: none on this node and none shared by another node.'
   end
   -- Peers that did not answer the last refresh: one line, not rows posing as connectors.
   if type(view.peers_silent) == 'table' and #view.peers_silent > 0 then
@@ -732,8 +734,8 @@ function M.views(view, opts)
     -- list simply did not look.
     if #section.rows == 0 then
       lines[#lines + 1] = section.group == 'built_in'
-        and 'no built-in connector: this agent ships none here'
-        or 'no user connector: nothing has been added on this node'
+        and 'no built-in MCPs on this node'
+        or 'no user MCPs on this node'
     end
     for position, row in ipairs(section.rows) do
       list.options[#list.options + 1] = {

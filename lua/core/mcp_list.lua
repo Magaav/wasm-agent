@@ -52,20 +52,28 @@ M.STATE_WORDS = {
   disabled = 'disabled',
   superseded = 'retired',
   retired = 'retired',
+  -- The built-in surface's own word when no node in the fleet says it holds the account (Fable 24/11: a
+  -- state word must say what is MISSING, not that something is unknown). Applied to that row only: a
+  -- registry connector never reports this state, so `no account` is never said of one.
+  unknown = 'no account',
 }
 
 -- "6 tools", "1 tool", "no tool". One wording for every place that counts a connector's tools.
 function M.tools_phrase(count)
   count = tonumber(count) or 0
-  if count == 0 then return 'no tool' end
+  if count == 0 then return 'no tools' end
   return string.format('%d tool%s', count, count == 1 and '' or 's')
 end
 
 -- The state in at most two words. Anything the table does not name is said AS IT IS (bounded) rather than
 -- promised healthy: an unknown state is never "connected".
-function M.state_word(state)
+function M.state_word(state, entry)
   local word = tostring(state or 'unknown')
   local mapped = M.STATE_WORDS[word]
+  -- `no account` is the BUILT-IN surface's word (`entry.state_label` is what only `whatsapp.service_row`
+  -- sets): a registry connector that reported a state nothing recognises keeps its own word, because that
+  -- row's problem is not a missing account.
+  if word == 'unknown' and not (type(entry) == 'table' and entry.state_label ~= nil) then mapped = nil end
   if mapped then return mapped end
   local words = {}
   for part in word:gmatch('%S+') do words[#words + 1] = part; if #words == 2 then break end end
@@ -104,7 +112,7 @@ function M.row(entry, state)
   return {
     key = entry.key, name = name,
     label = (healthy and M.MARK_OK or M.MARK_WARN) .. ' ' .. name,
-    hint = healthy and M.tools_phrase(entry.tool_count) or M.state_word(state),
+    hint = healthy and M.tools_phrase(entry.tool_count) or M.state_word(state, entry),
     healthy = healthy, state = state, entry = entry,
   }
 end
@@ -174,8 +182,7 @@ function M.plan(view, opts)
     folded[#folded + 1] = {
       kind = 'peers', title = 'On other nodes',
       label = string.format('On other nodes - %d hidden', #peer_rows_list),
-      lines = { string.format('%d connector%s on another node, folded here rather than repeated above.',
-        #peer_rows_list, #peer_rows_list == 1 and '' or 's') },
+      lines = { 'Connectors that live on other nodes.' },
       rows = peer_rows_list,
     }
   end
@@ -186,7 +193,7 @@ function M.plan(view, opts)
       -- remove, and a reader who wonders where it went must find it. It is not one of the two groups because
       -- its tools are not offered to the model any more (`mcp_whatsapp_*` is that surface).
       label = string.format('%d retired', #retired_rows),
-      lines = { 'A retired row is one whose program went: its tools are not offered any more.' },
+      lines = { 'Retired: the connector\'s program is gone, so its tools are no longer offered.' },
       rows = retired_rows,
     }
   end
@@ -194,7 +201,7 @@ function M.plan(view, opts)
     folded[#folded + 1] = {
       kind = 'other', title = 'Not classified',
       label = string.format('%d not classified', #other_rows),
-      lines = { 'These say neither that this agent ships them nor that they were added here.' },
+      lines = { 'Origin not known: neither shipped with wasm-agent nor added on this node.' },
       rows = other_rows,
     }
   end

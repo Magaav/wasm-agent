@@ -157,8 +157,15 @@ local whatsapp_row = row_of('whatsapp')
 check(whatsapp_row ~= nil, 'WhatsApp has a row of its own')
 check(whatsapp_row and whatsapp_row.label:sub(1, 2) == (command.state_label(seen_whatsapp) == 'connected'
   and '\u{2714} ' or '! '), 'the row carries the mark of its state: ' .. tostring(whatsapp_row and whatsapp_row.label))
-check(whatsapp_row and (whatsapp_row.hint == 'unknown' or whatsapp_row.hint:match('tool') ~= nil
+check(whatsapp_row and (whatsapp_row.hint == 'no account' or whatsapp_row.hint:match('tool') ~= nil
   or whatsapp_row.hint == 'not reachable'), 'and the count or the state, never both: ' .. tostring(whatsapp_row and whatsapp_row.hint))
+-- A word that says what is MISSING, not that something is unknown (Fable, 24/11): the built-in surface with no
+-- node in the fleet holding the account says `no account` (the unit half - a registry connector never borrows
+-- that word - is scripts/test-mcp-list.lua).
+if tostring(command.state_label(seen_whatsapp)) == 'unknown' then
+  check(whatsapp_row and whatsapp_row.hint == 'no account',
+    'the built-in surface with no account node says what is missing: ' .. tostring(whatsapp_row and whatsapp_row.hint))
+end
 local broken_row = row_of('broken')
 check(broken_row ~= nil and broken_row.hint == 'not reachable',
   'a failing connector says it in two words: ' .. tostring(broken_row and broken_row.hint))
