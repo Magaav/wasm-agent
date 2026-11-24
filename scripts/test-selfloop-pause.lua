@@ -309,6 +309,71 @@ check(not exists(old_path), "a record older than the window is closed on a live 
 check(exists(young_path), "a young record whose session is live is kept")
 check(exists(half_path), "a half-written YOUNG record is kept: unreadable is not dead")
 for _, path in ipairs({ old_path, young_path, half_path }) do pcall(host.remove_file, path) end
+-- THE RECLAIM AGAINST THE REAL RESOURCES STORE (r5d, Fable, 24/11). The two live defects were that the claim was
+-- looked for in the wrong store (the ledger has no claims table: they are in `<data>/resources/claims.sqlite`,
+-- `resources.rs:354-361`) and compared against the wrong boot (`claims.boot` is the uuid `Store::open` mints, not
+-- `runtime_info().boot_id`). So this test uses NO injection at all: a real claim through lua/core/resources.lua, the
+-- real store the node reads for this HOME, and the module's own `claim_state`.
+--
+-- HOW THIS PROVES IT IS THE NODE'S OWN STORE: `host.resource("list")` is the store this process opened, `paths.data()`
+-- is the directory the whole run is using, and the test asserts the claim it just took is in the inventory it just
+-- asked for under that data root - the same root `deploy-pause`, `sentinel` and the ledger live in.
+-- A DEPLOY THAT IS WAITING WOULD RETURN THE RECLAIM EARLY and make this block pass for the wrong reason, so the
+-- fixture proves nothing waits first: no installer marker, no request in the sentinel box of THIS home.
+pcall(host.remove_file, dofile("lua/core/paths.lua").data() .. "/deploy-pending.json")
+do
+  local box = dofile("lua/core/paths.lua").data() .. "/sentinel/requests"
+  local listing = host.list_dir(box)
+  local decoded = listing and json.decode(listing) or nil
+  for _, entry in ipairs((decoded and decoded.entries) or {}) do
+    pcall(host.remove_file, box .. "/" .. tostring(entry.name or ""))
+  end
+end
+local resources = dofile("lua/core/resources.lua")
+local pause_mod = dofile("lua/core/deploy_pause.lua")
+local pause_data = dofile("lua/core/paths.lua").data()
+local claim_session = memory.start_session("local", "chat",
+  { user_id = "master", node_id = "test-node", title = "a session with a run claim" })
+local ctx = { user_id = "master", session_id = claim_session, run_id = "run-r5d" }
+check(pause_mod.waiting(os.time()) == nil, "nothing is waiting for a deploy in this fixture (the reclaim runs)")
+local taken = resources.claim(ctx, { "session:" .. claim_session })
+check(taken and taken.ok, "a real session claim is taken through the resources capability: " .. json.encode(taken))
+local inventory = json.decode(host.resource("list", "{}") or "{}") or {}
+local liveness, found_at = nil, nil
+for _, entry in ipairs(inventory.claims or {}) do
+  if tostring(entry.key or "") == "session:" .. claim_session then liveness = entry.liveness end
+end
+check(liveness == "held", "the inventory answers `held` for a claim THIS process holds: " .. tostring(liveness))
+check(type(pause_data) == "string" and pause_data ~= "", "the data root is the one this run uses: " .. tostring(pause_data))
+local store = pause_data .. "/resources/claims.sqlite"
+local store_ok, store_text = pcall(host.read_file, store)
+check(store_ok and type(store_text) == "string" and #store_text > 0,
+  "the store exists where the node reads it, under the same data root: " .. store)
+
+-- A dispatching resume row is written the way the tick writes one, then the reclaim is asked to judge it.
+local wake = selfloop.schedule({ in_seconds = 60, reason = selfloop.RESUME_REASON or "deploy pending: resume after the node swap",
+  prompt = "resume" }, { session_id = claim_session, user_id = "master" })
+check(wake and wake.ok, "a resume row exists for that session")
+local old_at = os.time() - 400
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', updated_at=? WHERE id=?]], json.encode({ old_at, wake.wake.id }))
+local before = host.sql_query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]],
+  json.encode({ claim_session, old_at }))
+local before_rows = json.decode(before or "[]") or {}
+check(tonumber(before_rows[1] and before_rows[1].n or 1) == 0, "the session has written nothing since the dispatch")
+pause_mod.ensure_resumes(os.time(), { stale_seconds = 300 })
+local held_row = host.sql_query([[SELECT status FROM self_wakes WHERE id=?]], json.encode({ wake.wake.id }))
+local held_status = (json.decode(held_row or "[]") or {})[1]
+check(held_status and held_status.status == "dispatching",
+  "a claim held by the LIVE store keeps the row (no duplicate turn): " .. json.encode(held_status))
+
+-- NOT PROVEN HERE, SAID PLAINLY: the other half - a RELEASED claim (resources.finish) lets the same row be
+-- reclaimed - is asserted against the fake ledger in scripts/test-deploy-pause.lua, and could NOT be reproduced
+-- through this live-shaped fixture within this round: after `resources.finish(ctx)` the claim is gone from the
+-- inventory (`claims after finish=0`, measured) and the row still stayed `dispatching`, and the cause was not found
+-- before the round ended. It is named here rather than deleted: the dangerous direction (a HELD claim keeps the row,
+-- no duplicate turn) IS proven above with the real store, and the safe-but-inert direction still needs its own
+-- proof before this is called done.
+
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

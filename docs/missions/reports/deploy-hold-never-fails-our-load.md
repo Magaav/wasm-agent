@@ -1137,3 +1137,52 @@ no assertion was deleted, the count is lower only because those loops asserted o
 `scripts/test-deploy-wait.sh`: `deploy wait ok`.
 
 Texts: none new (the reclaim writes `dispatch interrupted; not replayed`, already approved as text 12's sibling).
+
+### r5d (Fable, 24/11 ~02:00Z): the claim is asked of the store that holds it
+
+Both live defects were invisible to my fixture, and both are measured facts about the node:
+
+1. **The claims are not in the ledger.** `SELECT boot FROM claims ...` ran through deploy_pause's `query`, i.e.
+   against `~/.wasm-agent/memory.db`, which has no `claims` table: the claim lives in
+   `<data>/resources/claims.sqlite` (`rust/wa-capabilities/src/resources.rs:354-361`, `Store::open`). Live, the
+   lookup raised, every stale row was kept, and nothing was ever reclaimed - a lost dispatch stayed lost and the
+   watchdog won again.
+2. **The wrong boot.** `claims.boot` is the uuid `Store::open` mints (`resources.rs:356`), not
+   `runtime_info().boot_id`, so `claim.boot == boot_id` never matched - every claim was ignored: the duplicate
+   direction.
+
+**The fix asks the capability, which already knows both.** `host.resource("list")` is `inventory_at`
+(`resources.rs:281-321`), which computes each claim's `liveness` itself:
+
+| liveness | meaning | what the reclaim does |
+| --- | --- | --- |
+| `held` | `boot == the store's own boot` | keeps the row |
+| `held_or_unavailable` | the lease is busy (another live process, or unverifiable) | keeps the row |
+| `lease_released` | the boot's lease can be taken: that process is gone | **free** - may reclaim |
+| `unverifiable` | neither | keeps the row |
+
+No capability, a raise, an unknown shape, or any other liveness -> **unknown -> keep**. The key absent after a
+successful `list` -> **free** (asked and answered at the source). The injected answer is `pcall`'ed too, so a test
+seam cannot turn an error into a reclaim. This module compares no boot of its own any more.
+
+`ensure_resumes` was also **rewritten whole**: three earlier revisions had left duplicated blocks and two
+`local reclaimed` in it, which is how a working reclaim can look wired and do nothing. One invariant, one order:
+migration -> `dispatching` reclaim (this module's own 300 s, three facts) -> overdue `pending` retirement -> the
+re-arm under the chain rule. The rewrite dropped `sweep_records` by accident; the row caught it (`attempt to call a
+nil value (field 'sweep_records')`) and it was restored from HEAD - which is what the rows are for.
+
+**How the test's store is the node's store.** The live-shaped test in `scripts/test-selfloop-pause.lua` takes a REAL
+claim through `lua/core/resources.lua`, then asserts three things about the objects the module itself reads:
+(a) `host.resource("list")` - the store this process opened - reports `liveness = "held"` for the claim it just
+took; (b) the data root is `paths.data()`, the one the pause records, the ledger and the sentinel share in this run;
+(c) `<data>/resources/claims.sqlite` is a non-empty file. No injection at all:
+`pause.ensure_resumes(now, { stale_seconds = 300 })`.
+
+**Not proven, said plainly:** the other half - a RELEASED claim (`resources.finish`) lets the same row be
+reclaimed - is asserted against the fake ledger in `scripts/test-deploy-pause.lua` and could NOT be reproduced
+through the live-shaped fixture in this round: after `resources.finish(ctx)` the inventory is empty (`claims after
+finish=0`, measured) and the row still stayed `dispatching`; the cause was not found before the round ended. It is
+named in the source with that measurement rather than deleted, and it is the first open item in this report.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **124**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`. No new texts.

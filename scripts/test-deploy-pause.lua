@@ -350,31 +350,25 @@ local function invariant_ledger(rows)
   return self_
 end
 
--- 1. A `dispatching` ROW IS RECLAIMED ONLY WHEN NOTHING HAPPENED (r5c, Fable, 24/11). The row leaves
--- `dispatching` at the END of its turn (selfloop.lua:1214/:1355), so age is a filter, never the evidence. THREE facts
--- are needed - past the bound, no run claim held by THIS boot, zero messages since the dispatch - and a lookup that
--- raises keeps the row (a duplicate resume turn is the expensive direction; `query(...) or {}` is how r4b turned a
--- db error into "quiet").
+-- 1. A `dispatching` RESUME ROW IS RECLAIMED ONLY WHEN NOTHING HAPPENED (r5c/r5d, Fable, 24/11).
 --
--- Seeded with ae2a9231's shape: dispatched, last_error 'deploy ended: resumed now', nothing written afterwards.
-local THIS_BOOT = "7d72c1a0-0000-4000-8000-000000000001"
-local OTHER_BOOT = "5c33b2f0-0000-4000-8000-000000000002"
+-- The row leaves `dispatching` at the END of its turn (selfloop.lua:1214/:1355), so age is a filter. Three facts are
+-- needed: past M.RESUME_DISPATCH_BOUND_SECONDS; the RUN CLAIM answered by the resources store (NOT the ledger: the
+-- claims are in `<data>/resources/claims.sqlite`, and `claim_state` is injected here because the live-shaped test in
+-- scripts/test-selfloop-pause.lua exercises the real store); and zero messages since the dispatch. Any answer that
+-- is not positively "free" - held, unknown, a raise, no capability - keeps the row.
+local THIS_SESSION = "sess-ae2a"
 local function dispatch_ledger(opts)
   opts = opts or {}
-  local row = { id = "ae2a9231", session_id = "sess-ae2a", owner = "master", attempts = 1, resume_chain = 0,
+  local row = { id = "ae2a9231", session_id = THIS_SESSION, owner = "master", attempts = 1, resume_chain = 0,
     status = "dispatching", created_at = now - 3600, updated_at = now - 400,
     last_error = "deploy ended: resumed now" }
-  local ledger_ = { rows = { row }, updates = {}, messages = opts.messages or 0,
-    claims = opts.claims or {}, fail_claims = opts.fail_claims, fail_messages = opts.fail_messages }
+  local ledger_ = { rows = { row }, updates = {}, messages = opts.messages or 0, fail_messages = opts.fail_messages }
   function ledger_.q(sql, params)
     params = params or {}
     if sql:find("FROM messages", 1, true) then
       if ledger_.fail_messages then error("database is locked") end
       return { { n = ledger_.messages } }
-    end
-    if sql:find("FROM claims", 1, true) then
-      if ledger_.fail_claims then error("no such table: claims") end
-      return ledger_.claims
     end
     if sql:find("FROM self_wake_pauses", 1, true) then return {} end
     if sql:find("FROM self_wakes", 1, true) then
@@ -410,47 +404,51 @@ local function dispatch_ledger(opts)
   end
   return ledger_
 end
-local function run(ledger_, extra)
+local function run(ledger_, claim)
   local armed, schedule = scheduler()
+  local asked = 0
   local out_ = pause.ensure_resumes(now, { read = function() return nil end, exec = ledger_.ex,
     query = ledger_.q, schedule = schedule, session_exists = function() return true end,
-    migrated = function() return true end, boot = THIS_BOOT, stale_seconds = 300 })
-  return out_, armed
+    migrated = function() return true end, stale_seconds = 300,
+    claim_state = function() asked = asked + 1; if type(claim) == "function" then return claim() end return claim end })
+  return out_, armed, asked
 end
 
 -- 1a. QUIET AND UNCLAIMED: reclaimed, and exactly ONE re-arm.
 local quiet = dispatch_ledger({})
-local out_q, armed_q = run(quiet)
-ok(out_q.rearmed == 1 and #armed_q == 1 and armed_q[1].session == "sess-ae2a",
+local out_q, armed_q = run(quiet, "free")
+ok(out_q.rearmed == 1 and #armed_q == 1 and armed_q[1].session == THIS_SESSION,
   "quiet and unclaimed: exactly one resume wake", json.encode(out_q))
 
--- 1b. A LONG FIRST TOOL CALL: the claim is held and NO message exists yet - untouched, zero wakes.
-local claimed = dispatch_ledger({ claims = { { boot = THIS_BOOT } } })
-local out_c, armed_c = run(claimed)
+-- 1b. THE CLAIM IS HELD (a long first tool call writes no message yet): untouched, zero wakes.
+local held_rows = dispatch_ledger({})
+local out_c, armed_c, asked_c = run(held_rows, "held")
+ok(asked_c == 1, "the claim was asked of the store, once per stale row")
 ok(out_c.rearmed == 0 and #armed_c == 0,
-  "a claim held by THIS boot means the turn is alive: no second resume", json.encode(out_c))
+  "a held claim means the turn is alive: no second resume", json.encode(out_c))
 
--- 1c. A CLAIM FROM ANOTHER BOOT DOES NOT BLOCK (claims survive a restart: resources.rs has no boot sweep).
-local dead = dispatch_ledger({ claims = { { boot = OTHER_BOOT } } })
-local out_d, armed_d = run(dead)
-ok(out_d.rearmed == 1 and #armed_d == 1,
-  "a claim left by a process that is gone does not block the reclaim", json.encode(out_d))
+-- 1c. THE CLAIM ANSWER IS UNKNOWN (no capability, a raise, an empty boot): untouched.
+for _, answer in ipairs({ "unknown", function() error("resources: unavailable") end }) do
+  local unknown_rows = dispatch_ledger({})
+  local out_u, armed_u = run(unknown_rows, answer)
+  ok(out_u.rearmed == 0 and #armed_u == 0,
+    "an unknown claim answer keeps the row", json.encode(out_u))
+end
 
--- 1d. THE CLAIM LOOKUP RAISES: untouched.
-local bad_claim = dispatch_ledger({ fail_claims = true })
-local out_bc, armed_bc = run(bad_claim)
-ok(out_bc.rearmed == 0 and #armed_bc == 0,
-  "a claim lookup that raises keeps the row", json.encode(out_bc))
+-- 1d. THE STORE SAYS THE LEASE IS RELEASED (the holder is gone): reclaimed.
+local released = dispatch_ledger({})
+local out_r, armed_r = run(released, "free")
+ok(out_r.rearmed == 1 and #armed_r == 1, "a released lease does not block", json.encode(out_r))
 
 -- 1e. THE MESSAGES LOOKUP FAILS: untouched (r4b's defect, exactly).
 local bad_messages = dispatch_ledger({ fail_messages = true })
-local out_bm, armed_bm = run(bad_messages)
+local out_bm, armed_bm = run(bad_messages, "free")
 ok(out_bm.rearmed == 0 and #armed_bm == 0,
   "a messages lookup that fails keeps the row", json.encode(out_bm))
 
 -- 1f. A LONG TURN THAT HAS WRITTEN: untouched, zero wakes.
 local alive = dispatch_ledger({ messages = 3 })
-local out_a, armed_a = run(alive)
+local out_a, armed_a = run(alive, "free")
 ok(out_a.rearmed == 0 and #armed_a == 0,
   "messages since the dispatch mean a running turn: no second resume", json.encode(out_a))
 
@@ -458,7 +456,7 @@ ok(out_a.rearmed == 0 and #armed_a == 0,
 ok(pause.RESUME_DISPATCH_BOUND_SECONDS == 300, "the resume bound is 300 s, its own constant")
 local young = dispatch_ledger({})
 for _, candidate in ipairs(young.rows) do candidate.updated_at = now - 200 end
-local out_y, armed_y = run(young)
+local out_y, armed_y = run(young, "free")
 ok(out_y.rearmed == 0 and #armed_y == 0, "a 200 s dispatching row is inside the bound: nothing reclaimed")
 -- 2. A `pending` ROW OVERDUE PAST THE WINDOW CAN NEVER FIRE (the 22/11 row): it is retired, not re-stamped for ever.
 local pending = invariant_ledger({})

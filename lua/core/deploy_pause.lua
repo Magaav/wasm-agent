@@ -352,6 +352,47 @@ local function sweep_stamp_path()
   return paths.data() .. "/pause-sweep.last"
 end
 
+-- ROWS FROM THE HOST, WHATEVER SHAPE IT ANSWERS (r5d, 24/11). `host.sql_rows` answers JSON *text*; an injected fake
+-- in a test answers a table. Requiring a table meant that on the live node EVERY lookup here read as failed - the
+-- reclaim never ran - while the tests passed. The normalisation is one place, so no caller can half-read an answer.
+local function rows_of(answer)
+  if type(answer) == "table" then return answer end
+  if type(answer) == "string" then
+    local ok, decoded = pcall(json.decode, answer)
+    if ok and type(decoded) == "table" then return decoded end
+  end
+  return nil
+end
+
+-- IS A RUN CLAIM HELD FOR THIS SESSION? ASKED OF THE STORE THAT HOLDS IT (r5d, 24/11).
+--
+-- The claims are NOT in the ledger: they are `<data>/resources/claims.sqlite` (`resources.rs:354-361`), and their
+-- `boot` is the uuid `Store::open` mints, not `runtime_info().boot_id`. So neither a SQL select here nor a boot
+-- comparison in this module can answer it; the store can, because `inventory_at` (resources.rs:281-321) computes
+-- each claim's liveness itself: "held" (its own boot), "lease_released" (that process is gone), "unavailable",
+-- "unverifiable".
+--
+-- Returns "held" | "free" | "unknown", and ONLY "free" may unblock a reclaim: no capability, a raise, a shape this
+-- code does not know, or an unknown liveness all answer "unknown", which keeps the row.
+local function claim_state_of(session, opts)
+  if type(opts.claim_state) == "function" then return opts.claim_state(session) end
+  if type(host) ~= "table" or type(host.resource) ~= "function" then return "unknown" end
+  local asked, raw = pcall(host.resource, "list", "{}")
+  if not asked or type(raw) ~= "string" then return "unknown" end
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  if not decoded_ok or type(decoded) ~= "table" or type(decoded.claims) ~= "table" then return "unknown" end
+  local key = "session:" .. tostring(session or "")
+  for _, entry in ipairs(decoded.claims) do
+    if tostring(entry.key or "") == key then
+      local liveness = tostring(entry.liveness or "")
+      if liveness == "lease_released" then return "free" end
+      if liveness == "held" or liveness == "held_or_unavailable" then return "held" end
+      return "unknown"
+    end
+  end
+  return "free"
+end
+
 local function marker_path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
   if not ok then return nil end
@@ -405,6 +446,9 @@ end
 -- `opts` exists for the test (scripts/test-deploy-pause.lua): exec, query, schedule, the session check, the
 -- migration marker and the clock are injected; a real caller passes nothing and gets the host's ledger,
 -- selfloop's scheduler and os.time().
+-- THE INVARIANT ENFORCED HERE, IN THIS ORDER (r5d, 24/11): every resume row reaches a terminal state inside the
+-- window. One function, one set of facts, and every lookup is pcall'ed: a lookup that fails or cannot be made
+-- KEEPS the row (a duplicate resume turn is the expensive direction).
 function M.ensure_resumes(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
@@ -414,6 +458,7 @@ function M.ensure_resumes(now, opts)
     return { error = "no_ledger", rearmed = 0 }
   end
   local cutoff = now - M.RESUME_WINDOW_SECONDS
+
   -- 1. THE ONE-TIME MIGRATION: rows older than the window are retired, and it says how many.
   local migration = 0
   if not migrated(opts) then
@@ -427,80 +472,59 @@ function M.ensure_resumes(now, opts)
         migration, M.RESUME_WINDOW_SECONDS))
     end
   end
-  -- THE ONE INVARIANT (r5, 24/11): EVERY RESUME ROW REACHES A TERMINAL STATE INSIDE THE WINDOW.
+
+  -- 2. A `dispatching` ROW THAT NOTHING HAPPENED TO IS LOST, at this module's own 300 s bound.
   --
-  -- A row that is not terminal and is past its own bound is LOST, not waiting: inside the window it is re-armed
-  -- (under the chain rule below); outside it, it is retired. Two states can be lost without anything else noticing:
-  --
-  --   * `dispatching` with no turn started: reconcile is the owner of that answer (`selfloop.lua`, `stale_seconds`,
-  --     300 s by default), but it lives in the tick's inline path while the seam's plan owns the other one, so a node
-  --     whose component bytes are older than that code never reconciles. MEASURED: ae2a9231 held `dispatching`,
-  --     attempts 1, chain 0, last_error `deploy ended: resumed now`, and never ran a turn.
-  --   * `pending` long past its due time: while a deploy waits the tick re-stamps every overdue row and dispatches
-  --     none (`selfloop.lua:1386-1391`). MEASURED: a 22/11 row, due 2026-11-22 10:45Z, attempts 1, last_error
-  --     `deploy_waiting: ...`, rewritten by every install since.
+  -- A resume row leaves `dispatching` at the END of its turn, not at the start (`selfloop.lua:1200`/`:1509` claim it
+  -- before the turn; `:1214`/`:1355` finish it after), so age is a filter and never the evidence. Three facts, and
+  -- only one answer may unblock a reclaim:
+  --   * the RUN CLAIM, asked of the store that holds it - `host.resource("list")`, whose `inventory_at`
+  --     (rust/wa-capabilities/src/resources.rs:281-321) computes liveness itself: "held" (the store's own boot),
+  --     "lease_released" (that process is gone), "held_or_unavailable", "unverifiable". The claims are NOT in the
+  --     ledger (they are `<data>/resources/claims.sqlite`), and their `boot` is the uuid Store::open mints, not
+  --     `runtime_info().boot_id` - two mistakes measured on the live node on 24/11; asking the store answers both;
+  --   * ZERO messages for the session at or after the row's `updated_at`;
+  --   * both lookups must ANSWER: a raise, a missing capability, an unknown shape or an unknown liveness keeps the row.
   local bound = tonumber(opts.stale_seconds) or M.RESUME_DISPATCH_BOUND_SECONDS
   local reclaimed = 0
-  -- RECLAIM NEEDS THREE FACTS, AND A FAILED LOOKUP IS NOT ONE OF THEM (r5c, Fable, 24/11).
-  --
-  --   1. the row is past M.RESUME_DISPATCH_BOUND_SECONDS;
-  --   2. NO run claim is held for the session by THIS boot. The claim is the primary signal - it is what
-  --      lua/core/agent.lua takes at the start of a turn (`session:<id>`, rust/wa-capabilities/src/resources.rs) and
-  --      what answered `resource_busy` today - and a turn holds it from its first step, before any message exists;
-  --   3. ZERO messages since the dispatch.
-  --
-  -- A claim CARRIES the process's `boot` and NOTHING releases it at a restart: `resources.rs` has no boot sweep, the
-  -- row is only dropped by the run's own `finish` or reclaimed lazily when some later run claims the same session
-  -- (its `lease_released` test). MEASURED shape today: {"boot":"7d72...","key":"session:..."}. So a claim from a
-  -- DEAD boot must not block this reclaim for ever: only a claim whose boot is the one running now counts.
-  --
-  -- A `query` that raises, or that answers something which is not a table, keeps the row: a duplicate resume turn
-  -- is the expensive direction, and `query(...) or {}` is how r4b turned a db error into `quiet = true`.
-  local stale_ok, stale_rows = pcall(query, [[SELECT id, session_id, updated_at FROM self_wakes
+  local stale_ok, stale_answer = pcall(query, [[SELECT id, session_id, updated_at FROM self_wakes
     WHERE reason=? AND status='dispatching' AND updated_at<?]], { M.RESUME_REASON, now - bound })
-  if not stale_ok or type(stale_rows) ~= "table" then stale_rows = {} end
-  -- `opts.boot` exists for the test (scripts/test-deploy-pause.lua): a script run's runtime_info names the test
-  -- interpreter's boot, not the one a fixture is simulating.
-  local boot = tostring(opts.boot or "")
-  if boot == "" and type(host) == "table" and type(host.runtime_info) == "function" then
-    local info_ok, info = pcall(host.runtime_info)
-    if info_ok and type(info) == "string" then
-      local decoded_ok, decoded = pcall(json.decode, info)
-      if decoded_ok and type(decoded) == "table" then boot = tostring(decoded.boot_id or "") end
-    end
-  end
-  for _, row in ipairs(stale_rows) do
-    local session = tostring(row.session_id or "")
-    local dispatched_at = tonumber(row.updated_at) or 0
-    if session ~= "" then
-      local claim_ok, claims = pcall(query, "SELECT boot FROM claims WHERE key=?", { "session:" .. session })
-      local claim_known = claim_ok and type(claims) == "table"
-      local held_now = false
-      if claim_known then
-        for _, claim in ipairs(claims) do
-          -- THIS boot only: a claim left by a process that is gone cannot be running a turn.
-          if boot ~= "" and tostring(claim.boot or "") == boot then held_now = true end
+  local stale_rows = stale_ok and rows_of(stale_answer) or nil
+  if type(stale_rows) == "table" then
+    for _, row in ipairs(stale_rows) do
+      local session = tostring(row.session_id or "")
+      local dispatched_at = tonumber(row.updated_at) or 0
+      if session ~= "" then
+        local answered, state = pcall(claim_state_of, session, opts)
+        if not answered or type(state) ~= "string" then state = "unknown" end
+        local seen_ok, seen_answer = pcall(query,
+          [[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]], { session, dispatched_at })
+        local seen = seen_ok and rows_of(seen_answer) or nil
+        local quiet_known = type(seen) == "table" and type(seen[1]) == "table"
+        local quiet = quiet_known and (tonumber(seen[1].n) or 0) == 0
+        if state == "free" and quiet_known and quiet then
+          local changed = exec([[UPDATE self_wakes SET status='unknown',
+            last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
+            { now, row.id })
+          reclaimed = reclaimed + tonumber(type(changed) == "table" and changed.changes or 0)
         end
       end
-      local seen_ok, seen = pcall(query, [[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]],
-        { session, dispatched_at })
-      local quiet_known = seen_ok and type(seen) == "table" and type(seen[1]) == "table"
-      local quiet = quiet_known and (tonumber(seen[1].n) or 0) == 0
-      if claim_known and quiet_known and not held_now and quiet then
-        local changed = exec([[UPDATE self_wakes SET status='unknown',
-          last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
-          { now, row.id })
-        reclaimed = reclaimed + tonumber(type(changed) == "table" and changed.changes or 0)
-      end
     end
   end
+
+  -- 3. A `pending` ROW OVERDUE PAST THE WINDOW CAN NEVER FIRE (the 22/11 row): retired, not re-stamped for ever.
+  -- It runs BEFORE the waiting gate, because a deploy that never ends must not hold a dead row hostage.
   pcall(exec, [[UPDATE self_wakes SET status='superseded', due_at=NULL, last_error='superseded: too old to fire',
     updated_at=? WHERE reason=? AND status='pending' AND created_at<?]], { now, M.RESUME_REASON, cutoff })
-  if M.waiting(now, opts) then return { waiting = true, rearmed = 0, migration = migration, stale = reclaimed } end
-  -- THE CHAIN IS `resume_chain`, NOT `attempts` (24/11): `attempts` counts dispatch attempts and reaches the
-  -- hundreds on a real ledger, so reading it here abandoned 46 live resumes on the first tick after an install.
+
+  if M.waiting(now, opts) then
+    return { waiting = true, rearmed = 0, migration = migration, reclaimed = reclaimed }
+  end
+
+  -- 4. A LOST ROW INSIDE THE WINDOW IS RE-ARMED under the chain rule; outside it, the migration has retired it.
   local lost = query([[SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE ]] .. LOST_WHERE
-    .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff }) or {}
+    .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff })
+  lost = rows_of(lost) or {}
   local schedule = opts.schedule
   if type(schedule) ~= "function" then
     schedule = function(args, session, user)
@@ -510,23 +534,24 @@ function M.ensure_resumes(now, opts)
   local exists = opts.session_exists
   if type(exists) ~= "function" then
     exists = function(session)
-      local ok, row = pcall(function() return dofile("lua/core/memory.lua").session(session) end)
-      return ok and type(row) == "table"
+      local loaded, row = pcall(function() return dofile("lua/core/memory.lua").session(session) end)
+      if not loaded then return nil end
+      return type(row) == "table"
     end
   end
   local rearmed, abandoned = 0, 0
   for _, row in ipairs(lost) do
     local session = tostring(row.session_id or "")
-    if session ~= "" and exists(session) then
-      -- A PARKED session is one nobody may resume: the operator held it (lua/core/session_park.lua), and the
-      -- tick skips its rows for the same reason.
-      local parked = query("SELECT session_id FROM self_wake_pauses WHERE session_id=? LIMIT 1", { session }) or {}
+    local alive = exists(session)
+    if session ~= "" and alive == true then
+      local parked = query("SELECT session_id FROM self_wake_pauses WHERE session_id=? LIMIT 1", { session })
+      parked = rows_of(parked) or {}
       local live = query([[SELECT id FROM self_wakes WHERE session_id=? AND reason=?
-        AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON }) or {}
+        AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON })
+      live = rows_of(live) or {}
       if #parked == 0 and #live == 0 then
         local chain = (tonumber(row.resume_chain) or 0) + 1
         if chain > M.RESUME_MAX_REARMS then
-          -- 2. THE CHAIN IS SPENT: this pause is over, and it says so instead of trying for ever.
           pcall(exec, [[UPDATE self_wakes SET status='resume_abandoned', last_error=?, updated_at=? WHERE id=?]],
             { string.format("resume_abandoned: %d re-arm(s) and no turn", chain - 1), now, row.id })
           pcall(M.mark_abandoned, session, "the resume could not run after " .. tostring(chain - 1) .. " re-arm(s)", opts)
@@ -544,9 +569,6 @@ function M.ensure_resumes(now, opts)
           }, session, tostring(row.owner or "master"))
           local wake = type(armed) == "table" and armed.wake or nil
           if wake and wake.id then
-            -- The chain is carried on the new row, so the next tick counts THIS attempt.
-            -- The chain is carried on the new row's OWN column, so the next tick counts THIS attempt and nothing
-            -- about the dispatch counter.
             pcall(exec, "UPDATE self_wakes SET resume_chain=? WHERE id=?", { chain, wake.id })
             pcall(exec, [[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=? WHERE id=?]],
               { "a newer resume was armed: " .. tostring(wake.id), now, row.id })
@@ -557,20 +579,11 @@ function M.ensure_resumes(now, opts)
       end
     end
   end
-  return { rearmed = rearmed, abandoned = abandoned, migration = migration }
+  return { rearmed = rearmed, abandoned = abandoned, migration = migration, reclaimed = reclaimed }
 end
 
--- A PAUSE RECORD THAT CAN NEVER BE RESUMED IS CLOSED (24/11). The records are written at the moment a session
--- pauses and nothing ever deleted one: `wa-sentinel status` counted 53 and said "oldest 1d", so the line that
--- exists to show a promise in flight showed a graveyard. A record is CLOSED when it cannot describe a live pause:
---
---   * its `since` is older than M.RESUME_WINDOW_SECONDS (six hours) - no deploy waits that long, and the sentinel
---     only reads a record at or after the request it is holding;
---   * or its session no longer exists (ended, closed, deleted), so there is nobody to resume.
---
--- A record that is younger and whose session is live is LEFT ALONE, whatever else is happening: it is the proof the
--- bound uses. `host.list_dir` is the host capability this needs (rust/wa-capabilities/src/host.rs), and `opts`
--- carries an injected listing for the test.
+-- Said once, on the log an operator reads, every time a lost resume is re-armed. Cheap on purpose: the fact is
+-- rare (twice in one evening, 23/11) and it is the only trace a re-arm leaves besides its ledger row.
 function M.sweep_records(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
