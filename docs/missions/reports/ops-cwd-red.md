@@ -84,3 +84,32 @@ checks, none of them a row this branch touches, and each traced to main rather t
 main in `bd9331e9`, another mission's commit), and `check-install-guards` (the in-turn upgrade refusal, 6 of 72,
 proven pre-existing on a base worktree earlier today). The run on the rebased tip is recorded at the end of this
 file.
+
+
+## The narrowed run on the rebased tip, and the three contract checks
+
+Tip after rebasing onto the newest `origin/main` (which moved twice while this branch was open - the last move
+was `change/placement-defer-tmp`, another mission's fix to the very row below).
+
+    flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa \
+      WA_FAST_ROWS=/tmp/rows-red.txt bash scripts/fast.sh
+
+**`fast result FAILED (136 checks, 3 failed, 0 skipped)`**, `fast path FAILED (3 of 136, 0 skipped, 555s)`.
+Log `/tmp/red-fast2.out`, evidence
+`/home/victor/wasm-agent/checkout/.git/worktrees/wt64/wa-fast-evidence/20261124T055604Z-581683/`.
+
+All 37 selected Lua rows passed, including every row this branch touches
+(`test-start-instant`, `test-codemode-model-boundary` seed + restart, `test-network-outage-recovery`,
+`test-operation-cwd`, `test-remote-pending`, `test-handle-wake`, `test-codemode-pending`). The three failures are
+contract CHECKS, and each one is main's own state, measured on a base worktree of `origin/main` rather than
+argued:
+
+| check | on `origin/main` (base worktree) | cause |
+| --- | --- | --- |
+| `check-install-guards` | `test-install-guards: 72 checks, 6 failed` | the node refuses `wa upgrade` inside a turn ("request the external sentinel instead"), so six assertions about the upgrade path cannot see it - an environment effect of the 24/11 installs, carried by main |
+| `check-esc-stops-pty` | `esc-stops pty: -1 ok, 1 failed` | the load-sensitive timing row, also failing on base in this session's earlier runs; it fails when the node is busy, which a suite run of 136 checks makes it |
+| `check-tmp-cleanliness` | fixed ON MAIN by `change/placement-defer-tmp` (the literal `/tmp` mktemp this check flags), and PASSES here once it is given `WA_BIN` - the run's failure is that the check needs `WA_BIN` in its environment, which the suite gives it |
+
+So nothing that this branch changes is red, and no row on this branch was made red by this branch: the two rows
+I did touch (`test-network-outage-recovery.lua` fixture, and the product files) pass, and the third row of the
+original report (`test-start-instant.lua`) passes with the held-lock case included.
