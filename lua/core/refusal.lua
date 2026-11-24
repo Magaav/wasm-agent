@@ -679,6 +679,11 @@ local CODES={
   fix='the forms are `results.get(hashOrOp)`, `results.last(n)`, `results.diff(a,b)` and `results.reuse(tool,{max_age_s})`.'},
  remote_error={message='the peer call failed on the far side ({origin}).',
   fix='read the peer own words in `detail`; the call reached it, so check the effect there before sending it again.'},
+ -- A relayed call that passed the deadline its caller was given: the answer did not arrive in time, and
+ -- whether the action ran on that node is NOT KNOWN. It is not a refusal, and the caller must not report
+ -- it as one (measured 24/11: two `wa update work` runs were shown to the operator as the node refusing).
+ not_known_yet={message='the deadline passed before that node answered, so whether it ran is not known ({origin}).',
+  fix='read the request back by its id on that node (its own status action answers accepted/running/installed/failed) before asking again; a second request with the same id starts nothing new.'},
  -- placement and the orchestration queue (the coordinator\'s own surface)
  placement_queue_full={message='this owner already has the maximum number of queued placements, so the request was dropped ({origin}).',
   fix='wait for a queued task to settle (its state is readable on the task row), or place fewer tasks in one round.'},

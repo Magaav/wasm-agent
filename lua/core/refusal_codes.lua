@@ -263,6 +263,7 @@ return {
   ['nonce_required']='nodes.lua',
   ['not_cancellable']='codemode_pending.lua',
   ['not_found']='file_tools.lua',
+  ['not_known_yet']='nodes.lua',
   ['not_peer_operator']='tools.lua',
   ['not_registered:']='nodes.lua',
   ['not_remote']='nodes.lua',

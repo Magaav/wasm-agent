@@ -1654,7 +1654,14 @@ M.RELAY_PEER_BUDGET_MS = 35000
 -- The reasons the relay deadline produces. Any of them means the same thing to the caller: the answer did
 -- not arrive in time, and the action may or may not have run on that node.
 M.RELAY_DEADLINE_REASONS = { relay_timeout = true, node_no_answer = true, node_not_attached = true,
-  node_busy = true, request_in_flight = true }
+  node_busy = true, request_in_flight = true,
+  -- The relay's OWN answer when the node did not answer inside the deadline its caller was given
+  -- (rust/wa-rendezvous/src/relay_client.rs, spawn_responder: a 504 with this code). Measured 24/11: two
+  -- `wa update work --tree --commit 53bb69b1` runs were rendered "remote_refused/relay_request_timeout,
+  -- layer node" - the master was told the node had REFUSED a request the node had not even reached,
+  -- while the node went on working for another 66 s and wrote its own, different refusal. A deadline is
+  -- not a refusal, and a code the relay really sends belongs in the list a caller reads it by.
+  relay_request_timeout = true }
 
 -- Model-facing: the real cap, and the exact call that does the same work ON that node instead of through
 -- the relay. Numbers are read from the constants above, never written twice.
@@ -1779,9 +1786,16 @@ function M.remote_call(selector, capability, args, options)
       local name = tostring(node.name or node.node_id or "the peer")
       return { error = "remote_error", detail = detail, node = node.name,
         retryable = response.retryable, rid = response.rid,
+        -- NOT KNOWN YET, in one field every caller can read (mission fleet-update-survives-a-slow-relay,
+        -- item 2): the deadline passed, and whether the action ran on that node is not known. The error
+        -- code stays remote_error because that is what the callers and rows already read; the FIELD is
+        -- what a caller that must not call this "refused" branches on (lua/core/remote_update.lua,
+        -- lua/core/land.lua). A sentence that led with the code alone let a deadline be reported as a
+        -- refusal twice on 24/11.
+        not_known_yet = true, state = "unknown",
         deadline_seconds = response.deadline_seconds or M.RELAY_DEADLINE_SECONDS,
         attempts = response.attempts or M.RELAY_ATTEMPTS,
-        message = M.relay_deadline_note(node, detail),
+        message = "NOT KNOWN YET - " .. M.relay_deadline_note(node, detail),
         fix = string.format('Start the work on that node and await it there: '
           .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) '
           .. 'then tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
@@ -1797,6 +1811,34 @@ function M.remote_call(selector, capability, args, options)
   if tonumber(response.status) ~= 200 then
     -- The node answered, but not 200. Its body is unsigned: keep the allow-listed code only.
     local code = M.relay_code(response.body)
+    -- A DEADLINE IS NOT A REFUSAL (mission fleet-update-survives-a-slow-relay, item 2). The relay
+    -- answers its own 504 relay_request_timeout when the node did not answer inside the deadline this
+    -- caller was given (rust/wa-rendezvous/src/relay_client.rs, spawn_responder). MEASURED 24/11 on
+    -- work: `wa update work --tree --commit 53bb69b1` answered
+    -- {error:"remote_refused", reason:"relay_request_timeout", node_status:504, layer:"node"} - "the
+    -- node refused" - while the node was 66 s into a request it had accepted and had refused nothing
+    -- at all. So the deadline codes answer not_known_yet: retryable, unverified, and pointing at the
+    -- read-back that CAN settle it. The list is an allow-list: every other non-200 keeps the refusal
+    -- rendering it had, so a real unknown_caller is still a refusal with its hint.
+    if code and M.RELAY_DEADLINE_REASONS[code] then
+      local layer = response.transport == "direct" and "node" or "relay"
+      local name = tostring(node.name or node.node_id or "the peer")
+      return { error = "not_known_yet", reason = code, not_known_yet = true, state = "unknown",
+        layer = layer, node = node.name,
+        relay_status = layer == "relay" and tonumber(response.status) or nil,
+        node_status = layer == "node" and tonumber(response.status) or nil,
+        transport = response.transport, verified = false, retryable = true, rid = response.rid,
+        deadline_seconds = M.RELAY_DEADLINE_SECONDS, attempts = M.RELAY_ATTEMPTS,
+        message = string.format("NOT KNOWN YET: %s did not answer inside the deadline this call was given "
+          .. "(%d s) and the answer was %s, which says nothing about whether it ran - it was NOT refused. "
+          .. "Read the request back by its id on that node before asking again: a second request with the "
+          .. "same id starts nothing new.", name, M.RELAY_DEADLINE_SECONDS, tostring(code)),
+        fix = string.format("ask that node what became of it: tools.remote({node:%s, capability:%s, "
+          .. "args:{action:status, id:<id>}}) - the id is in the request you sent, and the node "
+          .. "answers accepted/running/installed/failed from its own records.",
+          string.format("%q", name), string.format("%q", tostring(capability or "the capability"))),
+        input = tostring(capability or "the remote call") }
+    end
     if code then
       local refusal = M.refusal("node", code, tonumber(response.status), node)
       refusal.transport = response.transport
