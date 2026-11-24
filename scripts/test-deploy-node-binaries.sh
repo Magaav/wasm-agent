@@ -661,6 +661,58 @@ contains "$out" "stopped at the 0s bound" "the refusal says the walk stopped at 
 contains "$out" "none of the newest 0 published releases" "and how far it got, without claiming the channel is empty"
 
 
+# 11. THE DOWNLOAD PATH REFUSES A TAMPERED RELEASE BEFORE ANYTHING IS WRITTEN (24/11). The rows above
+#     prove the second gate (wa_node_verify_dir / --from) on a manifest that disagrees; these run the whole
+#     download - manifest, signed sums, payload - and check the two facts that matter: the refusal is
+#     NAMED, and no cache entry is left behind that a later deploy would read as a hit.
+#     Measured on the real published bytes (node-5bb28d8a1f51) the same way: a changed byte is rc 5
+#     node_hash_mismatch, a missing SHA256SUMS.sig is rc 2 release_unsigned, a manifest naming another
+#     commit is rc 2 node_manifest_commit_mismatch, and none of them left a .complete marker.
+flat_stub() { # <dir> <commit> <digest> -> a flat release stub (the shape a bare release download has)
+  local dir="$1" short tagged
+  short="$(wa_node_short_sha "$2")"
+  mk_release "$dir" "$2" "$3"
+  tagged="$dir/node-$short"
+  cp -f "$tagged/"* "$dir"/
+  # The tag subdirectory is REMOVED: wa_node_tag_base would otherwise read the sums and their signature
+  # from it, so a row that deletes the root's signature would still find one and pass. A flat release has
+  # exactly one copy of every asset, which is also the shape a real release download leaves on disk.
+  rm -rf "$tagged"
+}
+prebuilt_absent() { # <cache> <commit> <triple> <what>
+  local cache="$1" short
+  short="$(wa_node_short_sha "$2")"
+  [ ! -f "$cache/$short/$3/.complete" ] || fail "$4: a refused download left a COMPLETE cache entry, which the next deploy reads as a verified release"
+  ok
+}
+tamper_stub="$WORK/tamper"; rm -rf "$tamper_stub"; mkdir -p "$tamper_stub"
+flat_stub "$tamper_stub" "$C_BASE" "$DIG_BASE"
+tamper_short="$(wa_node_short_sha "$C_BASE")"
+# (a) unsigned: the sums are there, the signature is not.
+unsigned_stub="$WORK/tamper-unsigned"; rm -rf "$unsigned_stub"; cp -a "$tamper_stub" "$unsigned_stub"
+rm -f "$unsigned_stub/SHA256SUMS.sig"
+tcache="$WORK/tamper-cache-unsigned"
+out="$(WA_NODE_BINARIES_URL="$unsigned_stub" wa_node_binary_download "$digrepo" "$C_BASE" "$X64" "$tcache" 2>&1)"
+expect_status 2 "$?" "a release whose sums are not signed"
+contains "$out" "release_unsigned:" "the unsigned refusal is named"
+prebuilt_absent "$tcache" "$C_BASE" "$X64" "the unsigned release"
+# (b) a single changed byte in the payload, with the signed sums untouched.
+bitten_stub="$WORK/tamper-bitten"; rm -rf "$bitten_stub"; cp -a "$tamper_stub" "$bitten_stub"
+printf 'X' | dd of="$bitten_stub/wa-$X64-$tamper_short" bs=1 seek=64 conv=notrunc status=none 2>/dev/null   || fail "could not change one byte of the fixture payload"
+bcache="$WORK/tamper-cache-bitten"
+out="$(WA_NODE_BINARIES_URL="$bitten_stub" wa_node_binary_download "$digrepo" "$C_BASE" "$X64" "$bcache" 2>&1)"
+expect_status 5 "$?" "a payload with one changed byte"
+contains "$out" "node_hash_mismatch:" "the hash refusal is named"
+prebuilt_absent "$bcache" "$C_BASE" "$X64" "the tampered payload"
+# (c) the manifest names another commit than the one asked for: the release is intact and signed, and
+#     it is still not this commit's build.
+foreign_stub="$WORK/tamper-foreign"; rm -rf "$foreign_stub"; cp -a "$tamper_stub" "$foreign_stub"
+sed -i.bak "s/^source_commit=.*/source_commit=$C_RUST/" "$foreign_stub/node-$tamper_short.manifest" 2>/dev/null   || sed -i '' "s/^source_commit=.*/source_commit=$C_RUST/" "$foreign_stub/node-$tamper_short.manifest"
+out="$(wa_node_verify_dir "$foreign_stub" "$C_BASE" "$X64" 2>&1)"
+expect_status 2 "$?" "a manifest that names another commit"
+contains "$out" "node_manifest_commit_mismatch:" "the commit refusal is named"
+
+
   [ -x "$si_install/wa-sentinel" ] || fail "the installed prebuilt supervisor is not executable"
   ok
 else
