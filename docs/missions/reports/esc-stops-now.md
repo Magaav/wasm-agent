@@ -394,6 +394,53 @@ interrupt stamp (the stamp is taken when the reader raises the interrupt), so th
 same in every scenario, and the pty column still shows the whole path (200-357 ms) for a reader who wants
 it. Nothing was widened, loosened or hidden: the assertion moved from the script's clock to the node's.
 
+
+### The bash leg, red again on e832e152: the stop was never slow, the settlement was inside the number
+
+main-health 24/11 reported `esc-stops pty: 17 ok, 1 failed` with the bash leg over its cap by the node
+clock, and the run's log was gone before anyone could read it. This time the row answers the question
+itself, because the one number is now two.
+
+**The finding**: the old number was interrupt -> `run|end`, and `run|end` is written at the very end of
+`M.run` - after the failure record, the transcript flush, the audit flush and the done-gate note. That
+tail is the harness SETTLING, and the ledger's own patience is measured in this repo at 20 s under a
+competing writer (lua/core/telemetry.lua). The bash leg was charged for the ledger's patience.
+
+**The fix**: `lua/core/agent.lua` writes `run|stopped` the moment the cancelled run comes back out of
+`run_body`, with every tool and every read already let go. The row now asserts `interrupt -> run|stopped`
+and reports `run|stopped -> run|end` as the settlement. No budget was widened: 300 ms idle, 120 ms per
+unit of load, hard 2000, unchanged.
+
+**The bash stop does not really wait on anything**: `shell gone` is 4-9 ms, the probe takes one look
+(worst 3-4 ms), so there is no pty drain and no group wait - and the stop is 40-101 ms.
+
+**Proof, five single runs while a full fast.sh held the suite lock** (load 9.6 -> 3.6), all 18 ok / 0 failed:
+
+| run | bash stop | bash settle | load at the key |
+|---|---|---|---|
+| 1 | 56 ms | 24 ms | 10.40 |
+| 2 | 47 ms | 18 ms | 8.41 |
+| 3 | 80 ms | 19 ms | 5.74 |
+| 4 | 40 ms | 19 ms | 4.72 |
+| 5 | 59 ms | 21 ms | 4.04 |
+
+and in the same runs headers 6-8 ms, stream 6-10 ms, remote 22-28 ms, subagent 58-101 ms, every settlement
+17-25 ms. Against the idle budget of 300 ms the bash leg has 15-50x headroom at load 10.5, so the cap of
+2000 ms is not what made it red - the settlement inside the same number was.
+
+**Readable from main-health's first_lines now**: a failure prints its own measurement and budget,
+
+    FAIL - bash: Esc ends the run at once, by the node clock (1 ms idle, 0 ms per unit of load, never over 1)
+           measured 57 ms, budget 1 ms at load 3.02; the run then settled for 18 ms; seen from the pty 234 ms,
+           probe 3 ms over 1 looks, worst 3 ms
+
+(taken from a forced-failure run with the budget set to 1 ms, so the format is verified, not imagined).
+
+**What is not asserted, and why**: the settlement is reported, never asserted. A 20 s ledger stall is a
+ledger problem with its own rows; asserting it here would move the red from the stop to the settlement
+without fixing anything, and this row answers one question - did Esc stop the work. The number rides in
+the same line, so a settlement that goes bad is visible beside the stop it follows.
+
 **Pending, said plainly**: a reproduction of the 1041 ms. Neither a fork storm nor load 32 produced it;
 the trace line above is the first thing to read if it comes back, and `WASM_AGENT_CANCEL_TRACE=1` is how to
 turn it on. Fable's amendment (stop the load loops, rerun on an idle queue, 10 runs) is what produced the

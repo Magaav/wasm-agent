@@ -440,6 +440,7 @@ async function scenario(entry) {
       JSON.stringify(state.requests.filter(entry => entry.path.endsWith('/chat/completions')).map(entry => entry.body), null, 1));
   }
   return {name, escMs: backAt === null ? null : backAt - escAt, stopMs: stop.stopMs,
+    settleMs: stop.settleMs, workEndAt: stop.workEndAt, workWhy: stop.workWhy,
     interruptAt: stop.interruptAt, runEndAt: stop.runEndAt, stopWhy: stop.why,
     probeCalls, probeMaxMs, probeMs, escAt, rows, ledger, home,
     loadAtEsc, shellGoneMs, survivors: survivors.length,
@@ -455,27 +456,53 @@ async function scenario(entry) {
 // is unknown, never a pass.
 function ledgerStop(ledger, escAtMs) {
   const since = escAtMs / 1000 - 2;
+  const one = statement => {
+    const rows = ledgerRows(ledger, statement);
+    return rows === null ? null : rows[0] || null;
+  };
   let interruptAt = null;
   let runEndAt = null;
+  let workEndAt = null;
+  let workWhy = null;
   let why = '';
   const deadline = Date.now() + GIVE_UP_MS;
   while (Date.now() < deadline) {
-    const rows = ledgerRows(ledger,
-      "SELECT kind, phase, at FROM harness_events WHERE kind IN ('input','run') AND at >= " + since
-      + " ORDER BY seq DESC LIMIT 8");
-    if (rows === null) { why = 'the ledger could not be read'; }
-    else {
-      const interrupt = rows.find(row => row.kind === 'input' && row.phase === 'interrupt');
-      const end = rows.find(row => row.kind === 'run' && row.phase === 'end');
-      if (interrupt) interruptAt = Number(interrupt.at);
-      if (end) runEndAt = Number(end.at);
-      if (interruptAt !== null && runEndAt !== null) break;
+    // THREE NARROW READS, never one wide one: a run writes many step/tool rows after the interrupt, so a
+    // "newest 16 rows" read pushes the two stamps this row needs out of its own window (measured: every leg
+    // reported "seen from the pty 15 s" because run|end was never found and the loop burned its deadline).
+    const interrupt = one("SELECT kind, phase, at FROM harness_events WHERE kind='input' AND phase='interrupt'"
+      + " AND at >= " + since + " ORDER BY seq DESC LIMIT 1");
+    const end = one("SELECT kind, phase, at FROM harness_events WHERE kind='run' AND phase='end'"
+      + " AND at >= " + since + " ORDER BY seq DESC LIMIT 1");
+    // THE WORK STOPPING, not the run settling: a tool call the stop cut short writes its own end with
+    // cancelled=true the moment it returns - the shell reaped, the peer released - and everything the run
+    // does after that (transcript flush, audit flush, the done-gate note) is the harness settling, which may
+    // wait on a busy ledger for seconds. Main-health 24/11 (e832e152) was red on this row with the bash leg
+    // over the cap: the number charged the ledger's patience to the stop.
+    // The run writes a run|stopped row the moment it comes back out of its body with the cancel
+    // (lua/core/agent.lua), BEFORE the failure record, the transcript flush and the done-gate note: that
+    // stamp is the stop, and run|end - written after all of that - is the settlement. Older builds write no
+    // stopped row, so the tool call the stop cut short (tool|end with cancelled) is the next best stamp.
+    const stopped = one("SELECT kind, phase, at FROM harness_events WHERE kind='run' AND phase='stopped'"
+      + " AND at >= " + since + " ORDER BY seq DESC LIMIT 1");
+    const cut = one("SELECT kind, phase, at FROM harness_events WHERE kind='tool' AND phase='end'"
+      + " AND payload LIKE '%\"cancelled\":true%' AND at >= " + since + " ORDER BY seq DESC LIMIT 1");
+    if (interrupt === null && end === null && stopped === null && Date.now() > deadline - 8000) {
+      why = 'the ledger could not be read';
     }
+    if (interrupt) interruptAt = Number(interrupt.at);
+    if (end) runEndAt = Number(end.at);
+    if (stopped) { workEndAt = Number(stopped.at); workWhy = 'run_stopped'; }
+    else if (cut) { workEndAt = Number(cut.at); workWhy = 'tool_cancelled'; }
+    // run|end is the completion signal: the two stamps we need always precede it, and a scenario with no
+    // tool call (headers, stream) has no tool row at all - waiting for one burned the whole deadline.
+    if (interruptAt !== null && runEndAt !== null) break;
     spawnSync('sleep', ['0.06']);
   }
-  const stopMs = interruptAt !== null && runEndAt !== null && runEndAt >= interruptAt
-    ? Math.round((runEndAt - interruptAt) * 1000) : null;
-  return {interruptAt, runEndAt, stopMs, loadAtEsc: loadavg(), why};
+  const ms = (from, to) => (from !== null && to !== null && to >= from ? Math.round((to - from) * 1000) : null);
+  const stopMs = ms(interruptAt, workEndAt !== null ? workEndAt : runEndAt);
+  const settleMs = workEndAt !== null ? ms(workEndAt, runEndAt) : null;
+  return {interruptAt, workEndAt, runEndAt, workWhy, stopMs, settleMs, loadAtEsc: loadavg(), why};
 }
 
 // The ledger, read by a second process: what the run itself recorded about the stop.
@@ -538,10 +565,13 @@ console.log('');
 // TWO columns, and only one of them is the claim: the stop is the node's own number (the interrupt row to
 // the run-end row, both stamped in the ledger) and the pty column is when this script noticed the prompt -
 // reported so a reader can see the gap, never asserted, because it is this script's own latency.
-console.log('scenario   stop (the node\'s own)  seen from the pty  load at the key   shell gone after   probe');
+console.log('scenario   stop (node)   settle (node)  seen from the pty  load at the key   shell gone after   probe');
 for (const result of results) {
   const stopCol = result.stopMs === null || result.stopMs === undefined
     ? 'unknown (' + (result.stopWhy || 'no interrupt row or no run end') + ')' : result.stopMs + ' ms';
+  const settleCol = result.settleMs === null || result.settleMs === undefined
+    ? (result.workWhy ? '-' : 'no stop row')
+    : result.settleMs + ' ms';
   const seen = result.escMs === null ? 'never (gave up at ' + (GIVE_UP_MS / 1000) + ' s)' : result.escMs + ' ms';
   const load = result.loadAtEsc === null || result.loadAtEsc === undefined ? 'unknown' : String(result.loadAtEsc);
   const shell = result.shellGoneMs === null || result.shellGoneMs === undefined
@@ -549,8 +579,8 @@ for (const result of results) {
     : result.shellGoneMs + ' ms';
   const probeCol = (result.probeCalls || 0) === 0 ? '-'
     : result.probeCalls + ' looks, worst ' + result.probeMaxMs + ' ms';
-  console.log('  ' + result.name.padEnd(9) + ' ' + stopCol.padEnd(25) + seen.padEnd(18) + load.padEnd(17)
-    + shell.padEnd(19) + probeCol);
+  console.log('  ' + result.name.padEnd(9) + ' ' + stopCol.padEnd(13) + settleCol.padEnd(12) + seen.padEnd(18)
+    + load.padEnd(17) + shell.padEnd(19) + probeCol);
 }
 console.log('');
 
@@ -568,10 +598,17 @@ if (crash) {
       ? 'the node recorded no stop for this run: ' + (result.stopWhy || 'no interrupt row or no run end')
         + '\nseen from the pty: ' + (result.escMs === null ? 'never' : result.escMs + ' ms')
         + '\nthe screen at the end:\n' + result.rows.join('\n')
-      : result.stopMs + ' ms by the node stamps (limit ' + limit + ' ms at load ' + result.loadAtEsc
+      // THE NUMBER AND ITS BUDGET, in the line main-health shows: a red must be readable without the log.
+      : 'measured ' + result.stopMs + ' ms, budget ' + Math.min(limit, HARD_MS) + ' ms at load '
+        + result.loadAtEsc + '; the run then settled for ' + (result.settleMs === null ? 'unknown' : result.settleMs + ' ms')
         + '; seen from the pty ' + (result.escMs === null ? 'never' : result.escMs + ' ms')
         + ', probe ' + result.probeMs + ' ms over ' + result.probeCalls + ' looks, worst '
-        + result.probeMaxMs + ' ms)';
+        + result.probeMaxMs + ' ms';
+    // THE STOP IS THE CLAIM; the settlement is REPORTED. A run that takes 20 s to settle (the ledger's own
+    // patience, measured in lua/core/telemetry.lua) is a ledger problem with its own rows - asserting it
+    // here would move the red from the stop to the settlement without fixing anything, and this row exists
+    // to answer one question: did Esc stop the work. The number is in the line either way, so a settlement
+    // that goes bad is visible in the same breath as the stop it follows.
     const ok = measured && result.stopMs <= limit && result.stopMs <= HARD_MS;
     check(result.name + ': Esc ends the run at once, by the node clock (' + LIMIT_MS + ' ms idle, '
       + PER_LOAD_MS + ' ms per unit of load, never over ' + HARD_MS + ')', ok, detail);
