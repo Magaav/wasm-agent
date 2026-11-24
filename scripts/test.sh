@@ -1468,6 +1468,11 @@ gate_run bash scripts/test-session-park.sh
 # marker covering only the swap. A real node refuses new turns and holds due wakes while it waits; the real
 # sentinel binary names each holder and, past its bound, proceeds over the sessions that have PAUSED only.
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-wait.sh
+# WHAT A REQUEST RECORDS WHEN A NAMED MAIN IS BEHIND ORIGIN (24/11, G blocker): the real sentinel writes the
+# request in a fixture repository whose `wa.deployRemote` main is seven days behind origin/main, and the
+# node's own Lua reads the box and prints the pause, 'did not happen' and release lines. Every one of them
+# must name the commit a deploy would install, never the bundle's stale main.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-target.sh
 # A PAUSE'S RELEASE SAYS WHAT HAPPENED, DECIDED BY THE INSTALLED RECORD (r8c 1, mission one-resume-per-install):
 # the pause record names installed.txt's tree and bytes, a scripts-only install makes the release say
 # "[deploy] installed", a marker gone with nothing installed says "[deploy] the update did not happen", the resume
@@ -1482,6 +1487,16 @@ GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-kept-message
 # suspected "gap" is covered by the CLAIMED lane; a due resume held by a waiting deploy spends no resume turn; and a
 # session that paused three times inside one install is owed ONE paid resume turn, not three.
 GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-resume-window.lua" "$BIN" --db "$DB.resume-window" | grep 'resume window ok'
+# A DEPLOY THAT IS RUNNING HOLDS A PAUSED SESSION (r8c 21:15Z): the sentinel detaches the deploy and moves the request
+# to done/ in 8 s, so for the minutes a Rust install compiles there is no request, no claimed request and no marker -
+# the deploy's own running state is what says the install is still coming. Its reader's judgement (start time,
+# zombie, recycled pid, the record's own bound, no /proc), the wait every caller sees, and the release that must not
+# happen while it runs.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-alive.lua" "$BIN" --db "$DB.deploy-alive" | grep 'deploy alive ok'
+# THE SAME HOLD ON A REAL NODE (r8c G blocker): the deploy is claimed and moved to done/ at once, then compiles
+# for 60 s with no request, no claimed request and no marker; killed, scripts-only and back-to-back, every resume
+# counted at the loopback model.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-alive-hold.sh
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.

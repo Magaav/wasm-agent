@@ -86,17 +86,116 @@ local function request_reader()
   return request_module or nil
 end
 
+-- THE DEPLOY THAT IS RUNNING IS AN INSTALL IN PROGRESS (r8c 21:15-21:27Z, Fable 24/11).
+--
+-- MEASURED on this node: the sentinel CLAIMED the request for 39e862d6 and started deploy.sh detached, moving the
+-- request to `done/` 8 s later; deploy.sh then fetched and COMPILED for 430 s and wrote the deploy-pending marker
+-- only after the build (it belongs to scripts/upgrade.sh, which runs then). For those 430 s there was no request, no
+-- claimed request and no marker, so release_due concluded the install was over: two paused sessions were released,
+-- each ran a paid resume turn that found installed.txt unchanged and was told "[deploy] the update did not happen",
+-- and the marker then paused them again for a second release and a second paid turn. One install, two turns each.
+--
+-- The deploy's own state closes that hole (scripts/lib/deploy-alive.sh writes it at the start of scripts/deploy.sh
+-- and its exit trap clears it). It is not a second state machine: `M.waiting` treats it as one more reason an
+-- install is in progress, so every caller that already refuses or pauses for a waiting build does so for a running
+-- one too, and release_due releases only when there is no request, no claimed request, no marker AND no live deploy.
+M.ALIVE_FILE = "deploy-alive.json"
+-- How long a recorded deploy may hold a session when the reader CANNOT look at the process table (no /proc). The
+-- installer's own wait is 1800 s (scripts/upgrade.sh DEPLOY_IDLE_BOUND), and a compile is minutes (430 s measured),
+-- so this is the same bound: a killed deploy on such a host holds a session for at most this long, and then the
+-- release says the update did not happen, which by then is true.
+M.ALIVE_BOUND = 1800
+
+function M.alive_path()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok then return nil end
+  return paths.data() .. "/" .. M.ALIVE_FILE
+end
+
+-- The start time a pid began at (field 22 of /proc/<pid>/stat, clock ticks since boot) and its state letter, or
+-- nil when the file cannot be read. A pid on its own is NOT enough: pids are recycled, and a recycled one would hold
+-- every session for the life of a stranger - so the record carries the start time and the reader compares it.
+function M.pid_start(pid, opts)
+  pid = tonumber(pid)
+  if not pid or pid <= 0 then return nil end
+  opts = opts or {}
+  local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
+  if type(reader) ~= "function" then return nil end
+  local ok, body = pcall(reader, "/proc/" .. tostring(math.floor(pid)) .. "/stat")
+  if not ok or type(body) ~= "string" or body == "" then return nil end
+  -- `comm` may contain spaces and parentheses: everything up to the LAST ')' is the pid and the command, and the
+  -- fields after it start at field 3 (state); starttime (field 22) is the 20th of them.
+  local tail = body:match("%)%s*(.*)$")
+  if not tail then return nil end
+  local fields = {}
+  for word in tail:gmatch("%S+") do fields[#fields + 1] = word end
+  local start = tonumber(fields[20])
+  if not start then return nil end
+  return start, fields[1]
+end
+
+-- Can this machine's process table be read at all? `/proc/1/stat` is on every Linux, and absent on Windows and in a
+-- sandbox that hides /proc; the answer decides whether a missing pid means "the deploy is gone" (release now) or
+-- "cannot tell" (hold until the record's own bound).
+function M.proc_available(opts)
+  if opts and opts.proc_available ~= nil then return opts.proc_available == true end
+  return M.pid_start(1, opts) ~= nil
+end
+
+-- The deploy's own running state, or nil and why there is none. The same shape the marker and a claimed request
+-- answer in (`to`, `since`, `bound_seconds`, `source`), so no caller can tell them apart in the wrong way.
+function M.alive(now, opts)
+  opts = opts or {}
+  now = tonumber(now) or os.time()
+  local path = opts.alive_path or M.alive_path()
+  if not path then return nil, "no_path" end
+  local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
+  if type(reader) ~= "function" then return nil, "unreadable" end
+  local ok, body = pcall(reader, path)
+  if not ok or type(body) ~= "string" or body == "" then return nil, "absent" end
+  local decoded_ok, state = pcall(json.decode, body)
+  if not decoded_ok or type(state) ~= "table" then return nil, "unreadable" end
+  local since = tonumber(state.since) or 0
+  local bound = tonumber(state.bound_seconds) or M.ALIVE_BOUND
+  if bound <= 0 then bound = M.ALIVE_BOUND end
+  if since <= 0 then return nil, "no_since" end
+  if now > since + bound then return nil, "expired" end
+  local pid = tonumber(state.pid)
+  if not pid or pid <= 0 then return nil, "no_pid" end
+  local answer = { source = "deploy", to = tostring(state.commit or state.to or ""), since = since,
+    bound_seconds = bound, by = "the deploy's own running state", pid = pid }
+  local measured, proc_state = M.pid_start(pid, opts)
+  if measured ~= nil then
+    -- A LIVE PID IS ONLY THIS DEPLOY IF IT IS THE SAME PROCESS (start time) AND NOT A ZOMBIE (a killed child its
+    -- parent has not reaped yet is on the table but is not running).
+    if proc_state == "Z" then return nil, "zombie" end
+    local recorded = tonumber(state.pid_start)
+    if recorded ~= nil and measured ~= recorded then return nil, "pid_recycled" end
+    return answer
+  end
+  if M.proc_available(opts) then return nil, "not_running" end
+  -- NO PROCESS TABLE TO ASK: the record's own bound is the only thing that can end this hold, and the answer says so
+  -- rather than pretending the deploy is proven alive.
+  answer.unverified = true
+  return answer
+end
+
+
 function M.waiting(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
   local marker = (opts.read or M.read)(now)
   if marker then return marker end
   local module = request_reader()
-  if not module then return nil end
-  local read = opts.read_request or module.read
-  local found = read(now, opts.request)
-  if found then return found end
-  return nil
+  if module then
+    local read = opts.read_request or module.read
+    local found = read(now, opts.request)
+    if found then return found end
+  end
+  -- AND A DEPLOY THAT IS RUNNING IS AN INSTALL IN PROGRESS (r8c 21:15Z): the request file has left the box and the
+  -- installer's marker is not written until its build is done, so this is the only thing that says the install is
+  -- still coming. `M.alive` answers the same shape the other two do, so every caller treats it the same way.
+  return M.alive(now, opts)
 end
 
 -- How long after the pause the session asks to continue. Long enough for a swap and a restart, short
@@ -1109,8 +1208,13 @@ function M.release_due(now, opts)
   -- the deploy has not even started is what let a turn run again, keep the node busy, and starve the install
   -- for half an hour. The request is in the box until the swap is done, so its absence is the end.
   if M.waiting(now, opts) then return 0 end
-  local waiting = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>? LIMIT 8]],
-    { M.RESUME_REASON, now })
+  -- EVERY PENDING RESUME, DUE OR NOT (r8c 21:15Z, measured by scripts/test-deploy-alive-hold.sh): the release used to
+  -- look only at rows whose `due_at` was still in the future, so a pause whose 60 s poll came due DURING a long compile
+  -- was dispatched after the install ended by the ordinary due path - with the pause-time words ("the node is
+  -- installing a new build") and none of the release's line. The release is "nothing waits any more": it stamps every
+  -- pending resume of the session, due or not, and makes it due now.
+  local waiting = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? LIMIT 8]],
+    { M.RESUME_REASON })
   if type(waiting) ~= "table" or #waiting == 0 then return 0 end
   -- A HELD SESSION IS NOT WAITING FOR THIS INSTALL (Fable 24/11). `self_wake_pauses` holds a session for a reason of
   -- its own - a park (a mission stopped on purpose, 22/11) or an interrupt - and the node's tick dispatches none of
@@ -1122,14 +1226,7 @@ function M.release_due(now, opts)
     if type(row) == "table" and tostring(row.session_id or "") ~= "" then held[tostring(row.session_id)] = true end
   end
   local function is_held(session) return session ~= "" and held[session] == true end
-  -- The other half of the pause log (M.note): the install is done, so the wait each paused session paid ends
-  -- here. Logged before the rows are updated, because a row that is updated is a wait that ended.
-  for _, row in ipairs(waiting) do
-    if type(row) == "table" then
-      local session = tostring(row.session_id or "")
-      if not is_held(session) then M.note("released", session, { wake = row.id, at = now }) end
-    end
-  end
+
   -- ONE RESUME ROW PER SESSION - PER SESSION, NOT PER TABLE (Fable 24/11, the blocker).
   --
   -- MEASURED in review of 9a7edd49: this statement's first version kept the earliest pending resume in the WHOLE
@@ -1170,8 +1267,23 @@ function M.release_due(now, opts)
   -- the install directory says now. `install_moved` is true only for two records that disagree; nil (cannot tell) is
   -- never read as installed.
   local now_identity = M.installed_identity(opts)
-  local released = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>?
-    ORDER BY due_at, created_at]], { M.RESUME_REASON, now })
+  -- THE STAMP IS ONCE PER RELEASE, BECAUSE THE ROW'S OWN PROMPT IS THE MARK (Fable 24/11, the blocker).
+  --
+  -- MEASURED in review of 6ae677dd: taking the `due_at > now` filter off made EVERY pending resume selectable, and
+  -- `release_due` runs on every tick (2 s). A released row that stays pending - its session's lane busy with a kept
+  -- message, the plan's limit, anything - was therefore stamped again every tick: a 10-minute busy lane is ~300
+  -- copies of the line, ~100 KB of prompt, a paid turn on that, and a "released" log line per tick.
+  --
+  -- The mark is the first line of `prompt`: the release PREPENDS its line ([deploy] installed / [deploy] the update did
+  -- not happen / [deploy] the pause ended - all of them start with `[deploy] `), and a later pause of the same session
+  -- REWRITES the prompt through `selfloop.schedule` ("SET status='pending', prompt=?..."), which is what clears the
+  -- mark for the next cycle - the same write that re-arms the row. `last_error` was NOT used: the dispatcher writes
+  -- it on a pending row every time it defers (`lua/core/selfloop.lua:1594`, :1654, :1826, :1976), so the mark would be
+  -- erased by a refusal and the line stamped twice. No new column: the store's grant is read/write on this table's
+  -- rows, not DDL.
+  local released = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=?
+    AND substr(coalesce(prompt,''),1,9)<>'[deploy] '
+    ORDER BY due_at, created_at]], { M.RESUME_REASON })
   local changes = 0
   for _, row in ipairs(type(released) == "table" and released or {}) do
     local session = tostring(row.session_id or "")
@@ -1193,7 +1305,11 @@ function M.release_due(now, opts)
       local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
         prompt = ? || char(10) || char(10) || prompt
         WHERE id=? AND status='pending']], { now, now, text, tostring(row.id) })
-      changes = changes + (tonumber(type(changed) == "table" and changed.changes or 0) or 0)
+      local stamped = tonumber(type(changed) == "table" and changed.changes or 0) or 0
+      changes = changes + stamped
+      -- The other half of the pause log (M.note): the wait this session paid ends HERE, and here is once per
+      -- release - a row already stamped is not selected above, so a busy lane writes no second line.
+      if stamped > 0 then M.note("released", session, { wake = row.id, at = now }) end
     end
   end
   return changes

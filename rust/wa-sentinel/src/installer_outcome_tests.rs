@@ -11,6 +11,77 @@ const TARGET: &str = "ffd2a0a5dd92cf0133f35f3c02de28355867bf58";
 const OLD: &str = "4425f670b48eae9449625702aa2ddfe7f1151ba9";
 const REASON: &str = "land-quick deploy-hold-never-fails-our-load (ffd2a0a5)";
 
+const MAIN: &str = "345e51be8f0a4b9c1d2e3f405162738495a6b7c8";
+const STALE: &str = "74d48431a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+/// A test's own sentinel home and install directory, both restored when it ends - the two stores `verdict(id)`
+/// reads. Never the machine's own (the real box is `$HOME/.wasm-agent/sentinel`): a verdict judged against the
+/// node's own records would be a claim about the machine, not about this code.
+struct Fixture {
+    dir: PathBuf,
+    install: PathBuf,
+    restore: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl Fixture {
+    fn new(label: &str) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("wa-installer-outcome-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let install = dir.join("install");
+        std::fs::create_dir_all(&install).expect("fixture install directory");
+        std::fs::create_dir_all(dir.join(".wasm-agent").join("sentinel").join("done")).expect("fixture box");
+        let node = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".wasm-agent").join("sentinel"));
+        assert_ne!(Some(dir.join(".wasm-agent").join("sentinel")), node,
+            "the fixture store must never be the node's own sentinel directory");
+        let mut fixture = Fixture { dir, install, restore: Vec::new() };
+        fixture.set("WASM_AGENT_HOME", fixture.dir.display().to_string());
+        fixture.set("WA_INSTALL_DIR", fixture.install.display().to_string());
+        fixture
+    }
+
+    fn set(&mut self, key: &'static str, value: String) {
+        if !self.restore.iter().any(|(saved, _)| *saved == key) {
+            self.restore.push((key, std::env::var_os(key)));
+        }
+        std::env::set_var(key, value);
+    }
+
+    fn state(&self) -> PathBuf {
+        self.dir.join(".wasm-agent").join("sentinel")
+    }
+
+    /// The request in the lane `verdict` reads it from: `done/<id>.json`, as the sentinel writes it.
+    fn done(&self, id: &str, request: Value) {
+        let record = json!({"at": 1795475320u64, "ok": true, "phase": "spawned", "request": request});
+        std::fs::write(self.state().join("done").join(format!("{id}.json")), record.to_string())
+            .expect("fixture done record");
+    }
+
+    /// The installer's own log, at the path the verdict reads (`sentinel.log`).
+    fn log(&self, text: &str) {
+        std::fs::write(self.state().join("sentinel.log"), text).expect("fixture installer log");
+    }
+
+    /// `installed.txt` as the installer writes it (`commit=`), so the verdict reads the product's own file
+    /// through the product's own reader (`deploy_outcome::installed_commit`).
+    fn installed(&self, commit: &str) {
+        std::fs::write(self.install.join("installed.txt"), format!("commit={commit}\nbranch=main\n"))
+            .expect("fixture installed.txt");
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        for (key, value) in self.restore.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 fn log(body: &str) -> String {
     format!(
         "--- deploy unit wa-deploy-1795474000-42 at 1795474000 script /x/deploy.sh reason another landing\ndeploy: installed\n{body}"
@@ -69,6 +140,161 @@ fn an_earlier_installers_success_is_not_this_requests() {
 fn a_request_without_a_commit_claims_nothing() {
     assert_eq!(verdict_of("", OLD, &refused(), REASON), Outcome::Running);
 }
+
+
+/// 7. THE VERDICT IS JUDGED BY WHAT WAS DEMANDED (24/11). A protocol request carries two commits:
+/// `expected_sha` - what it demanded, which `deploy.sh` revalidates and installs and nothing else - and
+/// `target_commit`, what a deploy would have installed when the request was WRITTEN, which is advisory. On
+/// `work` the second was a `host` bundle's main SEVEN DAYS BEHIND, while the installer built and installed
+/// origin/main: a request that installed exactly what it demanded was judged against a commit it never
+/// mentioned, and with a rotated log it failed. There is no log here at all - the record is the only evidence.
+#[test]
+fn an_expected_sha_outranks_the_recorded_target() {
+    let fixture = Fixture::new("expected-first");
+    let id = "1795475320000000000-4242-00000000000000000000";
+    fixture.done(id, json!({"verb": "deploy", "id": id, "queued_at": 1795475320u64,
+        "expected_sha": MAIN, "target_commit": STALE, "reason": REASON}));
+    fixture.installed(MAIN);
+    assert_eq!(installer_outcome::verdict(id), Some(Outcome::Installed),
+        "the install record names what was demanded: this request installed");
+
+    // ... and the same request is NOT satisfied by a record naming the advisory target instead: the record is
+    // evidence only for the commit the request demanded.
+    fixture.installed(STALE);
+    match installer_outcome::verdict(id) {
+        Some(Outcome::Uninstalled(why)) => assert!(why.contains("no installer block"), "said plainly: {why}"),
+        other => panic!("a record naming another commit is not this request's install: {other:?}"),
+    }
+}
+
+/// 8. THE SAME COMMIT AT TWO LENGTHS. A request's commit and the install record's are written by different
+/// programs and may differ in length - a deploy records the short form, a request can carry either - so the
+/// shorter names the comparison, in BOTH directions. Measured shape of the old comparison
+/// (`target.starts_with(installed)`): a 12-character request against a 40-character record was "not
+/// installed", which would fail a request for the commit it installed.
+#[test]
+fn a_record_and_a_request_naming_the_same_commit_at_different_lengths_are_installed() {
+    let fixture = Fixture::new("lengths");
+    let id = "1795475320000000000-4242-00000000000000000003";
+    fixture.done(id, json!({"verb": "deploy", "id": id, "queued_at": 1795475320u64,
+        "target_commit": &MAIN[..12], "reason": REASON}));
+    fixture.installed(MAIN);
+    assert_eq!(installer_outcome::verdict(id), Some(Outcome::Installed),
+        "a short request and a full record name the same commit");
+    fixture.installed(&MAIN[..12]);
+    assert_eq!(installer_outcome::verdict(id), Some(Outcome::Installed),
+        "and a short record against a full request does too");
+}
+
+/// 9. A RECORD THAT NAMES THE ADVISORY TARGET IS NOT A SUCCESS WHEN ANOTHER COMMIT WAS DEMANDED. Read through
+/// the store (`verdict(id)`), which is where the two commits are told apart: the record names the target that
+/// was recorded at request time, and the request demanded a different commit - so nothing was installed for
+/// it. Without this the recorded target could MASK a wrong install: the record would match the advisory
+/// commit and the verdict would say "installed" for a commit the request never asked for.
+#[test]
+fn a_record_naming_the_advisory_is_not_the_demanded_install() {
+    let fixture = Fixture::new("advisory-masks");
+    let id = "1795475320000000000-4242-00000000000000000002";
+    fixture.done(id, json!({"verb": "deploy", "id": id, "queued_at": 1795475320u64,
+        "expected_sha": MAIN, "target_commit": STALE, "reason": REASON}));
+    fixture.installed(STALE);
+    fixture.log(&refused());
+    match installer_outcome::verdict(id) {
+        Some(Outcome::Uninstalled(why)) => {
+            assert!(why.contains("refused(component_proof_failed)"), "the installer's own words: {why}");
+            assert!(!why.contains("installed: "), "not a success: {why}");
+        }
+        other => panic!("a record naming the advisory target is not the demanded install: {other:?}"),
+    }
+}
+
+/// A \\`git\\` this fixture can drive: the retry hint asks the deploy tree a real question, so the tree is a
+/// real repository.
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C").arg(root).args(args)
+        .env("GIT_AUTHOR_NAME", "wa-installer-outcome-test")
+        .env("GIT_AUTHOR_EMAIL", "wa-installer-outcome-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "wa-installer-outcome-test")
+        .env("GIT_COMMITTER_EMAIL", "wa-installer-outcome-test@example.invalid")
+        .output().expect("git");
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// 10. THE RETRY HINT IS A COMMAND THAT CAN RUN. MEASURED (24/11): the hint named the request's recorded target
+/// as \\`--expected-sha\\`, and \\`deploy.sh\\` refuses an expected SHA that is not exactly HEAD and origin/main
+/// ("expected SHA is not exact origin/main") - so the hint on \\`work\\` offered \\`74d48431\\`, a command that could only
+/// be refused. Three requests against one fixture repository:
+///   * a demanded commit that IS origin/main - the hint carries \\`--expected-sha <that commit>\\`;
+///   * a demanded commit main has moved past - no \\`--expected-sha\\`, and the hint says why;
+///   * a legacy request that only RECORDED a target - never turned into a pin.
+#[test]
+fn the_retry_hint_never_offers_a_commit_deploy_sh_would_refuse() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let mut fixture = Fixture::new("retry-hint");
+    let repo = fixture.dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("fixture repository");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "main"]);
+    let first = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &first]);
+    fixture.set("WA_DEPLOY_ROOT", repo.display().to_string());
+
+    let failed = |id: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(fixture.state().join("failed").join(format!("{id}.json")))
+            .expect("failed record")).expect("failed json")
+    };
+    let refuse = |id: &str, request: Value| -> String {
+        fixture.done(id, request);
+        assert!(installer_outcome::fail_unobserved(id, "deploy: refused(component_proof_failed): nothing installed").unwrap());
+        failed(id)["detail"].as_str().unwrap_or("").to_string()
+    };
+    let pins = |detail: &str, sha: &str| detail.contains(&format!("--expected-sha {sha}"));
+
+    // 1. The demanded commit is exactly HEAD and origin/main: deploy.sh takes it, so the hint offers it.
+    let detail = refuse("1795475320000000000-4242-00000000000000000010", json!({"verb": "deploy",
+        "id": "1795475320000000000-4242-00000000000000000010", "queued_at": 1795475320u64,
+        "expected_sha": first, "reason": REASON}));
+    assert!(pins(&detail, &first), "the pin deploy.sh takes is offered: {detail}");
+    assert!(detail.contains("still exactly origin/main"), "and it says the installer takes it: {detail}");
+
+    // 2. main has moved on: the same demanded commit would be refused now, so the hint does not name it.
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "main moved on"]);
+    let later = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &later]);
+    let detail = refuse("1795475320000000000-4242-00000000000000000011", json!({"verb": "deploy",
+        "id": "1795475320000000000-4242-00000000000000000011", "queued_at": 1795475320u64,
+        "expected_sha": first, "reason": REASON}));
+    assert!(!pins(&detail, &first), "no pin the installer would refuse: {detail}");
+    assert!(detail.contains("not exactly origin/main now"), "and it says which absence it is: {detail}");
+
+    // 3. A demanded commit at the wrong LENGTH is refused too ("expected SHA is not exact origin/main"): a pin
+    //    is a full commit SHA, so an abbreviated one is never offered - even when it names what is main now.
+    let detail = refuse("1795475320000000000-4242-00000000000000000012", json!({"verb": "deploy",
+        "id": "1795475320000000000-4242-00000000000000000012", "queued_at": 1795475320u64,
+        "expected_sha": &later[..12], "reason": REASON}));
+    assert!(!pins(&detail, &later[..12]), "an abbreviated pin is refused by deploy.sh: {detail}");
+
+    // 4. A legacy request recorded a target and demanded nothing: the record is not a pin.
+    let detail = refuse("1795475320000000000-4242-00000000000000000013", json!({"verb": "deploy",
+        "id": "1795475320000000000-4242-00000000000000000013", "queued_at": 1795475320u64,
+        "target_commit": later, "reason": REASON}));
+    assert!(!pins(&detail, &later), "a recorded target is not a demand: {detail}");
+    assert!(detail.contains("demanded no commit"), "said plainly: {detail}");
+    // 5. A REQUEST /update WROTE IS RE-ASKED WITH THE VERB THE PERSON USED (Fable, 24/11): /update prefixes its
+    // own reason ("/update: …", lua/core/update.lua:475 and :860), so the hint leads with `wa update again` and
+    // names the sentinel's door second. A person must not be handed the internal verb first.
+    let detail = refuse("1795475320000000000-4242-00000000000000000014", json!({"verb": "deploy",
+        "id": "1795475320000000000-4242-00000000000000000014", "queued_at": 1795475320u64,
+        "expected_sha": later, "reason": "/update: deploy /srv/tree through the gate"}));
+    assert!(detail.contains("run wa update again (or: wa-sentinel request deploy --reason '/update: deploy /srv/tree through the gate' --expected-sha "),
+        "the product verb leads, and the sentinel's door follows it: {detail}");
+    assert!(!detail.contains("re-request with:"), "and the internal verb is never the lead: {detail}");
+    // Printed so the review reads the composed sentence, not a description of it (cargo test -- --nocapture).
+    println!("retry hint for a /update request: {detail}");
+}
+
 
 /// 6. `fail_unobserved` ends the request where the operator and the landing both read it: `failed/` with the
 /// reason, one queue record, and ONE re-queue - and it does that once, not on every tick.

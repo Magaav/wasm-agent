@@ -209,6 +209,12 @@ function M.say(wait, now)
   local target = sha ~= "" and sha:sub(1, 12) or "an unnamed commit"
   local since = tonumber(wait.since) or 0
   local waited = since > 0 and ago((tonumber(now) or os.time()) - since) or "for an unrecorded time"
+  -- A DEPLOY THAT IS RUNNING HAS NO REQUEST FILE TO NAME (r8c 21:15Z): the sentinel moved it to done/ when it started
+  -- the script, so the sentence says how long the deploy has been running instead of naming a request id that no box
+  -- holds.
+  if tostring(wait.source) == "deploy" then
+    return string.format("%s %s (a deploy has been running %s)", M.REASON, target, waited)
+  end
   return string.format("%s %s (deploy request %s, asked %s)",
     M.REASON, target, tostring(wait.id or "unnamed"), waited)
 end
@@ -216,6 +222,15 @@ end
 -- What a turn that did NOT start says: the wait, and that nothing was lost. The first word is a name the
 -- log, the tests and `wa session status` can match on (`deploy_waiting`), like `no_dispatchable_tools`.
 function M.refusal(wait, now)
+  -- A DEPLOY THAT IS RUNNING IS NOT A REQUEST TO WITHDRAW (r8c 21:15Z): it is a detached process with no file in the
+  -- box left to withdraw, so the sentence names it and says when it ends instead of naming a `request withdraw` that
+  -- would refuse.
+  if tostring((wait or {}).source) == "deploy" then
+    return "deploy_waiting: " .. M.say(wait, now) .. ". This node starts no new turn while a deploy is being "
+      .. "installed - a turn in flight is exactly what keeps the node from going idle - and this turn did not "
+      .. "start. Nothing was lost: this is a wait, not a failure, and the work starts again once the swap is done. "
+      .. "A running turn pauses after its current step instead (lua/core/deploy_pause.lua). " .. M.RETRY
+  end
   return "deploy_waiting: " .. M.say(wait, now) .. ". This node starts no new turn while a build is "
     .. "waiting for it or being installed - a turn in flight is exactly what keeps the node from going "
     .. "idle - and this turn did not start. Nothing was lost: this is a wait, not a failure, and the work "
