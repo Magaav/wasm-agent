@@ -570,6 +570,14 @@ gate_run bash scripts/test-deploy-components.sh
 # the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built
 # artifacts - the real set end to end. No toolchain, no network, no node.
 gate_run bash scripts/test-deploy-components-shipped.sh
+# WHAT NONE OF THE ABOVE ASKS: does a fresh build of this tree still produce the pinned bytes? Half 1 of
+# test-component-pins.sh compares the lock to the SOURCE, half 2 to a COPY of bytes somebody built, so
+# eleven lines sat at artifacts no build of main produced (23/11: ten of them - another machine's rustc,
+# and another checkout path for the five components with a `path =` dependency). This row rebuilds them
+# through the shipped pipeline and compares sha256 and size to the lock, so a pin nothing here can
+# reproduce is red instead of green. It needs wasi-sdk and minutes, which is why it is here and not in
+# scripts/fast.sh.
+gate_run bash scripts/test-component-lock-rebuild.sh
 # The same idea one level up: the node BINARY from a release, so a node that cannot afford a rebuild
 # (openclaw: 2 cores, 99% disk) installs the bytes another machine built (docs/COMPONENTS.md "The node
 # binary itself"). Two halves, both with fixtures and no network, no cargo, no zig and no gh: the deploy

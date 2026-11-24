@@ -79,6 +79,7 @@ fi
 # guesses a component: a wasm that is not pinned cannot be published by this script.
 names="$(awk '/^[[:space:]]*(#|$)/ {next} $1 != "" && $2 ~ /^[0-9a-f]+$/ {print $1}' "$REPO_ROOT/components.lock")"
 [ -n "$names" ] || fail "components_lock_empty: no pinned component in $REPO_ROOT/components.lock"
+pinned_count="$(printf '%s\n' $names | grep -c .)"
 
 # The bundle directory is what ships: the build writes it, `--from` copies artifacts another machine
 # built into it, and `--check --from` only reads them where they are (nothing is written). Everything is
@@ -113,6 +114,14 @@ fi
 
 if [ -z "$FROM" ]; then
   command -v cargo >/dev/null 2>&1 || fail 'cargo_missing: the build half of this script needs cargo and, for a component with C inside, wasi-sdk (WASI_SDK=<dir>)'
+  # WHERE the build happens and WITH WHAT is part of the artifact, so a run that would build somewhere
+  # else (a stray WA_COMPONENT_BUILD_ROOT, WA_COMPONENT_TOOLCHAIN=node, a TMPDIR that used to move the
+  # root) is refused BY NAME here - before anything is built - instead of producing bytes that then read
+  # as a mystery drift against the lock. components.lock records both ("# TOOLCHAIN:", "# BUILD-ROOT:").
+  . "$ROOT/scripts/lib/component-build-root.sh"
+  if ! wa_component_build_inputs_match_lock "$REPO_ROOT"; then
+    fail 'build_inputs_differ_from_the_lock: this run would not build where, or with what, components.lock records (the line above says which), so its bytes cannot be the pins. Nothing was built.' 5
+  fi
   say "building $(printf '%s ' $names)into $OUT (needs wasi-sdk for a component with C inside)"
   mkdir -p "$OUT" || fail "bundle_unwritable: $OUT"
   # build-components.sh installs into WA_COMPONENTS_DIR: build straight into the bundle directory, so
@@ -160,7 +169,6 @@ done
 if [ -n "$drift" ]; then
   drifted_names="$(printf '%s' "$drift" | awk '{printf "%s ", $1}')"
   drifted_count="$(printf '%s' "$drift" | grep -c .)"
-  pinned_count="$(printf '%s\n' $names | grep -c .)"
   say "$drifted_count of $pinned_count pinned component(s) are not the build of this tree. Commit these lines with the component change that caused each one:"
   printf '%s' "$drift" >&2
   if [ "$drift_sha" = 1 ]; then
@@ -168,6 +176,11 @@ if [ -n "$drift" ]; then
   fi
   fail "artifact_not_pinned: ${drifted_names% } - the pinned size, not the pinned bytes; the lines above are what to commit" 6
 fi
+
+# THE ACCEPTANCE LINE (docs/COMPONENTS.md, "Reproducible builds"): every pinned name was measured
+# against its own line in THIS run, in the directory that ships, from this tree's sources. Nothing is
+# called verified that the loop above did not measure, and the count is the lock's own.
+say "all $pinned_count match components.lock"
 
 # The lock travels with the artifacts: it is the bundle's identity (the deploy compares it to its own
 # before it caches or stages anything), and the tag is derived from it.
