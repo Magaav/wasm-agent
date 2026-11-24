@@ -149,6 +149,54 @@ and never a `binary_source`, `deploy: building` or `deploy: compiled` line.
 script, or a question that cannot be answered, is `unknown` - never "fine". Every field that was there
 before is unchanged.
 
+## Addition (24ddc690) - the release list line: what the five were, and newest by publish time
+
+Fable, from the node's own output on 39e862d6: the check printed a five-entry release list whose "newest"
+was `node-d2fbd140934e` while node-9a0c589adfa0 and node-525780e13623 were newer. Measured on this node's
+cache (`~/.wasm-agent/update-check.json`, written 21:30Z), in the order it stored them:
+
+| stored order | tag | published |
+| --- | --- | --- |
+| 1 | node-d2fbd140934e | 2026-11-24T16:42:32Z |
+| 2 | node-9a0c589adfa0 | 2026-11-24T17:20:43Z |
+| 3 | node-8844132aa843 | 2026-11-24T16:16:32Z |
+| 4 | node-5bb28d8a1f51 | 2026-11-24T15:50:15Z |
+| 5 | node-525780e13623 | 2026-11-24T17:08:58Z |
+
+Three answers to Fable's question: the cap was `M.DEFAULT_PER_PAGE = 5` (the feed URL asked for five); the
+order is GitHub's release-list order, which is by CREATION and not by `published_at` (sorted by neither);
+and "newest" was `feed[1]`, the first entry as returned - the oldest published of the five - while
+node-4615449f4f02 (16:50:51Z) was not in the window at all.
+
+What changed: `by_published()` orders by `published_at` descending (an entry without a publish time sorts
+last), applied by the parser AND by the cache reader, so `latest`, `newest_installable`, the verdict and the
+line all agree; the bound is 20 and is stated; the line keeps its prefix and adds the order, the newest's
+publish time and the bound:
+
+```
+release list: 5 entries, read 2026-11-24 21:30Z, newest node-9a0c589adfa0 (published 2026-11-24T17:20:43Z),
+ordered by publish time, out of at most 20 asked for
+```
+
+...against the same cache, measured with this tree's lua and the node's binary (`wa update --check`), with
+item 3's sentence still in the first line:
+
+```
+installed 9a0c589adfa0... is 70 commit(s) behind origin/main 65e3daefd089; `wa update` installs it.
+components-df6f97708c72 is published; a node can install this commit by download.
+release list: 5 entries, read 2026-11-24 21:30Z, newest node-9a0c589adfa0 (published 2026-11-24T17:20:43Z), ordered by publish time, out of at most 20 asked for
+```
+
+Row: `scripts/test-update-banner.lua`, 249 checks, 0 failed - a stub of twelve entries with the tags in name
+order and publish times shuffled (index 4 = 11:00Z newest, index 10 = 00:00Z oldest, the alphabetically last
+at 05:00Z), so position, tag order and the last entry all name the wrong release. Two existing rows moved
+with the bound (`per_page` and the feed URL now expect 20 where they expected 5, with the reason in place);
+no assertion was loosened.
+
+New string to approve (9): `release list: <n> entries, read <when>, newest <tag> (published <when>),
+ordered by publish time, out of at most <bound> asked for[ (so anything older than the oldest entry here is
+not in it)]`.
+
 ## Item 4 - `wa-remap-rustc` Permission denied on work (55e5f652)
 
 The old install trusted two things it had not measured: that a file it found at the wrapper's path was
