@@ -285,15 +285,52 @@ function M.paused_dir()
   return paths.data() .. "/" .. (request_reader() and request_reader().PAUSE_SUBDIR or "deploy-paused")
 end
 
-function M.record_pause(marker, now, session_id, user)
-  if type(session_id) ~= "string" or session_id == "" then return nil end
+-- A PAUSE HAS TO BE COUNTABLE LATER. The per-session record above answers "is this holder paused", which is
+-- the sentinel's question; it cannot answer "how many sessions did that install pause, and how long did each
+-- wait", because a paused session and an abandoned one leave the same file and nothing removes it (measured
+-- 24/11: eight records from one day, none cleaned). So the two moments a later reader needs are appended to
+-- one small log beside them - one JSON row per event, never rewritten:
+--
+--   paused    at the moment the pause is decided: session, when, which request, which source, which target
+--   released  when the install has ended and the node releases the resume (M.release_due): when the wait ended
+--
+-- Best effort on purpose. A log that cannot be written must never stop a pause or a resume: the pause is what
+-- keeps the install inside its bound, and a file is not worth a turn (the same rule as telemetry's spool).
+function M.log_path()
   local dir = M.paused_dir()
   if not dir then return nil end
-  if type(host) ~= "table" or type(host.write_file) ~= "function" then return nil end
+  return dir .. "/pauses.jsonl"
+end
+
+-- opts.path / opts.append exist for the test that cannot touch this node's own data directory: a writer
+-- handed in is the writer used, and every production caller passes none and gets host.append_file.
+function M.note(event, session_id, fields, opts)
+  if type(session_id) ~= "string" or session_id == "" then return nil end
+  opts = opts or {}
+  local path = opts.path or M.log_path()
+  if not path then return nil end
+  local append = opts.append or (type(host) == "table" and host.append_file or nil)
+  if type(append) ~= "function" then return nil end
+  local row = { at = os.time(), event = event, session = session_id }
+  if type(fields) == "table" then for key, value in pairs(fields) do if value ~= nil then row[key] = value end end end
+  local ok, encoded = pcall(json.encode, row)
+  if not ok or type(encoded) ~= "string" then return nil end
+  local wrote, answer = pcall(append, path, encoded .. "\n")
+  if not wrote or answer ~= true then return nil end
+  return path
+end
+
+function M.record_pause(marker, now, session_id, user, opts)
+  if type(session_id) ~= "string" or session_id == "" then return nil end
+  opts = opts or {}
+  local dir = opts.dir or M.paused_dir()
+  if not dir then return nil end
+  local writer = opts.write or (type(host) == "table" and host.write_file or nil)
+  if type(writer) ~= "function" then return nil end
   local safe = session_id:gsub("[^%w%-_]", "")
   if safe == "" then return nil end
   local path = dir .. "/" .. safe .. ".json"
-  local ok = pcall(host.write_file, path, json.encode({
+  local ok = pcall(writer, path, json.encode({
     session = session_id,
     since = tonumber(now) or os.time(),
     to = marker.to,
@@ -301,7 +338,13 @@ function M.record_pause(marker, now, session_id, user)
     request = marker.id,
     by = tostring(user or marker.owner or ""),
   }))
-  if ok then return path end
+  if ok then
+    M.note("paused", session_id, {
+      since = tonumber(now) or os.time(), to = marker.to, source = marker.source or "install",
+      request = marker.id, by = tostring(user or marker.owner or ""),
+    }, opts)
+    return path
+  end
   return nil
 end
 
@@ -898,9 +941,14 @@ function M.release_due(now, opts)
   -- the deploy has not even started is what let a turn run again, keep the node busy, and starve the install
   -- for half an hour. The request is in the box until the swap is done, so its absence is the end.
   if M.waiting(now, opts) then return 0 end
-  local waiting = query([[SELECT id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>? LIMIT 8]],
+  local waiting = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>? LIMIT 8]],
     { M.RESUME_REASON, now })
   if type(waiting) ~= "table" or #waiting == 0 then return 0 end
+  -- The other half of the pause log (M.note): the install is done, so the wait each paused session paid ends
+  -- here. Logged before the rows are updated, because a row that is updated is a wait that ended.
+  for _, row in ipairs(waiting) do
+    if type(row) == "table" then M.note("released", tostring(row.session_id or ""), { wake = row.id, at = now }) end
+  end
   local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now'
     WHERE status='pending' AND reason=? AND due_at>?]], { now, now, M.RESUME_REASON, now })
   return tonumber(type(changed) == "table" and changed.changes or 0) or 0
