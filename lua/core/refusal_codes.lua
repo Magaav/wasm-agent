@@ -555,6 +555,7 @@ return {
   ['wake_at_must_be_unix_epoch_seconds']='selfloop.lua',
   ['wake_defer_unavailable']='selfloop.lua',
   ['wake_dispatch_answer_unreadable']='selfloop.lua',
+  ['wake_dispatch_failure_without_an_id']='selfloop.lua',
   ['wake_dispatch_no_receipt']='selfloop.lua',
   ['wake_dispatch_unavailable']='selfloop.lua',
   ['wake_event_takes_no_time_arguments']='selfloop.lua',
