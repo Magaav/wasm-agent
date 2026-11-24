@@ -981,6 +981,8 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.
 WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's request box is untouched"
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
+# No test may run the installer with the operator's real data dir: one run pauses every session here.
+bash scripts/test-installer-data-isolation.sh 2>&1 | tee "$DB.installer-isolation.log" | grep -q "installer data isolation ok" || { tail -20 "$DB.installer-isolation.log" >&2; exit 1; }
 gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
 # AN INSTALL CARRIES THE UI THE RELEASE SHIPS, faces included (mission fonts-install item 1, 21/11): the measured
 # node had ui/ dated 16/11 with no fonts/ at all, so the page's own stylesheet 404ed and 'wa setup fonts' had no

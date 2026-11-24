@@ -15,6 +15,26 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d /tmp/wa-upgidle-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
+# THE REAL DATA DIR IS THE ONE THING THIS ROW MUST NOT TOUCH (24/11). upgrade.sh writes the
+# deploy-pending signal BEFORE it waits - `DEPLOY_SIGNAL_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-
+# $HOME}/.wasm-agent}"` (upgrade.sh:648) - and every running session on this machine reads it and pauses
+# after its step. Run with the inherited environment, this row wrote
+# ~/.wasm-agent/deploy-pending.json with `to: unknown` and stopped the whole factory's turns, twice, and
+# nothing on the node resumed them. So the real file's state is captured here, the row runs with its own
+# data dir, and the file is compared afterwards: a row that touches it is red.
+REAL_HOME="$HOME"
+REAL_SIGNAL="$REAL_HOME/.wasm-agent/deploy-pending.json"
+signal_state() {
+  if [ -e "$REAL_SIGNAL" ]; then
+    printf 'present:%s
+' "$(stat -c '%s:%Y' "$REAL_SIGNAL" 2>/dev/null || echo unknown)"
+  else
+    printf 'absent
+'
+  fi
+}
+REAL_BEFORE="$(signal_state)"
+
 INST="$WORK/install"
 mkdir -p "$INST/scripts"
 case "$(uname -s 2>/dev/null)" in
@@ -48,14 +68,24 @@ STUB="$WORK/bin"
 mkdir -p "$STUB"
 cat > "$STUB/curl" <<'SH'
 #!/bin/sh
+# The wait's only source of truth about the node AND the moment the deploy-pending signal is on disk:
+# upgrade.sh clears it when the wait ends, so a check after the run cannot see it. The first health call
+# copies it aside, as the witness that the writer aimed at THIS data dir.
+if [ ! -f "$WA_TEST_DATA/.witness" ] && [ -f "$WA_TEST_DATA/deploy-pending.json" ]; then
+  cp -f "$WA_TEST_DATA/deploy-pending.json" "$WA_TEST_DATA/.witness" 2>/dev/null || true
+fi
 printf '%s' "$WA_TEST_HEALTH"
 SH
 chmod +x "$STUB/curl"
 
+# Its own home, its own data dir, its own HOME: the three the installer resolves its state from.
+mkdir -p "$WORK/home" "$WORK/data"
 run() { # state idle_timeout idle_max
   # The real turn guard belongs to the caller. This scratch upgrade is testing
   # idle waiting, so it must not inherit that guard from an in-turn smoke run.
-  env -u WASM_AGENT_IN_TURN WA_TEST_HEALTH="$1" WA_INSTALL_DIR="$INST" WA_PORT=1 \
+  env -u WASM_AGENT_IN_TURN -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY \
+    HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home" WASM_AGENT_DATA="$WORK/data" \
+    WA_TEST_HEALTH="$1" WA_TEST_DATA="$WORK/data" WA_INSTALL_DIR="$INST" WA_PORT=1 \
     WA_IDLE_TIMEOUT="$2" WA_IDLE_MAX_SECONDS="$3" \
     PATH="$STUB:$PATH" bash "$ROOT/scripts/upgrade.sh" "$NEW" 2>&1
 }
@@ -79,5 +109,16 @@ case "$stalled" in
   *"has not reported progress"*) echo "  ok: a stalled worker is given up on" ;;
   *) echo "  FAIL: expected the stall deadline, got the above"; exit 1 ;;
 esac
+
+# The assertion the leak earns: the real signal is exactly as it was.
+REAL_AFTER="$(signal_state)"
+if [ "$REAL_BEFORE" != "$REAL_AFTER" ]; then
+  echo "  FAIL: this row touched $REAL_SIGNAL ($REAL_BEFORE -> $REAL_AFTER); upgrade.sh writes the deploy-pending" >&2
+  echo "        signal into the inherited data dir, and every session on this machine would pause for it" >&2
+  exit 1
+fi
+# ...and its own data dir DID get the signal, so the row is exercising the writer and not skipping it.
+[ -f "$WORK/data/.witness" ] || { echo "  FAIL: the scratch data dir never received the deploy-pending signal" >&2; exit 1; }
+echo "  ok: the real data dir was not touched, and the scratch one received the signal"
 
 echo "upgrade idle-wait ok"
