@@ -80,6 +80,14 @@ elapsed=$(( $(date +%s) - start ))
 [ -n "$B_STARTED" ] || fail "B's wake did not start within ${BOUND}s while A's session was held"
 [ -n "$A_DEFERRED" ] || fail "A's resume did not defer with session_busy within ${BOUND}s"
 grep -q "deferred: another run holds the session claim" "$S/serve.log" || fail "A's deferral was not named in the node's log"
+# (r8) TWO BACKGROUND COMPLETIONS DUE IN THE SAME TICK LAND ON TWO DIFFERENT LANES. MEASURED live: runs 1349 and 1350
+# of two different sessions were both admitted to node-thread 2 in one second, because the picker saw a lane as idle
+# while it already had work queued but not started. The two lines below name the lanes actually used.
+lane_b=$(grep -o "admitted run [0-9]* of session placement-b to node-thread [0-9]*" "$S/serve.log" | grep -o "node-thread [0-9]*" | awk '{print $2}' | head -1)
+lane_c=$(grep -o "admitted run [0-9]* of session placement-c to node-thread [0-9]*" "$S/serve.log" | grep -o "node-thread [0-9]*" | awk '{print $2}' | head -1)
+[ -n "$lane_b" ] && [ -n "$lane_c" ] || fail "both same-tick completions must be admitted (b=$lane_b c=$lane_c)"
+[ "$lane_b" != "$lane_c" ] || fail "two background completions in one tick took the same lane ($lane_b): the picker cannot see queued work"
+echo "same_tick_lanes=$lane_b,$lane_c"
 # The two ran on DIFFERENT lanes: B on a run lane, A's completion on a borrowed reserve lane.
 grep -q "admitted run .* of session placement-b to node-thread 2" "$S/serve.log" || fail "B did not take the background lane"
 grep -q "borrows reserve node-thread 0" "$S/serve.log" || fail "A did not borrow a reserve lane"
