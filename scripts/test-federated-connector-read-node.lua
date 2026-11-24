@@ -7,6 +7,14 @@
 --   WA_FED_ACTION=call    the federated call a master makes: nodes.remote_call(peer, "federation", ...)
 local json = dofile('lua/vendor/json.lua')
 local action = tostring(host.getenv('WA_FED_ACTION') or '')
+-- ONE NODE'S HALF, NOT A TEST OF ITS OWN. scripts/test-discriminates.sh treats every changed test-*
+-- path as a row, and this file has no verdict without the harness that drives it: it says so in the one
+-- shape that is neither a pass nor a failure ("^SKIP ", a hole the test itself names), so a round that
+-- adds it is not blocked by a row that could never catch anything.
+if action == '' then
+  print('SKIP this file is one node\'s half of scripts/test-federated-connector-read.mjs; it has no verdict of its own')
+  return
+end
 local tool = tostring(host.getenv('WA_FED_TOOL') or '')
 
 if action == 'setup' then
