@@ -306,7 +306,8 @@ THE FINAL NARROWED RUN (`WA_FAST_ROWS=/tmp/rows-run.txt`, 51 of 364 Lua rows, th
 * Lua: `test-opening.lua` (44 ok), `test-icons.lua` (267 ok), `test-cli-view.lua` (566 ok),
   `test-icon-face.lua` (44 ok), `test-font-setup.lua` (183 ok);
 * Python: `scripts/test-unicode-icons.py` (ok: 14 glyphs, 4 faces measured, 4 named unmeasured);
-* Rust: `cargo test -p wa-term --lib opening::` (16 ok), `--test opening` (7 ok), `--test icons` (1 ok); the two
+* Rust: the WHOLE crate on the rebased tip - `cargo test -p wa-term` - 221 lib tests, `--test icons` (1),
+  `live_region` (4), `--test opening` (7) and `reflow_blocks` (1): 234 passed, 0 failed; the two
   pty rows were also run against the BASE binary and fail there (the discriminator);
 * Identity (the two rows that own the build's name, which `2be61e78` changed): `test-build-identity.lua`
   (21 ok) and `test-product-version.lua` (15 ok);
