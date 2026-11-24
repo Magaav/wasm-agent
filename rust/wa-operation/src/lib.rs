@@ -163,6 +163,20 @@ pub fn withheld_note(names: &[String]) -> String {
     format!("withheld_from_tool_children: {} - {}. To hand one to tool children on this node, list its exact name in policy.json under tool_env_allow (a shape is never re-granted, only the name you list).", names.join(", "), what)
 }
 
+/// Remove the git names that choose a repository from a command the NODE runs itself (disk.rs reads a
+/// worktree and removes one through `git -C <path>`), before it is spawned.
+///
+/// The tool child is scrubbed at its own spawn (`scrub_inherited_env`); the node's own git calls were not,
+/// and they are the more dangerous half: `git -C <worktree> worktree remove --force` with a `GIT_DIR`
+/// inherited from a hook removes a DIFFERENT worktree's registration, and a change list read through it
+/// shows another session's files. One rule, both callers: whatever `GIT_ENV_KEEP` does not carry is gone.
+pub fn scrub_git_env(command: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy().to_string();
+        if git_env_withheld(&name.to_ascii_uppercase()) { command.env_remove(&name); }
+    }
+}
+
 /// Remove the denied names from a child's inherited environment. Called by both platform spawns before
 /// `spec.env` is applied, so a granted name can still be handed over explicitly.
 #[allow(dead_code)]
