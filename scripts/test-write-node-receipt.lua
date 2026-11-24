@@ -8,8 +8,10 @@
 -- What this holds:
 --   * the result a run block gets from tools.write and tools.edit carries node = this node's name, the
 --     same word `nodes` reports for it, so a script compares the two without learning a second word;
---   * every field the receipt had before is still there (path, ok, graph_index, applied, version): the
---     node is added, nothing is replaced;
+--   * every field the receipt had before is still there (path, ok, applied, version): the node is added,
+--     nothing is replaced - and `graph_index` is one of those fields only when the graph indexed the write,
+--     which is the state the node is in (docs/GRAPH.md, 23/11): absent on a dormant graph, a table when the
+--     graph is on. The row asserts the state it runs in, so it is true on every node;
 --   * a refusal of the same two tools carries it as well - a refusal on the wrong node is the same
 --     confusion with less damage;
 --   * when the name cannot be read the field is ABSENT, never invented: unknown is not yes.
@@ -73,7 +75,18 @@ local got = run('const w=await tools.write({path:' .. json.encode(target) .. ',c
 check(got.w and got.w.ok == true, 'the write applied: ' .. json.encode(got.w))
 check(got.w.node == chosen, 'the write receipt names the node it wrote on: ' .. json.encode(got.w))
 check(got.w.path == target, 'the write receipt still names the path: ' .. json.encode(got.w))
-check(type(got.w.graph_index) == 'table', 'the write receipt still carries graph_index: ' .. json.encode(got.w))
+-- THE GRAPH IS OFF BY DEFAULT (docs/GRAPH.md, 23/11), and a dormant graph indexes nothing: the receipt must
+-- not carry a field it did not earn. When a node DOES use the graph, the write is indexed and the field is
+-- there - the shape this row was written against. Both are asserted, from the real resolver, so the row
+-- cannot pass by reading the wrong state (main-health, 24/11: it did, and called it "still carries").
+local features = dofile('lua/core/features.lua')
+local graph = features.resolve('graph')
+check(got.w.graph_index == nil or type(got.w.graph_index) == 'table',
+  "graph_index is the graph's answer or absent, never another shape: " .. json.encode(got.w))
+if not graph.enabled then
+  check(got.w.graph_index == nil,
+    'a dormant graph leaves the write receipt without graph_index: ' .. json.encode(got.w))
+end
 check(host.read_file(target) == 'ho', 'the edit in the same block applied after the write')
 
 -- The edit receipt: node plus the fields an applied edit always had.
