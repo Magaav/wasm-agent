@@ -1297,3 +1297,45 @@ acceptance call - which the committed `WA_PAUSE_DEBUG` probes do not yet print t
 
 **Fixed and safe to keep in either case:** the param-binding contract (5), which was silently breaking every
 statement in the module on the live node.
+
+### r5h: the live-shaped acceptance is GREEN (24/11 ~02:35Z)
+
+**The last defect was a clock split inside the fixture.** `selfloop.schedule` stamps `created_at` with *this test
+file's* clock (`T0`), while the dispatch marker and the `now` passed to the call were wall time. The probe printed it:
+
+```
+debug stale: ok=true n=0 bound=300 now=1700000400 threshold=1700000100 rows=[]
+   (the row at that moment: updated_at=1795486042 - wall)
+```
+
+An age filter compares two numbers; with the row on one clock and the call on another it can never match, so in turn
+the reclaim and the re-arm were each invisible - which is why the same statement worked standalone and not inside.
+The row now carries `created_at` **and** `updated_at` from one wall clock, and every call in the block uses it.
+
+**Acceptance, no seam, real stores (`scripts/test-selfloop-pause.lua`, 129 checks):**
+
+| step | assertion |
+| --- | --- |
+| claim taken through `lua/core/resources.lua`, inventory `held` | the row is KEPT (no duplicate turn) |
+| `resources.finish(ctx)` -> inventory `claims=[]` | the same row is RECLAIMED in ONE call (`reclaimed == 1`) |
+| that same call | exactly ONE new `pending` resume row for the session, `resume_chain == 1` |
+| a second pass | adds nothing: no new re-arm, still one pending row |
+
+Running the row prints the re-arm itself: `deploy pause: re-armed the LOST resume of session … (wake … had no
+outcome, new wake …)`.
+
+**How the store is proven to be the node's:** the claim is taken through the real capability, `host.resource("list")`
+(the store this process opened) is asserted to answer `liveness = "held"` for it, the data root is `paths.data()` (the
+one the pause records, ledger and sentinel share), and `<data>/resources/claims.sqlite` is asserted to be a non-empty
+file.
+
+**Two code fixes found by this round and kept:**
+
+1. `exec`/`query` bind their params as JSON text **by contract** - a host function is a fresh closure per access, so
+   `fn == host.sql_rows` never matched, every statement in the module ran with its WHERE values unbound, and
+   `SELECT COUNT(*) … created_at>=?` read 0 (a running turn would have looked quiet and paid a duplicate resume);
+2. the `WA_PAUSE_DEBUG` probes (the stale-row count with its params and bounds, the lost query, and the reclaim
+   loop's three facts) - off unless the variable is set, and what found this.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **129**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.

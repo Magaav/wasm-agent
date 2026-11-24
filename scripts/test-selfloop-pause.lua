@@ -355,7 +355,11 @@ local wake = selfloop.schedule({ in_seconds = 60, reason = selfloop.RESUME_REASO
   prompt = "resume" }, { session_id = claim_session, user_id = "master" })
 check(wake and wake.ok, "a resume row exists for that session")
 local old_at = os.time() - 400
-host.sql_exec([[UPDATE self_wakes SET status='dispatching', updated_at=? WHERE id=?]], json.encode({ old_at, wake.wake.id }))
+-- ONE CLOCK, WALL: `selfloop.schedule` stamps `created_at` with THIS FILE's clock (T0), and a row carrying T0 while
+-- the calls here use `os.time()` satisfies neither the 6 h window nor the 300 s bound - measured: `stale: n=0` at
+-- `now=1700000400` for a row stamped `updated_at=1795486042`, so the reclaim and the re-arm were never reached.
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', created_at=?, updated_at=? WHERE id=?]],
+  json.encode({ old_at, old_at, wake.wake.id }))
 local before = host.sql_query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]],
   json.encode({ claim_session, old_at }))
 local before_rows = json.decode(before or "[]") or {}
@@ -388,10 +392,7 @@ do
     pcall(host.remove_file, box .. "/" .. tostring(entry.name or ""))
   end
 end
-local created_rows = json.decode(host.sql_query([[SELECT created_at FROM self_wakes WHERE id=?]],
-  json.encode({ wake.wake.id })) or "[]") or {}
-local row_created = tonumber((created_rows[1] or {}).created_at) or 0
-local clock_now = row_created + 400
+local clock_now = old_at + 400
 check(pause_mod.waiting(clock_now) == nil, "nothing waits for a deploy at the moment the reclaim runs")
 local verdict = pause_mod.ensure_resumes(clock_now, { stale_seconds = 300 })
 check((tonumber(verdict and verdict.reclaimed) or 0) == 1,

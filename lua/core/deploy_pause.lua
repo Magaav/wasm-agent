@@ -518,6 +518,16 @@ function M.ensure_resumes(now, opts)
     WHERE reason=? AND status='dispatching' AND updated_at<?]], { M.RESUME_REASON, now - bound })
   local stale_rows = stale_ok and rows_of(stale_answer) or nil
   if type(stale_rows) == "table" then
+    do
+      local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+      if seen and type(dbg) == "string" and dbg ~= "" then
+        local encoded_ok, encoded = pcall(json.encode, stale_rows)
+        pcall(host.log, string.format("debug stale: ok=%s n=%s bound=%s now=%s threshold=%s params=%s rows=%s",
+          tostring(stale_ok), tostring(#stale_rows), tostring(bound), tostring(now),
+          tostring(now - bound), json.encode({ M.RESUME_REASON, now - bound }),
+          encoded_ok and encoded:sub(1, 200) or tostring(stale_answer)))
+      end
+    end
     for _, row in ipairs(stale_rows) do
       local session = tostring(row.session_id or "")
       local dispatched_at = tonumber(row.updated_at) or 0
