@@ -744,10 +744,14 @@ function M.views(view, opts)
       }
     end
   end
-  for _, fold in ipairs(plan.folded) do
+  for position, fold in ipairs(plan.folded) do
     -- The row is the words the brief asks for and nothing else: the count of what it hides is IN the label
     -- ("On other nodes - 2 hidden"), so a hint here would only be a second sentence on a list row.
-    list.options[#list.options + 1] = { label = fold.label, page = fold_page[fold.kind] }
+    -- The FIRST folded row carries an empty heading: that is the blank row that sets the folds apart from
+    -- the group above them, so "1 retired" and "On other nodes" do not read as connectors of this node
+    -- (Fable, 24/11).
+    list.options[#list.options + 1] = { label = fold.label, page = fold_page[fold.kind],
+      heading = position == 1 and '' or nil }
   end
   return { command = '/mcp', captured_at = host.now and host.now() or os.time(), views = pages, view = view }
 end

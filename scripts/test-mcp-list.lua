@@ -122,6 +122,28 @@ do
     local text = balloon.text({ root }, width)
     ok(widest(text) <= width, 'at ' .. width .. ' columns no row is cut: widest ' .. widest(text))
     ok(not has(text, '\u{276f}  1.'), 'at ' .. width .. ' nothing is numbered')
+    -- THE RIGHT COLUMN IS ONE COLUMN (24/11). The check mark is three bytes and ONE cell; the plain renderer
+    -- used to pad a label with string.format("%-27s"), which pads by BYTES, so a check row's hint started two
+    -- cells to the left of a warning row's (measured on the 80-column capture: head chars 28 vs 30).
+    -- Measured on the drawn rows: each row's own hint is found in the text, and the column it starts in is
+    -- counted in characters to its left. A hint that ends a row of the list is a right column.
+    local columns, rendered = {}, lines_of(text)
+    for _, option in ipairs(root.options) do
+      local hint = tostring(option.hint or '')
+      if hint ~= '' then
+        for _, row in ipairs(rendered) do
+          local at = row:find(hint, 1, true)
+          if at and at > 1 and row:sub(-#hint) == hint then
+            columns[#columns + 1] = width_of(row:sub(1, at - 1)) + 1
+            break
+          end
+        end
+      end
+    end
+    local same = true
+    for _, column in ipairs(columns) do if column ~= columns[1] then same = false end end
+    ok(#columns >= 2 and same, 'at ' .. width .. ' columns every right column starts in the same cell: '
+      .. table.concat(columns, ','))
     local _, whatsapps = text:gsub('WhatsApp', '')
     ok(whatsapps == 1, 'at ' .. width .. ' WhatsApp is listed once: ' .. whatsapps)
     ok(has(text, 'wasm-agent built-in MCPs') and has(text, 'User MCPs'),

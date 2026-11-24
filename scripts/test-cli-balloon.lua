@@ -169,8 +169,14 @@ ok(set.views[1].title == "MCP servers", "the root is the list of MCP servers")
 -- THE LIST IS TWO GROUPS (24/11): a heading, then one row per connector on this node, then the folded rows
 -- for what is not a row here (the same connector on another node, a retired entry).
 local root_opts = set.views[1].options
-local headings = {}
-for _, option in ipairs(root_opts) do if option.heading then headings[#headings + 1] = option.heading end end
+local headings, gaps = {}, 0
+for _, option in ipairs(root_opts) do
+  -- An EMPTY heading is the blank row that sets the folded rows apart from the group above them (24/11);
+  -- a heading with words is a group's name.
+  if option.heading == '' then gaps = gaps + 1
+  elseif option.heading then headings[#headings + 1] = option.heading end
+end
+ok(gaps == 1, "the folded rows are set apart by one blank row: " .. gaps)
 ok(#headings == 2 and headings[1] == "wasm-agent built-in MCPs" and headings[2] == "User MCPs",
   "the list has the two headings, in that order: " .. table.concat(headings, " | "))
 ok(set.views[1].lines[1] == "5 servers", "the title line counts the servers it lists: " .. tostring(set.views[1].lines[1]))

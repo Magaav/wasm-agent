@@ -65,6 +65,26 @@ Every claim below cites one of those (`git log -S`, `git show`).
   description; the new row's widest part is 34 characters (mark, space, 32-character name). Measured by the
   snapshot at 80 and 120 and by `widest()` in both tests.
 
+## The layout follow-up (Fable, 24/11): a blank row, and a real column bug
+
+Two things Fable asked for after reading the captures, both in this branch's last code commit:
+
+1. **The two folded rows stand after a blank row.** They used to follow the last `User MCPs` row with nothing
+   between them, so `1 retired` read like another connector of this node. `lua/core/mcp_command.lua`
+   (`M.views`) now gives the FIRST folded row an empty `heading`, and both renderers draw an empty heading as
+   the gap alone: `lua/core/balloon.lua` `page_text` and `rust/wa-term`'s `Panel::render` (which used to drop an
+   empty heading in `from_spec`; it now keeps it, precisely because it means "gap").
+2. **The right column was two cells off, and it was real - in the plain renderer, not the terminal.** Measured
+   on this branch's own 80-column capture before the fix: the `✔` row's hint started at character 29 and the
+   `!` rows' at 31. Cause: `balloon.page_text` padded a label with `string.format("%-27s", label)`, and C's
+   `%s` width counts BYTES - the check mark is three bytes and one cell, so that row's padding was two spaces
+   short. The host panel was already right (`format!("{:<width$}")` pads by characters), which is why the
+   terminal and the capture disagreed. Fixed with `pad_label` (pads by characters). Both halves now carry the
+   assertion: `scripts/test-mcp-list.lua` measures the drawn rows' hint column (it reads 28/30 on the old code
+   and one number now), and `wa-term`'s
+   `a_group_heading_is_a_row_of_its_own_and_never_a_choice` compares the cell column of a `✔` row and a `!` row
+   in a rendered panel.
+
 ## The two decisions I had to make, and why
 
 1. **An empty group has no heading.** The renderer draws a heading above the row that starts a group (a
@@ -86,10 +106,9 @@ From `scripts/test-mcp-list.lua` (`a8049eaf`) in a scratch home: the registry bu
 (`put`, then `probe`, then `enable`) with one built-in surface (WhatsApp), two user connectors - `Healthy`,
 whose probe passed against a real `scripts/fixtures/mcp-peer.mjs` - and `Bills`, whose far end answered `401
 unauthorized`, one connector on a peer node and one retired entry. No account name and no connector secret
-appears in either capture.
+appears in either capture. The same text is `~/Work/missions/mcp-list-is-simple/capture-80.txt`.
 
 ```
----- capture: wa mcp list at 80 ----
 MCP servers
 
 3 servers
@@ -98,8 +117,9 @@ wasm-agent built-in MCPs
 ❯ ! WhatsApp                  no account
 
 User MCPs
-  ✔ Healthy                 1 tool
+  ✔ Healthy                   1 tool
   ! Bills                     needs token
+
   On other nodes - 1 hidden
   1 retired
 
@@ -113,19 +133,22 @@ wasm-agent built-in MCPs
 ❯ ! WhatsApp                  no account
 
 User MCPs
-  ✔ Healthy                 1 tool
+  ✔ Healthy                   1 tool
   ! Bills                     needs token
+
   On other nodes - 1 hidden
   1 retired
 
 Enter opens a connector · Esc or ← closes
 ```
 
-`wa mcp list` prints that text character for character: the test asserts
-`table.concat(printed, "\n") == text80`, where `text80` is `balloon.text` of the same page.
+`wa mcp list` prints that text character for character: the test asserts that the printed lines joined with
+a newline equal `text80`, the balloon's own rendering of the same page.
 
-WhatsApp reads `! WhatsApp  unknown` here because a scratch node holds no WhatsApp account and no node in its
-fleet says it does: `unknown` is the built-in row's own state word, and the row does not claim `connected`.
+WhatsApp reads `! WhatsApp  no account` here because a scratch node holds no WhatsApp account and no node in
+its fleet says it does: `no account` is the built-in row's own state word (Fable, 24/11), and the row does not
+claim `connected`. The two rows that are not connectors of this node sit under a blank row.
+
 The 80-column snapshot of the shared fixture, which HAS a connected WhatsApp, is
 `tests/snapshots/balloon/mcp-list-80x24.txt`:
 
@@ -135,13 +158,14 @@ MCP servers
 5 servers
 
 wasm-agent built-in MCPs
-❯ ✔ Gmail                            2 tools
-  ✔ WhatsApp                         3 tools
+❯ ✔ Gmail                              2 tools
+  ✔ WhatsApp                           3 tools
 
 User MCPs
-  ✔ Quarterly reports from the acco… 3 tools
+  ✔ Quarterly reports from the acco…   3 tools
   ! Filesystem reads                   not reachable
   ! Gated reports                      needs token
+
   On other nodes - 2 hidden
   1 retired
 

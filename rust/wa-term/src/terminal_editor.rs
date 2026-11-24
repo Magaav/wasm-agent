@@ -1058,7 +1058,9 @@ impl Panel {
             PanelOption {
                 label: o.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 hint: o.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                heading: o.get("heading").and_then(|v| v.as_str()).filter(|h| !h.is_empty()).map(str::to_string),
+                // An EMPTY heading is kept: it is the blank row that sets a block of rows apart from the group
+                // above it, and dropping it here would put the folded rows back among the connectors.
+                heading: o.get("heading").and_then(|v| v.as_str()).map(str::to_string),
             }).collect()).unwrap_or_default();
         // A page that does not say is numbered: every panel that existed before this field was one.
         let numbered = spec.get("numbered").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -1249,7 +1251,7 @@ impl Panel {
                 // marked, and a blank row keeps it apart from the group above it.
                 if let Some(heading) = option.heading.as_deref() {
                     if index > 0 { rows.push(String::new()); }
-                    rows.push(fit(heading));
+                    if !heading.is_empty() { rows.push(fit(heading)); }
                 }
                 let mark = if index == self.selected { "\u{276f}" } else { " " };
                 let digits = self.options.len().to_string().len();
@@ -1458,7 +1460,8 @@ mod tests {
                 {"label": "\u{2714} WhatsApp", "hint": "8 tools", "heading": "wasm-agent built-in MCPs"},
                 {"label": "\u{2714} Colmeio bills", "hint": "25 tools", "heading": "User MCPs"},
                 {"label": "! Reports", "hint": "needs token"},
-                {"label": "On other nodes - 2 hidden"},
+                {"label": "On other nodes - 2 hidden", "heading": ""},
+                {"label": "1 retired"},
             ],
             "selected": 1,
         });
@@ -1474,6 +1477,26 @@ mod tests {
         // The second heading gets a blank row of its own above it, so the groups read as two.
         assert_eq!(rows[user - 1], "", "a blank row separates the groups: {rows:?}");
         assert_eq!(rows[built_in - 1], "", "and the first heading sits under the title's own gap: {rows:?}");
+        // THE RIGHT COLUMN IS ONE COLUMN, whatever glyph starts the row. The check mark is three bytes and one
+        // cell; a renderer that pads by BYTES puts its hint two cells to the left of every other row's, which is
+        // exactly what /mcp's 80-column text capture did before 24/11 (measured: head chars 28 vs 30). Cells
+        // here, because a cell is what a terminal draws.
+        let column_of = |needle: &str, hint: &str| -> usize {
+            let row = rows.iter().find(|row| row.contains(needle)).unwrap_or_else(|| panic!("no row {needle}"));
+            let at = row.find(hint).unwrap_or_else(|| panic!("no hint {hint} in {row:?}"));
+            visible_cells(&row[..at]) + 1
+        };
+        assert_eq!(column_of("WhatsApp", "8 tools"), column_of("Reports", "needs token"),
+            "the check row and the warning row start their hint in the same column: {rows:?}");
+        assert_eq!(column_of("Colmeio bills", "25 tools"), column_of("Reports", "needs token"),
+            "and so does every row between them: {rows:?}");
+        // An EMPTY heading is a gap and nothing else: the folded rows sit under it, apart from the group
+        // above, and no row of text is drawn for it.
+        let folded = at("On other nodes").expect("the folded row is drawn");
+        assert_eq!(rows[folded - 1], "", "a blank row sets the folded rows apart: {rows:?}");
+        let above = rows[folded - 2].trim_end().to_string();
+        assert!(above.contains("! Reports") && above.trim_end().ends_with("needs token"),
+            "and nothing but the gap is drawn above them: {rows:?}");
         // Not numbered: the rows are a list, not a menu.
         assert!(!frame.contains("1. "), "nothing is numbered: {frame:?}");
         assert!(frame.contains("\u{276f}"), "the reader's row is still marked");
