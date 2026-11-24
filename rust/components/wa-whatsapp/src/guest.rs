@@ -1413,32 +1413,8 @@ async fn outbox_tick() -> bool {
                         // What this client sends never comes back as an event, so it was never indexed: a
                         // read after a successful send did not show the message, and the model went looking
                         // for it (14/11). The sent message is indexed here, as our own, like any other.
-                        //
-                        // READ YOUR WRITES (23/11): the write happens NOW, before the send answers, and the
-                        // answer carries its receipt (`in_history`). It used to be handed to the pipeline
-                        // inbox and written on a later tick, which is the window in which a read issued the
-                        // moment the send answered answered with a picture from before the send - the model
-                        // then confirmed delivery by searching its own text back. A store that refuses the
-                        // write still answers the send (the message IS out) and says `in_history:false`,
-                        // while the inbox retries it as before.
-                        let record = sent_record(&client, &request, &message_id);
-                        let in_history = match index::put(&IndexKv, &record).await {
-                            Ok(()) => {
-                                if crate::ocr::wanted(&record).is_ok() {
-                                    queue_ocr(&record);
-                                }
-                                health::indexed(1, now_ms());
-                                true
-                            }
-                            Err(reason) => {
-                                say!("index: sent message queued, write refused reason={reason}");
-                                INDEX_INBOX.with(|q| q.borrow_mut().push_back((record, 0)));
-                                false
-                            }
-                        };
-                        let mut outcome = wa_whatsapp_outbox::Outcome::indexed(&message_id, in_history);
-                        outcome.note = note;
-                        let output = outcome.encode();
+                        INDEX_INBOX.with(|q| q.borrow_mut().push_back((sent_record(&client, &request, &message_id), 0)));
+                        let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone(), note }.encode();
                         if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
                             // The message is out; a settle that failed is a queue problem, and retrying the
                             // send would be a second message. Report it, let the lease lapse.
@@ -2022,43 +1998,6 @@ async fn ocr_tick(cfg: &IndexConfig) -> bool {
     true
 }
 
-/// What the node itself can say about the pipe: when it last wrote a message into the index, and whether
-/// the transport is up.
-///
-/// "This chat is quiet" and "the pipe is stuck" are different facts, and 23/11 an agent spent four
-/// sources telling them apart (log uptime, another chat, the alias, the group). `last_received_s` is
-/// seconds since ANY message was received and indexed on this node; `connected` is the transport, read
-/// from the one place that knows it (the client this instance holds and its own bot state).
-fn receive_freshness(now: i64) -> (Option<i64>, bool) {
-    let last = health::snapshot().last_index_ms;
-    let connected = CLIENT.with(|client| client.borrow().is_some()) && !matches!(bot(), outbox::Bot::Stopped);
-    (last.map(|last| ((now - last).max(0)) / 1000), connected)
-}
-
-/// Most pending ids one read or search answer lists by name. The count is exact (`pending_total`); the
-/// list is the tail, which is what a caller's own just-sent message is in.
-const PACE_PENDING: usize = 8;
-
-/// How caught up the writer is, for the answers that say so (`index::Pace`).
-///
-/// It reads the lanes, never a guess: `INDEX_INBOX` is exactly the records this component has accepted
-/// and a later tick will write, so its length and its newest time are the gap between the wire and the
-/// index. A history sync still queued is a catch-up the component knows it is behind on.
-fn pace() -> index::Pace {
-    let mut pending: Vec<(String, String)> = Vec::new();
-    let mut total = 0usize;
-    let mut newest_seen = 0i64;
-    INDEX_INBOX.with(|inbox| {
-        let inbox = inbox.borrow();
-        total = inbox.len();
-        newest_seen = inbox.iter().map(|(record, _)| record.ts).max().unwrap_or(0);
-        // Newest first: the tail of what arrived is the head of the list a read needs to name.
-        pending = inbox.iter().rev().take(PACE_PENDING).map(|(record, _)| (record.chat.clone(), record.id.clone())).collect();
-    });
-    let catching_up = HISTORY_INBOX.with(|inbox| !inbox.borrow().is_empty());
-    index::Pace { pending, pending_total: total, newest_seen, catching_up }
-}
-
 /// Refill the OCR inbox from the index when it is empty: images that were indexed without text (the
 /// lane was off, the node restarted mid-download, or a history sync wrote them) are still read, one
 /// bounded scan per pass and never a re-download the media limits would refuse
@@ -2135,12 +2074,9 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         }
     };
     let op = request.op;
-    let mut answer = match op {
-        // Both answer with how caught up the writer is (`index::Pace`): the records this component has
-        // accepted and not written yet, and whether a catch-up is running. A read that cannot show a
-        // message it already has says so (`pending`) instead of answering with the picture from before it.
-        seam::Op::Search => index::search_paced(&IndexKv, &request, &pace()).await,
-        seam::Op::Read => index::read_paced(&IndexKv, &request, &pace()).await,
+    let answer = match op {
+        seam::Op::Search => index::search(&IndexKv, &request).await,
+        seam::Op::Read => index::read(&IndexKv, &request).await,
         seam::Op::Message => index::message(&IndexKv, &request).await,
         seam::Op::Reactions => index::reactions(&IndexKv, &request).await,
         seam::Op::Media => index::media(&IndexKv, &request).await,
@@ -2149,17 +2085,6 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         // Which chat a name means (`whatsapp_contacts`), and the same resolution `read` uses.
         seam::Op::Contacts => index::contacts(&IndexKv, &request).await,
     };
-    // A read or a search describes the index, so it also says how fresh the index itself is: the node's
-    // own receive freshness and the transport, in the same result. A refusal is left alone - it answers
-    // a question about the request, not about the index.
-    if matches!(op, seam::Op::Read | seam::Op::Search) {
-        if let Ok(body) = answer.as_mut() {
-            if body.get("ok") == Some(&serde_json::Value::Bool(true)) {
-                let (last_received_s, connected) = receive_freshness(now_ms());
-                crate::view::note_freshness(body, last_received_s, connected);
-            }
-        }
-    }
     match answer {
         Ok(answer) => {
             // The answer is already bounded (`wa_whatsapp_index::bound`): the queue refuses an oversized

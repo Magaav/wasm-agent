@@ -214,62 +214,6 @@ fn dedupe_key_names_one_job_per_queue() {
     assert_eq!(again.id, first.id);
 }
 
-/// The read contract of 23/11, at the queue: a claim that is only about "nobody else should run this
-/// while it is running" must stop answering the moment the job answers. The account node measured the
-/// opposite: three reads of one chat in a row answered 15:40, 16:15 and 15:44, each a different job
-/// that had already settled, because the claim lived until `reap` (an hour).
-#[test]
-fn an_in_flight_claim_stops_answering_when_the_job_settles_and_a_send_claim_does_not() {
-    let f = Fixture::new();
-    let ask = || {
-        f.queue
-            .enqueue(EnqueueRequest::new("whatsapp.query", b"read".to_vec()).dedupe("read-1").dedupe_in_flight())
-            .expect("enqueue")
-    };
-    let first = ask();
-    assert!(!first.dedupe_hit);
-    // While the scan is running, a second identical call reads the same job instead of scanning twice.
-    let while_live = ask();
-    assert!(while_live.dedupe_hit, "an in-flight claim still dedupes");
-    assert_eq!(while_live.id, first.id);
-
-    let taken = f.take("whatsapp.query", "wa-whatsapp");
-    assert_eq!(taken.id, first.id);
-    f.queue.done_by(first.id, "wa-whatsapp", b"answer").expect("done");
-
-    // The settled answer is gone as a claim: the next identical call is a fresh question, and it
-    // cannot be answered with the picture of a minute ago.
-    let after = ask();
-    assert!(!after.dedupe_hit, "a settled in-flight claim must not answer a later caller");
-    assert_ne!(after.id, first.id);
-    assert!(f.queue.done_by(after.id, "wa-whatsapp", b"answer").is_err(), "the fresh job is not leased by anyone yet");
-
-    // Recovery does not resurrect the released claim: settle the fresh job, repair the derived keys,
-    // and the next identical call is a new job again.
-    let fresh = f.take("whatsapp.query", "wa-whatsapp");
-    assert_eq!(fresh.id, after.id);
-    f.queue.done_by(after.id, "wa-whatsapp", b"answer").expect("done");
-    f.queue.repair().expect("repair");
-    assert!(!ask().dedupe_hit, "repair must not re-add a settled in-flight claim");
-
-    // A send keeps the long-lived claim: the same intent must not go out twice just because the first
-    // one already answered.
-    let send = f
-        .queue
-        .enqueue(EnqueueRequest::new("whatsapp.outbox", b"send".to_vec()).dedupe("send-1"))
-        .expect("enqueue");
-    assert!(!send.dedupe_hit);
-    let sent = f.take("whatsapp.outbox", "wa-whatsapp");
-    assert_eq!(sent.id, send.id);
-    f.queue.done_by(send.id, "wa-whatsapp", b"sent").expect("done");
-    let twice = f
-        .queue
-        .enqueue(EnqueueRequest::new("whatsapp.outbox", b"send".to_vec()).dedupe("send-1"))
-        .expect("enqueue");
-    assert!(twice.dedupe_hit, "a send claim outlives its settle");
-    assert_eq!(twice.id, send.id);
-}
-
 #[test]
 fn a_dedupe_claim_left_by_a_crash_is_reclaimed() {
     let f = Fixture::new();

@@ -68,11 +68,6 @@ impl<'a> Reader<'a> {
         Self { buf, at: 0 }
     }
 
-    /// True while bytes are left: the door a record's appended, optional tail comes through.
-    pub(crate) fn more(&self) -> bool {
-        self.at < self.buf.len()
-    }
-
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
         let end = self
             .at

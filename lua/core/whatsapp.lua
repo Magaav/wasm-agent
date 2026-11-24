@@ -75,7 +75,7 @@ M.TOOLS = {
   },
   {
     verb = 'search', capability = 'whatsapp_search', effect = 'read',
-    description = 'Search every WhatsApp message this account has indexed: text, captions, document filenames and voice-note transcripts, accent-folded, so "acao" finds "Ação" and "relatorio" finds "Relatório.pdf". Messages of every kind are indexed (text, image, video, audio, voice note, document, sticker, location, contact card, poll) and so are edits and deletions. Narrow with at least one of q, chat, kind or from; the filters combine (since/until is a time window in epoch milliseconds, seconds accepted). Every hit carries the chat name, the sender name, the time three ways (at, at_local, at_iso) and the message shape, and a long body is a pointer to whatsapp_message. The best match comes first; a search that matched more than it could return says truncated=true and matched=N. The answer says how it is sorted (order) and how fresh it is (as_of, index, last_received_s, connected); every hit carries its time and chat.',
+    description = 'Search every WhatsApp message this account has indexed: text, captions, document filenames and voice-note transcripts, accent-folded, so "acao" finds "Ação" and "relatorio" finds "Relatório.pdf". Messages of every kind are indexed (text, image, video, audio, voice note, document, sticker, location, contact card, poll) and so are edits and deletions. Narrow with at least one of q, chat, kind or from; the filters combine (since/until is a time window in epoch milliseconds, seconds accepted). Every hit carries the chat name, the sender name, the time three ways (at, at_local, at_iso) and the message shape, and a long body is a pointer to whatsapp_message. The best match comes first; a search that matched more than it could return says truncated=true and matched=N.',
     parameters = { type = 'object', properties = {
       q = { type = 'string', maxLength = 200, description = 'Literal text, accent-folded.' },
       chat = { type = 'string', maxLength = 160 }, ['from'] = { type = 'string', maxLength = 160 },
@@ -87,14 +87,14 @@ M.TOOLS = {
       ['since'] = integer_of(), ['until'] = integer_of(), limit = bounded(1, 50),
     }, additionalProperties = false },
     request = function(args)
-      return { q = args.q, chat = args.chat, kind = args.kind, ['from'] = args['from'], ['since'] = args['since'], ['until'] = args['until'], limit = args.limit, order = args.order }
+      return { q = args.q, chat = args.chat, kind = args.kind, ['from'] = args['from'], ['since'] = args['since'], ['until'] = args['until'], limit = args.limit }
     end,
     -- index.rs `search` + `hit_json` (a hit is `view::message` plus chat_name/score).
     returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text}],count,matched,truncated}',
   },
   {
     verb = 'read', capability = 'whatsapp_read', effect = 'read',
-    description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page. An older name for this question - whatsapp_read, mcp_whatsapp_native_read_newest_<hash>, mcp_whatsapp_native_inspect_chat_<hash>, or peer_<node>__whatsapp_read - is refused with this one, so a name from an older build still finds the tool that answers it. The answer says how fresh it is (as_of, index, pending) and whether a quiet answer is this chat or a stuck pipe (last_received_s, connected); read again in a second when pending is not empty. One person under @lid and phone is one history.',
+    description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page. An older name for this question - whatsapp_read, mcp_whatsapp_native_read_newest_<hash>, mcp_whatsapp_native_inspect_chat_<hash>, or peer_<node>__whatsapp_read - is refused with this one, so a name from an older build still finds the tool that answers it.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 80, description = 'An exact chat JID, or a name to resolve (ambiguous names answer with candidates).' },
       before = { type = 'string', maxLength = 128, description = 'The next_before cursor from the previous page.' },
@@ -134,7 +134,7 @@ M.TOOLS = {
   },
   {
     verb = 'send', capability = 'whatsapp_send', effect = 'write',
-    description = 'Send one WhatsApp message yourself, on this account, to one exact chat, and answer what WhatsApp did with it. It is queued on the account node\'s durable queue and sent by the wa-whatsapp component; this call waits for that answer and returns {state:"done", id, message_id, served_by} or {state:"failed", id, reason, served_by}. wait_s is how long it waits: default 60, 0 queues and answers at once, at most 300, and never longer than the script that asked has left. Not finished in time is not an error: it answers {state:\"pending\", id, waited_s} and, in a script, the same {state:\"pending\", op} handle every other call answers - wait(op) resumes it and never sends again (a repeated chat+text+reply_to is one job, so nothing is sent twice), and one wait(...) collects several sends in one call, one entry per op in the order asked. Outside a script the answer\'s resume field names the one call that collects the same job. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group) - a name is not accepted here, use mcp_whatsapp_contacts to turn a name into a chat first. When operator approval is ON for that chat nothing is queued at all: this call answers {state:\"pending\", draft, approval:\"waiting\"} and the message waits as a draft until the operator sends it, edits it or rejects it. Waiting on it is the same call with {draft:<handle>}, which never sends anything; the settled draft answers {state:\"done\", outcome:\"unchanged\"|\"edited\", message_id, text(when edited)} or {state:\"rejected\", note} or {state:\"cancelled\"}. in_history says whether a read of the chat returns the message yet.',
+    description = 'Send one WhatsApp message yourself, on this account, to one exact chat, and answer what WhatsApp did with it. It is queued on the account node\'s durable queue and sent by the wa-whatsapp component; this call waits for that answer and returns {state:"done", id, message_id, served_by} or {state:"failed", id, reason, served_by}. wait_s is how long it waits: default 60, 0 queues and answers at once, at most 300, and never longer than the script that asked has left. Not finished in time is not an error: it answers {state:\"pending\", id, waited_s} and, in a script, the same {state:\"pending\", op} handle every other call answers - wait(op) resumes it and never sends again (a repeated chat+text+reply_to is one job, so nothing is sent twice), and one wait(...) collects several sends in one call, one entry per op in the order asked. Outside a script the answer\'s resume field names the one call that collects the same job. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group) - a name is not accepted here, use mcp_whatsapp_contacts to turn a name into a chat first. When operator approval is ON for that chat nothing is queued at all: this call answers {state:\"pending\", draft, approval:\"waiting\"} and the message waits as a draft until the operator sends it, edits it or rejects it. Waiting on it is the same call with {draft:<handle>}, which never sends anything; the settled draft answers {state:\"done\", outcome:\"unchanged\"|\"edited\", message_id, text(when edited)} or {state:\"rejected\", note} or {state:\"cancelled\"}.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160, description = 'Exact chat JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us. A bare phone number is refused.' },
       text = { type = 'string', maxLength = 65536, description = 'The message body, exactly as it should appear.' },
@@ -151,7 +151,7 @@ M.TOOLS = {
   },
   {
     verb = 'send_status', capability = 'whatsapp_send_status', effect = 'read', hidden = true,
-    description = 'Kept for a script written before one send answered its own outcome: the same answer as mcp_whatsapp_send({id, wait_s:0}), including in_history for the message id it reports. No catalogue and no guidance offers it - call mcp_whatsapp_send with the id instead.',
+    description = 'Kept for a script written before one send answered its own outcome: the same answer as mcp_whatsapp_send({id, wait_s:0}). No catalogue and no guidance offers it - call mcp_whatsapp_send with the id instead.',
     parameters = { type = 'object', properties = { id = { type = 'integer', minimum = 1, description = 'The job id a send answered.' },
       cancel = { type = 'boolean', description = 'Take the job out of the queue if no sender holds it yet.' },
       reason = { type = 'string', maxLength = 160, description = 'Why it was cancelled, kept on the job.' } }, required = { 'id' }, additionalProperties = false },
@@ -1067,10 +1067,6 @@ function M.settle(id, wait_s, read, options)
       local done = { ok = true, status = 200, state = 'done', id = id, message_id = answer.message_id,
         waited_s = waited_since(started), reads = reads }
       if answer.attempts ~= nil then done.attempts = answer.attempts end
-      -- READ YOUR WRITES (23/11): the component says whether the message it just sent is in the history a
-      -- read answers from. Carried through, so nobody confirms a delivery by searching the text back.
-      if type(answer.in_history) == 'boolean' then done.in_history = answer.in_history end
-      if type(answer.in_history_note) == 'string' then done.in_history_note = answer.in_history_note end
       if who() then done.served_by = who() end
       if type(answer.asked_owner) == 'string' then done.asked_owner = answer.asked_owner end
       return done
@@ -1282,8 +1278,6 @@ function M.settle_many(ids, wait_s, read, options)
         local state = type(answer.state) == 'string' and answer.state or nil
         if answer.error == nil and state == 'done' then
           entry.state, entry.message_id, terminal[index] = 'done', answer.message_id, true
-          if type(answer.in_history) == 'boolean' then entry.in_history = answer.in_history end
-          if type(answer.in_history_note) == 'string' then entry.in_history_note = answer.in_history_note end
         elseif answer.error == nil and state and FAILED_STATES[state] then
           entry.state, entry.reason, terminal[index] = 'failed', answer.reason or state, true
         elseif answer.error then

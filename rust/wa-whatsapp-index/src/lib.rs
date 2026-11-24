@@ -260,36 +260,6 @@ impl Refusal {
     }
 }
 
-/// The order a search answers in.
-///
-/// Two, not three: a search ranks by how well it matched (what a person means by searching) or by when
-/// the message was sent (what a person means by "what is new"). The answer always SAYS which one it
-/// used, because a list read in the wrong order is a wrong conclusion (23/11).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Order {
-    /// Best match first (the default when a query has terms and no chat narrows it).
-    Relevance,
-    /// Newest message first (the default for a chat-scoped search and for a search with no terms).
-    Newest,
-}
-
-impl Order {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Order::Relevance => "relevance",
-            Order::Newest => "newest",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<Order> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "relevance" => Some(Order::Relevance),
-            "newest" => Some(Order::Newest),
-            _ => None,
-        }
-    }
-}
-
 /// One query as it travels in the job payload.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -312,11 +282,6 @@ pub struct Request {
     pub limit: Option<u32>,
     /// `download` only: how many plaintext bytes the caller will accept.
     pub max_bytes: Option<u64>,
-    /// `search` only: `relevance` (best match first) or `newest` (newest message first). Absent is the
-    /// default the op decides: a search of one chat, or one with no query terms, answers newest first
-    /// (23/11: a search of old audios answered them by relevance, and a reader took the list for the
-    /// tail of the conversation).
-    pub order: Option<String>,
 }
 
 /// A request that passed every check, with the bounds already applied.
@@ -339,8 +304,6 @@ pub struct Verified {
     /// The effective count: a page size, or (for `backfill`) the messages per chat, clamped.
     pub limit: u32,
     pub max_bytes: u64,
-    /// How a `search` orders its hits (`None` = the op's default, see [`Request::order`]).
-    pub order: Option<Order>,
 }
 
 impl Request {
@@ -413,21 +376,6 @@ impl Request {
                 Some(text.to_string())
             }
         };
-        // `order` is the search's, and only the search's: a read is always newest first (its cursor is
-        // a position in that order), so an `order` on another op is refused by name rather than kept
-        // and quietly ignored.
-        let order = match self.order.as_deref().map(str::trim) {
-            None | Some("") => None,
-            Some(text) => {
-                if op != Op::Search {
-                    return Err(Refusal::new("bad_order", "order is a search option: read, media, download and the rest answer in one order"));
-                }
-                match Order::parse(text) {
-                    Some(order) => Some(order),
-                    None => return Err(Refusal::new("bad_order", "order must be relevance or newest")),
-                }
-            }
-        };
         let since = self.since.map(epoch_ms);
         let until = self.until.map(epoch_ms);
         if let (Some(since), Some(until)) = (since, until) {
@@ -471,7 +419,7 @@ impl Request {
             }
             Op::Contacts => (clamp_limit(self.limit, CONTACTS_MAX, CONTACTS_MAX), 0),
         };
-        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order })
+        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes })
     }
 
     /// The payload bytes for the queue.
@@ -522,7 +470,7 @@ impl Verified {
     /// which build answers" - a CLI with no registry - and it is still a stable key for that caller.
     pub fn dedupe_key_in(&self, build: &str) -> String {
         let material = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.op.as_str(),
             self.q.as_deref().unwrap_or(""),
             self.chat.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
@@ -535,7 +483,6 @@ impl Verified {
             self.before.as_deref().unwrap_or(""),
             self.limit,
             self.max_bytes,
-            self.order.map(Order::as_str).unwrap_or(""),
             build,
         );
         hex(&Sha256::digest(material.as_bytes()))
@@ -558,7 +505,6 @@ impl Verified {
             before: self.before.clone(),
             limit: Some(self.limit),
             max_bytes: Some(self.max_bytes),
-            order: self.order.map(|order| order.as_str().to_string()),
         }
     }
 }
@@ -932,31 +878,6 @@ mod tests {
         }
         assert_eq!(request("").validate().unwrap_err().code, "bad_op");
         assert_eq!(request("delete).drop table").validate().unwrap_err().code, "bad_op");
-    }
-
-    /// Item G (23/11): the order is the caller's to choose, the answer says which one it used, and a word
-    /// this crate does not know is refused by name rather than answered in some other order.
-    #[test]
-    fn a_search_order_is_relevance_or_newest_and_only_a_search_takes_one() {
-        let newest = Request { q: Some("boleto".into()), order: Some("newest".into()), ..request("search") };
-        assert_eq!(newest.validate().unwrap().order, Some(Order::Newest));
-        let relevance = Request { q: Some("boleto".into()), order: Some(" Relevance ".into()), ..request("search") };
-        assert_eq!(relevance.validate().unwrap().order, Some(Order::Relevance));
-        // Absent means "the op decides", which the component does: the seam carries `None`.
-        let absent = Request { q: Some("boleto".into()), ..request("search") };
-        assert_eq!(absent.validate().unwrap().order, None);
-        // An unknown word is refused, never guessed at.
-        let wrong = Request { q: Some("boleto".into()), order: Some("date".into()), ..request("search") };
-        assert_eq!(wrong.validate().unwrap_err().code, "bad_order");
-        // A read has one order (its cursor is a position in it), so an order on it is refused.
-        let on_a_read = Request { chat: Some("5511999999999@lid".into()), order: Some("newest".into()), ..request("read") };
-        assert_eq!(on_a_read.validate().unwrap_err().code, "bad_order");
-        // The order is part of what was asked: two orders are two jobs, never one shared answer.
-        let a = Request { q: Some("boleto".into()), order: Some("newest".into()), ..request("search") }.validate().unwrap();
-        let b = Request { q: Some("boleto".into()), order: Some("relevance".into()), ..request("search") }.validate().unwrap();
-        assert_ne!(a.dedupe_key_in("build"), b.dedupe_key_in("build"));
-        // And it survives the wire, so the component answers the order that was asked for.
-        assert_eq!(a.to_request().order.as_deref(), Some("newest"));
     }
 
     #[test]
