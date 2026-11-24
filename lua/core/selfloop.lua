@@ -1387,7 +1387,24 @@ function M.run_wake(args)
     deferred.session_busy = true
     return deferred
   end
-  -- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
+    -- ONE RESUME TURN PER INTERRUPTION (r8a, Fable 24/11). MEASURED live: runs 1350, 1351 and 1352 of session
+  -- 587c16b6 were all still queued on node-thread 2 (waited 1331/1027/720 s), and as the code stood all three would
+  -- have run when the lane freed - four paid turns for one pause; and at 10:15Z a re-arm queued BEHIND the session's
+  -- own running turn. So a resume that RUNS withdraws its siblings first: every other resume row of this session that
+  -- has not run is marked superseded HERE, before it is started, and a superseded row's own completion answers
+  -- `self_wake_not_dispatching` and spends no model turn. Whichever route delivers first wins - node, re-arm, an
+  -- attended CLI resume or the watchdog - because they all go through this function to run.
+  if tostring(row.reason or "") == tostring(dep("deploy_pause").RESUME_REASON) then
+    local withdrawn = exec([[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=?
+      WHERE session_id=? AND reason=? AND id<>? AND status IN ('pending','dispatching')]],
+      { "superseded: another resume of this session ran", now, row.session_id, row.reason, row.id })
+    local changed = type(withdrawn) == "table" and tonumber(withdrawn.changes) or 0
+    if changed > 0 and type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, string.format("selfloop: resume of session %s withdrew %d other resume row(s) before they ran",
+        tostring(row.session_id), changed))
+    end
+  end
+-- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
   -- the step is about to run, so the number is turns and not sweeps (lua/core/counters.lua).
   if tostring(row.id or ""):match("^handle:") then
     pcall(function() dofile("lua/core/counters.lua").bump("wake_only_round") end)

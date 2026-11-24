@@ -864,9 +864,14 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
     // different priority, so a run is never admitted to a node-thread the control lane owns.
     let ceiling = run_capacity().saturating_sub(1);
     let beats = NODE_THREAD_BEATS.get()?;
+    // LANES THAT ALREADY HAVE OUR WORK QUEUED (r8, 24/11). A completion that was admitted and then released by its
+    // own refusal is invisible to `claimed` (scheduler.rs:298, owners only), and its label is set only when the
+    // node-thread STARTS it - so a second admission in the same tick saw the same lane as free and stacked behind it.
+    // MEASURED live: runs 1349 and 1350 of two different sessions admitted to node-thread 2 in one second.
+    let queued_lanes: std::collections::HashSet<usize> = pending_snapshot().into_iter().map(|entry| entry.node_thread).collect();
     let mut idle: Vec<usize> = live_node_thread_ids()
         .into_iter()
-        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
+        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && !queued_lanes.contains(index) && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
         .filter(|index| {
             // A node-thread that has not beaten is as idle as one that never existed; a node-thread that has gone
             // quiet is not idle, whatever its label says.
@@ -890,7 +895,7 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
     if background {
         let reserve: Vec<usize> = live_node_thread_ids()
             .into_iter()
-            .filter(|index| *index < floor && *index <= ceiling && !claimed.contains(index)
+            .filter(|index| *index < floor && *index <= ceiling && !claimed.contains(index) && !queued_lanes.contains(index)
                 && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
             .collect();
         if borrowable_reserve() > 0 {

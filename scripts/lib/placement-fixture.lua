@@ -12,6 +12,13 @@ local wake_a = selfloop.schedule({ in_seconds = 0, reason = "resume after the no
   { session_id = a, user_id = "master" })
 local wake_b = selfloop.schedule({ in_seconds = 0, reason = "B's own work", prompt = "do B's thing", now = now },
   { session_id = b, user_id = "master" })
+-- A THIRD SESSION, DUE IN THE SAME TICK (r8, 24/11): MEASURED live, runs 1349 and 1350 of two different sessions were
+-- both admitted to node-thread 2 in one second because the picker could not see a lane that already had work queued
+-- but not yet started. Two background completions in one tick must land on two different lanes.
+local c = memory.start_session("local", "chat", { id = "placement-c", user_id = "master", node_id = "n", title = "C same tick" })
+local wake_c = selfloop.schedule({ in_seconds = 0, reason = "C's own work", prompt = "do C's thing", now = now },
+  { session_id = c, user_id = "master" })
 print("wake_a=" .. tostring(wake_a and wake_a.wake and wake_a.wake.id))
 print("wake_b=" .. tostring(wake_b and wake_b.wake and wake_b.wake.id))
+print("wake_c=" .. tostring(wake_c and wake_c.wake and wake_c.wake.id))
 print("ready")
