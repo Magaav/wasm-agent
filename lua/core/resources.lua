@@ -17,6 +17,19 @@ function M.claim(ctx,keys)
   local args=owner(ctx); args.keys=keys
   return call("claim",args)
 end
+-- A RUN THAT CANNOT HAVE ITS SESSION BECAUSE ANOTHER RUN IS WORKING IT (r7c, 24/11).
+--
+-- MEASURED on the live node: a resume wake's completion was handed a node-thread, could not take its session's
+-- claim (an attended CLI turn held it), and the node-thread was gone for 29 minutes while every other session's
+-- wake queued behind it. A wake must never wait for a person's turn to end: it defers, keeps its row and its
+-- time, and the node-thread is free at once. The words live here, in the module that owns the claim, because
+-- TWO places produce and read them - `lua/core/agent.lua` refuses the turn with them and `lua/core/selfloop.lua`
+-- recognises the refusal and defers the wake - and a second spelling is how the two would drift.
+M.BUSY_REFUSAL = "session_busy: another run of this session is still working; this turn did not start"
+function M.is_busy_refusal(text)
+  return type(text) == "string" and text:sub(1, #M.BUSY_REFUSAL) == M.BUSY_REFUSAL
+end
+
 function M.begin(ctx)
   local key="session:"..tostring(ctx.session_id)
   local result=M.claim(ctx,{key})

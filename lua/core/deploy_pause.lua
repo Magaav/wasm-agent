@@ -453,6 +453,7 @@ end
 -- Returns "held" | "free" | "unknown", and ONLY "free" may unblock a reclaim: no capability, a raise, a shape this
 -- code does not know, or an unknown liveness all answer "unknown", which keeps the row.
 local function claim_state_of(session, opts)
+  opts = opts or {}
   if type(opts.claim_state) == "function" then return opts.claim_state(session) end
   if type(host) ~= "table" or type(host.resource) ~= "function" then return "unknown" end
   local asked, raw = pcall(host.resource, "list", "{}")
@@ -470,6 +471,12 @@ local function claim_state_of(session, opts)
   end
   return "free"
 end
+
+-- The same answer, for a caller that is not a resume sweep: `lua/core/selfloop.lua` asks it before a wake spends a
+-- turn (r7c, 24/11) - a wake whose session another run is working must defer, not queue a node-thread behind a
+-- person's turn. One implementation, asked of the store that holds the claim (the r5d rule), so the sweep and the
+-- wake can never disagree about who is running a session.
+M.claim_state = function(session, opts) return claim_state_of(session, opts or {}) end
 
 local function marker_path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")

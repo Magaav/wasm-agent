@@ -643,6 +643,35 @@ local counted = notice_mod.abandoned_count({ now = r6_now })
 check(type(counted) == "table" and tonumber(counted.count) >= 1, "the counter counts abandoned resumes: " .. json.encode(counted))
 check(tonumber(counted.oldest_age_seconds) ~= nil, "and reports the oldest age: " .. tostring(counted.oldest_age_seconds))
 check(tonumber(counted.count) < 2, "the one that showed, and the normal one, are not counted: " .. json.encode(counted))
+-- (7) A WAKE ON A SESSION HELD BY ANOTHER LIVE RUN DEFERS AT ONCE (r7c, 24/11). MEASURED live: a resume
+-- completion took a node-thread and never returned because its session was mid-turn in an attended CLI run; that
+-- lane then held three other sessions' wakes for 29 minutes. The rule: the wake costs one line and a due time, and
+-- the lane is free before a turn is attempted. This uses the REAL claim store - the held claim below is taken the
+-- same way agent.lua takes it - and asserts the call returns immediately, not after a wait.
+local busy_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r7c held" })
+-- The held state is a real claim in the store, taken exactly the way a turn takes it.
+local resources = dofile("lua/core/resources.lua")
+local held = resources.begin({ session_id = busy_session, user_id = "master", run_id = "run-held-1" })
+check(held and held.ok == true, "the test itself holds the session claim: " .. json.encode(held))
+check(pause_mod.claim_state(busy_session) == "held", "the store says the session is held")
+local busy_wake = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume" },
+  { session_id = busy_session, user_id = "master" })
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', attempts=1, updated_at=? WHERE id=?]],
+  json.encode({ r6_now, busy_wake.wake.id }))
+local started_at = os.clock()
+local answer = selfloop.run_wake({ id = busy_wake.wake.id, owner = "master", session_id = busy_session })
+local elapsed = os.clock() - started_at
+check(type(answer) == "table" and answer.session_busy == true,
+  "the wake on a held session defers instead of waiting: " .. json.encode(answer))
+check(elapsed < 5, "and it returns at once, not after a wait: " .. tostring(elapsed) .. "s")
+local busy_row = (json.decode(host.sql_query([[SELECT status, last_error, due_at FROM self_wakes WHERE id=?]],
+  json.encode({ busy_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(busy_row.status) == "pending", "the row is back to pending: " .. json.encode(busy_row))
+check(tostring(busy_row.last_error):find("session_busy", 1, true) ~= nil,
+  "and it says why: " .. tostring(busy_row.last_error))
+check(tonumber(busy_row.due_at) ~= nil and tonumber(busy_row.due_at) > r6_now, "with a time to try again")
+resources.finish({ session_id = busy_session, user_id = "master", run_id = "run-held-1" })
+check(pause_mod.claim_state(busy_session) == "free", "with the claim released the session is not held")
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

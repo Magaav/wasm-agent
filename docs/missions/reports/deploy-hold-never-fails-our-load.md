@@ -1709,3 +1709,47 @@ activity check narrowed to this wake's own run; and the answer to *is (2) presen
 
 Two turns reported "empty output" from `bash`. That was **my** mistake, not the node's: the bash result carries
 `stdout`, and I was reading `.output`, so every result read as empty. Nothing about the node was ever silent to me.
+
+### r7c: the placement and the defer, fixed (24/11 ~07:10Z)
+
+Fable's question is answered (by Fable): `pick_run_node_thread`/`interactive_reserve` exist in v0.1.1
+(`serve.rs:284`, `:686`), so (2) is an old defect. Fixed here.
+
+**(2) Placement - the smaller change, and why it is the right one.** A lane is now ineligible when the label it
+holds has been held past a bound (`node_thread_busy_for_ms`, `held_past_bound`, `node_stall_seconds`, default 120 s,
+`WASM_AGENT_NODE_STALL_SECONDS`). I chose this over counting progress events because the start time of the label is
+**already recorded** (`NODE_THREAD_BUSY` stores `(label, since)`), so the rule is three lines and needs no new state;
+and when every run lane is busy or stalled, a background completion may take an idle, non-stalled **reserve** lane as
+the last resort, with `[placement] no run lane is eligible ... background run takes reserve node-thread N`. That is
+the one behaviour change of substance: the reserve exists so a burst of wakes cannot starve a person, and a person is
+not served by a lane that has stopped making progress.
+
+**(3) /health** (`health_body_for`): the per-lane entry now reports `state: "stalled"` when the label is held past the
+bound, plus `stalled: true` and `stalled_after_seconds` - the label and the session were already there. A lane that
+beats but does not progress is no longer called busy.
+
+**(1) The defer.** `selfloop.run_wake` asks `deploy_pause.claim_state` (the r5d rule, read from the claim store's
+liveness) **before** the turn: `held` costs the wake one row write, one line
+(`selfloop: wake <id> of session <id> deferred: another run holds the session claim`) and a `due_at`; the
+node-thread is free before a turn is attempted. Measured in the row: `185 checks passed`, and the line appears.
+
+**(6) `scripts/test-selfloop.lua:193`** (red since r6d): `finish` only wrote `WHERE status='dispatching'`, so a wake
+that was settled while still `pending` (an event or message wake its publisher had already settled) never moved. It
+now also settles a row that was **never claimed** (`status='pending' AND attempts=0`); a re-armed row has been
+claimed, so r6b's belt still protects it. Row: `{"checks":109,"ok":true}`.
+
+**Rust unit test:** `a_lane_that_beats_but_does_not_progress_is_stalled` asserts the pure rule. To run it I had to
+repair the crate's **lib test target**, which did not compile before this round: two `foreground(...)` calls in
+`operations.rs` tests were missing their `stdin` argument. Result: `404 passed, 4 failed` - the four are
+`operations::*` tests that refuse to run with `HOME=/home/victor` (they need `scripts/test.sh`'s `GATE_HOME`), none
+of them mine and none of them new.
+
+**NOT done, named:**
+* **(4) the spin.** `serve.rs:2388` spawns `wa-placement`, which loops `wa_orchestrator_tick` and then sleeps 2 s;
+  49 % CPU for 29 minutes means `wa_orchestrator_tick` (`lua/core/subagents.lua:1056`) never returned, so the spin
+  is inside the tick - most likely its sqlite-busy path (`phase`, `subagents.lua:~1040`) re-raising without backoff.
+  Not fixed; the measurement stands.
+* **(5) the sentinel.** `wa-sentinel status` already distinguishes "admitted, not started" per holder, yet the restart
+  request was held by "session 79230887 is still working (child completion)" - so the restart bound uses a different
+  rule than the status line, and I did not locate it in `rust/wa-sentinel/src/main.rs` this round. `recover` on a
+  unit-owned node (`wa-serve.service`) is likewise untouched.

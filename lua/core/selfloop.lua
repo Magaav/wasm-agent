@@ -1273,6 +1273,14 @@ function M.finish(row, ok, detail, opts)
   -- the guard, `delivered` landed on the new resume and lost it (the back-to-back install case, measured tonight).
   exec([[UPDATE self_wakes SET status=?, due_at=NULL, probe_result='', event_json='', updated_at=?,
     last_error=? WHERE id=? AND status='dispatching']], { status, now, ok and "" or slug(detail), row.id })
+  -- A ROW THAT WAS NEVER CLAIMED IS STILL THE CALLER'S TO SETTLE (r7c, 24/11). MEASURED at
+  -- scripts/test-selfloop.lua:193: an event wake and a message wake were settled by their publishers and stayed
+  -- `pending`, so a new interpreter saw three pending wakes instead of one (red on 4c720beb, green on 85d4d950).
+  -- The belt above is unchanged and still protects a row someone RE-ARMED: that row has been claimed at least
+  -- once (`attempts >= 1`), and this second write cannot touch it.
+  exec([[UPDATE self_wakes SET status=?, due_at=NULL, probe_result='', event_json='', updated_at=?,
+    last_error=? WHERE id=? AND status='pending' AND (attempts IS NULL OR attempts=0)]],
+    { status, now, ok and "" or slug(detail), row.id })
   return { status = status, due_at = nil }
 end
 
@@ -1361,6 +1369,24 @@ function M.run_wake(args)
       WHERE id=? AND status='dispatching']], { row.due_at, now, deploy_text:sub(1, 400), row.id })
     return { deferred = true, wake_id = row.id, deploy_waiting = deploy_text }
   end
+  -- THE SESSION IS BEING RUN SOMEWHERE ELSE RIGHT NOW: DEFER, DO NOT WAIT (r7c, 24/11).
+  -- MEASURED on the live node: a resume wake's completion was handed a node-thread, could not take its session's
+  -- claim because an attended CLI turn held it, and the node-thread never came back - 29 minutes, with three other
+  -- sessions' wakes queued behind it and 1 761 s recorded on the queue. The claim is asked of the store that holds
+  -- it (`deploy_pause.claim_state`, the r5d rule) BEFORE the turn: `held` costs this wake one row write, one log
+  -- line and a due time, and the node-thread is free before a turn is ever attempted. `unknown` is not a yes and it
+  -- is not a wait either: the run's own claim still decides, and `agent.lua` refuses that turn with the same words
+  -- instead of blocking - which is the belt this pre-check does not need to be perfect.
+  local claim_state = dep("deploy_pause").claim_state(row.session_id)
+  if claim_state == "held" then
+    local deferred = M.defer_refused(row, "session_busy", { now = now })
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, string.format("selfloop: wake %s of session %s deferred: another run holds the session claim",
+        tostring(row.id), tostring(row.session_id)))
+    end
+    deferred.session_busy = true
+    return deferred
+  end
   -- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
   -- the step is about to run, so the number is turns and not sweeps (lua/core/counters.lua).
   if tostring(row.id or ""):match("^handle:") then
@@ -1423,6 +1449,12 @@ function M.run_wake(args)
   -- A REFUSAL FOR A WAITING BUILD IS A WAIT, NOT A DELIVERED WAKE (23/11): same row, same time, put back.
   if ok and dep("deploy_pause").is_refusal(bot.turn_refused) then
     return M.defer_refused(row, tostring(bot.turn_refused), { now = clock({}) })
+  end
+  -- THE SAME FOR A SESSION ANOTHER RUN TOOK BETWEEN THE PRE-CHECK AND THE TURN (r7c, 24/11): `agent.lua` refuses
+  -- that turn with `resources.BUSY_REFUSAL` instead of blocking its node-thread, and the wake goes back to pending
+  -- with its time, exactly as a deploy wait does. The race is one statement wide, so the row is kept, not failed.
+  if ok and dep("resources").is_busy_refusal(bot.turn_refused) then
+    return M.defer_refused(row, "session_busy", { now = clock({}) })
   end
   if not ok and M.cancelled_stop(result) then
     local settled = M.settle_interrupted(row, { now = clock({}) })

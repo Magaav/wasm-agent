@@ -613,6 +613,33 @@ fn node_thread_busy_label(index: usize) -> Option<String> {
         .map(|(label, _)| label)
 }
 
+/// How long the current label has been held, in ms. A node-thread that BEATS is not proof that it PROGRESSES:
+/// MEASURED (24/11) a lane sat inside `wa_completion_run` for 29 minutes while its beat kept the "idle" test
+/// happy, and every other session's completion queued behind it. Progress is the only honest test.
+fn node_thread_busy_for_ms(index: usize) -> Option<u64> {
+    let since = NODE_THREAD_BUSY
+        .get()
+        .and_then(|slots| slots.get(index))
+        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+        .map(|(_, since)| since)?;
+    Some(now_ms().saturating_sub(since))
+}
+
+/// The bound past which a held label counts as STALLED, not busy: long enough for a real turn's slow host call,
+/// short enough that a person does not wait behind a dead lane (`WASM_AGENT_NODE_STALL_SECONDS` overrides it).
+fn node_stall_seconds() -> u64 {
+    std::env::var("WASM_AGENT_NODE_STALL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120)
+}
+
+/// The rule itself, pure so it can be asserted without the process-wide busy table other tests share.
+fn held_past_bound(held_ms: u64, bound_seconds: u64) -> bool {
+    held_ms >= bound_seconds.saturating_mul(1000)
+}
+
+fn node_thread_is_stalled(index: usize) -> bool {
+    node_thread_busy_for_ms(index).map(|held| held_past_bound(held, node_stall_seconds())).unwrap_or(false)
+}
+
 /// The conversation a node-thread holds, if any. `/health` reports it, and the window uses it to
 /// scope an in-flight run to its own conversation instead of assuming any chat run is its own.
 fn node_thread_session(index: usize) -> Option<String> {
@@ -771,7 +798,7 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
     let beats = NODE_THREAD_BEATS.get()?;
     let mut idle: Vec<usize> = live_node_thread_ids()
         .into_iter()
-        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index))
+        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
         .filter(|index| {
             // A node-thread that has not beaten is as idle as one that never existed; a node-thread that has gone
             // quiet is not idle, whatever its label says.
@@ -786,6 +813,22 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
     if !idle.is_empty() {
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
         return Some(idle[start % idle.len()]);
+    }
+    // NOTHING ELIGIBLE - and a background run still has to run somewhere (24/11). When every lane a completion
+    // could legally use is stalled, waiting for the interactive reserve to free is a promise nobody keeps: measured,
+    // four completions of three sessions sat 1761 s behind one dead lane while an idle reserve lane existed. A
+    // stalled lane is not a person's next run, so a reserve lane that is idle and not stalled is offered to
+    // background work as the last resort, and the line says so.
+    if background {
+        let reserve: Vec<usize> = live_node_thread_ids()
+            .into_iter()
+            .filter(|index| *index < floor && *index <= ceiling && !claimed.contains(index)
+                && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
+            .collect();
+        if let Some(index) = reserve.first().copied() {
+            eprintln!("[placement] no run lane is eligible (every one stalled or busy): background run takes reserve node-thread {index}");
+            return Some(index);
+        }
     }
     // No idle node-thread: grow the pool if the ceiling allows. `spawn_node_thread` never reuses node-thread 0 (it is
     // always running), so a spawned node-thread is always outside the interactive reserve.
@@ -1314,6 +1357,19 @@ fn execution_path_health() -> serde_json::Value {
 
 #[cfg(test)]
 mod execution_path_tests {
+    /// r7c (24/11): the beat says the loop is turning, not that the work advances. MEASURED live: one lane sat
+    /// 29 minutes inside a completion while its label never changed, /health called it busy, and placement kept
+    /// offering it. Progress is the test, and this is the rule - pure, because the busy table is process-wide and
+    /// other tests in this binary write it.
+    #[test]
+    fn a_lane_that_beats_but_does_not_progress_is_stalled() {
+        assert!(super::held_past_bound(600_000, 120), "a label held ten minutes is a stall");
+        assert!(super::held_past_bound(120_000, 120), "the bound itself counts");
+        assert!(!super::held_past_bound(119_999, 120), "a second short of it is still work");
+        assert!(!super::held_past_bound(0, 120), "a label taken this instant is busy, not stalled");
+        assert!(super::node_stall_seconds() > 0, "the bound is a real number of seconds");
+    }
+
     use super::execution_path_from;
 
     /// Nothing set anywhere is the ordinary case: one path, no refusal.
@@ -1419,7 +1475,13 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     "session": node_thread_session(index),
                     "run_id": node_thread_run_id(index),
                     "run_key": node_thread_run_id(index).map(|id|id.to_string()),
-                    "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
+                    // A LANE THAT BEATS BUT DOES NOT PROGRESS IS STALLED (r7c, 24/11): the beat only says the loop
+                    // is turning. Measured: one lane sat 29 minutes inside `wa_completion_run` with a fresh beat
+                    // and a "child completion" label, and /health called it busy the whole time. `stalled` names
+                    // it, with the label, the session and how long it has been held, so it is not invisible again.
+                    "state": if age >= stall_seconds() * 1000 || node_thread_is_stalled(index) { "stalled" } else if age < 1000 { "alive" } else { "busy" },
+                    "stalled": node_thread_is_stalled(index),
+                    "stalled_after_seconds": node_stall_seconds(),
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
                     "label": busy.as_ref().map(|(label, _)| label.clone()),
