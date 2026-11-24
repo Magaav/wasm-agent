@@ -1,7 +1,8 @@
 # mcp-list-is-simple - /mcp lists two groups, a mark, a name and a tool count
 
-H item, week 1. Branch `change/mcp-list-is-simple`, based on `origin/main` (345e51be). Nothing was landed,
-pushed or deployed by this mission; the work is three commits on the branch.
+H item, week 1. Branch `change/mcp-list-is-simple`, based on `origin/main` (345e51be; `origin/main` has
+moved on to 65e3daef since, and the landing queue merges that, not me). Nothing was landed, pushed or
+deployed by this mission: the work is five commits on the branch.
 
 ## What was asked, and what it now does
 
@@ -35,8 +36,10 @@ the list folds away, because a pipe cannot open a row).
 | `9832ab08` | `lua/core/mcp_list.lua` (the rows), `M.views` rebuilt around it, `balloon` heading + unnumbered pages, fixture, snapshots at 80 and 120, the three tests that pinned the old rows |
 | `a8049eaf` | `wa mcp list` (`mcp_cli.run_cli`), the `mcp` verb in `lua/core/init.lua`, `scripts/test-mcp-list.lua`, the fixture's `refuse_token` mode |
 | `6b958b3c` | the live panel: `PanelOption.heading` + `Panel.numbered` in `rust/wa-term`, `ViewOption.heading` + `View.numbered` in `rust/wa-cli-views` |
+| `7e112ccd` | this report and `docs/MCP.md`; the `wa mcp` usage lines de-duplicated into one `usage()` |
+| `442c8046` | the discrimination evidence below, measured on a base worktree |
 
-Every claim below cites one of those three (`git log -S`, `git show`).
+Every claim below cites one of those (`git log -S`, `git show`).
 
 ## Premises, re-measured before writing code
 
