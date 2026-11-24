@@ -75,6 +75,18 @@ Two things they do that this project cannot copy as-is, and the reason:
   silently move a fleet member across schema migrations. The channel here is a **release tag** and
   `installed.txt` records it (`release=`, `source_commit=`, `manifest_sha256=`), so "which build is this
   node" is answerable months later, and `/update` compares commits, not a moving `latest`.
+
+  **AND A NODE CAN RUN TWO COMMITS AT ONCE** (measured 24/11, after a scripts-only landing): a deploy that
+  changes only `scripts/` or `lua/` installs the new LUA TREE and keeps the older binary - the fast path,
+  `lua_fast_path=1`. `installed.txt` then says `commit=fe108a8c` (the tree) while the bytes were built from
+  `9a0c589a`, and `wa --version` said only the second, so the one command an operator is told to check named
+  a commit that does not hold what the node runs. The label now names both when they differ:
+
+      wasm-agent v0.1.2 · v9a0c589a · tree fe108a8c
+
+  and `/health`'s `build` field is the same string, from the same composer
+  (`rust/wa-host/src/build_info.rs`, `install_label`). A record that names the binary's own commit adds no
+  `tree` half, so an ordinary install's line does not change.
 - **Replacing the running binary in place.** Every CLI above ships one executable and replaces it in
   place, because nothing else is inside it. A node runs *two* long-lived processes (`wa-sentinel`
   supervising `wa serve`), so the swap has to come from outside them, and has to be reversible.
