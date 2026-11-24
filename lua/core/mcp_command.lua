@@ -726,13 +726,18 @@ function M.views(view, opts)
   -- an empty group keeps its heading and says why it is empty there, because a heading with nothing under
   -- it reads as a rendering bug.
   for _, section in ipairs(plan.sections) do
-    local heading = section.heading
+    -- An empty group has no row to carry its heading, and a heading with nothing under it reads as a
+    -- rendering bug. So the list says it once, under the count, and the groups that DO have rows keep
+    -- their heading: "1 server" alone would leave a reader wondering whether nothing was added or the
+    -- list simply did not look.
     if #section.rows == 0 then
-      heading = heading .. (section.group == 'built_in' and ' - none on this node' or ' - none added on this node')
+      lines[#lines + 1] = section.group == 'built_in'
+        and 'no built-in connector: this agent ships none here'
+        or 'no user connector: nothing has been added on this node'
     end
     for position, row in ipairs(section.rows) do
       list.options[#list.options + 1] = {
-        heading = position == 1 and heading or nil,
+        heading = position == 1 and section.heading or nil,
         label = row.label, hint = row.hint, page = link_of[row.key],
       }
     end

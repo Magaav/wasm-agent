@@ -256,4 +256,64 @@ function M.run(argument, opts)
   return { ok = false, error = 'usage' }
 end
 
+-- ---------------------------------------------------------------- `wa mcp list`
+--
+-- The brief's seventh line: "wa mcp list prints the same groups and columns as plain text." So this is not a
+-- second table: it is the SAME builder the balloon uses (`mcp_command.list` -> `mcp_command.views`), printed.
+-- A reader who compares the window with a pipe must not find two layouts, and a column added to one must
+-- appear in the other without anyone remembering to do it.
+--
+-- `--all` is the pipe's Enter: a pipe cannot open a row, so the folded pages (the connectors on other nodes,
+-- the retired entries) and every connector's own page are printed after the list. Without it the words are
+-- the window's, exactly.
+function M.run_cli(argv, opts)
+  opts = opts or {}
+  argv = argv or {}
+  local emit = opts.print or print
+  local verb = tostring(argv[1] or '')
+  -- A question runs nothing: `wa mcp --help` is the usage and exit 0, like every read-only verb
+  -- (lua/core/cli_help.lua lists only the verbs that ACT, and this one cannot).
+  if verb == '--help' or verb == '-h' then
+    emit('usage: wa mcp list [--all] [--width <columns>]   the MCP connectors this node can use')
+    emit('  --all     also print the rows the list folds away (other nodes, retired) and each connector')
+    emit('  --width   the column count to lay the rows out for (80 by default)')
+    return { ok = true, usage = true }
+  end
+  if verb ~= 'list' then
+    emit('usage: wa mcp list [--all] [--width <columns>]   the MCP connectors this node can use')
+    emit('  --all     also print the rows the list folds away (other nodes, retired) and each connector')
+    emit('  --width   the column count to lay the rows out for (80 by default)')
+    return { ok = false, error = 'usage', exit = 2 }
+  end
+  local all, width, index = false, nil, 2
+  while index <= #argv do
+    local word = tostring(argv[index])
+    if word == '--all' then all = true; index = index + 1
+    elseif word == '--width' then
+      width = tonumber(argv[index + 1])
+      if not width or width < 20 then
+        emit('--width takes the column count, 20 or more')
+        return { ok = false, error = 'mcp_usage_width', exit = 2 }
+      end
+      index = index + 2
+    else
+      -- An argument nothing recognises is refused by name: a verb that silently ignores half a line is how
+      -- an operator ends up believing a flag applied (unknown is not yes).
+      emit('wa mcp list does not take ' .. word)
+      return { ok = false, error = 'mcp_usage', argument = word, exit = 2 }
+    end
+  end
+  local command = dofile('lua/core/mcp_command.lua')
+  -- The operator's own terminal, so the operator's own view: the same context `wa services` uses.
+  local ctx = opts.ctx or { role = 'master', user_id = 'cli' }
+  local view = command.list(ctx, opts.list_options or {})
+  if view.ok == false then
+    emit('  MCP registry unreadable: ' .. tostring(view.registry_error or view.error))
+    return { ok = false, error = view.registry_error or view.error, exit = 1 }
+  end
+  local set = command.views(view, opts)
+  emit(balloon.text(all and set.views or { set.views[1] }, width or balloon.WIDTH))
+  return { ok = true, view = view }
+end
+
 return M

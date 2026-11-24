@@ -120,7 +120,11 @@ function M.plan(view, opts)
   local built_in, user, peers, retired, other = {}, {}, {}, {}, {}
   for _, entry in ipairs(view.connectors or {}) do
     local state = tostring(state_label(entry) or 'unknown')
-    if entry.state == 'retired' or state == 'retired' then
+    -- A retired row is a row of THIS node's registry (the entry its program outlived). A peer's connector
+    -- goes under the fold that names the node it runs on, whatever its state: the two folds answer two
+    -- different questions ("where is it" and "is it still a thing here"), and a peer's retired entry
+    -- belongs to the first.
+    if entry.scope ~= 'peer' and (entry.state == 'retired' or state == 'retired') then
       retired[#retired + 1] = entry
     elseif entry.scope == 'peer' then
       peers[#peers + 1] = entry

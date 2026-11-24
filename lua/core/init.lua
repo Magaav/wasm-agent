@@ -578,6 +578,12 @@ elseif command == "services" then
   -- node. Every verb goes through the registry's own master gate (lua/core/services.lua).
   local code = dofile("lua/core/services_cli.lua").run({ table.unpack(args, 2) })
   if code and code ~= 0 then os.exit(code) end
+elseif command == "mcp" then
+  -- `wa mcp list`: the same two groups and columns `/mcp` draws, as plain text, with no turn and no model
+  -- (lua/core/mcp_cli.lua, `run_cli`). It prints the balloon's own first page rather than a table of its
+  -- own, so the window and a pipe cannot disagree about a row.
+  local answer = dofile("lua/core/mcp_cli.lua").run_cli({ table.unpack(args, 2) })
+  if type(answer) == "table" and answer.exit then os.exit(answer.exit) end
 elseif command == "approve" then
   -- The operator's gate on outgoing WhatsApp drafts (lua/core/approve.lua, docs/APPROVE.md): the
   -- switch, the queue of drafts, and the decision. Every answer comes from the node that HOLDS THE
@@ -850,6 +856,7 @@ elseif command == "help" or command == "--help" or command == "-h" then
   print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
+  print("    mcp list [--all] [--width <columns>]  the MCP connectors this node can use, in two groups")
   print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
   print("    whatsapp archive list|cut|restore|unload|push|expire [YYYY-MM]  the index's monthly archives")
   print("    whatsapp posting status|on|off|allow <chats>|alerts on|off|language <code>  the component's transcript posting switch")
