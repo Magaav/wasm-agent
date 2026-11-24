@@ -419,6 +419,157 @@ for _, row in ipairs(rows2) do if row.status == "pending" then pending2 = pendin
 check((tonumber(again and again.rearmed) or 0) == 0 and pending2 == 1,
   "a second pass adds nothing: " .. json.encode(again) .. " pending=" .. tostring(pending2))
 
+-- r6, THE THREE TESTS (24/11). All of them through the product's own setup and stores - `selfloop.setup`, the real
+-- resources store via `lua/core/resources.lua`, host capabilities by their real names, params as JSON text, and ONE
+-- clock taken from the row itself; nothing injected.
+local pause_mod = dofile("lua/core/deploy_pause.lua")
+local r6_data = dofile("lua/core/paths.lua").data()
+local r6_now = os.time()
+
+-- (1) THE SWEEP RUNS BEFORE THE WAITING GATE: a record older than the window closes whatever is installing, and the
+-- daily stamp is written - the live node closed none for hours because the gate returns before the sweep.
+local paused_dir = pause_mod.paused_dir()
+local function put_record(name, body) pcall(host.write_file, paused_dir .. "/" .. name, body) return paused_dir .. "/" .. name end
+local function there(path) local ok, text = pcall(host.read_file, path) return ok and type(text) == "string" end
+local old_record = put_record("r6-old.json", json.encode({ session = "r6-old-session", since = r6_now - 7 * 3600 }))
+local live_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 live" })
+local young_record = put_record("r6-young.json", json.encode({ session = live_session, since = r6_now - 60 }))
+local marker = pause_mod.path and pause_mod.path() or (r6_data .. "/deploy-pending.json")
+pcall(host.write_file, marker, json.encode({ state = "deploy_pending", since = r6_now - 5, bound_seconds = 1800,
+  to = "e832e152", by = "installer" }))
+check(pause_mod.waiting(r6_now) ~= nil, "a deploy is installing in this fixture (the gate is up)")
+selfloop.tick({ now = r6_now })
+check(not there(old_record), "the sweep closed the expired record WHILE an install was waiting")
+check(there(young_record), "and kept the young record of a live session")
+check(there(r6_data .. "/pause-sweep.last"), "and said it ran: <data>/pause-sweep.last exists")
+pcall(host.remove_file, marker)
+pcall(host.remove_file, young_record)
+
+-- (2) A RESUME THAT MEETS AN INSTALL ALREADY WAITING SPENDS NOTHING: no model call, no message, row back to pending.
+local r6_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 wake" })
+local r6_wake = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume after the deploy" },
+  { session_id = r6_session, user_id = "master" })
+check(r6_wake and r6_wake.ok, "a resume row is due now: " .. json.encode(r6_wake))
+local claimed = selfloop.claim_due(r6_session, "master", { now = r6_now })
+check(claimed and claimed.id == r6_wake.wake.id, "and the node claimed it for its turn")
+pcall(host.write_file, marker, json.encode({ state = "deploy_pending", since = r6_now - 2, bound_seconds = 1800,
+  to = "e832e152", by = "installer" }))
+local messages_before = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=?]],
+  json.encode({ r6_session })) or "[]") or {})[1].n) or 0
+local deferred = selfloop.run_wake({ id = r6_wake.wake.id, owner = "master", session_id = r6_session })
+check(type(deferred) == "table" and deferred.deferred == true, "the run defers instead of starting: " .. json.encode(deferred))
+check(tostring(deferred.deploy_waiting):find("deploy_waiting", 1, true) ~= nil,
+  "with the sentence every other refusal uses (no new text): " .. tostring(deferred.deploy_waiting):sub(1, 60))
+local messages_after = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=?]],
+  json.encode({ r6_session })) or "[]") or {})[1].n) or 0
+check(messages_after == messages_before, "and writes NOTHING into the session: " .. tostring(messages_before)
+  .. " -> " .. tostring(messages_after))
+local back = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE id=?]],
+  json.encode({ r6_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(back.status) == "pending", "the row is pending again, not failed: " .. json.encode(back))
+pcall(host.remove_file, marker)
+
+-- (4) NO STATEMENT OF THE REPAIR TOUCHES A ROW THAT IS NOT A DEPLOY RESUME (24/11, the defect that put main red):
+-- `test-deploy-resume.lua`'s unrelated wake must keep its status, its time and its prompt through every pass - the
+-- migration, the reclaim, the pending retire and the re-arm all carry reason = the resume reason in their WHERE.
+local foreign_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 foreign" })
+local foreign = {}
+for _, spec in ipairs({ { "foreign-dispatching", "check the deploy" }, { "foreign-unknown", "look again" } }) do
+  local armed = selfloop.schedule({ in_seconds = 60, reason = spec[2], prompt = "unrelated" },
+    { session_id = foreign_session, user_id = "master" })
+  check(armed and armed.ok, "an unrelated wake is armed: " .. tostring(spec[1]))
+  foreign[#foreign + 1] = armed.wake.id
+end
+-- one of them dispatched-and-dead, the other merely overdue: both are exactly what the repair looks for by STATUS
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', created_at=?, updated_at=? WHERE id=?]],
+  json.encode({ r6_now - 7200, r6_now - 7200, foreign[1] }))
+host.sql_exec([[UPDATE self_wakes SET created_at=?, due_at=? WHERE id=?]],
+  json.encode({ r6_now - 7200, r6_now - 7200, foreign[2] }))
+local function snapshot(id)
+  local row = (json.decode(host.sql_query([[SELECT status, prompt, due_at, created_at, resume_chain FROM self_wakes WHERE id=?]],
+    json.encode({ id })) or "[]") or {})[1] or {}
+  return table.concat({ tostring(row.status), tostring(row.prompt), tostring(row.due_at), tostring(row.created_at),
+    tostring(row.resume_chain) }, "|")
+end
+local before_foreign = { snapshot(foreign[1]), snapshot(foreign[2]) }
+pause_mod.ensure_resumes(r6_now, { stale_seconds = 300 })
+pause_mod.ensure_resumes(r6_now, { stale_seconds = 300 })
+check(snapshot(foreign[1]) == before_foreign[1],
+  "an unrelated DISPATCHING wake is untouched by the repair: " .. before_foreign[1] .. " -> " .. snapshot(foreign[1]))
+check(snapshot(foreign[2]) == before_foreign[2],
+  "and so is an unrelated OVERDUE one: " .. before_foreign[2] .. " -> " .. snapshot(foreign[2]))
+-- UNCHANGED, not "none pending": one of them was armed pending on purpose, and the repair must leave that one
+-- pending and the other exactly as it was.
+local foreign_pending = 0
+for _, id in ipairs(foreign) do
+  local row = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE id=?]], json.encode({ id })) or "[]") or {})[1] or {}
+  if tostring(row.status) == "pending" then foreign_pending = foreign_pending + 1 end
+end
+check(foreign_pending == 1, "and nothing re-arms them: one was pending before, one after - " .. tostring(foreign_pending) .. " of 2")
+-- (3) AT MOST ONE PENDING RESUME PER SESSION, seeded from c67c0609's real shape (two resume rows for one session):
+-- arming B while A is pending REPLACES it - one row, the OLDEST created_at, the LARGEST chain.
+-- (3b) A RESUMED TURN THAT PAUSES AGAIN: its own row is `dispatching` (the turn running now), the pause arms a NEW
+-- resume, and when that turn ends `finish` must not land on the new row. MEASURED shape of the back-to-back installs:
+-- replacing the dispatching row let `finish` write `delivered` over the new resume and lose it.
+local paused_run_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 resumed" })
+local row_x = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume X" },
+  { session_id = paused_run_session, user_id = "master" })
+check(row_x and row_x.ok, "row X is armed")
+host.sql_exec([[UPDATE self_wakes SET created_at=?, resume_chain=1 WHERE id=?]],
+  json.encode({ r6_now - 7200, row_x.wake.id }))
+local claimed_x = selfloop.claim_due(paused_run_session, "master", { now = r6_now })
+check(claimed_x and claimed_x.id == row_x.wake.id, "and the node claimed it: X is `dispatching`, the turn is running")
+-- the turn pauses again, so deploy_pause arms a resume for the NEXT install, the way at_boundary does
+local armed_on_pause = selfloop.schedule({ in_seconds = 60, reason = pause_mod.RESUME_REASON, prompt = "resume Y" },
+  { session_id = paused_run_session, user_id = "master", resume_chain = 1 })
+check(armed_on_pause and armed_on_pause.ok, "the pause armed a second resume")
+check(armed_on_pause.replaced ~= true and tostring(armed_on_pause.wake.id) ~= tostring(row_x.wake.id),
+  "a DISPATCHING row is not replaced: the new resume is its own row")
+check(tonumber((json.decode(host.sql_query([[SELECT created_at FROM self_wakes WHERE id=?]],
+  json.encode({ armed_on_pause.wake.id })) or "[]") or {})[1].created_at) == r6_now - 7200,
+  "and it INHERITS the chain's oldest created_at, so re-arming cannot extend the window")
+-- now the running turn ends the way a finished run does
+selfloop.finish(claimed_x, true, "turn finished", { now = r6_now })
+local after_rows = json.decode(host.sql_query([[SELECT id, status, created_at, resume_chain FROM self_wakes
+  WHERE session_id=? AND reason=?]], json.encode({ paused_run_session, pause_mod.RESUME_REASON })) or "[]") or {}
+local pending_after = 0
+for _, row in ipairs(after_rows) do if row.status == "pending" then pending_after = pending_after + 1 end end
+check(pending_after == 1, "after the turn ends there is exactly ONE pending resume: " .. json.encode(after_rows))
+for _, row in ipairs(after_rows) do
+  if tostring(row.id) == tostring(armed_on_pause.wake.id) then
+    check(row.status == "pending", "and it is the NEW row, not overwritten by the finish: " .. json.encode(row))
+    check(tonumber(row.resume_chain) == 1, "with the chain carried over: " .. tostring(row.resume_chain))
+  end
+end
+
+-- (3c) THE BELT: a row that someone re-armed WHILE the turn ran is never overwritten by that turn's ending - `finish`
+-- writes only where the row is still `dispatching`.
+local belt_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 belt" })
+local belt_row = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "belt" },
+  { session_id = belt_session, user_id = "master" })
+local belt_claimed = selfloop.claim_due(belt_session, "master", { now = r6_now })
+check(belt_claimed and belt_claimed.id == belt_row.wake.id, "the belt row is claimed")
+host.sql_exec([[UPDATE self_wakes SET status='pending' WHERE id=?]], json.encode({ belt_row.wake.id }))
+selfloop.finish(belt_claimed, true, "turn finished", { now = r6_now })
+local belt_after = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE id=?]],
+  json.encode({ belt_row.wake.id })) or "[]") or {})[1] or {}
+check(tostring(belt_after.status) == "pending",
+  "finish does NOT overwrite a row that was re-armed meanwhile: " .. json.encode(belt_after))
+local one_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 one" })
+local first = selfloop.schedule({ in_seconds = 60, reason = pause_mod.RESUME_REASON, prompt = "A" },
+  { session_id = one_session, user_id = "master" })
+check(first and first.ok, "row A is armed")
+host.sql_exec([[UPDATE self_wakes SET created_at=?, resume_chain=2 WHERE id=?]], json.encode({ r6_now - 3600, first.wake.id }))
+local second = selfloop.schedule({ in_seconds = 120, reason = pause_mod.RESUME_REASON, prompt = "B", resume_chain = 1 },
+  { session_id = one_session, user_id = "master" })
+check(second and second.ok and second.replaced == true, "arming B REPLACES A instead of adding a row: " .. json.encode(second))
+local rows = json.decode(host.sql_query([[SELECT id, status, created_at, resume_chain, prompt FROM self_wakes
+  WHERE session_id=? AND reason=?]], json.encode({ one_session, pause_mod.RESUME_REASON })) or "[]") or {}
+check(#rows == 1, "exactly ONE resume row for the session: " .. json.encode(rows))
+check(tostring(rows[1].id) == tostring(first.wake.id), "and it is the row that was already owed")
+check(tonumber(rows[1].created_at) == r6_now - 3600, "keeping the OLDEST created_at for the window: " .. tostring(rows[1].created_at))
+check(tonumber(rows[1].resume_chain) == 2, "and the LARGEST chain: " .. tostring(rows[1].resume_chain))
+check(tostring(rows[1].status) == "pending", "pending again, with B's prompt: " .. tostring(rows[1].prompt))
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

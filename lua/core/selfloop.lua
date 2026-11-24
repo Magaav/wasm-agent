@@ -447,6 +447,41 @@ function M.schedule(args, ctx)
       note = "A probe with no recheck cadence could only run once. Give every_seconds for a time wake, or use an event wake." }
   end
 
+  -- AT MOST ONE PENDING RESUME PER SESSION (r6, 24/11). Two resume rows for one session are two paid turns for one
+  -- pause: MEASURED on session c67c0609 - three automated turns from two resume rows, one of them armed while the other
+  -- was still owed. Arming a resume while one is pending or dispatching REPLACES it instead of adding one:
+  --
+  --   * one row, and it is the OLDEST `created_at` (a session must not stay resumable for ever by re-arming: the
+  --     six-hour window is measured from that field);
+  --   * the LARGEST `resume_chain` (the re-arm count carries over, so the cap of two still bites);
+  --   * its own `due_at`, prompt and `updated_at` are refreshed, and the row is `pending` again.
+  local resume_reason
+  do
+    local loaded, pause = pcall(dofile, "lua/core/deploy_pause.lua")
+    if loaded and type(pause) == "table" then resume_reason = pause.RESUME_REASON end
+  end
+  local inherited_created, inherited_chain
+  if resume_reason ~= nil and reason == resume_reason then
+    -- ONLY A `pending` ROW IS REPLACED (r6b, 24/11). A `dispatching` row is the turn that is pausing RIGHT NOW: it
+    -- ends `delivered` through `M.finish`, so replacing it would let that finish land on the new resume and lose it -
+    -- the back-to-back install case of this evening. The new row is owed instead, and it INHERITS the chain's oldest
+    -- `created_at` and its count, so a session cannot stay resumable for ever by re-arming.
+    local pending_row = query([[SELECT * FROM self_wakes WHERE session_id=? AND reason=? AND status='pending'
+      ORDER BY created_at LIMIT 1]], { session.id, reason })[1]
+    if pending_row then
+      local chain = math.max(tonumber(pending_row.resume_chain) or 0, tonumber(args.resume_chain) or 0)
+      exec([[UPDATE self_wakes SET status='pending', prompt=?, due_at=?, updated_at=?, last_error='', resume_chain=?
+        WHERE id=?]], { prompt, due_at, now, chain, pending_row.id })
+      local row = query("SELECT * FROM self_wakes WHERE id=?", { pending_row.id })[1]
+      return { ok = true, wake = view(row, now), replaced = true }
+    end
+    local running = query([[SELECT * FROM self_wakes WHERE session_id=? AND reason=? AND status='dispatching'
+      ORDER BY created_at LIMIT 1]], { session.id, reason })[1]
+    if running then
+      inherited_created = tonumber(running.created_at)
+      inherited_chain = tonumber(running.resume_chain) or 0
+    end
+  end
   local id = host.uuid()
   local at = now
   -- Two statements rather than one with a nil parameter: the store encodes parameters as JSON, and a
@@ -463,8 +498,13 @@ function M.schedule(args, ctx)
       exec("UPDATE self_wakes SET due_at=? WHERE id=?", { due_at, id })
     end
   end
+  if inherited_created ~= nil or inherited_chain ~= nil or tonumber(args.resume_chain) ~= nil then
+    local chain = math.max(inherited_chain or 0, tonumber(args.resume_chain) or 0)
+    exec([[UPDATE self_wakes SET created_at=?, resume_chain=? WHERE id=?]],
+      { inherited_created or at, chain, id })
+  end
   local row = query("SELECT * FROM self_wakes WHERE id=?", { id })[1]
-  return { ok = true, wake = view(row, at) }
+  return { ok = true, wake = view(row, at), inherited = inherited_created ~= nil }
 end
 
 -- The pending wake facts for a session (the footer's and the window's one read).
@@ -1226,11 +1266,13 @@ function M.finish(row, ok, detail, opts)
   if every and every > 0 then
     status = "pending"
     exec([[UPDATE self_wakes SET status=?, due_at=?, probe_result='', event_json='', updated_at=?,
-      last_error=? WHERE id=?]], { status, now + every, now, ok and "" or slug(detail), row.id })
+      last_error=? WHERE id=? AND status='dispatching']], { status, now + every, now, ok and "" or slug(detail), row.id })
     return { status = status, due_at = now + every }
   end
+  -- THE BELT (r6b): a row that someone re-armed while this turn ran is NOT overwritten by this turn's ending. Without
+  -- the guard, `delivered` landed on the new resume and lost it (the back-to-back install case, measured tonight).
   exec([[UPDATE self_wakes SET status=?, due_at=NULL, probe_result='', event_json='', updated_at=?,
-    last_error=? WHERE id=?]], { status, now, ok and "" or slug(detail), row.id })
+    last_error=? WHERE id=? AND status='dispatching']], { status, now, ok and "" or slug(detail), row.id })
   return { status = status, due_at = nil }
 end
 
@@ -1334,6 +1376,15 @@ function M.run_wake(args)
     M.finish(row, false, 'vetoed by hook ' .. tostring(vetoed.blocked_by) .. ': ' .. tostring(vetoed.reason), { now = now })
     return { error = 'self_wake_vetoed', reason = tostring(vetoed.reason or ''), effect = 'none' }
   end
+  -- A RESUME THAT MEETS AN INSTALL ALREADY WAITING SPENDS NOTHING (r6, 24/11). The gate at the top of this function ran
+  -- when the row was DISPATCHED; the installer's marker can appear in between, and the pause only happens at round 2
+  -- (`agent.lua`, `at_boundary` runs for round > 1) - so such a turn always pays its first model call before it can
+  -- pause (measured: session c67c0609's seq 238, a turn that started while e832e152 was installing). Re-read it HERE,
+  -- after the claim and before the model, and put the row back with the same sentence the other refusals use.
+  local waiting_now = dep("deploy_pause").refuse(now, args.deploy_wait)
+  if waiting_now then
+    return M.defer_refused(row, waiting_now, { now = now })
+  end
   local agentlib = dep("agent")
   local bot = agentlib.new(row.session_id, function(event) host.stream(json.encode(event)) end,
     user.role, row.owner, "")
@@ -1373,6 +1424,12 @@ function M.tick(opts)
   -- AND A RESUME THAT WAS LOST IS RE-ARMED (23/11): a row that ended `unknown` (its dispatch was cut by the very
   -- install it paused for) is a debt, and the node pays it here, in the same tick, once nothing waits.
   local rearmed = dep("deploy_pause").ensure_resumes(now, { exec = exec, query = query, read = opts.deploy_marker })
+  -- AND SO DOES THE RECORD SWEEP (r6, 24/11): it used to run LAST, after the gate below - and the gate returns whenever
+  -- a deploy waits or installs, which on a landing node is most of the time, so it closed nothing for hours (measured:
+  -- 56 records, `stale: 39` growing, no <data>/pause-sweep.last). A record older than the window cannot be the pause of
+  -- a deploy installing now, so closing it never needs to wait for idle.
+  local closed = dep("deploy_pause").sweep_records(now, { read = opts.deploy_marker })
+  if tonumber(closed) and tonumber(closed) > 0 then out.pause_records_closed = tonumber(closed) end
   if type(rearmed) == "table" and tonumber(rearmed.rearmed) and tonumber(rearmed.rearmed) > 0 then
     out.resume_rearmed = tonumber(rearmed.rearmed)
   end
@@ -1528,11 +1585,6 @@ function M.tick(opts)
       end
     end
   end
-  -- AND THE RECORDS THAT CAN NEVER BE RESUMED ARE CLOSED (24/11): the health line counts what is left, so a
-  -- graveyard of 53 records from a day of deploys cannot pass for work in flight. LAST, after every dispatch
-  -- decision: housekeeping must never stand between a due row and the scheduler.
-  local closed = dep("deploy_pause").sweep_records(now, { read = opts.deploy_marker })
-  if tonumber(closed) and tonumber(closed) > 0 then out.pause_records_closed = tonumber(closed) end
   return out
 end
 

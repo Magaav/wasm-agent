@@ -69,8 +69,16 @@ local other = selfloop.schedule({ in_seconds = 1730, reason = "check the deploy"
 ok(other.ok, "an unrelated wake is scheduled")
 
 local dispatched = {}
+local resources = dofile("lua/core/resources.lua")
 local function fake_dispatch(row)
   dispatched[#dispatched + 1] = tostring(row.reason)
+  -- A REAL DISPATCH HOLDS THE SESSION'S RUN CLAIM FOR THE TURN'S DURATION (lua/core/agent.lua takes `session:<id>`
+  -- before any model call; rust/wa-capabilities/src/resources.rs). This stub takes it for real, through the same module
+  -- and the same store, so a row that is "dispatching" here is shaped like the product's: dispatching WITH its claim,
+  -- which nothing may call lost. Without that, the row looked like "dispatched and nothing happened" and the reclaim
+  -- (rightly) revived it - the confusion that put main red on 24/11.
+  pcall(resources.claim, { user_id = "master", session_id = row.session_id, run_id = "resume-turn-1" },
+    { "session:" .. tostring(row.session_id) })
   return { accepted = true, run_id = 1 }
 end
 

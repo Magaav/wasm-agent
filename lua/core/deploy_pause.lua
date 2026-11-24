@@ -335,6 +335,13 @@ M.RESUME_WINDOW_SECONDS = 6 * 3600
 -- HOW LONG A RESUME ROW MAY BE `dispatching` BEFORE IT COUNTS AS LOST (r5c, Fable, 24/11). 300 s, and it is this
 -- module's own number: `selfloop.M.stale_seconds()` (1800 s) stays the bound for every OTHER wake, because at 1800 s
 -- the operator's watchdog (~20 min) would beat the node to a lost dispatch. Named here, not hardcoded at the use site.
+-- HOW LONG A RESUME ROW MAY BE `dispatching` BEFORE IT COUNTS AS LOST: 300 s, and it is deliberately SHORTER than
+-- `selfloop.M.stale_seconds()` (1800 s, the bound reconcile uses for every other wake). The two answer different
+-- questions: reconcile asks "was this dispatch interrupted?" for any row, while this asks "is the node going to resume
+-- this paused session without the operator's watchdog?" - and the watchdog fires on a paused marker older than 15 min
+-- plus its own 600 s, i.e. at 1500 s. A resume bound at or above that would make the watchdog, not the node, the thing
+-- that resumes the session, which is exactly what this mission exists to prevent. Claim and messages still gate it:
+-- a row whose turn is alive (claim held) or which has written anything is never reclaimed.
 M.RESUME_DISPATCH_BOUND_SECONDS = 300
 
 M.RESUME_MAX_REARMS = 2
