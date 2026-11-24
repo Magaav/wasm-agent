@@ -200,7 +200,12 @@ end
 --   opts.detail    a table the caller wants kept with the record (commit, node, requester, ...)
 --   opts.program   the child to run detached (args = opts.args, cwd = opts.cwd)
 --   opts.owner     the host.operation owner (default M.OWNER)
-function M.begin(opts)
+-- STEP 1, for a caller whose own refusals must stay synchronous: claim the id and write the record,
+-- and start NOTHING yet. The cheap, decisive checks run between this and M.detach (a deploy's dirty
+-- tree, a peer's missing watcher), so a refusal still answers the caller directly - and the record
+-- already names the id, so a caller whose deadline expired reads the same refusal back by id instead
+-- of being told nothing happened.
+function M.accept(opts)
   opts = type(opts) == 'table' and opts or {}
   local id = trim(opts.id)
   if not M.valid_id(id) then return { ok = false, error = 'accept_id_invalid', observed = tostring(opts.id) } end
@@ -214,6 +219,29 @@ function M.begin(opts)
       accepted_at = existing.accepted_at, operation = existing.operation,
       detail = existing.detail, root = root, summary = M.summary(existing) }
   end
+  local record = {
+    schema = 1, id = id, kind = trim(opts.kind) ~= '' and trim(opts.kind) or 'request',
+    state = 'accepted', accepted_at = math.floor(host.now()),
+    detail = type(opts.detail) == 'table' and opts.detail or {},
+    owner = trim(opts.owner) ~= '' and trim(opts.owner) or M.OWNER,
+    detached = false,
+  }
+  if not save(root, id, record) then
+    return { ok = false, error = 'accept_record_not_written', id = id,
+      observed = 'the id was claimed and its record could not be written to ' .. root,
+      next = 'check that ' .. root .. ' is writable by this node; nothing was started' }
+  end
+  return { ok = true, id = id, state = record.state, detached = false, claimed = true,
+    accepted_at = record.accepted_at, detail = record.detail, root = root, summary = M.summary(record) }
+end
+
+-- STEP 2: start the work detached for an id that M.accept already claimed. It returns at once - the
+-- operation is the node's own managed one, so the caller's process is not holding it.
+function M.detach(opts)
+  opts = type(opts) == 'table' and opts or {}
+  local id = trim(opts.id)
+  if not M.valid_id(id) then return { ok = false, error = 'accept_id_invalid' } end
+  local root = M.root(opts.root)
   local started = M.start_operation(opts)
   local record = {
     schema = 1, id = id, kind = trim(opts.kind) ~= '' and trim(opts.kind) or 'request',
@@ -315,6 +343,20 @@ function M.status(opts)
   end
   answer.summary = M.summary(record, answer)
   return answer
+end
+
+-- Both steps in one call, for a caller with nothing to say between them.
+function M.begin(opts)
+  local accepted = M.accept(opts)
+  if not accepted.ok or accepted.already then return accepted end
+  local detached = M.detach(opts)
+  detached.claimed = true
+  if detached.ok ~= true then
+    -- The id stays claimed. A retry must not start the work twice, and the caller is told which call
+    -- failed rather than being invited to try again blindly.
+    return detached
+  end
+  return detached
 end
 
 return M

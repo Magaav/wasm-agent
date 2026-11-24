@@ -137,6 +137,24 @@ if command == "update" or command == "--update" then
   end
   local remote = dofile("lua/core/remote_update.lua").cli(args)
   if remote ~= nil then os.exit(remote) end
+  -- `wa update --accept <id>`: THE DETACHED SIDE of a request this node already accepted
+  -- (lua/core/remote_update.lua, M.spawn_accepted). It is the child the accepting peer call starts, so
+  -- the expensive tail of a remote request - the pre-update backup (101 s measured on `work` 24/11), then
+  -- the request to this node's own Sentinel - runs after the caller's relay deadline has expired, and the
+  -- accept record it settles is what that caller polls by id. Not a verb a human types: the id is on the
+  -- record the accept wrote.
+  local accept_index = nil
+  for i = 2, #args do if args[i] == "--accept" then accept_index = i end end
+  if accept_index then
+    local accepted_id = args[accept_index + 1]
+    if type(accepted_id) ~= "string" or accepted_id == "" then
+      print("wa update --accept <id>: the id of the request this node accepted is required")
+      os.exit(2)
+    end
+    local answered = dofile("lua/core/remote_update.lua").run_accepted(accepted_id)
+    print(tostring(answered and (answered.detail or answered.error) or "the accepted request produced no answer"))
+    os.exit((answered and answered.ok == true) and 0 or 1)
+  end
   local updater = dofile("lua/core/update.lua")
   local redact = dofile("lua/core/redact.lua")
   local follow = dofile("lua/core/update_follow.lua")
