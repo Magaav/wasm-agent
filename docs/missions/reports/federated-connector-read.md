@@ -229,9 +229,27 @@ Fable's G-blocker round, with the measurements in `ready-fix.md`:
   3600 is the operation's timeout cap. During that window `/health` carries the id in `operations` — the
   field `wa-sentinel`'s `activity_of` reads — so a deploy asked for in the window is held with "the node
   is busy: a run, a subagent or an operation is in flight". After it, idle.
-- **An operation whose process is gone does not stay running**: read from another process it answers
-  `settled:true, state:"outcome_unknown"` with `operation_owner_not_attached` and an `owner_gone_note`.
-  No restart item is needed, and `health()` (unsettled only) does not hold maintenance for it.
+- **(e) MEASUREMENT ONLY — there is NO fix for it in this branch** (Fable's clarification, 25/11). The
+  question: does an operation record whose process is gone still read "running" after a node restart?
+  **Answer: NO.** Two measurements, both on scratch homes:
+  1. A node restarted with an unsettled row on disk: the row reads `completed`/`settled` and
+     `/health` answers `operations: []` (the `probe/lifetime.mjs` run in `ready-fix.md`, measured *after*
+     the restart);
+  2. the sharper one — a row whose supervising process is gone, read by a *different* process (which is what
+     a restart is): it answers
+     `{"settled":true,"state":"outcome_unknown","error":"operation_owner_not_attached; it may still be active
+     elsewhere; reconcile effects, never replay blindly", "owner_gone_note":"the process that started this
+     operation is gone and the operation never reported an outcome: its state above is the last one that
+     process recorded. … Nothing was replayed and no success is claimed."}`
+     — i.e. `settled:true`, never "running".
+  So nothing in this branch reconciles operations: `git diff --name-only 4bceddd5..HEAD` shows
+  `rust/wa-capabilities/src/operations.rs` changed only by the two receipt fields (`138f621d`), and no
+  other file near that machinery.
+- **(e)+(g) together**: an operation whose process is gone does **not** stop an update on a restarted node —
+  after the restart `/health` answers `operations: []`, which is the field `activity_of` reads, so
+  `hold_for` answers `None` and the request is `ready`, not `held: node busy`. The ~30 s hold of (g) belongs
+  to a *live* session on a *running* node, not to a restarted one. This is reported for Fable to decide;
+  the branch fixes the federated bug (b) and nothing else.
 - **The fix** is one exit in `lua/core/mcp_session.lua` (`done()`): a peer call closes the session it
   started, on success, on every failure return and on timeout, under the owner the start receipt answered.
   A node's own turn keeps its pooled session. `Caller::owns` is untouched, and the row proves it: a second
