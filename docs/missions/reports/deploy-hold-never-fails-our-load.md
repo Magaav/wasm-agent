@@ -924,3 +924,67 @@ One flake, named again: `scripts/test-deploy-wait.sh` step 6 ("the held wakes ru
 in this pass and passed on an immediate re-run with nothing changed - the same step, and the same behaviour, as the
 three earlier observations of it today (before r4 as well). It is not touched by this change; it is load-dependent
 and it is named here rather than called fixed.
+
+## Addendum 7 (Fable, 24/11 ~01:32Z): why the sweep is silent, and the 22/11 row that never fires
+
+Read-only. Installed: `commit=0d8657e5…` (`~/.local/bin/installed.txt`), which contains the r4 code (`git show
+0d8657e5:lua/core/deploy_pause.lua | grep -c sweep_records` = 1, and its log shows `9598d3f6`, `4b9b4a45`,
+e7367ad7).
+
+### Q1: `sweep_records` runs on every tick - and can never delete anything
+
+The sweep asks the host for a remover that does not exist:
+
+* `lua/core/deploy_pause.lua:515` - `local remover = opts.remove or (host and host.delete_file)`;
+* there is no `host.delete_file`. The capability is **`host.remove_file`**
+  (`rust/wa-capabilities/src/host.rs:1690-1695`, "host.remove_file(path) -> one boolean"), and the only other
+  caller in the tree uses that name (`lua/core/telemetry.lua:442`).
+
+So `type(remover) ~= "function"` holds on every live tick, nothing is removed, `closed` stays 0 - and the log line
+is inside `if closed > 0`, so a sweep that can never close is exactly the silence measured. The r4.1 rule is fine:
+`host.list_dir` returns `modified` in **epoch seconds** (`host.rs`, `d.as_secs()`), the same unit as `now`, so once
+the remover exists the age rule is correct.
+
+That the tick itself runs is not in doubt: the 22/11 row's `updated_at = 2026-11-24 01:18:06Z` is written by the
+`deploy_waiting` branch of the same tick (`lua/core/selfloop.lua:1385-1391`), i.e. during the install of
+0d8657e5 - the tick ran, reached that branch, and the sweep at its end did nothing it could log. `/health` shows
+nothing either, because `pause_records_closed` is only set when something was closed.
+
+Why the test passed while the live node could not delete: **the test injected the remover**
+(`test-deploy-pause.lua`, `remove = function(path) ... end`), so it never asked the host for the capability's name.
+That is the same class of mistake as r2's `attempts = 0` fixtures: the fixture replaced precisely the thing that
+was wrong.
+
+### Q2: the 22/11 pending row
+
+`reason='deploy pending: resume after the node swap'`, `status='pending'`, `due_at 2026-11-22 10:45Z`,
+`attempts=1`, `last_error='deploy_waiting: waiting for the install of unknown …'`, `updated_at 01:18:06Z`.
+
+What keeps it `pending`: while a deploy waits, the tick's `deploy_waiting` branch selects every pending row whose
+`due_at <= now` and rewrites `last_error` and `updated_at` on it (`selfloop.lua:1386-1391`) - so a row that is
+overdue is re-stamped every tick and never dispatched; and the r3 repair never touched it either, because
+`ensure_resumes` selects only `unknown`/`failed`/node-cancelled rows of the resume reason inside the 6 h window,
+and this one is `pending` and two days old.
+
+Should the sweep or the migration retire it: **the sweep**, and not only for the resume reason. A row that is
+`pending`, overdue by more than the window, and has been deferred by a deploy wait every time it came due can
+never fire; leaving it `pending` is the same lie as a `paused session` nobody owes. The rule belongs beside the
+record sweep, because it is the same question ("is this still a promise?") asked of the other ledger.
+
+### r5 (proposal; NOT written - waits for go)
+
+1. **Delete with the capability that exists**: `host.remove_file`, with the boolean checked. When the capability is
+   missing the sweep must SAY so once (`deploy pause: sweep cannot remove …`), not return 0 silently.
+2. **A sweep that ran must be visible**: one counter on the node's `/health`
+   (`paused_records: {seen, closed, kept}`) and one line per tick that changed something. The bug was invisible
+   because "closed nothing" and "never ran" were the same output.
+3. **Retire the row that can never fire**: `pending` + `due_at` older than the window + `last_error` naming a deploy
+   wait → `superseded`, `last_error='superseded: too old to fire'`, counted and logged once; the one-time migration
+   does the same for the backlog.
+4. **The test must not inject the capability** (Fable's rule, applied to capabilities this time): a **live-shaped
+   tick** - a scratch `WASM_AGENT_HOME` with real `deploy-paused/*.json` files (one young, one older than the window,
+   one half-written) and a real pending overdue row, then `selfloop.tick` run through the **real host** (`wa --db …
+   WA_SCRIPT=…`, no `opts.remove`, no `opts.remove`/`list`/`read_file` injection) - asserting the old record's file
+   is gone, the young and half-written ones are there, the overdue row is `superseded` with that sentence, and
+   `/health`/the log shows the sweep. It fails on today's code for the exact reason the live node is silent.
+5. Same rows as r4 plus the new one; `scripts/test-selfloop-pause.lua` and `test-deploy-pause.lua` extended.
