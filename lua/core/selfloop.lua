@@ -1585,11 +1585,6 @@ function M.tick(opts)
       end
     end
   end
-  -- AND THE RECORDS THAT CAN NEVER BE RESUMED ARE CLOSED (24/11): the health line counts what is left, so a
-  -- graveyard of 53 records from a day of deploys cannot pass for work in flight. LAST, after every dispatch
-  -- decision: housekeeping must never stand between a due row and the scheduler.
-  local closed = dep("deploy_pause").sweep_records(now, { read = opts.deploy_marker })
-  if tonumber(closed) and tonumber(closed) > 0 then out.pause_records_closed = tonumber(closed) end
   return out
 end
 

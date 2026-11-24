@@ -1518,3 +1518,32 @@ while its turn ran is not overwritten by that turn's ending.
 **Rows:** `test-selfloop-pause.lua` **156 checks** (was 146); `test-deploy-pause.lua` 100; `test-handle-wake.lua` 17;
 `test-cli-wake-row.lua` 30; `test-deploy-bound.sh` `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
 No new texts.
+
+### r6c: main's red row, and the guard that keeps the repair inside its own reason
+
+**What was red.** `scripts/test-deploy-resume.lua:95` ("an unrelated wake does not fire when the deploy ends: expected 0,
+got 1") on main after `e832e152`. The row schedules a deploy-resume wake due at `T0+1730`, dispatches it with a stub
+when the install ends, then asserts that the tick at `T0+1729` dispatches nothing. My reclaim's bound was **300 s**, so
+at `T0+1729` it judged that dispatched row (age 1723 s, no message, no claim - a stub) LOST, re-armed it, and the tick
+dispatched the new row: one dispatch too many. Reproduced exactly, in a script, before changing anything.
+
+**The statement.** `ensure_resumes`'s reclaim query is correctly scoped (`WHERE reason=? AND status='dispatching' AND
+updated_at<?`), so it was not touching a foreign row: it was touching a *resume* row too early. The 300 s figure came
+from r5c ("beat the operator's watchdog"); the tick's own reconcile uses `M.stale_seconds()` = 1800 s for the same
+judgement, and two numbers for one meaning is the defect. **The reclaim now uses `M.stale_seconds()`**, documented as
+"the seam-independent twin of reconcile", and `scripts/test-deploy-pause.lua` asserts equality with
+`selfloop.stale_seconds()` instead of a literal - so the two cannot drift back apart.
+
+**The guard the orchestrator asked for**, in `scripts/test-selfloop-pause.lua`: two rows of a session with reasons
+`check the deploy` and `look again`, one set `dispatching` and two hours old (exactly what the reclaim looks for by
+status and age), one overdue by two hours (exactly what the pending retire looks for). After **two** `ensure_resumes`
+passes, each row's `status|prompt|due_at|created_at|resume_chain` is byte-identical to its before-snapshot, and the
+pending count is unchanged (1 of 2 - the one that was armed pending). The migration, the reclaim, the pending retire
+and the re-arm all carry `reason = the resume reason` in their WHERE.
+
+**Also fixed:** the duplicate `sweep_records` call at the end of the tick is gone (r6 moved it before the gate and the
+old copy survived), so the sweep runs once.
+
+**Rows:** `test-deploy-resume.lua` **25 checks** (main's row, green); `test-deploy-pause.lua` **100**;
+`test-selfloop-pause.lua` **161** (was 156); `test-handle-wake.lua` 17; `test-cli-wake-row.lua` 30;
+`test-deploy-bound.sh` `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.

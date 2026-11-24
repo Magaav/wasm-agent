@@ -452,8 +452,12 @@ local out_a, armed_a = run(alive, "free")
 ok(out_a.rearmed == 0 and #armed_a == 0,
   "messages since the dispatch mean a running turn: no second resume", json.encode(out_a))
 
--- 1g. THE BOUND IS THIS MODULE'S OWN 300 s, named, and not the tick's 1800.
-ok(pause.RESUME_DISPATCH_BOUND_SECONDS == 300, "the resume bound is 300 s, its own constant")
+-- 1g. THE BOUND IS ONE NUMBER, SHARED WITH THE TICK'S OWN RECONCILE.
+-- ONE NUMBER, ONE MEANING (24/11): the reclaim is the seam-independent twin of the tick's own reconcile, so it
+-- uses reconcile's bound - asserted against that function rather than against a literal, so the two cannot drift.
+ok(pause.RESUME_DISPATCH_BOUND_SECONDS == dofile("lua/core/selfloop.lua").stale_seconds(),
+  "the resume bound is the tick's own stale bound, not a second number: " .. tostring(pause.RESUME_DISPATCH_BOUND_SECONDS)
+    .. " vs " .. tostring(dofile("lua/core/selfloop.lua").stale_seconds()))
 local young = dispatch_ledger({})
 for _, candidate in ipairs(young.rows) do candidate.updated_at = now - 200 end
 local out_y, armed_y = run(young, "free")

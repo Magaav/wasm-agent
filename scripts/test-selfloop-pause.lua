@@ -469,6 +469,43 @@ local back = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE i
 check(tostring(back.status) == "pending", "the row is pending again, not failed: " .. json.encode(back))
 pcall(host.remove_file, marker)
 
+-- (4) NO STATEMENT OF THE REPAIR TOUCHES A ROW THAT IS NOT A DEPLOY RESUME (24/11, the defect that put main red):
+-- `test-deploy-resume.lua`'s unrelated wake must keep its status, its time and its prompt through every pass - the
+-- migration, the reclaim, the pending retire and the re-arm all carry reason = the resume reason in their WHERE.
+local foreign_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 foreign" })
+local foreign = {}
+for _, spec in ipairs({ { "foreign-dispatching", "check the deploy" }, { "foreign-unknown", "look again" } }) do
+  local armed = selfloop.schedule({ in_seconds = 60, reason = spec[2], prompt = "unrelated" },
+    { session_id = foreign_session, user_id = "master" })
+  check(armed and armed.ok, "an unrelated wake is armed: " .. tostring(spec[1]))
+  foreign[#foreign + 1] = armed.wake.id
+end
+-- one of them dispatched-and-dead, the other merely overdue: both are exactly what the repair looks for by STATUS
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', created_at=?, updated_at=? WHERE id=?]],
+  json.encode({ r6_now - 7200, r6_now - 7200, foreign[1] }))
+host.sql_exec([[UPDATE self_wakes SET created_at=?, due_at=? WHERE id=?]],
+  json.encode({ r6_now - 7200, r6_now - 7200, foreign[2] }))
+local function snapshot(id)
+  local row = (json.decode(host.sql_query([[SELECT status, prompt, due_at, created_at, resume_chain FROM self_wakes WHERE id=?]],
+    json.encode({ id })) or "[]") or {})[1] or {}
+  return table.concat({ tostring(row.status), tostring(row.prompt), tostring(row.due_at), tostring(row.created_at),
+    tostring(row.resume_chain) }, "|")
+end
+local before_foreign = { snapshot(foreign[1]), snapshot(foreign[2]) }
+pause_mod.ensure_resumes(r6_now, { stale_seconds = 300 })
+pause_mod.ensure_resumes(r6_now, { stale_seconds = 300 })
+check(snapshot(foreign[1]) == before_foreign[1],
+  "an unrelated DISPATCHING wake is untouched by the repair: " .. before_foreign[1] .. " -> " .. snapshot(foreign[1]))
+check(snapshot(foreign[2]) == before_foreign[2],
+  "and so is an unrelated OVERDUE one: " .. before_foreign[2] .. " -> " .. snapshot(foreign[2]))
+-- UNCHANGED, not "none pending": one of them was armed pending on purpose, and the repair must leave that one
+-- pending and the other exactly as it was.
+local foreign_pending = 0
+for _, id in ipairs(foreign) do
+  local row = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE id=?]], json.encode({ id })) or "[]") or {})[1] or {}
+  if tostring(row.status) == "pending" then foreign_pending = foreign_pending + 1 end
+end
+check(foreign_pending == 1, "and nothing re-arms them: one was pending before, one after - " .. tostring(foreign_pending) .. " of 2")
 -- (3) AT MOST ONE PENDING RESUME PER SESSION, seeded from c67c0609's real shape (two resume rows for one session):
 -- arming B while A is pending REPLACES it - one row, the OLDEST created_at, the LARGEST chain.
 -- (3b) A RESUMED TURN THAT PAUSES AGAIN: its own row is `dispatching` (the turn running now), the pause arms a NEW

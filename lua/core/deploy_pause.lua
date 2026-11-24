@@ -335,7 +335,13 @@ M.RESUME_WINDOW_SECONDS = 6 * 3600
 -- HOW LONG A RESUME ROW MAY BE `dispatching` BEFORE IT COUNTS AS LOST (r5c, Fable, 24/11). 300 s, and it is this
 -- module's own number: `selfloop.M.stale_seconds()` (1800 s) stays the bound for every OTHER wake, because at 1800 s
 -- the operator's watchdog (~20 min) would beat the node to a lost dispatch. Named here, not hardcoded at the use site.
-M.RESUME_DISPATCH_BOUND_SECONDS = 300
+-- HOW LONG A RESUME ROW MAY BE `dispatching` BEFORE IT COUNTS AS LOST. This is `selfloop.M.stale_seconds()` - the bound
+-- the inline reconcile path already uses (1800 s, `WA_SELF_WAKE_STALE_SECONDS`) - because this reclaim is the same
+-- judgement made on the path the seam can bypass: one number, one meaning. r5c chose 300 s to beat the operator's
+-- watchdog; r6 keeps reconcile's own bound instead, because a shorter one declares a dispatched row lost while the
+-- tick's own reconcile still considers it in flight (measured: scripts/test-deploy-resume.lua's 1730 s resume row was
+-- re-armed mid-horizon, and main went red).
+M.RESUME_DISPATCH_BOUND_SECONDS = 1800
 
 M.RESUME_MAX_REARMS = 2
 M.RESUME_BACKOFF_SECONDS = 30
