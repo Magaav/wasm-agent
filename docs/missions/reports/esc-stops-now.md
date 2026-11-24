@@ -441,6 +441,51 @@ ledger problem with its own rows; asserting it here would move the red from the 
 without fixing anything, and this row answers one question - did Esc stop the work. The number rides in
 the same line, so a settlement that goes bad is visible beside the stop it follows.
 
+
+### red-r3: the row budgets what the reader gets back - a usable prompt
+
+Fable, 24/11: 'what Victor feels is Esc -> PROMPT USABLE, so THAT is what the row budgets'. The row now
+measures exactly that: after the key it waits for the stop to be on screen, types one character into the
+input row and requires the editor to take it (the marker goes), then takes the character back out - an
+empty line is never a turn, so the probe leaves nothing behind. The number is <Esc> -> the keystroke
+landing, read from the pty; the node's own stamps ride beside it as the split.
+
+**Five single runs while a full fast.sh held the suite lock** (load 4.96 -> 3.80), all 18 ok / 0 failed:
+
+| run | headers | stream | bash | remote | subagent |
+|---|---|---|---|---|---|
+| 1 | 165 ms | 169 ms | 206 ms | 189 ms | 211 ms |
+| 2 | 171 ms | 161 ms | 200 ms | 190 ms | 214 ms |
+| 3 | 171 ms | 169 ms | 213 ms | 186 ms | 261 ms |
+| 4 | 164 ms | 162 ms | 212 ms | 175 ms | 241 ms |
+| 5 | 165 ms | 161 ms | 212 ms | 176 ms | 257 ms |
+
+Every leg inside the 300 ms idle budget, worst 261 ms; the bash leg (the one that was red) is 200-213 ms
+with a node stop of 40-58 ms and a settlement of 18-20 ms. Against the same runs' node prompt stamps
+(53-180 ms) the pty number carries 100-130 ms of this harness's own looking - it was 170-210 ms before the
+poll was trimmed to 10 ms and the fixed 30 ms echo sleep removed.
+
+**On 'if the settlement blocks the prompt'**: it does, by 18-26 ms, and it is measured - the split prints
+it on every failure. Handing the prompt back first (deferring the failure record, the transcript and audit
+flushes and the run's own end row to after the prompt) was written and then reverted: with it, five runs
+came back 11 ok / 7 failed - the interrupt row of the stopped run went missing and a second run started,
+because keys typed into the window the deferral opened became a queued line the CLI submitted. That is a
+change to make with the CLI's queue in hand, not ten minutes before a report, and at 20 ms of 170 it does
+not move a single verdict. The measurement and the reverted patch's failure are here so the next session
+starts from both.
+
+**The FAIL line, verified by forcing a 1 ms budget** (a forced-failure run, so the format is not imagined):
+
+    FAIL - bash: Esc gives back a usable prompt at once (1 ms idle, 0 ms per unit of load, never over 1)
+           measured 204 ms, budget 1 ms at load 3.28 (node prompt 85 ms, stop 45 ms, settlement 20 ms,
+           notice (pty) 200 ms, drawn (pty) 200 ms; probe 45 ms over 16 looks, worst 4 ms)
+
+Four harness bugs found and fixed on the way, each of which had made the measurement lie: the prompt row
+read from before the key (-1995 ms), stamps paired across two runs, the ledger read blocking the screen
+loop (every leg 'noticed' the prompt 15 s late), and the placeholder matched anywhere in the scrollback
+(the row declared a prompt usable 11 ms after the key, typed into a live run, and queued the keystrokes as
+a line that started a second run).
+
 **Pending, said plainly**: a reproduction of the 1041 ms. Neither a fork storm nor load 32 produced it;
 the trace line above is the first thing to read if it comes back, and `WASM_AGENT_CANCEL_TRACE=1` is how to
 turn it on. Fable's amendment (stop the load loops, rerun on an idle queue, 10 runs) is what produced the

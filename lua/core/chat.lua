@@ -907,6 +907,13 @@ function M.run(argv)
 
   local function read_line()
     view:prompt()
+    -- THE PROMPT, BY THE NODE'S OWN CLOCK (red-r3, 24/11). What the reader gets back is a prompt they can
+    -- type into, so the row budgets that - but a pty can only say when it NOTICED the redraw. This stamp
+    -- says when this process put the prompt on the screen, so the split "Esc -> run stopped -> prompt" is
+    -- the node's own arithmetic and the pty number is readable against it instead of instead of it.
+    pcall(function()
+      return dofile('lua/core/telemetry.lua').event(agent.session_id, '', '', 'input', 'prompt', {})
+    end)
     while true do
       record_interrupt()
       restart_if_due()
@@ -977,6 +984,7 @@ function M.run(argv)
   -- `scripts/test-cli-balloon.lua` fails when one does.
   local balloon = reload.require("lua/core/balloon.lua")
   local ui = balloon.for_view(view, { print = print, redact = redact })
+
 
   while true do
     -- Whatever the last command wrote (a turn, a `!` line, /new) is this CLI's own: already shown.
