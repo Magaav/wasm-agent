@@ -554,3 +554,31 @@ neither of the operation's two redirected streams, so the log simply stopped aft
 found by sourcing `scripts/lib/fast-rows.sh` and calling `wa_fast_row_filter` with the same file by hand. Row list
 fixed, run restarted. (That the refusal was invisible through the redirect is worth knowing for the next reader: an
 exit 2 with a short log is this, not a hang.)
+
+
+### The narrowed run's verdict (final tip)
+
+Tip: `efbdde7c` (the commit that follows the behaviour change `99684528` and its report commits). Command:
+
+    flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa \
+      WA_FAST_ROWS=/tmp/rows-ops.txt bash scripts/fast.sh
+
+Result: **`fast result FAILED (141 checks, 1 failed, 0 skipped)`, `fast path FAILED (1 of 141 checks, 0 skipped, 603s)`**.
+Log `/tmp/ops-final4.out`, evidence
+`/home/victor/wasm-agent/checkout/.git/worktrees/wt35/wa-fast-evidence/20261124T003339Z-3335346/`.
+
+The ONE failure is `check-esc-stops-pty` - the load-sensitive timing row already proven pre-existing on a base
+worktree in this report ("Esc ends the run at once ... 300 ms idle, 120 ms per unit of load, never over 2000").
+Everything this branch touches passed inside the run, including `test-operation-cwd.lua` (31 checks).
+
+Two failures from the earlier attempt at a final tip are FIXED and re-verified, both caused by this change and both
+caught by the runner rather than by me:
+
+* `test-refusal-contract.lua` - the new refusal code made `lua/core/refusal_codes.lua` stale. Regenerated
+  (`lua5.4 scripts/gen-refusal-codes.lua --write`, one added line: `['session_cwd_gone']='tools.lua'`) in `efbdde7c`;
+  the row now passes from the tree: `refusal contract: 17732 checks passed` (611 codes).
+* `check-regenerate` - "the copied base tree is already stale", the same root cause; now `test-regenerate ok (29 checks)`.
+
+`test-tool-env-allow.lua` and `test-session-isolation.lua` are listed in `scripts/fast-path.exclude`, so they are not
+part of a narrowed run; both were run singly and are reported above (`test-tool-env-allow` fails 4 of 11 identically
+on base - Fable: a gate-stays-fast item, not this branch's; it stays named in this report).
