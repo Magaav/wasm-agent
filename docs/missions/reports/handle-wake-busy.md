@@ -109,3 +109,22 @@ Run singly (hermetic rows, no suite lock needed):
 | `scripts/test-cli-wake-row.lua` | 30 checks |
 | `scripts/test-deploy-pause.lua` | 100 checks |
 | `scripts/test-selfloop-pause.lua` | 129 checks |
+
+
+### The narrowed run (final tip)
+
+    flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa \
+      WA_FAST_ROWS=/tmp/rows-wake.txt bash scripts/fast.sh
+
+**`fast result ok (137 checks, 0 failed, 0 skipped)`**, `fast path ok (137 checks, 0 skipped, 627s)`, `EXIT=0`.
+Log `/tmp/wake-fast.out`, evidence
+`/home/victor/wasm-agent/checkout/.git/worktrees/wt61/wa-fast-result.json`.
+
+Rows: `test-handle-wake-busy` (new), `test-handle-wake`, `test-handle-wake-turn`, `test-codemode-pending`,
+`test-codemode-wait-shape`, `test-operation-survives-turn`, `test-cli-wake-row`, `test-deploy-pause`,
+`test-selfloop-pause`, `test-selfloop`, plus the never-dropped core rows and every contract check - including
+`test-refusal-contract` (this change adds no refusal code, so its inventory stays current) and
+`test-discriminates`, which is where the new row's base failure is measured by the gate.
+
+Nothing failed, so there is no pre-existing red to name in this row's run: the load-sensitive `esc-stops-pty` row
+that failed in the operations-explain-and-survive runs did not fire here.
