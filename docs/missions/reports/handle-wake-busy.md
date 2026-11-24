@@ -201,3 +201,57 @@ Log `/tmp/wake-fast2.out`, result
 plus the never-dropped core rows); every contract check ran, including `test-refusal-contract` (no new refusal
 code, so its inventory is current) and `test-discriminates`, which is where the new row's base failure is measured
 by the gate. Nothing failed, so no pre-existing red is carried by this branch.
+
+
+## Rebase onto main after r7 (deploy-hold), 24/11
+
+The branch stopped merging because main's r7 changed the same function this branch edits. Rebased onto
+`origin/main` (8 commits, clean except one conflict).
+
+**The one conflict: `lua/core/selfloop.lua`, the delivery path's busy handling.** The two sides are the SAME
+situation arriving by two different doors, and neither replaces the other:
+
+* main (r7c) - the agent RETURNS a refusal: `if ok and dep("resources").is_busy_refusal(bot.turn_refused) then
+  return M.defer_refused(row, "session_busy", { now = clock({}) })`;
+* this branch - the agent RAISES one: `if not ok and M.resource_refused(result) then return M.defer_refused(row,
+  tostring(result), { now = clock({}) })`.
+
+**Resolution: the union, in that order.** The two guards are mutually exclusive (`ok` against `not ok`), so
+nothing can be deferred twice, and no approved line was touched - the approved raised-refusal path is exactly
+as Fable approved it, and main's returned-refusal gate sits above it. No behaviour of this branch changed, so
+nothing here needs to go back to Fable.
+
+**Proof that the rebase lost nothing, on both sides, line by line** (merge-base -> each side -> the rebased
+tree):
+
+| file | this branch's added lines | missing after the rebase | main's added lines | missing after the rebase |
+| --- | --- | --- | --- | --- |
+| `lua/core/selfloop.lua` | 63 | **0** | 127 | **0** |
+| `lua/core/codemode_pending.lua` | 80 | **0** | 0 (main did not touch it) | - |
+
+`lua/core/codemode.lua` is the codemode file r7 changed (43 lines); this branch does not edit it, so it merged
+untouched and is main's.
+
+**The approved vocabulary still stands, from `selfloop.STATUS_*` and nowhere else:** `STATUS_PENDING`
+(`selfloop.lua:1315`), `STATUS_DISPATCHING` (:1316), `STATUS_DELIVERED` (:1317); `is_delivering` (:1323) answers
+for `dispatching` or `delivered` - the notice - and `is_pending` (:1328) for the deferral. `woke_at` remains the
+only time the deferral writes, and `defer_refused` (:1332) is the only deferral path, used by both doors.
+
+### Rows on the rebased tip
+
+| row | verdict |
+| --- | --- |
+| `scripts/test-handle-wake-busy.lua` | `handle wake busy ok (33 checks)` |
+| `scripts/test-handle-wake.lua` | `handle wake: 21 checks` |
+| `scripts/test-selfloop-pause.lua` | `self-loop pause: 191 checks passed` |
+| `scripts/test-deploy-pause.lua` | `deploy claim wait ok (101 checks)` |
+
+### The narrowed run
+
+    WA_FAST_ROWS=/tmp/rows-wake.txt bash scripts/fast.sh
+    fast result FAILED (138 checks, 1 failed, 0 skipped)
+
+One failure, `check-esc-stops-pty`, the load-sensitive timing row - and it fails on `origin/main` itself under
+the same load right now (`esc-stops pty: 16 ok, 2 failed` on a base worktree of `origin/main`), so it is the
+machine, not this branch. The branch's own approved run was `137 checks, 0 failed`; main has since added a
+check, which is the 138th.
