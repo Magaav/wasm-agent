@@ -1495,6 +1495,10 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-edit-aliases.lua" "$BIN" --db "$DB.
 # hint and no store appears; with "graph": true it is back. It runs with nothing set on purpose - the rows
 # below switch the feature on in their own home (scripts/lib/test-graph-on.lua) because they exercise it.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-dormant.lua" "$BIN" --db "$DB.graph-dormant" | grep 'graph dormant ok'
+# The deploy's own graph proof, held against the two ways it can lie (docs/GRAPH.md, step 3e): with the graph
+# dormant on the node and the switch set for the proof process it PASSES through the staged component; without
+# the switch it fails by name; and a component whose bytes are not its pin still fails it.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-graph-proof.lua" "$BIN" --db "$DB.deploy-graph-proof" | grep 'deploy graph proof ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-workspace.lua" "$BIN" --db "$DB.graph-workspace" | grep 'graph workspace ok'
