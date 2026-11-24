@@ -95,7 +95,7 @@ MCP servers
 3 servers
 
 wasm-agent built-in MCPs
-❯ ! WhatsApp                  unknown
+❯ ! WhatsApp                  no account
 
 User MCPs
   ✔ Healthy                 1 tool
@@ -110,7 +110,7 @@ MCP servers
 3 servers
 
 wasm-agent built-in MCPs
-❯ ! WhatsApp                  unknown
+❯ ! WhatsApp                  no account
 
 User MCPs
   ✔ Healthy                 1 tool
@@ -217,34 +217,41 @@ Enter opens a connector · Esc or ← closes
 
 ## Texts to approve (Fable)
 
-Every string that is new or changed for a person to read, verbatim, in the order they appear:
+Every string that is new or changed for a person to read, verbatim, in the order they appear. **Approved by
+Fable 24/11 with these changes, applied in `8d5725af`**: 6 `no tool` -> `no tools`; 11 `unknown` ->
+`no account` (the built-in surface's word only - a registry connector never borrows it); 16, 17, 18, 20, 21
+and 24 rewritten as shown below. `8d5725af` changes four files; the two snapshots were regenerated and came
+out byte-identical, because none of the eight strings is on the list page itself (they are the folded pages',
+the empty-group line and the Tools page's count phrase).
 
 1. `MCP servers` (the list's title)
 2. `%d servers` -> `1 server`, `3 servers` (under the title)
 3. `wasm-agent built-in MCPs` (first heading)
 4. `User MCPs` (second heading)
 5. `✔` and `!` - the two marks a row can carry (connected, not healthy)
-6. `%d tools` -> `1 tool`, `no tool` (the right column of a healthy row)
+6. `%d tools` -> `1 tool`, `no tools` (the right column of a healthy row, and the Tools page's own count
+    phrase, so the two pages cannot disagree)
 7. `needs token` (a credential the far end refused)
 8. `server changed` (the connector's tool list moved since the approved one)
 9. `not reachable` (the last probe or call failed, or the account node is not in the fleet)
 10. `disabled` (turned off; nothing failed)
-11. `unknown` (the built-in surface's own word when no node says it holds the account)
+11. `no account` (the built-in surface's own word when no node says it holds the account; a registry
+    connector that reports a state nothing recognises keeps that state's own word instead)
 12. `On other nodes - %d hidden` (the folded row for connectors on other nodes)
 13. `%d retired` (the folded row for retired registry entries)
 14. `%d not classified` (the folded row for a connector that says neither that this agent ships it nor that
     it was added here - unreachable in practice, kept so nothing is silently hidden)
 15. `On other nodes` / `Retired` / `Not classified` (the titles of the pages those rows open)
-16. `%d connector%s on another node, folded here rather than repeated above.`
-17. `A retired row is one whose program went: its tools are not offered any more.`
-18. `These say neither that this agent ships them nor that they were added here.`
+16. `Connectors that live on other nodes.`
+17. `Retired: the connector's program is gone, so its tools are no longer offered.`
+18. `Origin not known: neither shipped with wasm-agent nor added on this node.`
 19. `<connector> on <node>` (a row inside the folded page, e.g. `whatsapp_native on openclaw`)
-20. `no built-in connector: this agent ships none here`
-21. `no user connector: nothing has been added on this node`
+20. `no built-in MCPs on this node`
+21. `no user MCPs on this node`
 22. `read-only: a master turns a connector on or off` (replaces the guest's long note, which was cut at 80
     columns)
 23. `Enter opens a connector · Esc or ← closes` (the list's hint row)
-24. `none: no connector is registered on this node, and no peer exports one.` (was `no service is registered`)
+24. `no MCP servers: none on this node and none shared by another node.`
 25. `usage: wa mcp list [--all] [--width <columns>]   the MCP connectors this node can use`
 26. `  --all     also print the rows the list folds away (other nodes, retired) and each connector`
 27. `  --width   the column count to lay the rows out for (80 by default)`
