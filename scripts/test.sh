@@ -569,6 +569,15 @@ command -v cygpath >/dev/null 2>&1 && export WA_COMPONENTS_DIR="$(cygpath -w "$G
 # sha256 and size check, the atomic swap and the rollback. No toolchain, no node: the component itself
 # is proved by the graph tests below and by scripts/check-graph-component.lua during a deploy.
 gate_run bash scripts/test-deploy-components.sh
+# THE FALLBACK BUILD'S RUSTC WRAPPER, AND THE REFUSAL A NODE WITHOUT A TOOLCHAIN OWES (24/11, work). The
+# wrapper install trusted a file it had not tested and a directory it had not tested at all, so on work the
+# deploy's fallback build died with "could not execute process wa-remap-rustc ... Permission denied (os error
+# 13)" after two minutes of toolchain fetch, naming none of it. This row proves the install repairs a copy
+# without its execute bit, refuses (by name) a directory this process cannot write or execute from, never
+# quietly replaces an explicit WA_REMAP_DIR, falls back from an unusable TMPDIR to the home cache saying why,
+# and that a PATH without cargo/rustup refuses the component stage AT ONCE with component_build_impossible
+# instead of starting a build. No network, no cargo, no node.
+gate_run bash scripts/test-component-build-wrapper.sh
 # The shipped set: a component is shipped by being PINNED (`components.lock`), and a deploy installs,
 # records and rolls back that whole set (docs/FEATURES.md). Proves the lock (production set, no fixture),
 # the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built

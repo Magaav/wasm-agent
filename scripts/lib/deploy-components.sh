@@ -83,6 +83,23 @@ wa_component_pin() {
 ' "$line"
 }
 
+# Can this machine build a component at all? -> 0 when it can (no output), 1 with the missing names on
+# stdout ("cargo rustup"). The build half of a component is scripts/build-components.sh, which needs cargo,
+# and rustup because components.lock pins the COMPILER the bytes were made with (scripts/lib/component-build-root.sh,
+# WA_COMPONENT_TOOLCHAIN=node is the documented "compile with whatever is here" exception and needs no
+# rustup). A wasi-sdk is needed only by a component with C inside, and the build says so by name in seconds,
+# so it is not a blocker here: the two-minute cost this refuses was the toolchain FETCH.
+wa_component_build_blockers() {
+  local missing=""
+  command -v cargo >/dev/null 2>&1 || missing="$missing cargo"
+  case "${WA_COMPONENT_TOOLCHAIN:-}" in
+    node) ;;
+    *) command -v rustup >/dev/null 2>&1 || missing="$missing rustup" ;;
+  esac
+  if [ -n "$missing" ]; then printf '%s' "${missing# }"; return 1; fi
+  return 0
+}
+
 # <repo> <name> <out_dir>
 #
 # Stage one component into <out_dir> and verify it against components.lock.
@@ -115,6 +132,16 @@ wa_component_stage() {
     cp -f "$source/$name.wasm" "$wasm" && cp -f "$source/$name.json" "$json" \
       || { echo "component_stage_unwritable: $out" >&2; return 3; }
   else
+    # A NODE WITHOUT A TOOLCHAIN REFUSES AT ONCE (24/11, work). The fallback used to start a build that
+    # first fetched rustc <the lock's pin> from the network - measured on work: two minutes - and then died
+    # inside cargo ("could not execute process wa-remap-rustc ... Permission denied (os error 13)"), so a
+    # deploy paid for a toolchain it could never use and reported the failure as a compiler accident. The
+    # question "can this machine build a component at all?" costs two `command -v` and is asked FIRST, and
+    # the refusal names the bundle that would have made the build unnecessary.
+    if ! blockers="$(wa_component_build_blockers)"; then
+      echo "component_build_impossible: $name has no pinned bytes here and this node cannot build it ($blockers missing from PATH), so the release $(wa_component_release_tag "$repo" 2>/dev/null || echo 'this lock names') is the only way to install it. Publish that bundle where the bytes were pinned (bash scripts/publish-components.sh, then the gh line it prints) or install them from a directory (WA_DEPLOY_COMPONENT_SOURCE=<dir>); nothing was built and nothing was installed." >&2
+      return 4
+    fi
     build_log="$out/.build-$name.log"
     WA_COMPONENTS_DIR="$out" bash "$repo/scripts/build-components.sh" "$name" >"$build_log" 2>&1
     if [ $? -ne 0 ] || [ ! -f "$wasm" ] || [ ! -f "$json" ]; then
