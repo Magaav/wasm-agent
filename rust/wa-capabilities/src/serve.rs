@@ -695,14 +695,24 @@ fn held_past_bound(held_ms: u64, bound_seconds: u64) -> bool {
     held_ms >= bound_seconds.saturating_mul(1000)
 }
 
-/// The state a lane reports (r7c, Fable 24/11). "stalled" is the WEDGED case only - the beat is dead, `age_ms`
-/// past `stall_seconds()` - because a lane working a long turn still beats, and painting it red would make every
-/// turn longer than two minutes look like a dead node (measured: 79230887 after the restart was working and would
-/// have read stalled). A lane holding a label is "busy", with `held_seconds` beside it; the RED-by-name signal is a
-/// COMPLETION WAITING past `completion_wait_bound_seconds()` (`over_bound`), never a lane at work.
-fn lane_state(age_ms: u64, held_ms: Option<u64>, stall_seconds: u64, held_bound_seconds: u64) -> &'static str {
+/// The state a lane reports (r7c, Fable 24/11; r8b item 5, Fable 24/11). "stalled" is the WEDGED case only -
+/// no beat for `stall_seconds()`, AND no operation of its own pending, AND no tool activity - because a lane
+/// working a long turn still beats, and painting it red would make every turn longer than two minutes look like a
+/// dead node (measured: 79230887 after the restart was working and would have read stalled). A lane holding a
+/// label is "busy", with `held_seconds` beside it; the RED-by-name signal is a COMPLETION WAITING past
+/// `completion_wait_bound_seconds()` (`over_bound`), never a lane at work.
+///
+/// A LANE WAITING ON ITS OWN OPERATION IS "waiting", NOT STALLED (r8b item 5). MEASURED (run 1382,
+/// `_orch/evidence/dead-beat-3-ca09c1c4/NOTE.md`): a turn polled its own backgrounded operation every ~5 minutes,
+/// and each poll is one short host call - so the lane beat AT the polls and never between them, and /health
+/// flipped the lane between "stalled" and "busy" for as long as that work ran, while the operation was alive and
+/// progressing. The 10:19Z restart most likely killed run 1349 live on that false signal. The operation's own
+/// state is proof of life, so `waiting_on` (the id of the unsettled operation this lane's conversation owns)
+/// keeps the lane out of "stalled" and names it instead.
+fn lane_state(age_ms: u64, held_ms: Option<u64>, stall_seconds: u64, held_bound_seconds: u64,
+              waiting_on: Option<&str>) -> &'static str {
     if stall_seconds > 0 && age_ms >= stall_seconds.saturating_mul(1000) {
-        "stalled"
+        if waiting_on.is_some() { "waiting" } else { "stalled" }
     } else if held_ms.map(|held| held >= held_bound_seconds.saturating_mul(1000)).unwrap_or(false) {
         // A lane at work for longer than the bound is BUSY - `held_seconds` says how long - never stalled.
         "busy"
@@ -711,6 +721,38 @@ fn lane_state(age_ms: u64, held_ms: Option<u64>, stall_seconds: u64, held_bound_
     } else {
         "busy"
     }
+}
+
+/// The operation a lane is WAITING ON, if any: an unsettled operation the RUN this lane is executing started
+/// (r8b item 5). `ops` is `operations::health()`'s node-wide list, read once per /health body.
+///
+/// THE RUN IS THE IDENTITY, NOT THE CONVERSATION. Measured on this row's fixture (a real node, a real turn): the
+/// operation a turn starts answers `owner: "run:1"` and a `session` that is the run's OWN scope, not the
+/// conversation the lane is writing - so matching on the session found nothing and the lane stayed "busy" while
+/// it was demonstrably waiting. The lane knows its run id (`node_thread_run_id`), and the operation's owner names
+/// the same number, so that pair is what is matched; a session match is kept as the fallback for an operation
+/// adopted another way (an op a session started outside a run).
+fn waiting_op_for_run(ops: &[serde_json::Value], run_id: u64, session: &str) -> Option<(String, bool)> {
+    let owned = format!("run:{run_id}");
+    let by_owner = (run_id != 0).then(|| ops.iter()
+        .find(|op| op.get("owner").and_then(|value| value.as_str()) == Some(owned.as_str())));
+    // THE SESSION FALLBACK IS FOR A LANE WITH NO RUN (r8b 5a, Fable 24/11). As written it also ran for a lane
+    // that HAS a run id and no operation of its own: any unsettled operation of the same conversation - an older
+    // turn's background command, still running - then made a truly wedged lane read "waiting". A lane that knows
+    // its run is answered by that run alone; the session is only the identity of a lane that has none.
+    let by_session = (|| {
+        if run_id != 0 || session.is_empty() { return None; }
+        ops.iter().find(|op| op.get("session").and_then(|value| value.as_str()) == Some(session))
+    })();
+    by_owner.flatten().or(by_session).and_then(|op| {
+        let id = op.get("operation_id").and_then(|value| value.as_str()).map(str::to_string)?;
+        // AN OVERDUE OPERATION IS NOT PROOF OF LIFE (r8b 5b, Fable 24/11). `overdue` is the operation's own
+        // word for "past the deadline it declared and still unsettled" - the case the supervisor acts on - so a
+        // lane waiting on it is not alive because of it. The id is still returned, so /health can say what the
+        // lane is stuck behind, but the caller must not let it out of "stalled".
+        let overdue = op.get("overdue").and_then(|value| value.as_bool()).unwrap_or(false);
+        Some((id, overdue))
+    })
 }
 
 fn node_thread_is_stalled(index: usize) -> bool {
@@ -1458,11 +1500,40 @@ mod execution_path_tests {
     #[test]
     fn a_lane_held_ten_minutes_with_a_live_beat_is_busy_not_stalled() {
         // Live beat (age 200 ms), label held ten minutes: BUSY, with held_seconds, never stalled.
-        assert_eq!(super::lane_state(200, Some(600_000), 30, 120), "busy", "ten minutes of work with a live beat is busy");
-        assert_eq!(super::lane_state(200, None, 30, 120), "alive");
-        assert_eq!(super::lane_state(5_000, Some(1_000), 30, 120), "busy");
+        assert_eq!(super::lane_state(200, Some(600_000), 30, 120, None), "busy", "ten minutes of work with a live beat is busy");
+        assert_eq!(super::lane_state(200, None, 30, 120, None), "alive");
+        assert_eq!(super::lane_state(5_000, Some(1_000), 30, 120, None), "busy");
         // A dead beat past the stall bound is the wedged case, whatever the label says.
-        assert_eq!(super::lane_state(31_000, Some(600_000), 30, 120), "stalled");
+        assert_eq!(super::lane_state(31_000, Some(600_000), 30, 120, None), "stalled");
+        // r8b item 5: the SAME dead beat, with an operation of this lane's own still running, is waiting - the
+        // measured 1382 shape (a turn polling its own 3-minute operation every ~5 minutes never beat between polls).
+        assert_eq!(super::lane_state(31_000, Some(600_000), 30, 120, Some("op-1-2-3")), "waiting",
+            "a lane waiting on its own operation is not wedged");
+        assert_eq!(super::lane_state(86_400_000, None, 30, 120, Some("op-1-2-3")), "waiting", "a day of waiting is still waiting");
+        // ...and the operation must be the LANE's own: a lane whose conversation owns nothing is still stalled.
+        assert_eq!(super::lane_state(31_000, None, 30, 120, None), "stalled");
+        let ops = vec![serde_json::json!({"operation_id": "op-own", "session": "s-1", "owner": "run:7"}),
+                       serde_json::json!({"operation_id": "op-other", "session": "s-2", "owner": "run:8"}),
+                       serde_json::json!({"operation_id": "op-session", "session": "s-3", "owner": "session"})];
+        // THE RUN THE LANE IS EXECUTING IS THE IDENTITY (measured: a turn's operation answers owner "run:1" and a
+        // session that is the run's own scope, not the conversation).
+        assert_eq!(super::waiting_op_for_run(&ops, 7, ""), Some(("op-own".to_string(), false)));
+        assert_eq!(super::waiting_op_for_run(&ops, 9, ""), None, "another run's operation is not this lane's");
+        // AN OVERDUE OPERATION IS NOT PROOF OF LIFE (r8b 5b): the id is still reported (so /health can say what
+        // the lane is stuck behind) with `true`, and the caller passes None to lane_state, which is "stalled".
+        let overdue = vec![serde_json::json!({"operation_id": "op-late", "session": "s-4", "owner": "run:11",
+            "overdue": true})];
+        assert_eq!(super::waiting_op_for_run(&overdue, 11, ""), Some(("op-late".to_string(), true)));
+        assert_eq!(super::lane_state(31_000, None, 30, 120, None), "stalled",
+            "a lane waiting on an OVERDUE operation is stalled: the operation is not proof of life");
+        // The session is the fallback for an operation adopted outside a run.
+        assert_eq!(super::waiting_op_for_run(&ops, 0, "s-3"), Some(("op-session".to_string(), false)));
+        // ...and ONLY for a lane with no run: a lane that knows its run is answered by that run alone, or it is
+        // not waiting at all. (Run 9 owns nothing; session s-3 has an operation; the answer must be None.)
+        assert_eq!(super::waiting_op_for_run(&ops, 9, "s-3"), None,
+            "a lane with a run id does not inherit another turn's operation through the conversation");
+        assert_eq!(super::waiting_op_for_run(&ops, 0, "s-9"), None, "another conversation's operation is not this lane's");
+        assert_eq!(super::waiting_op_for_run(&ops, 0, ""), None, "no run and no conversation: nothing to wait on");
     }
 
     /// r7c (Fable, 24/11): one background lane is not a pool. With a reserve of two lanes, exactly one may be lent
@@ -1544,8 +1615,10 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
     let scope = crate::operations::health_scope_for(session, node_wide, owner);
     let operations = scope["operations"].clone();
     let age_ms = live_node_thread_ids().into_iter().map(node_thread_age_ms).max().unwrap_or(0);
-    let stalled = age_ms >= stall_seconds() * 1000 || operation_overdue;
-    let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
+    // THE AGGREGATE IS DERIVED FROM THE LANES (r8b item 5), further down, once each lane has answered: "stalled"
+    // is a claim about a lane (no beat AND no pending operation of its own), and an overdue operation is its own
+    // fact (`operation_overdue`) - it is not this node being wedged. The list is read once here for every lane.
+    let lane_operations = crate::operations::health().as_array().cloned().unwrap_or_default();
     let mut current = IN_FLIGHT.lock().ok().and_then(|slot| {
         slot.as_ref().map(|(label, started)| {
             // `session` is the conversation this run is writing, so a window can tell whether
@@ -1582,6 +1655,14 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     .and_then(|slots| slots.get(index))
                     .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
                 let run = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
+                let lane_waiting_op = waiting_op_for_run(&lane_operations, node_thread_run_id(index).unwrap_or(0),
+                    node_thread_session(index).as_deref().unwrap_or(""));
+                // Only a LIVE operation keeps the lane out of "stalled"; an overdue one is named in
+                // `waiting_operation` (so a reader sees what it is stuck behind) and flagged
+                // `waiting_operation_overdue`, and the state says "stalled" - both facts, not one.
+                let lane_overdue = lane_waiting_op.as_ref().map(|(_, overdue)| *overdue).unwrap_or(false);
+                let lane_waiting: Option<String> = lane_waiting_op.map(|(id, _)| id);
+                let lane_live_wait = if lane_overdue { None } else { lane_waiting.as_deref() };
                 if current.is_none() && run {
                     if let Some((label, started)) = &busy {
                         current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index),"run_key":node_thread_run_id(index).map(|id|id.to_string())}));
@@ -1598,7 +1679,14 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     // is turning. Measured: one lane sat 29 minutes inside `wa_completion_run` with a fresh beat
                     // and a "child completion" label, and /health called it busy the whole time. `stalled` names
                     // it, with the label, the session and how long it has been held, so it is not invisible again.
-                    "state": lane_state(age, node_thread_busy_for_ms(index), stall_seconds(), node_stall_seconds()),
+                    "state": lane_state(age, node_thread_busy_for_ms(index), stall_seconds(), node_stall_seconds(),
+                        lane_live_wait),
+                    // An operation past its own deadline is a fact the state does not hide: the lane is stalled AND
+                    // this is what it is stuck behind.
+                    "waiting_operation_overdue": lane_overdue,
+                    // WHICH OPERATION THIS LANE IS WAITING ON (r8b item 5): the id, so "is it alive?" is answered by
+                    // the operation's own state and a reader never has to guess from a beat that only comes on polls.
+                    "waiting_operation": lane_waiting,
                     "held_seconds": node_thread_busy_for_ms(index).map(|held| held / 1000),
                     "held_past_bound": node_thread_is_stalled(index),
                     "held_bound_seconds": node_stall_seconds(),
@@ -1656,6 +1744,17 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
         .and_then(|value| value.as_str())
         == Some("upgrading")
         && deploy_state_fresh;
+    // THE AGGREGATE, FROM THE LANES (r8b item 5): one wedged lane is the node being stalled, and a lane waiting
+    // on its own operation is not wedged. With no lane to ask (no pool), the oldest beat answers as it always did.
+    let stalled = if node_threads.is_empty() {
+        age_ms >= stall_seconds() * 1000
+    } else {
+        node_threads.iter().any(|thread| thread.get("state").and_then(|value| value.as_str()) == Some("stalled"))
+    };
+    let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
+    let waiting_operation = node_threads
+        .iter()
+        .find_map(|thread| thread.get("waiting_operation").and_then(|value| value.as_str()).map(str::to_string));
     let busy_threads = node_threads
         .iter()
         .filter(|thread| thread.get("label").map(|label| !label.is_null()).unwrap_or(false))
@@ -1712,6 +1811,9 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
         // waiting for an idle node, and that script also has to read *older* nodes: renaming the key is
         // a coordinated change, not this one (see the report).
         "worker": state,
+        // The operation the node's run lane is waiting on, if any (r8b item 5): the id, so a supervisor, a window
+        // and a supervisor's log can say "waiting on op-<id>" instead of reading a poll gap as a dead lane.
+        "waiting_operation": waiting_operation,
         "stalled_ms": age_ms,
         "queue": QUEUED.load(Ordering::Relaxed),
         // The same count, itemised: one entry per run admitted and not started (empty when the node is

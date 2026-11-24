@@ -1001,6 +1001,15 @@ WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
 # the environment, so a scratch home alone did not stop a paid turn). It was an orphan until main-health said so
 # (one commit, change/one-turn-wired): a row that nothing runs is a proof nobody uses.
 WA_BIN="$bin" check one-turn bash scripts/test-one-turn.sh
+# A TURN WAITING ON ITS OWN OPERATION IS NOT A DEAD LANE (r8b item 5): a real node, a real turn that starts a
+# backgrounded operation and polls it, and /health that must name the operation and never call the lane stalled
+# while it runs. The stall bound is dropped to 2 s so the mechanism is measured in seconds.
+WA_BIN="$bin" check health-waiting-on-op bash scripts/test-health-waiting-on-op.sh
+# RECOVER A NODE THE OS OWNS (r8b (i)): a scratch USER unit runs this tree's node on its own port, HOME
+# and ledger; it is wedged with SIGSTOP, and the watcher must bring it back through the unit with no human
+# step and no pid proof. wa-serve.service and the real node are never named or touched. The row needs
+# `wa-sentinel` beside the binary, and says so by name (a skip) when the gate did not build it.
+WA_BIN="$bin" check sentinel-recover-unit bash scripts/test-sentinel-recover-unit.sh
 # fast.sh runs under set -u: every incremented counter is initialised (test-fast-counters.sh).
 check fast-counters bash scripts/test-fast-counters.sh
 check install-front-door bash scripts/test-install.sh
