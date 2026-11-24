@@ -391,6 +391,10 @@ shape, on `change/deploy-component-proof`:
   deploy**: what it adds is the graph component's own answers (index -> query -> explain -> status), which a
   broken `graph.wasm` would otherwise only fail in the gate's graph rows. It cannot be switch-free, so it
   runs only where a node uses the graph: `scripts/test-deploy-component-proof.lua`'s last direction.
+  What the graph proof still adds to a DEPLOY is nothing, and that is checkable rather than a judgement: a
+  `graph.wasm` whose bytes are not its pin is already refused at staging (`wa_components_prepare`,
+  `component_hash_mismatch`), before any proof runs; the seam is what the deploy has to prove, and `memory`
+  proves it without an optional feature.
 
 `scripts/test-deploy-component-proof.lua` (renamed from `test-deploy-graph-proof.lua`, 21 checks, wired in
 `scripts/test.sh` and picked up by the fast path) holds all four directions in its own scratch homes with its
@@ -408,3 +412,10 @@ component proof ok: memory answered through the staged component (bf469e8ce4af),
 refused by name (graph_dormant, effect none) from this binary
 exit 0
 ```
+
+Narrowed run after the steer (138 checks): **every one of the 40 Lua rows passed**, including
+`scripts/test-deploy-component-proof.lua` (21 checks) and every graph and feature row. Two checks were red and
+**both are red on `origin/main` too**: `esc-stops-pty` (the load-sensitive pty row) and `install-guards`
+(`scripts/test-install-guards.sh`, 72 checks, the same 6 failures - `scripts/upgrade.sh` refuses inside a turn
+running on the node it would replace, and this run was made from such a turn). Neither file is touched by this
+branch.
