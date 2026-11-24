@@ -1183,7 +1183,7 @@ DEPLOY_LOCK_HELD=1
 # install - what it costs is said on the deploy's own log.
 DEPLOY_ALIVE_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
 DEPLOY_ALIVE_LIB="$ROOT/scripts/lib/deploy-alive.sh"
-[ -r "$DEPLOY_ALIVE_LIB" ] && . "$DEPLOY_ALIVE_LIB"
+if [ -r "$DEPLOY_ALIVE_LIB" ]; then . "$DEPLOY_ALIVE_LIB"; fi
 if command -v wa_deploy_alive_write >/dev/null 2>&1; then
   wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" \
     || say "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"

@@ -1433,6 +1433,10 @@ GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-resume-windo
 # zombie, recycled pid, the record's own bound, no /proc), the wait every caller sees, and the release that must not
 # happen while it runs.
 GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-alive.lua" "$BIN" --db "$DB.deploy-alive" | grep 'deploy alive ok'
+# THE SAME HOLD ON A REAL NODE (r8c G blocker): the deploy is claimed and moved to done/ at once, then compiles
+# for 60 s with no request, no claimed request and no marker; killed, scripts-only and back-to-back, every resume
+# counted at the loopback model.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-alive-hold.sh
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.

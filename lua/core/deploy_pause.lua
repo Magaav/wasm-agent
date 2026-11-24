@@ -1208,8 +1208,13 @@ function M.release_due(now, opts)
   -- the deploy has not even started is what let a turn run again, keep the node busy, and starve the install
   -- for half an hour. The request is in the box until the swap is done, so its absence is the end.
   if M.waiting(now, opts) then return 0 end
-  local waiting = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>? LIMIT 8]],
-    { M.RESUME_REASON, now })
+  -- EVERY PENDING RESUME, DUE OR NOT (r8c 21:15Z, measured by scripts/test-deploy-alive-hold.sh): the release used to
+  -- look only at rows whose `due_at` was still in the future, so a pause whose 60 s poll came due DURING a long compile
+  -- was dispatched after the install ended by the ordinary due path - with the pause-time words ("the node is
+  -- installing a new build") and none of the release's line. The release is "nothing waits any more": it stamps every
+  -- pending resume of the session, due or not, and makes it due now.
+  local waiting = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? LIMIT 8]],
+    { M.RESUME_REASON })
   if type(waiting) ~= "table" or #waiting == 0 then return 0 end
   -- A HELD SESSION IS NOT WAITING FOR THIS INSTALL (Fable 24/11). `self_wake_pauses` holds a session for a reason of
   -- its own - a park (a mission stopped on purpose, 22/11) or an interrupt - and the node's tick dispatches none of
@@ -1269,8 +1274,8 @@ function M.release_due(now, opts)
   -- the install directory says now. `install_moved` is true only for two records that disagree; nil (cannot tell) is
   -- never read as installed.
   local now_identity = M.installed_identity(opts)
-  local released = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>?
-    ORDER BY due_at, created_at]], { M.RESUME_REASON, now })
+  local released = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=?
+    ORDER BY due_at, created_at]], { M.RESUME_REASON })
   local changes = 0
   for _, row in ipairs(type(released) == "table" and released or {}) do
     local session = tostring(row.session_id or "")

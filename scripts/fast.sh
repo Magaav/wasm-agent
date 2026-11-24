@@ -1009,6 +1009,11 @@ WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
 # marker mid-turn pauses the turn; the marker then goes with nothing installed and the node's own tick runs
 # exactly ONE resume turn whose ledger row carries '[deploy] the update did not happen'.
 WA_BIN="$bin" check deploy-release-node bash scripts/test-deploy-release-node.sh
+# AN INSTALL HOLDS A SESSION ONCE, FROM ITS FIRST PAUSE UNTIL THE NODE IS BACK (r8c G blocker): a real scratch node
+# where the deploy is CLAIMED and moved to done/ at once (the sentinel detaches it) and then compiles for 60 s with no
+# request, no claimed request and no marker - the 21:15Z hole - with three sessions mid-turn, then a killed deploy, a
+# scripts-only install and two requests back to back, every resume counted at the loopback model.
+WA_BIN="$bin" check deploy-alive-hold bash scripts/test-deploy-alive-hold.sh
 # ONE TURN, ONE PROVIDER REQUEST (r8a/4, 8ef62fea): the instrument every later paid-turn assertion needs - a
 # turn against a stub provider this row owns, asserting exactly ONE request for one turn. It needs no live
 # node and no real provider: its own `wa chat --once --offline` in a scratch home, a loopback stub on an
