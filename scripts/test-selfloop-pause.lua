@@ -523,7 +523,10 @@ check(claimed_x and claimed_x.id == row_x.wake.id, "and the node claimed it: X i
 local armed_on_pause = selfloop.schedule({ in_seconds = 60, reason = pause_mod.RESUME_REASON, prompt = "resume Y" },
   { session_id = paused_run_session, user_id = "master", resume_chain = 1 })
 check(armed_on_pause and armed_on_pause.ok, "the pause armed a second resume")
-check(armed_on_pause.replaced ~= true and tostring(armed_on_pause.wake.id) ~= tostring(row_x.wake.id),
+-- THE ASSERTION IS THE ROW, NOT A FLAG IN THE ANSWER (parity, 24/11): `schedule`'s answer is the contract's
+-- `wake` and nothing else (`replaced`/`inherited` were dropped - the component cannot produce them, and the parity
+-- row compared them). The fact is the id: a DISPATCHING row is not replaced, so the new resume is its own row.
+check(tostring(armed_on_pause.wake.id) ~= tostring(row_x.wake.id) and armed_on_pause.wake.status == "pending",
   "a DISPATCHING row is not replaced: the new resume is its own row")
 check(tonumber((json.decode(host.sql_query([[SELECT created_at FROM self_wakes WHERE id=?]],
   json.encode({ armed_on_pause.wake.id })) or "[]") or {})[1].created_at) == r6_now - 7200,
@@ -562,7 +565,11 @@ check(first and first.ok, "row A is armed")
 host.sql_exec([[UPDATE self_wakes SET created_at=?, resume_chain=2 WHERE id=?]], json.encode({ r6_now - 3600, first.wake.id }))
 local second = selfloop.schedule({ in_seconds = 120, reason = pause_mod.RESUME_REASON, prompt = "B", resume_chain = 1 },
   { session_id = one_session, user_id = "master" })
-check(second and second.ok and second.replaced == true, "arming B REPLACES A instead of adding a row: " .. json.encode(second))
+-- "B REPLACES A" is the ANSWERED ROW being A's row (parity, 24/11: the answer carries no `replaced` flag any
+-- more - it was a key the component cannot produce - and the rows below say the same thing with more: one row, A's
+-- id, the oldest created_at, the largest chain, pending again with B's words).
+check(second and second.ok and tostring(second.wake.id) == tostring(first.wake.id),
+  "arming B REPLACES A instead of adding a row: " .. json.encode(second))
 local rows = json.decode(host.sql_query([[SELECT id, status, created_at, resume_chain, prompt FROM self_wakes
   WHERE session_id=? AND reason=?]], json.encode({ one_session, pause_mod.RESUME_REASON })) or "[]") or {}
 check(#rows == 1, "exactly ONE resume row for the session: " .. json.encode(rows))

@@ -570,7 +570,14 @@ function M.schedule(args, ctx)
       exec([[UPDATE self_wakes SET status='pending', prompt=?, due_at=?, updated_at=?, last_error='', resume_chain=?
         WHERE id=?]], { prompt, due_at, now, chain, pending_row.id })
       local row = query("SELECT * FROM self_wakes WHERE id=?", { pending_row.id })[1]
-      return { ok = true, wake = view(row, now), replaced = true }
+      -- THE ANSWER IS THE CONTRACT'S `wake` AND NOTHING ELSE (parity, 24/11). `replaced` and `inherited` were
+      -- Lua-side bookkeeping about the r6/r6b resume collapse, and a `schedule` answer carrying a key the
+      -- component ('the component carries the contract', wit/selfloop/selfloop.wit: the result is a `wake`)
+      -- cannot produce is a parity defect, not extra information: measured, scripts/test-selfloop-component.lua:115
+      -- 'PARITY: schedule a time wake differs' on the extra key alone. No caller read either key (nothing in
+      -- lua/ or scripts/ reads `schedule(...).replaced` or `.inherited`), and which row won is in the answer's
+      -- `wake.id` plus the superseded rows in the ledger.
+      return { ok = true, wake = view(row, now) }
     end
     local running = query([[SELECT * FROM self_wakes WHERE session_id=? AND reason=? AND status='dispatching'
       ORDER BY created_at LIMIT 1]], { session.id, reason })[1]
@@ -601,7 +608,7 @@ function M.schedule(args, ctx)
       { inherited_created or at, chain, id })
   end
   local row = query("SELECT * FROM self_wakes WHERE id=?", { id })[1]
-  return { ok = true, wake = view(row, at), inherited = inherited_created ~= nil }
+  return { ok = true, wake = view(row, at) }
 end
 
 -- The pending wake facts for a session (the footer's and the window's one read).
