@@ -3820,6 +3820,10 @@ pub extern "C-unwind" fn build_identity(l: *mut LuaState) -> c_int {
         // same file wa-host embeds): the welcome box and every other surface read it here rather than keeping
         // a copy. `unknown` when a build was stamped from a tree that has no VERSION file.
         "product_version": PRODUCT_VERSION.trim(),
+        // Does the tree this binary was built from carry the icon font (item 7)? The publisher copies that
+        // file into the release and refuses a set without it, so this is the fact `/icons` needs before it
+        // prints a curl of the release asset: an older tree answers false, and then there is no link to print.
+        "release_fonts": RELEASE_FONTS,
     }));
     1
 }

@@ -24,9 +24,18 @@ fn generate_product_version() {
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
+    // THE ICON FONT A RELEASE CARRIES (item 7, Victor 23/11): `scripts/publish-node-binaries.sh` copies
+    // assets/fonts/waIcons-Regular.ttf beside the binaries and refuses a set without it ("font_missing"), and
+    // scripts/publish-artifacts-branch.sh carries it into the artifacts commit - so "this tree has the font"
+    // IS why a release built from it has the asset. Embedded here, by the crate that answers
+    // host.build_identity(), so `/icons` prints its upload line only when that line can stand.
+    let font = manifest.join("../../assets/fonts/waIcons-Regular.ttf");
+    println!("cargo:rerun-if-changed={}", font.display());
+    let fonts = font.is_file();
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-    std::fs::write(out.join("product_version.rs"), format!("pub const PRODUCT_VERSION: &str = {version:?};\n"))
-        .expect("write the product version");
+    std::fs::write(out.join("product_version.rs"), format!(
+        "pub const PRODUCT_VERSION: &str = {version:?};\npub const RELEASE_FONTS: bool = {fonts};\n"))
+        .expect("write the product version and the release-font fact");
 }
 
 

@@ -79,17 +79,58 @@ for _, icon in ipairs(NAMES) do
     "unicode." .. icon .. " is a glyph measured one cell wide in the stock faces (" .. tostring(glyph) .. ")")
 end
 
--- THE FONT ON THE DRAWING MACHINE (item 7): ONE line, from THIS build's node release - and nothing at all
--- when no release can be named, because an unpinned guess is worse than no advice.
-local fetch = icons.fetch_line("v0123456789ab")
-ok(type(fetch) == "string" and fetch:find(
+-- THE FONT ON THE DRAWING MACHINE (item 7): ONE line, from THIS build's own release - and it is printed only
+-- when the release asset can stand behind it (Fable, 24/11): the build embeds whether its tree carries the font
+-- (rust/wa-capabilities/build.rs RELEASE_FONTS, which the publisher's own font_missing refusal mirrors), and the
+-- label names the tag the assets live under.
+local function fetch_box(label, fonts) return icons.fetch_line(label, { fonts = fonts }) end
+
+local node_link, node_why = fetch_box("node-0123456789ab", true)
+ok(type(node_link) == "string" and node_link:find(
   "https://github.com/Magaav/wasm-agent/releases/download/node-0123456789ab/waIcons-Regular.ttf", 1, true) ~= nil,
-  "the one line downloads this build's own font asset: " .. tostring(fetch))
-ok(type(fetch) == "string" and fetch:find("curl -fsSL", 1, true) == 1 and fetch:find("fc-cache", 1, true) ~= nil,
-  "with curl and the font cache rebuild, and nothing else: " .. tostring(fetch))
-eq(icons.fetch_line("unknown build"), nil, "an unnameable release prints no line")
-eq(icons.fetch_line(nil), nil, "and a caller with no label prints no line")
-eq(icons.fetch_line("node-0123456789ab"), fetch, "a release tag and a commit label give the same line")
+  "a node release's link names that release's tag: " .. tostring(node_link))
+ok(node_why == nil, "and needs no reason")
+ok(type(node_link) == "string" and node_link:find("curl -fsSL", 1, true) == 1 and node_link:find("fc-cache", 1, true) ~= nil,
+  "with curl and the font cache rebuild, and nothing else: " .. tostring(node_link))
+
+-- A TAGGED RELEASE uses ITS OWN tag - its assets live under it, not under node-<sha> (Fable, 24/11).
+local tagged = fetch_box("v0.1.2", true)
+ok(type(tagged) == "string" and tagged:find(
+  "https://github.com/Magaav/wasm-agent/releases/download/v0.1.2/waIcons-Regular.ttf", 1, true) ~= nil,
+  "a product release's link uses its own tag: " .. tostring(tagged))
+ok(type(fetch_box("v0.1.3-rc.1", true)) == "string", "and so does a pre-release tag")
+eq(icons.release_tag("node-0123456789ab"), "node-0123456789ab", "a node tag is read back as itself")
+eq(icons.release_tag("v0.1.2"), "v0.1.2", "a product tag is read back as itself")
+eq(icons.release_tag("d0e345a1"), nil, "a commit label is not a release")
+eq(icons.release_tag("d0e345a1 (pinned)"), nil, "and a pinned commit is not one either")
+
+-- A BUILD WHOSE RELEASE HAS NO FONT prints the reason, never a dead link (Fable, 24/11: text 5's reason).
+local absent, absent_why = fetch_box("node-0123456789ab", false)
+eq(absent, nil, "no link when the tree carries no font, however release-like the label is")
+ok(type(absent_why) == "string" and absent_why:find("font_absent:", 1, true) == 1,
+  "the reason is said instead: " .. tostring(absent_why))
+eq(fetch_box("node-0123456789ab", nil), nil, "and an unknown answer is not a yes")
+local dev, dev_why = fetch_box("d0e345a1", true)
+eq(dev, nil, "a dev commit names no release")
+ok(type(dev_why) == "string" and dev_why:find("no_release:", 1, true) == 1,
+  "and says so: " .. tostring(dev_why))
+
+-- THIS TREE REALLY CARRIES THE FONT, and its build says so: the two facts that make the link stand on a
+-- release. The row reads the file itself, so deleting it fails here rather than in a 404 months later.
+local wanted = ((type(host) == "table") and host.getenv and host.getenv("WASM_AGENT_LUA_ROOT")) or "."
+-- `host.read_file` answers TEXT only (a font is refused as read_file_not_text), so the file is asked about the
+-- way a shell asks: `test -s`. A row that cannot ask refuses, never passes.
+local jlib = dofile("lua/vendor/json.lua")
+local asked, raw = pcall(host.exec, "test -s " .. wanted .. "/assets/fonts/waIcons-Regular.ttf", "", 10)
+local font_code
+do
+  local decoded = nil
+  if asked and type(raw) == "string" then local d, value = pcall(jlib.decode, raw); if d then decoded = value end end
+  font_code = type(decoded) == "table" and tonumber(decoded.code) or nil
+end
+ok(font_code == 0, "this tree carries assets/fonts/waIcons-Regular.ttf (test -s answered " .. tostring(font_code) .. ")")
+local identity = dofile("lua/core/build_identity.lua").identity()
+ok(identity.fonts == true, "and the running binary's build says its tree carries it (release_fonts)")
 
 -- Nine states in every set that has a ball (the brief keeps all nine in wa/nerd/unicode).
 for _, set_name in ipairs({ "wa", "nerd", "unicode" }) do

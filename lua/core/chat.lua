@@ -1202,9 +1202,15 @@ function M.run(argv)
         -- the one line that puts the font on the machine whose terminal shows these rows - a container cannot
         -- install it for the window it is drawn in. Nothing is printed when no release can be named.
         if tostring(set) ~= "wa" then
+          -- The link, or the reason it cannot stand (Fable, 24/11): `release_fonts` says whether the tree these
+          -- bytes were built from carries the font (the publisher refuses a release without it), and the label
+          -- says which release tag the assets live under - `node-<sha12>`, or a product tag. Neither, and the
+          -- reader is told why instead of being sent to a 404.
           local icons_lib = dofile("lua/core/icons.lua")
-          local line = icons_lib.fetch_line(dofile("lua/core/build_identity.lua").label())
-          if line then ui.say("  wa Icons on this machine: " .. line) end
+          local identity = dofile("lua/core/build_identity.lua").identity()
+          local line, why = icons_lib.fetch_line(identity.label, { fonts = identity.fonts })
+          if line then ui.say("  wa Icons on this machine: " .. line)
+          elseif why then ui.say("  " .. why) end
         end
       else
         local chosen, why = view_lib.use_icons(asked)

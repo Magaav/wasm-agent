@@ -281,22 +281,51 @@ end
 -- bytes as assets/fonts/waIcons-Regular.ttf, and it is covered by that release SIGNED SHA256SUMS (the
 -- vault release-signing key signs that list, and a release without a valid signature is never published).
 --
--- WHAT THE LINE DOWNLOADS, and from where: this build own node release - tag node-<sha12>, the tag the
--- release index and the install path already trust - at
---   https://github.com/<repo>/releases/download/node-<sha12>/waIcons-Regular.ttf
--- one font file, no installer, no shell pipeline and no token. Where no release can be named (a dev tree
--- whose label is not a commit) it says nothing: an unpinned guess is worse than no advice.
+-- AND ONLY WHEN THE ASSET EXISTS (Fable, 24/11): the running build knows from `release_fonts`, embedded by
+-- rust/wa-capabilities/build.rs from the presence of this tree's own assets/fonts/waIcons-Regular.ttf - the
+-- file the publisher refuses a release without - and from its own label, which names the tag the assets live
+-- under. A build that cannot stand behind the URL prints the REASON instead (M.FONT_ABSENT / M.NO_RELEASE),
+-- never a dead link.
 M.FONT_ASSET = "waIcons-Regular.ttf"
 M.FONT_REPO = "Magaav/wasm-agent"
-M.FONT_TAG_PREFIX = "node-"
-function M.fetch_line(label)
-  local tag = tostring(label or ""):gsub("%s", ""):gsub("^v", "")
-  if tag:sub(1, #M.FONT_TAG_PREFIX) == M.FONT_TAG_PREFIX then tag = tag:sub(#M.FONT_TAG_PREFIX + 1) end
-  if not tag:match("^%x%x%x%x%x%x%x%x%x%x%x%x$") then return nil end
-  return string.format(
-    "curl -fsSL https://github.com/%s/releases/download/%s%s/%s -o ~/.local/share/fonts/%s && fc-cache -f ~/.local/share/fonts",
-    M.FONT_REPO, M.FONT_TAG_PREFIX, tag, M.FONT_ASSET, M.FONT_ASSET)
+
+-- The tag a release's assets live under, from the label of the bytes that are running - or nil when that
+-- label is not a release. THREE SHAPES, and each exists in this tree's own words:
+--   * `node-<sha12>` - every node release (`scripts/lib/node-binaries.sh`, wa_node_release_tag); `installed.txt`
+--     records it as binary_release, so an installed node's label IS its release tag;
+--   * `vX.Y.Z[-pre]` - a product release tag (`wa release cut`). A TAGGED RELEASE'S ASSETS LIVE UNDER ITS OWN
+--     TAG, NOT under `node-<sha>`: the link must name the tag the release was published with, which is why this
+--     reads the label instead of re-deriving it;
+--   * `<sha>` / `<sha> (pinned)` - a dev build, or a commit an operator pinned. Neither was published, so
+--     there is no release to name and no link to print.
+function M.release_tag(label)
+  local text = tostring(label or "")
+  if text:match("%s+%([^%)]*%)") then return nil end
+  local sha = text:match("^node%-(%x%x%x%x%x%x%x%x%x%x%x%x)$")
+  if sha then return "node-" .. sha end
+  if text:match("^v%d+%.%d+%.%d+[%w%.%-]*$") then return text end
+  return nil
 end
+
+-- WHAT THE LINE DOWNLOADS, and from where: this build's own release - under its own tag, `node-<sha12>` or a
+-- product tag - at https://github.com/<repo>/releases/download/<tag>/waIcons-Regular.ttf, one font file, no
+-- installer, no shell pipeline and no token, listed in that release's SIGNED SHA256SUMS.
+--
+-- AND NOTHING WHEN IT CANNOT STAND: a link is printed only when the build's tree carries the font
+-- (`release_fonts`, embedded at build time - the publisher refuses a set without that file, so the two agree)
+-- AND the label names a release. Otherwise the reason is returned instead, never a dead URL.
+M.FONT_ABSENT = "font_absent: this build's tree has no %s, so its release ships no icon font and there is no link to print (a build cut before item 7 has none)"
+M.NO_RELEASE = "no_release: these bytes are not a release (label %s), so there is no release asset to name - install a node release, or copy assets/fonts/%s by hand"
+function M.fetch_line(label, opts)
+  opts = opts or {}
+  if opts.fonts ~= true then return nil, string.format(M.FONT_ABSENT, M.FONT_ASSET) end
+  local tag = M.release_tag(label)
+  if not tag then return nil, string.format(M.NO_RELEASE, tostring(label or ""), M.FONT_ASSET) end
+  return string.format(
+    "curl -fsSL https://github.com/%s/releases/download/%s/%s -o ~/.local/share/fonts/%s && fc-cache -f ~/.local/share/fonts",
+    M.FONT_REPO, tag, M.FONT_ASSET, M.FONT_ASSET), nil
+end
+
 -- The nine balls, in context_ball's order.
 function M.balls(set_name)
   local set, why = M.set(set_name)
