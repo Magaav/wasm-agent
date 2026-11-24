@@ -205,6 +205,8 @@ Verified on this node (measured, not asserted):
    allow-list, redacted; the script re-checks every value and exits 4 rather than print a JID or a run of
    five digits (`scrub`). The scratch run's own output was read line by line for that.
 6. `scripts/test-whatsapp-acceptance.mjs`: 43 checks, green, wired into `scripts/fast.sh`.
+7. That test DISCRIMINATES: on a separate worktree of the base commit `e832e152` it exits 1 with 31 of 33
+   checks failing (nothing to test there), and on this branch it is green - measured, not assumed (rule 16).
 
 Not verified (and not claimed):
 
