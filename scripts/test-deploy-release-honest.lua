@@ -90,5 +90,58 @@ check((row.prompt or ""):find("finish the request", 1, true) ~= nil,
   "and the request the turn was continuing stays in it, below the line")
 eq(row.status, "dispatching", "the row is claimed by the release and handed over once")
 
+
+-- ---- 3. THE SAME FUNCTION AFTER A REAL SWAP SAYS *INSTALLED*, NOT "nothing was installed" ---------
+-- Fable's blocker: release_due is also the normal path after a real install, so the did-not-happen text was being
+-- prepended to every resumed worker. The line comes from a FACT: the build recorded when the pause was taken vs the
+-- build now (host.build_identity). Here the record names an OLDER build, which is what a swap leaves.
+local swap_session = memory.start_session("local", "chat", { id = "r8c-swap", user_id = "master", title = "swap" })
+marker(T0 - 60, 900)          -- a LIVE install: the turn pauses and arms its resume, as a real one does
+local swap_wake = unpause(swap_session)
+marker(T0 - 3600, 900)        -- and by the time it is released the marker is long past its bound (the swap happened)
+
+local record_dir = pause.paused_dir()
+pcall(host.write_file, record_dir .. "/" .. swap_session .. ".json",
+  json.encode({ session = swap_session, since = T0 - 60, build = "aaaa1111bbbb2222" }))
+sent = { count = 0, ids = {} }
+selfloop.tick({ now = T0 + 6, dispatch = counted })
+local swap_row = rows("SELECT * FROM self_wakes WHERE id=?", { swap_wake })[1]
+check((swap_row.prompt or ""):find(pause.INSTALLED, 1, true) ~= nil,
+  "after a real swap the release says the build is installed: " .. tostring(swap_row.prompt):sub(1, 160))
+check((swap_row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) == nil,
+  "and it does NOT tell the worker that nothing was installed")
+check((swap_row.prompt or ""):find("aaaa1111bbbb", 1, true) ~= nil, "naming the build it was paused on")
+
+-- ---- 4. BACK-TO-BACK RELEASES LEAVE EXACTLY ONE RESUME ROW PER SESSION ---------------------------
+-- The second live case (session 9a7edd49): resume wakes DELIVERED at 18:18:24, 18:18:45 and 18:19:42 around one
+-- install, because each release re-armed its own row and the tick dispatches every due row it sees.
+local multi = memory.start_session("local", "chat", { id = "r8c-multi", user_id = "master", title = "multi" })
+local rows_before = rows([[SELECT COUNT(*) AS n FROM self_wakes WHERE session_id=? AND reason=?]],
+  { multi, pause.RESUME_REASON })[1]
+eq(tonumber(rows_before.n), 0, "a fresh session starts with no resume rows")
+-- THE SHAPE THE LIVE LEDGER HAD (fixtures, written the way the release writes them: one resume row per request
+-- that arrived while the pause was up). `selfloop.schedule` collapses resume rows of its own accord, so the
+-- three-row queue is built directly - it is exactly what back-to-back releases used to leave behind.
+for i = 1, 3 do
+  host.sql_exec([[INSERT INTO self_wakes (id, owner, session_id, status, reason, prompt, due_at, created_at, updated_at)
+    VALUES (?, 'master', ?, 'pending', ?, ?, ?, ?, ?)]],
+    json.encode({ "r8c-multi-" .. i, multi, pause.RESUME_REASON, "resume " .. i, T0 + 300 + i, T0, T0 }))
+end
+eq(tonumber(rows([[SELECT COUNT(*) AS n FROM self_wakes WHERE session_id=? AND reason=? AND status='pending']],
+  { multi, pause.RESUME_REASON })[1].n), 3, "three back-to-back requests leave three pending resume rows (the shape)")
+sent = { count = 0, ids = {} }
+marker(T0 - 3600, 900)
+pause.release_due(T0 + 7, { exec = function(sql, params) return json.decode(host.sql_exec(sql, json.encode(params))) end,
+  query = function(sql, params) return json.decode(host.sql_query(sql, json.encode(params))) end })
+eq(tonumber(rows([[SELECT COUNT(*) AS n FROM self_wakes WHERE session_id=? AND reason=? AND status='pending']],
+  { multi, pause.RESUME_REASON })[1].n), 1, "the release leaves exactly ONE pending resume row for the session")
+local claimed_many = 0
+for _ = 1, 3 do
+  local got = selfloop.claim_due(multi, "master", { now = T0 + 200 })
+  if got then claimed_many = claimed_many + 1; selfloop.settle_interrupted(got, { now = T0 + 201 }) end
+end
+eq(claimed_many, 1, "so at most ONE resume turn can be claimed for that session, not three")
+
+pcall(host.remove_file, record_dir .. "/" .. swap_session .. ".json")
 pcall(host.remove_file, MARKER)
 print("deploy release ok (" .. checks .. " checks): a leaked or crashed marker releases ONE resume turn that says the update did not happen")

@@ -134,6 +134,34 @@ end
 -- own words - a model that reads "the node is installing a new build" and then finds no new build has to invent
 -- what happened, which is exactly the kind of guess this tree refuses to make.
 M.NOT_HAPPENED = "[deploy] the update did not happen"
+M.INSTALLED = "[deploy] installed"
+
+-- THE BUILD THIS NODE RUNS, from the node itself (host.build_identity, the same label /health reports). A release
+-- line is decided by COMPARING builds, never by assuming: the pause records the build it was taken on, and the
+-- release compares it with the build now.
+function M.build_now()
+  if type(host) == "table" and type(host.build_identity) == "function" then
+    local ok, value = pcall(host.build_identity)
+    if ok and type(value) == "string" and value ~= "" then return value end
+  end
+  return "unknown"
+end
+
+-- The build recorded when the pause was taken, for this session, if a record names it.
+function M.paused_build(session_id, opts)
+  opts = opts or {}
+  local dir = opts.dir or M.paused_dir()
+  if not dir or type(session_id) ~= "string" or session_id == "" then return nil end
+  local reader = opts.read or (type(host) == "table" and host.read_file or nil)
+  if type(reader) ~= "function" then return nil end
+  local ok, body = pcall(reader, dir .. "/" .. session_id .. ".json")
+  if not ok or type(body) ~= "string" or body == "" then return nil end
+  local decoded_ok, record = pcall(json.decode, body)
+  if not decoded_ok or type(record) ~= "table" then return nil end
+  local build = record.build
+  if type(build) == "string" and build ~= "" then return build end
+  return nil
+end
 
 function M.not_happened_text(marker, now)
   marker = marker or {}
@@ -364,6 +392,10 @@ function M.note(event, session_id, fields, opts)
 end
 
 function M.record_pause(marker, now, session_id, user, opts)
+  opts = opts or {}
+  -- THE BUILD THE PAUSE WAS TAKEN ON (Fable 24/11): without it a release cannot tell a real install from an install
+  -- that never happened, and after a SUCCESSFUL swap every resumed worker was being told nothing was installed.
+  if opts.build == nil then opts = { dir = opts.dir, write = opts.write, read = opts.read, build = M.build_now() } end
   if type(session_id) ~= "string" or session_id == "" then return nil end
   opts = opts or {}
   local dir = opts.dir or M.paused_dir()
@@ -992,16 +1024,51 @@ function M.release_due(now, opts)
   for _, row in ipairs(waiting) do
     if type(row) == "table" then M.note("released", tostring(row.session_id or ""), { wake = row.id, at = now }) end
   end
+  -- ONE RESUME ROW PER SESSION, ALWAYS (Fable 24/11, second live case: session 9a7edd49 got resume wakes
+  -- DELIVERED at 18:18:24, 18:18:45 and 18:19:42 around one install). Back-to-back requests and installs each
+  -- released and re-armed their own row, and the tick dispatches every due row it sees - so one pause became
+  -- several paid resumes. The session's other pending resumes are SUPERSEDED here, before the release, so the
+  -- re-arm below leaves exactly one claimable row per session.
+  pcall(function()
+    exec([[UPDATE self_wakes SET status='superseded', last_error='superseded: one resume row per paused session',
+      updated_at=? WHERE status='pending' AND reason=? AND id NOT IN (
+        SELECT id FROM (SELECT id FROM self_wakes WHERE status='pending' AND reason=? ORDER BY due_at, created_at LIMIT 1))]],
+      { now, M.RESUME_REASON, M.RESUME_REASON })
+  end)
   -- A RELEASE IS ONE RESUME TURN PER SESSION, AND IT SAYS WHAT THE PAUSE WAITED FOR (r8c 1). The marker this
   -- node read is passed in (`opts.released_marker`): the tick knows whether it saw an expired marker or none at
   -- all, and the line it stamps is the machine's own statement - "the update did not happen" - not a silence a
   -- model would have to fill in. `prompt` is prepended, so the continuation the model was already given stays
   -- below it, exactly as written when the pause was taken.
-  local text = M.not_happened_text(opts.released_marker or M.marker_on_disk(opts), now)
-  local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
-    prompt = ? || char(10) || char(10) || prompt
-    WHERE status='pending' AND reason=? AND due_at>?]], { now, now, text, M.RESUME_REASON, now })
-  return tonumber(type(changed) == "table" and changed.changes or 0) or 0
+  -- WHICH LINE IS A FACT, NOT A GUESS (Fable 24/11, the blocker): this same function releases after a REAL swap
+  -- ("deploy ended: resumed now"), so prepending "nothing was installed" to every row told every resumed worker the
+  -- opposite of what had just happened. The line is decided PER SESSION from two facts: the build recorded when
+  -- that session's pause was taken, and the build this node runs now. A different build is the swap and names both;
+  -- the same build (or none recorded) is the did-not-happen text Fable approved.
+  local now_build = M.build_now()
+  local released = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>?
+    ORDER BY due_at, created_at]], { M.RESUME_REASON, now })
+  local changes = 0
+  for _, row in ipairs(type(released) == "table" and released or {}) do
+    local session = tostring(row.session_id or "")
+    local was_build = M.paused_build(session, opts)
+    local text
+    if was_build and now_build ~= "unknown" and was_build ~= now_build then
+      text = table.concat({
+        M.INSTALLED .. ": this node now runs " .. tostring(now_build):sub(1, 12) .. " (was " .. tostring(was_build):sub(1, 12) .. ").",
+        "The pause this turn took was for that install and it completed, so the work continues on the new build.",
+        "This is the same request continuing, not a new one: verify the machine (`wa --version`) before you claim",
+        "anything about what was installed.",
+      }, "\n")
+    else
+      text = M.not_happened_text(opts.released_marker or M.marker_on_disk(opts), now)
+    end
+    local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
+      prompt = ? || char(10) || char(10) || prompt
+      WHERE id=? AND status='pending']], { now, now, text, tostring(row.id) })
+    changes = changes + (tonumber(type(changed) == "table" and changed.changes or 0) or 0)
+  end
+  return changes
 end
 
 return M
