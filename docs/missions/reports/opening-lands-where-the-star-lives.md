@@ -295,6 +295,8 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
 * Python: `scripts/test-unicode-icons.py` (ok: 14 glyphs, 4 faces measured, 4 named unmeasured);
 * Rust: `cargo test -p wa-term --lib opening::` (16 ok), `--test opening` (7 ok), `--test icons` (1 ok); the two
   pty rows were also run against the BASE binary and fail there (the discriminator);
+* Identity (the two rows that own the build's name, which `2be61e78` changed): `test-build-identity.lua`
+  (21 ok) and `test-product-version.lua` (15 ok);
 * Shell: `test-land-signing.sh` (46 ok), `test-publish-artifacts.sh` (56 ok), `test-publish-shared-commit.sh`
   (43 ok). `test-deploy-node-binaries.sh` fails on this node with "the installed prebuilt supervisor is not
   executable" - measured on a base worktree (`git worktree add /tmp/base-ffd2 ffd2a0a5`) and identical there,
