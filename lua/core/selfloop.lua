@@ -409,6 +409,13 @@ function M.keep_pending_message(session_id, owner, prompt, reason, opts)
   if session_id == "" or prompt == "" or reason == "" then return nil end
   local now = clock(opts)
   local seconds = tonumber(opts and opts.in_seconds) or 60
+  -- ONE KEPT TURN, INCLUDING WHAT IS ALREADY QUEUED (Fable 24/11): a session that had 27 kept rows kept them -
+  -- preventing new ones fixes nothing for a queue that already exists. Every other pending kept row of this session
+  -- is superseded here, first, and the survivor is the oldest (its row is the one re-armed with the latest words).
+  exec([[UPDATE self_wakes SET status='superseded', last_error='superseded: one kept message per session', updated_at=?
+    WHERE session_id=? AND reason=? AND status='pending' AND id NOT IN (
+      SELECT id FROM (SELECT id FROM self_wakes WHERE session_id=? AND reason=? AND status='pending'
+        ORDER BY created_at LIMIT 1))]], { now, session_id, reason, session_id, reason })
   local existing = query([[SELECT id FROM self_wakes WHERE session_id=? AND owner=? AND reason=?
     AND status='pending' ORDER BY created_at LIMIT 1]], { session_id, owner, reason })[1]
   if existing then

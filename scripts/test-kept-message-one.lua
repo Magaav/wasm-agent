@@ -74,4 +74,19 @@ local fresh = chat.keep_refused_message(session, "a new request", "master", "dep
 check(fresh ~= ids[1], "after the kept turn ran, a new refusal arms a new one (" .. tostring(fresh) .. ")")
 eq(#kept_rows(session), 2, "the ledger has the ran row and the new one, and no third")
 
+-- ---- 4. IT ALSO COLLAPSES WHAT IS ALREADY QUEUED (Fable 24/11: a session held 27 kept rows) ----------
+local legacy = memory.start_session("local", "chat", { id = "r8c-kept-legacy", user_id = "master", title = "kept" })
+for i = 1, 5 do
+  host.sql_exec([[INSERT INTO self_wakes (id, owner, session_id, status, reason, prompt, due_at, created_at, updated_at)
+    VALUES (?, 'master', ?, 'pending', ?, ?, ?, ?, ?)]],
+    json.encode({ "kept-legacy-" .. i, legacy, KEPT, "old " .. i, T0 + 300, T0 + i, T0 + i }))
+end
+eq(#kept_rows(legacy), 5, "five kept rows already in the queue (the shape the live session had, at 27)")
+local collapsed = chat.keep_refused_message(legacy, "the newest words", "master", "deploy_waiting: a build waits")
+check(type(collapsed) == "string", "the refusal is kept (" .. tostring(collapsed) .. ")")
+eq(#kept_rows(legacy), 5, "no new row is added to the five")
+local pending = 0
+for _, row in ipairs(kept_rows(legacy)) do if tostring(row.status) == "pending" then pending = pending + 1 end end
+eq(pending, 1, "and exactly ONE of them is still pending: the rest are superseded")
+
 print("kept-message-one ok (" .. checks .. " checks): one kept turn per session, re-armed, never queued seven times")
