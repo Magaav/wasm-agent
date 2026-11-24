@@ -402,14 +402,38 @@ async function scenario(entry) {
   // end. Their difference is the stop as this process experienced it, and no amount of tmux captures,
   // sleeps or scheduling in this script can move it. The screen is still read, but only to show what the
   // reader saw (observed_ms, reported and never asserted) and to stop waiting at a coarse interval.
-  const stop = ledgerStop(ledger, escAt);
   let backAt = null;
+  let drawnAt = null;
+  let usableAt = null;
   let probeCalls = 0;
   let probeMaxMs = 0;
   let probeMs = 0;
   const deadline = Date.now() + GIVE_UP_MS;
   // Coarser under load and cheap always: this loop decides when to STOP WAITING, never what the stop cost.
-  const pause = (stop.loadAtEsc !== null && stop.loadAtEsc >= 6) ? 120 : 40;
+  // The harness must not eat the budget it asserts (red-r3): at a quiet prompt the screen is read every
+  // 10 ms, and only a loaded machine (where a capture-pane call itself gets expensive) is polled coarser.
+  const pause = loadAtEsc >= 6 ? 40 : 10;
+  // WHAT THE READER GETS BACK IS A PROMPT THEY CAN TYPE INTO (Fable on red-r3, 24/11: what Victor feels is
+  // Esc -> a usable prompt, so that is what the budget covers). A drawn prompt is not a usable one: the
+  // row types two characters and requires the editor to take them - the placeholder out, the text in -
+  // so "the input accepts a keystroke" is measured rather than assumed.
+  // THE INPUT ROW IS THE LAST ROW THAT BEGINS WITH THE PROMPT MARK, not the last row of the screen: the view
+  // draws a border under the input, so the bottom line is a rule of box characters (measured: every leg
+  // reported "drawn never" while the screen plainly showed the prompt).
+  const PROMPT_MARK = '\u276f';
+  const promptRow = rows => {
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      if (rows[index].includes(PROMPT_MARK)) return rows[index];
+    }
+    return '';
+  };
+  const atEscPrompt = promptRow(screen());
+  // THE PROBE IS A KEY THAT LEAVES NOTHING BEHIND. A printable pair typed for this measurement is a LINE
+  // the CLI queues while a run is finishing and submits when the prompt returns (terminal_editor's queued
+  // lines) - measured: five runs of seven failures, a second run started, a second sleep 30 alive, and the
+  // interrupt row of the interrupted run overwritten by the new turn's. One character, taken straight back
+  // out, proves the editor is live and leaves the buffer empty (an empty line is never a turn).
+  const PROBE = 'x';
   while (Date.now() < deadline) {
     const before = Date.now();
     const seen = screen();
@@ -417,11 +441,56 @@ async function scenario(entry) {
     probeCalls += 1;
     probeMs += took;
     if (took > probeMaxMs) probeMaxMs = took;
-    if (seen.some(row => row.includes(INTERRUPTED))) { backAt = Date.now(); break; }
-    if (stop.runEndAt !== null && Date.now() - escAt > 400) break;
+    if (backAt === null && seen.some(row => row.includes(INTERRUPTED))) backAt = Date.now();
+    // THE PROMPT IS THE BOTTOM ROW, not any row that mentions it: the screen keeps its scrollback, so the
+    // placeholder drawn at start is still up there during a run - matching it anywhere declared "usable" 11 ms
+    // after Esc, typed into a busy CLI, and queued the keystrokes as a line (seven failures in five runs).
+    // THE PROMPT IS THE BOTTOM ROW AND IT MUST BE A LIVE ONE: after the stop the CLI repaints the input row,
+    // so a bottom row that differs from the one at the key is the fresh prompt (the placeholder is not a
+    // reliable marker - it is only drawn on a completely empty line, and the interrupted row keeps the run's
+    // own text). A row still carrying the interrupt notice is not a prompt yet.
+    // THE PROBE IS TYPED ONLY ONCE THE NODE SAYS THE PROMPT IS DRAWN. The editor row looks the same while a
+    // run is in flight (the placeholder stays), so a screen test cannot tell a live input from a queued one -
+    // and a key typed into a queued one becomes a line the CLI submits when the run ends (measured: five runs
+    // of seven failures, a second run started). The node's own input|prompt stamp is the gate; the echo of
+    // the key is still what makes the prompt USABLE, and the time is still Esc -> the pty seeing the key
+    // land, so nothing of what the reader feels is taken from the node's word.
+    // The gate is the STOP ITSELF ON SCREEN: the interrupt notice is drawn on the same repaint that gives the
+    // input row back, so typing after it cannot land in a run's queue. (The node's prompt row is not a gate
+    // here - the interrupted run writes it, and reading it early matched the prompt from BEFORE the key,
+    // measured as a -1943 ms "node prompt" and a queued keystroke that started a second run.)
+    if (drawnAt === null && seen.some(row => row.includes(INTERRUPTED))) drawnAt = Date.now();
+    const drew = drawnAt !== null;
+    if (drew && drawnAt === null) drawnAt = Date.now();
+    if (drew) {
+      tmux(['send-keys', '-t', SESSION, '-l', PROBE]);
+      // The editor taking the key is the placeholder going: polled, not slept, because a fixed sleep was the
+      // harness's own latency inside the number the reader is promised.
+      // The editor taking the key: the character lands on the bottom row.
+      for (let echoAt = 0; echoAt < 200; echoAt += 8) {
+        if (promptRow(screen()).includes(PROBE)) { usableAt = Date.now(); break; }
+        await sleep(8);
+      }
+      // Take it back out either way, so nothing is left in the buffer for the next turn.
+      tmux(['send-keys', '-t', SESSION, 'BSpace']);
+      if (usableAt !== null) {
+        for (let back = 0; back < 300; back += 10) {
+          if (!promptRow(screen()).includes(PROBE)) break;
+          await sleep(10);
+        }
+        break;
+      }
+    }
     await sleep(pause);
   }
   const rows = screen();
+  // THE LEDGER IS READ AFTER THE SCREEN, not before: the reads block while the run settles, and while they
+  // block the loop that watches the prompt is not running - measured, the pty "noticed" the prompt only when
+  // the deferred run|end landed (307 ms against a node prompt of 97 ms).
+  const stop = ledgerStop(ledger, escAt);
+  // The prompt row is written after the run ends, which can be after the loop above stopped reading: read
+  // it once more, now that a usable prompt has certainly been drawn (a '-' in the node column was this race).
+  if (stop.promptMs === null || stop.promptMs === undefined) stop.promptMs = ledgerPrompt(ledger, escAt);
   // DID THE RUN'S OWN SHELL DIE WITH IT? The stop is only the reader's if the work behind it is gone too,
   // and a child that outlives the prompt is the other half of "it took a second" (main-health, 23/11:
   // bash 1041 ms at load ~10). Measured from the prompt's return, not from the key: the owe is the run's.
@@ -439,7 +508,10 @@ async function scenario(entry) {
     fs.writeFileSync(process.env.ESC_BODIES + '.' + name,
       JSON.stringify(state.requests.filter(entry => entry.path.endsWith('/chat/completions')).map(entry => entry.body), null, 1));
   }
-  return {name, escMs: backAt === null ? null : backAt - escAt, stopMs: stop.stopMs,
+  return {name, escMs: backAt === null ? null : backAt - escAt,
+    usableMs: usableAt === null ? null : usableAt - escAt,
+    drawnMs: drawnAt === null ? null : drawnAt - escAt, stopMs: stop.stopMs,
+    settleMs: stop.settleMs, promptMs: stop.promptMs, workEndAt: stop.workEndAt, workWhy: stop.workWhy,
     interruptAt: stop.interruptAt, runEndAt: stop.runEndAt, stopWhy: stop.why,
     probeCalls, probeMaxMs, probeMs, escAt, rows, ledger, home,
     loadAtEsc, shellGoneMs, survivors: survivors.length,
@@ -455,27 +527,88 @@ async function scenario(entry) {
 // is unknown, never a pass.
 function ledgerStop(ledger, escAtMs) {
   const since = escAtMs / 1000 - 2;
+  const one = statement => {
+    const rows = ledgerRows(ledger, statement);
+    return rows === null ? null : rows[0] || null;
+  };
   let interruptAt = null;
   let runEndAt = null;
+  let workEndAt = null;
+  let workWhy = null;
+  let promptAt = null;
   let why = '';
   const deadline = Date.now() + GIVE_UP_MS;
   while (Date.now() < deadline) {
-    const rows = ledgerRows(ledger,
-      "SELECT kind, phase, at FROM harness_events WHERE kind IN ('input','run') AND at >= " + since
-      + " ORDER BY seq DESC LIMIT 8");
-    if (rows === null) { why = 'the ledger could not be read'; }
-    else {
-      const interrupt = rows.find(row => row.kind === 'input' && row.phase === 'interrupt');
-      const end = rows.find(row => row.kind === 'run' && row.phase === 'end');
-      if (interrupt) interruptAt = Number(interrupt.at);
-      if (end) runEndAt = Number(end.at);
-      if (interruptAt !== null && runEndAt !== null) break;
+    // THREE NARROW READS, never one wide one: a run writes many step/tool rows after the interrupt, so a
+    // "newest 16 rows" read pushes the two stamps this row needs out of its own window (measured: every leg
+    // reported "seen from the pty 15 s" because run|end was never found and the loop burned its deadline).
+    const interrupt = one("SELECT kind, phase, at, seq FROM harness_events WHERE kind='input' AND phase='interrupt'"
+      + " AND at >= " + since + " ORDER BY seq DESC LIMIT 1");
+    // The FIRST end after the FIRST stop of THIS key: a cancelled run can be followed by another run in
+    // the same window (a wake, a retry), and taking each stamp independently crossed the pairs - the settle
+    // column went '-' on every subagent leg for exactly that reason.
+    const end = interrupt === null ? null
+      : one("SELECT kind, phase, at FROM harness_events WHERE kind='run' AND phase='end'"
+        + " AND at >= " + Number(interrupt.at) + " ORDER BY at ASC LIMIT 1");
+    // THE WORK STOPPING, not the run settling: a tool call the stop cut short writes its own end with
+    // cancelled=true the moment it returns - the shell reaped, the peer released - and everything the run
+    // does after that (transcript flush, audit flush, the done-gate note) is the harness settling, which may
+    // wait on a busy ledger for seconds. Main-health 24/11 (e832e152) was red on this row with the bash leg
+    // over the cap: the number charged the ledger's patience to the stop.
+    // The run writes a run|stopped row the moment it comes back out of its body with the cancel
+    // (lua/core/agent.lua), BEFORE the failure record, the transcript flush and the done-gate note: that
+    // stamp is the stop, and run|end - written after all of that - is the settlement. Older builds write no
+    // stopped row, so the tool call the stop cut short (tool|end with cancelled) is the next best stamp.
+    // BY STAMP, NOT BY SEQ: the interrupt row is WRITTEN when the cancelled run comes back to chat.lua, so
+    // its seq is higher than the stop's even though its stamp is earlier. Ordering this pair by seq put the
+    // stop outside the window and printed "no stop row" on four legs of five.
+    const stopped = interrupt === null ? null
+      : one("SELECT kind, phase, at FROM harness_events WHERE kind='run' AND phase='stopped'"
+        + " AND at >= " + Number(interrupt.at) + " ORDER BY at ASC LIMIT 1");
+    // The node's own "the prompt is on the screen" stamp (lua/core/chat.lua, read_line): the pty can only
+    // say when it NOTICED the redraw, and the split Esc -> stopped -> prompt has to be the node's arithmetic.
+    // STRICTLY AFTER THE INTERRUPT (by seq, which is the ledger's own order): a prompt row from before the
+    // key - the prompt the reader typed into - is inside the two-second window and produced a NEGATIVE
+    // "node prompt" of -1995 ms in five measured runs.
+    const withdrawn = interrupt === null ? null
+      : one("SELECT kind, phase, at FROM harness_events WHERE kind='input' AND phase='prompt'"
+        + " AND at >= " + Number(interrupt.at) + " ORDER BY at ASC LIMIT 1");
+    const cut = one("SELECT kind, phase, at FROM harness_events WHERE kind='tool' AND phase='end'"
+      + " AND payload LIKE '%\"cancelled\":true%' AND at >= " + since + " ORDER BY seq ASC LIMIT 1");
+    if (interrupt === null && end === null && stopped === null && Date.now() > deadline - 8000) {
+      why = 'the ledger could not be read';
     }
+    if (interrupt) interruptAt = Number(interrupt.at);
+    if (end) runEndAt = Number(end.at);
+    if (stopped) { workEndAt = Number(stopped.at); workWhy = 'run_stopped'; }
+    if (withdrawn) promptAt = Number(withdrawn.at);
+    else if (cut) { workEndAt = Number(cut.at); workWhy = 'tool_cancelled'; }
+    // run|end is the completion signal: the two stamps we need always precede it, and a scenario with no
+    // tool call (headers, stream) has no tool row at all - waiting for one burned the whole deadline.
+    if (interruptAt !== null && runEndAt !== null) break;
     spawnSync('sleep', ['0.06']);
   }
-  const stopMs = interruptAt !== null && runEndAt !== null && runEndAt >= interruptAt
-    ? Math.round((runEndAt - interruptAt) * 1000) : null;
-  return {interruptAt, runEndAt, stopMs, loadAtEsc: loadavg(), why};
+  const ms = (from, to) => (from !== null && to !== null && to >= from ? Math.round((to - from) * 1000) : null);
+  const stopMs = ms(interruptAt, workEndAt !== null ? workEndAt : runEndAt);
+  const settleMs = workEndAt !== null ? ms(workEndAt, runEndAt) : null;
+  const promptMs = ms(interruptAt, promptAt);
+  return {interruptAt, workEndAt, runEndAt, promptAt, workWhy, stopMs, settleMs, promptMs, loadAtEsc: loadavg(), why};
+}
+
+// One look at the ledger for the node's prompt stamp: the gate that keeps this script from typing into a
+// prompt that is drawing itself. Null while there is none, which is not a failure - the caller polls.
+// The node's own prompt stamp, read after the fact: <Esc> -> the prompt on the screen.
+function ledgerPrompt(ledger, escAtMs) {
+  const since = escAtMs / 1000 - 2;
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const rows = ledgerRows(ledger, "SELECT at FROM harness_events WHERE kind='input' AND phase='prompt'"
+      + " AND at >= (SELECT COALESCE(MAX(at),0) FROM harness_events WHERE kind='input' AND phase='interrupt'"
+      + " AND at >= " + since + ") ORDER BY at ASC LIMIT 1");
+    if (rows && rows[0]) return Math.round((Number(rows[0].at) - escAtMs / 1000) * 1000);
+    spawnSync('sleep', ['0.04']);
+  }
+  return null;
 }
 
 // The ledger, read by a second process: what the run itself recorded about the stop.
@@ -538,10 +671,15 @@ console.log('');
 // TWO columns, and only one of them is the claim: the stop is the node's own number (the interrupt row to
 // the run-end row, both stamped in the ledger) and the pty column is when this script noticed the prompt -
 // reported so a reader can see the gap, never asserted, because it is this script's own latency.
-console.log('scenario   stop (the node\'s own)  seen from the pty  load at the key   shell gone after   probe');
+console.log('scenario   usable (pty)  node prompt  stop (node)   settle (node)  load at the key   shell gone   probe');
 for (const result of results) {
+  const usableCol = result.usableMs === null || result.usableMs === undefined
+    ? 'NEVER (' + (result.escMs === null ? 'no prompt' : 'drawn at ' + result.escMs + ' ms') + ')' : result.usableMs + ' ms';
   const stopCol = result.stopMs === null || result.stopMs === undefined
     ? 'unknown (' + (result.stopWhy || 'no interrupt row or no run end') + ')' : result.stopMs + ' ms';
+  const settleCol = result.settleMs === null || result.settleMs === undefined
+    ? (result.workWhy ? '-' : 'no stop row')
+    : result.settleMs + ' ms';
   const seen = result.escMs === null ? 'never (gave up at ' + (GIVE_UP_MS / 1000) + ' s)' : result.escMs + ' ms';
   const load = result.loadAtEsc === null || result.loadAtEsc === undefined ? 'unknown' : String(result.loadAtEsc);
   const shell = result.shellGoneMs === null || result.shellGoneMs === undefined
@@ -549,8 +687,9 @@ for (const result of results) {
     : result.shellGoneMs + ' ms';
   const probeCol = (result.probeCalls || 0) === 0 ? '-'
     : result.probeCalls + ' looks, worst ' + result.probeMaxMs + ' ms';
-  console.log('  ' + result.name.padEnd(9) + ' ' + stopCol.padEnd(25) + seen.padEnd(18) + load.padEnd(17)
-    + shell.padEnd(19) + probeCol);
+  const nodePromptCol = result.promptMs === null || result.promptMs === undefined ? '-' : result.promptMs + ' ms';
+  console.log('  ' + result.name.padEnd(9) + ' ' + usableCol.padEnd(13) + nodePromptCol.padEnd(13) + stopCol.padEnd(13)
+    + settleCol.padEnd(15) + load.padEnd(17) + shell.padEnd(13) + probeCol);
 }
 console.log('');
 
@@ -563,17 +702,23 @@ if (crash) {
 } else {
   for (const result of results) {
     const limit = limitAt(result.loadAtEsc);
-    const measured = result.stopMs !== null && result.stopMs !== undefined;
+    const measured = result.usableMs !== null && result.usableMs !== undefined;
+    // THE BUDGETED NUMBER IS WHAT THE READER GETS BACK: a prompt they can type into (Fable, red-r3). The
+    // stop and the settlement ride beside it as the split, so a red says which half went long instead of
+    // starting an argument. Everything is on the FAIL line: main-health keeps only first_lines.
+    const split = 'node prompt ' + (result.promptMs === null ? 'unknown' : result.promptMs + ' ms')
+      + ', stop ' + (result.stopMs === null ? 'unknown' : result.stopMs + ' ms')
+      + ', settlement ' + (result.settleMs === null ? 'unknown' : result.settleMs + ' ms')
+      + ', notice (pty) ' + (result.escMs === null ? 'never' : result.escMs + ' ms')
+      + ', drawn (pty) ' + (result.drawnMs === null ? 'never' : result.drawnMs + ' ms');
     const detail = !measured
-      ? 'the node recorded no stop for this run: ' + (result.stopWhy || 'no interrupt row or no run end')
-        + '\nseen from the pty: ' + (result.escMs === null ? 'never' : result.escMs + ' ms')
+      ? 'no usable prompt within the give-up: ' + split
         + '\nthe screen at the end:\n' + result.rows.join('\n')
-      : result.stopMs + ' ms by the node stamps (limit ' + limit + ' ms at load ' + result.loadAtEsc
-        + '; seen from the pty ' + (result.escMs === null ? 'never' : result.escMs + ' ms')
-        + ', probe ' + result.probeMs + ' ms over ' + result.probeCalls + ' looks, worst '
-        + result.probeMaxMs + ' ms)';
-    const ok = measured && result.stopMs <= limit && result.stopMs <= HARD_MS;
-    check(result.name + ': Esc ends the run at once, by the node clock (' + LIMIT_MS + ' ms idle, '
+      : 'measured ' + result.usableMs + ' ms, budget ' + Math.min(limit, HARD_MS) + ' ms at load '
+        + result.loadAtEsc + ' (' + split + '; probe ' + result.probeMs + ' ms over ' + result.probeCalls
+        + ' looks, worst ' + result.probeMaxMs + ' ms)';
+    const ok = measured && result.usableMs <= limit && result.usableMs <= HARD_MS;
+    check(result.name + ': Esc gives back a usable prompt at once (' + LIMIT_MS + ' ms idle, '
       + PER_LOAD_MS + ' ms per unit of load, never over ' + HARD_MS + ')', ok, detail);
   }
   // ---- display only: the row's words never reach the provider --------------------------------

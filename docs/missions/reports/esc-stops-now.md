@@ -394,6 +394,98 @@ interrupt stamp (the stamp is taken when the reader raises the interrupt), so th
 same in every scenario, and the pty column still shows the whole path (200-357 ms) for a reader who wants
 it. Nothing was widened, loosened or hidden: the assertion moved from the script's clock to the node's.
 
+
+### The bash leg, red again on e832e152: the stop was never slow, the settlement was inside the number
+
+main-health 24/11 reported `esc-stops pty: 17 ok, 1 failed` with the bash leg over its cap by the node
+clock, and the run's log was gone before anyone could read it. This time the row answers the question
+itself, because the one number is now two.
+
+**The finding**: the old number was interrupt -> `run|end`, and `run|end` is written at the very end of
+`M.run` - after the failure record, the transcript flush, the audit flush and the done-gate note. That
+tail is the harness SETTLING, and the ledger's own patience is measured in this repo at 20 s under a
+competing writer (lua/core/telemetry.lua). The bash leg was charged for the ledger's patience.
+
+**The fix**: `lua/core/agent.lua` writes `run|stopped` the moment the cancelled run comes back out of
+`run_body`, with every tool and every read already let go. The row now asserts `interrupt -> run|stopped`
+and reports `run|stopped -> run|end` as the settlement. No budget was widened: 300 ms idle, 120 ms per
+unit of load, hard 2000, unchanged.
+
+**The bash stop does not really wait on anything**: `shell gone` is 4-9 ms, the probe takes one look
+(worst 3-4 ms), so there is no pty drain and no group wait - and the stop is 40-101 ms.
+
+**Proof, five single runs while a full fast.sh held the suite lock** (load 9.6 -> 3.6), all 18 ok / 0 failed:
+
+| run | bash stop | bash settle | load at the key |
+|---|---|---|---|
+| 1 | 56 ms | 24 ms | 10.40 |
+| 2 | 47 ms | 18 ms | 8.41 |
+| 3 | 80 ms | 19 ms | 5.74 |
+| 4 | 40 ms | 19 ms | 4.72 |
+| 5 | 59 ms | 21 ms | 4.04 |
+
+and in the same runs headers 6-8 ms, stream 6-10 ms, remote 22-28 ms, subagent 58-101 ms, every settlement
+17-25 ms. Against the idle budget of 300 ms the bash leg has 15-50x headroom at load 10.5, so the cap of
+2000 ms is not what made it red - the settlement inside the same number was.
+
+**Readable from main-health's first_lines now**: a failure prints its own measurement and budget,
+
+    FAIL - bash: Esc ends the run at once, by the node clock (1 ms idle, 0 ms per unit of load, never over 1)
+           measured 57 ms, budget 1 ms at load 3.02; the run then settled for 18 ms; seen from the pty 234 ms,
+           probe 3 ms over 1 looks, worst 3 ms
+
+(taken from a forced-failure run with the budget set to 1 ms, so the format is verified, not imagined).
+
+**What is not asserted, and why**: the settlement is reported, never asserted. A 20 s ledger stall is a
+ledger problem with its own rows; asserting it here would move the red from the stop to the settlement
+without fixing anything, and this row answers one question - did Esc stop the work. The number rides in
+the same line, so a settlement that goes bad is visible beside the stop it follows.
+
+
+### red-r3: the row budgets what the reader gets back - a usable prompt
+
+Fable, 24/11: 'what Victor feels is Esc -> PROMPT USABLE, so THAT is what the row budgets'. The row now
+measures exactly that: after the key it waits for the stop to be on screen, types one character into the
+input row and requires the editor to take it (the marker goes), then takes the character back out - an
+empty line is never a turn, so the probe leaves nothing behind. The number is <Esc> -> the keystroke
+landing, read from the pty; the node's own stamps ride beside it as the split.
+
+**Five single runs while a full fast.sh held the suite lock** (load 4.96 -> 3.80), all 18 ok / 0 failed:
+
+| run | headers | stream | bash | remote | subagent |
+|---|---|---|---|---|---|
+| 1 | 165 ms | 169 ms | 206 ms | 189 ms | 211 ms |
+| 2 | 171 ms | 161 ms | 200 ms | 190 ms | 214 ms |
+| 3 | 171 ms | 169 ms | 213 ms | 186 ms | 261 ms |
+| 4 | 164 ms | 162 ms | 212 ms | 175 ms | 241 ms |
+| 5 | 165 ms | 161 ms | 212 ms | 176 ms | 257 ms |
+
+Every leg inside the 300 ms idle budget, worst 261 ms; the bash leg (the one that was red) is 200-213 ms
+with a node stop of 40-58 ms and a settlement of 18-20 ms. Against the same runs' node prompt stamps
+(53-180 ms) the pty number carries 100-130 ms of this harness's own looking - it was 170-210 ms before the
+poll was trimmed to 10 ms and the fixed 30 ms echo sleep removed.
+
+**On 'if the settlement blocks the prompt'**: it does, by 18-26 ms, and it is measured - the split prints
+it on every failure. Handing the prompt back first (deferring the failure record, the transcript and audit
+flushes and the run's own end row to after the prompt) was written and then reverted: with it, five runs
+came back 11 ok / 7 failed - the interrupt row of the stopped run went missing and a second run started,
+because keys typed into the window the deferral opened became a queued line the CLI submitted. That is a
+change to make with the CLI's queue in hand, not ten minutes before a report, and at 20 ms of 170 it does
+not move a single verdict. The measurement and the reverted patch's failure are here so the next session
+starts from both.
+
+**The FAIL line, verified by forcing a 1 ms budget** (a forced-failure run, so the format is not imagined):
+
+    FAIL - bash: Esc gives back a usable prompt at once (1 ms idle, 0 ms per unit of load, never over 1)
+           measured 204 ms, budget 1 ms at load 3.28 (node prompt 85 ms, stop 45 ms, settlement 20 ms,
+           notice (pty) 200 ms, drawn (pty) 200 ms; probe 45 ms over 16 looks, worst 4 ms)
+
+Four harness bugs found and fixed on the way, each of which had made the measurement lie: the prompt row
+read from before the key (-1995 ms), stamps paired across two runs, the ledger read blocking the screen
+loop (every leg 'noticed' the prompt 15 s late), and the placeholder matched anywhere in the scrollback
+(the row declared a prompt usable 11 ms after the key, typed into a live run, and queued the keystrokes as
+a line that started a second run).
+
 **Pending, said plainly**: a reproduction of the 1041 ms. Neither a fork storm nor load 32 produced it;
 the trace line above is the first thing to read if it comes back, and `WASM_AGENT_CANCEL_TRACE=1` is how to
 turn it on. Fable's amendment (stop the load loops, rerun on an idle queue, 10 runs) is what produced the

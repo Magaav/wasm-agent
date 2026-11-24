@@ -2282,6 +2282,15 @@ function M:run(text, images)
     self.emit({type="error",error="resource_release_failed: "..json.encode(released)})
     ok,result=false,"resource_release_failed: "..json.encode(released)
   end
+  -- THE MOMENT THE RUN STOPPED WORKING (main-health 24/11, e832e152). Everything below this line is the
+  -- harness SETTLING - the failure record, the transcript flush, the audit flush, the done-gate note - and a
+  -- busy ledger can hold that for seconds (lua/core/telemetry.lua measures a 20 s ledger wait under a
+  -- competing writer). The stop the reader pressed for ended HERE, when the cancelled run came back out of
+  -- run_body with every tool and every read already let go; stamping it apart from the settlement is what
+  -- lets the row assert the stop and report the settlement instead of charging one to the other.
+  if (not ok) and tostring(result):find('run_cancelled', 1, true) then
+    pcall(function() telemetry.event(self.session_id, self.run_id, '', 'run', 'stopped', {}) end)
+  end
   -- Now the record, the event, the bus fact and (when a rerun can finish it) the one wake.
   if (not ok) and self.failure==nil then
     local failure=self.pending_failure or {}
