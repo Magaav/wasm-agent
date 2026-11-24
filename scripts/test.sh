@@ -1737,6 +1737,16 @@ else
   [ "$stt_two_nodes" = "0" ] || exit "$stt_two_nodes"
 fi
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
+# A federated connector READ between two real nodes on one machine (24/11). The master runs a peer's
+# connector as `peer_<node>__<tool>`; the call crosses the signed peer call, arrives in the peer's outbound
+# relay lane, and there the node starts a persistent MCP read session as a supervised operation. Three
+# processes (a scratch rendezvous, the caller, an enrolled peer), two scratch homes, its own ports, no
+# model, no vault, no live fleet. It exists because the failure lives BETWEEN processes: the relay lane
+# makes the request the thread's runtime owner (`relay:<rid>`), Lua names an owner of its own, and the
+# operation manager compares them. Measured before 138f621d: every pair (main->main, main->v0.1.1,
+# v0.1.1->v0.1.1) answered `mcp_session_startup_failed` / `operation_not_yours` and left a 3600 s read
+# session parked on the peer, while the same read on the peer itself answered ok.
+gate_run node scripts/test-federated-connector-read.mjs "$BIN"
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh
 # Which conversation a turn lands in. The name a client sends is the only thing that
