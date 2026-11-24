@@ -631,6 +631,36 @@ ok
 # /c mount reports every file executable, so a probe decides rather than the test's own assumption.
 exec_probe="$WORK/exec-probe"; printf '#!/bin/sh\n' > "$exec_probe"; chmod 644 "$exec_probe" 2>/dev/null
 if [ ! -x "$exec_probe" ]; then
+# 9. THE DIGEST SEARCH IS NOT CAPPED AT THE FIRST PAGE (24/11). A release published 25 places down is
+#    still the right answer for a commit whose compiled inputs it carries; the search used to look at the
+#    newest 20 and build instead. Measured on the real channel: listing every tag costs 3.4 s, and reading
+#    every manifest costs about 1.1 s each, which is why the walk has a seconds bound as well as a count.
+stub_wide="$WORK/digest-wide"; mkdir -p "$stub_wide"
+: > "$stub_wide/releases.txt"
+for n in $(seq 1 24); do
+  filler="$(printf 'aaa%037d' "$n")"
+  mk_release "$stub_wide" "$filler" "$(wa_compiled_inputs_digest "$digrepo" "$C_RUST")"
+  printf 'node-%s\n' "${filler:0:12}" >> "$stub_wide/releases.txt"
+done
+mk_release "$stub_wide" "$C_DOCS2" "$DIG_BASE"
+printf 'node-%s\n' "${C_DOCS2:0:12}" >> "$stub_wide/releases.txt"
+i="$(fresh digest-wide)"
+out="$(WA_NODE_BINARIES_URL="$stub_wide" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 0 "$?" "a digest match 25 releases down the list"
+contains "$out" "release_tag=node-${C_DOCS2:0:12}" "the release past the old window is the one used"
+
+# 10. A WALK THAT STOPS EARLY SAYS SO. With no time to look, the refusal names the bound instead of
+#     claiming the channel has nothing - the difference between "not published" and "not looked at".
+stub_bound="$WORK/digest-bound"; mkdir -p "$stub_bound"
+mk_release "$stub_bound" "$C_RUST" "$(wa_compiled_inputs_digest "$digrepo" "$C_RUST")"
+printf 'node-%s\n' "${C_RUST:0:12}" > "$stub_bound/releases.txt"
+i="$(fresh digest-bound)"
+out="$(WA_NODE_RELEASE_DIGEST_SECONDS=0 WA_NODE_BINARIES_URL="$stub_bound" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 8 "$?" "a digest walk with no time to look"
+contains "$out" "stopped at the 0s bound" "the refusal says the walk stopped at its bound"
+contains "$out" "none of the newest 0 published releases" "and how far it got, without claiming the channel is empty"
+
+
   [ -x "$si_install/wa-sentinel" ] || fail "the installed prebuilt supervisor is not executable"
   ok
 else
