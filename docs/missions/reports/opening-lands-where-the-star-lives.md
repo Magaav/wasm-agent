@@ -221,6 +221,9 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
 3. `  icons <set>  (this session only: <why>)` - the same when the config file could not be written.
 4. `  wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releases/download/node-<sha12>/waIcons-Regular.ttf -o ~/.local/share/fonts/waIcons-Regular.ttf && fc-cache -f ~/.local/share/fonts`
    - the one line `/icons` prints when this window is not drawing wa Icons.
+5. `font_absent: <out>/waIcons-Regular.ttf is not in this set, so this release ships no icons (a set built before item 7 has none)`
+   - `scripts/publish-artifacts-branch.sh`, printed for a set that predates the font; never for a set this
+     tree's publisher made (that one refuses with `font_missing` instead).
 
 ## Deviations and open facts
 
@@ -236,6 +239,25 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
 * `a_resize_ends_the_opening` is gone, replaced by the two rows named in 3: the brief asks a resize to
   re-target, which is the opposite of what that row asserted. No other assertion was removed or loosened; the
   cell-width proof in `scripts/test-icons.lua` is untouched.
-* Pre-existing reds: none seen. The rows run for this branch: `test-opening.lua` (44), `test-icons.lua` (256),
-  `test-cli-view.lua` (566), `test-icon-face.lua` (44), `test-font-setup.lua` (183), `test-unicode-icons.py`,
-  `cargo test -p wa-term --test opening` (7), `--test icons` (1), `cargo test -p wa-term --lib opening::` (16).
+* **The release shape changed by one file.** `5df877b7` makes `waIcons-Regular.ttf` part of a node release: it
+  is copied beside the binaries by `scripts/publish-node-binaries.sh` and carried into the artifacts commit by
+  `scripts/publish-artifacts-branch.sh`, so it is in the signed `SHA256SUMS`. Three test rows follow that shape
+  and were updated with it, not loosened: `test-land-signing.sh`'s fixture now copies the font (a fixture that
+  mirrors a requirement), `test-publish-artifacts.sh`'s exact file list and sums row count (3 -> 4), and
+  `scripts/test-icons.lua`'s "the chosen set is spaced" (the unicode set is glued now, which is the item).
+
+## Rows run (each singly, this branch)
+
+* Lua: `test-opening.lua` (44 ok), `test-icons.lua` (256 ok), `test-cli-view.lua` (566 ok),
+  `test-icon-face.lua` (44 ok), `test-font-setup.lua` (183 ok);
+* Python: `scripts/test-unicode-icons.py` (ok: 14 glyphs, 4 faces measured, 4 named unmeasured);
+* Rust: `cargo test -p wa-term --lib opening::` (16 ok), `--test opening` (7 ok), `--test icons` (1 ok); the two
+  pty rows were also run against the BASE binary and fail there (the discriminator);
+* Shell: `test-land-signing.sh` (46 ok), `test-publish-artifacts.sh` (56 ok), `test-publish-shared-commit.sh`
+  (43 ok). `test-deploy-node-binaries.sh` fails on this node with "the installed prebuilt supervisor is not
+  executable" - measured on a base worktree (`git worktree add /tmp/base-ffd2 ffd2a0a5`) and identical there,
+  so it is PRE-EXISTING and not this branch's.
+* The narrowed `scripts/fast.sh` run over the touched paths (`WA_FAST_ROWS=/tmp/rows-opening-star.txt`, the
+  rows for the files this branch changes) was started under `flock -o ~/Work/missions/.suite.lock`; the node's
+  suite lock was held by another mission's run for the whole of this session, so its result is not claimed
+  here - the same rows were each run singly above.
