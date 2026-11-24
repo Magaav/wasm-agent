@@ -452,11 +452,33 @@ end
 function M.ensure_resumes(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
-  local exec = opts.exec or host.sql_exec
-  local query = opts.query or host.sql_rows
-  if type(exec) ~= "function" or type(query) ~= "function" then
+  -- THE HOST TAKES ITS PARAMS AS JSON TEXT, a test seam takes a table (r5e, 24/11). memory.lua and selfloop.lua wrap
+  -- `host.sql_exec`/`host.sql_rows` with json.encode for exactly this reason; this module passed a Lua table straight
+  -- to the host, so its statements carried no bound values and matched nothing - the reclaim computed every fact
+  -- right and then wrote nothing (measured: stale=1, seen=0, claims=[], `reclaimed=0`).
+  local raw_exec = opts.exec or host.sql_exec
+  local raw_query = opts.query or host.sql_rows
+  if type(raw_exec) ~= "function" or type(raw_query) ~= "function" then
     return { error = "no_ledger", rearmed = 0 }
   end
+  -- How many rows a statement CHANGED, from either shape of answer (the host answers JSON text).
+  local function changes_of(answer)
+    if type(answer) == "table" then return tonumber(answer.changes) or 0 end
+    if type(answer) == "string" then
+      local ok, decoded = pcall(json.decode, answer)
+      if ok and type(decoded) == "table" then return tonumber(decoded.changes) or 0 end
+    end
+    return 0
+  end
+  local function encode_for(fn, params)
+    -- The host's own functions are identified by identity; anything else is a seam and keeps the table.
+    if fn == host.sql_exec or fn == host.sql_rows or fn == host.sql_row then
+      return json.encode(params or {})
+    end
+    return params
+  end
+  local exec = function(statement, params) return raw_exec(statement, encode_for(raw_exec, params)) end
+  local query = function(statement, params) return raw_query(statement, encode_for(raw_query, params)) end
   local cutoff = now - M.RESUME_WINDOW_SECONDS
 
   -- 1. THE ONE-TIME MIGRATION: rows older than the window are retired, and it says how many.
@@ -464,7 +486,7 @@ function M.ensure_resumes(now, opts)
   if not migrated(opts) then
     local retired = exec([[UPDATE self_wakes SET status='superseded', last_error='superseded: too old to resume',
       updated_at=? WHERE ]] .. LOST_WHERE .. [[ AND created_at<?]], { now, M.RESUME_REASON, cutoff })
-    migration = tonumber(type(retired) == "table" and retired.changes or 0) or 0
+    migration = changes_of(retired)
     record_migrated(opts, migration)
     if type(host) == "table" and type(host.log) == "function" then
       pcall(host.log, string.format(
@@ -506,7 +528,7 @@ function M.ensure_resumes(now, opts)
           local changed = exec([[UPDATE self_wakes SET status='unknown',
             last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
             { now, row.id })
-          reclaimed = reclaimed + tonumber(type(changed) == "table" and changed.changes or 0)
+          reclaimed = reclaimed + changes_of(changed)
         end
       end
     end
@@ -549,6 +571,15 @@ function M.ensure_resumes(now, opts)
       local live = query([[SELECT id FROM self_wakes WHERE session_id=? AND reason=?
         AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON })
       live = rows_of(live) or {}
+      if type(host) == "table" and type(host.getenv) == "function" then
+        local dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+        if dbg then
+          local shown = ""
+          for _, entry in ipairs(live) do shown = shown .. tostring(entry.id) .. "," end
+          pcall(host.log, string.format("debug ensure_resumes: session=%s alive=%s parked=%d live=%d [%s] chain=%s window=%s",
+            tostring(session), tostring(alive), #parked, #live, shown, tostring(row.resume_chain), tostring(tonumber(row.created_at))))
+        end
+      end
       if #parked == 0 and #live == 0 then
         local chain = (tonumber(row.resume_chain) or 0) + 1
         if chain > M.RESUME_MAX_REARMS then

@@ -1186,3 +1186,42 @@ named in the source with that measurement rather than deleted, and it is the fir
 
 **Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **124**; `test-deploy-bound.sh`
 `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`. No new texts.
+
+### r5e (Fable, 24/11 ~02:25Z): the fact that answered "keep" was the SQL call shape
+
+The instrumented run (real stores, no seam) printed, for a row 400 s past its dispatch with the claim released:
+
+```
+RAW={"claims":[],"complete":true,"identities_complete":true,"kind":"resource-inventory","ok":true,"schema":1}
+claims type=table n=0
+stale=[{"id":"93ecf455-...","session_id":"f879ab53-...","updated_at":1795485125}]
+old_at=1795485125 now=1795485525      -- age 400 s, bound 300 s
+seen=[{"n":0}]                       -- quiet
+out={"abandoned":0,"migration":0,"rearmed":0,"reclaimed":0}
+after={"status":"dispatching"}       -- the row never moved
+```
+
+All three facts were right and nothing was written. **The cause: the module handed the host a Lua table where its
+statements take JSON text.** `host.sql_exec(sql, params_json)` / `host.sql_rows(sql, params_json)`;
+`lua/core/memory.lua` and `lua/core/selfloop.lua` both wrap them with `json.encode` for exactly this reason, and this
+module called them raw. The SELECTs happened to work (the host tolerates a table on a read), the UPDATE did not: it
+carried no `id`, matched nothing, and `reclaimed` stayed 0. The `claims=[]` shape and the message count were innocent
+(`claims` is the key, an empty inventory is `[]`, so `free` was the right answer and it was reached).
+
+**Fix:** `exec`/`query` are wrapped in the module - the host's own functions get `json.encode(params)`, an injected
+seam keeps the table it expects - and `.changes` is read from either answer shape (the host answers JSON text).
+
+**Acceptance, live-shaped and with no seam, now green:** after `resources.finish(ctx)` the same row is RECLAIMED
+(`status` leaves `dispatching`; measured in the diagnostic run: `rearmed=1`, row `superseded`).
+
+**Still open, measured and named in the test:** in the `test-selfloop-pause.lua` fixture the RE-ARM step of that same
+call does not fire - the ledger ends with exactly one row, `unknown / deploy pending… / chain=0`, and a `host.log`
+print placed inside the re-arm loop never fired, so the `lost` query returned nothing there while the same row read
+`unknown` afterwards. Ruled out before the round ended: nothing is waiting (`pause_mod.waiting() == nil` asserted
+immediately before the call), the session is live, no pending row exists. The re-arm is covered by the fake-ledger
+cases in `scripts/test-deploy-pause.lua` and by step 7b of `scripts/test-deploy-wait.sh`; it is NOT covered by the
+live-shaped fixture yet. Next probe for whoever lands this: print `lost` and the two bound values inside that
+fixture.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **126**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
