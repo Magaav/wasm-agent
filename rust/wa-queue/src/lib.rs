@@ -172,6 +172,10 @@ pub struct Job {
     /// does not spend the retry budget of jobs that never actually failed.
     pub lease_expiries: u32,
     pub dedupe_key: Option<String>,
+    /// True when the dedupe key is claimed only while the job is live: the claim is released the moment
+    /// the job settles (done, dead, expired). A question that answers "the state now" uses this, so a
+    /// settled answer is never handed to a later caller as though it were an answer to *his* question.
+    pub dedupe_in_flight: bool,
     pub state: JobState,
     pub lease_worker: Option<String>,
     pub lease_until: Option<i64>,
@@ -209,6 +213,11 @@ pub struct EnqueueRequest {
     pub max_attempts: Option<u32>,
     /// Producer-side idempotency key, unique inside the queue. `None` = no dedupe.
     pub dedupe_key: Option<String>,
+    /// Release the dedupe claim when the job settles, instead of holding it until the record is reaped
+    /// (Policy::done_retention_ms, an hour). In-flight-only is what a query wants: the claim stops a
+    /// second scan while the first is running, and a settled answer is never replayed to a caller who
+    /// asked later. A send keeps the long-lived claim, because a repeated send must not go out twice.
+    pub dedupe_in_flight: bool,
     /// Window from now after which a still-unfinished job raises a timeout alert. `None` uses
     /// `Policy::default_deadline_ms`.
     pub deadline_in_ms: Option<i64>,
@@ -224,6 +233,7 @@ impl EnqueueRequest {
             fresh_for_ms: None,
             max_attempts: None,
             dedupe_key: None,
+            dedupe_in_flight: false,
             deadline_in_ms: None,
         }
     }
@@ -250,6 +260,12 @@ impl EnqueueRequest {
 
     pub fn dedupe(mut self, key: impl Into<String>) -> Self {
         self.dedupe_key = Some(key.into());
+        self
+    }
+
+    /// Claim the dedupe key only while this job is live (see Job::dedupe_in_flight).
+    pub fn dedupe_in_flight(mut self) -> Self {
+        self.dedupe_in_flight = true;
         self
     }
 
