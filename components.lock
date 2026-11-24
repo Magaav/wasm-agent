@@ -250,4 +250,4 @@ wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
 # its bytes are the ones published in components-033542eb9a37.
-wa-whatsapp ff2446237e3bd52562e79852f19c766b6ff487a2da0b54a941977e057fa71bdc 8815817
+wa-whatsapp 3ab893733cd6160b572c65afc7500bc3d3b067b04ebfd46c87ad053f3e0dcb80 8865574
