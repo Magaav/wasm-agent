@@ -4,7 +4,9 @@
 //! It exports `wa:selfloop` — the wake/notes/probe state machine, its validation, its refusals, the
 //! claim/settle compare-and-set and the rendered wake turn — and imports one thing: `wa:kernel/sql`,
 //! scoped by this component's manifest to `self_wakes`, `self_notes`, `self_notes_archive` (read and
-//! write) and `sessions` (read, for the authority checks). The file stays in the kernel.
+//! write), `sessions` (read, for the authority checks) and `self_wake_pauses` (read only: a held
+//! session's rows must not be planned, so they can never take the slot a dispatchable row needs). The
+//! files stay in the kernel.
 //!
 //! What is deliberately **not** here, because it needs living state of the node rather than a row:
 //!
@@ -552,8 +554,18 @@ impl Guest for SelfloopComponent {
             &[real(now), real(now - stale_seconds)],
         )?
         .changes;
+        // A ROW THAT CANNOT BE DISPATCHED THIS TICK NEVER TAKES A SLOT (Fable 24/11 12:55Z, the wake
+        // starvation). MEASURED on the live node: no self-wake was dispatched for two hours while a parked
+        // session had 13 overdue rows - this query handed the node the 8 earliest-due rows, every one of them
+        // from that held session, the node skipped all 8, and the ninth row was never reached: a canary wake
+        // of a free session, due 12:39:04Z, was still pending an hour later.
+        //
+        // A held session's rows are left exactly as they were - pending, in their order, so a resume fires
+        // each one once - they are simply not candidates for a slot. self_wake_pauses is in this component's
+        // read grant for this query alone (manifest.json); the component writes no pause.
         let rows = query(
             "SELECT * FROM self_wakes WHERE status='pending' AND due_at IS NOT NULL AND due_at<=? \
+             AND session_id NOT IN (SELECT session_id FROM self_wake_pauses) \
              ORDER BY due_at LIMIT ?",
             &[real(now), int(DUE_LIMIT)],
         )?;

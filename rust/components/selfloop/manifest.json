@@ -7,7 +7,7 @@
   "capabilities": {
     "sql": {
       "database": "memory",
-      "read": ["self_wakes", "self_notes", "self_notes_archive", "sessions"],
+      "read": ["self_wakes", "self_notes", "self_notes_archive", "sessions", "self_wake_pauses"],
       "write": ["self_wakes", "self_notes", "self_notes_archive"]
     }
   },

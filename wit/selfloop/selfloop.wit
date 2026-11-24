@@ -112,7 +112,9 @@ interface types {
     }
 
     /// What `plan` found: the stale dispatches it reconciled to `unknown`, and the due rows, oldest
-    /// first, bounded by the same 8 the native loop takes.
+    /// first, bounded by the same 8 the native loop takes. A row whose session is held (a
+    /// `self_wake_pauses` row: an interrupted run, a park) is **not** a candidate and never consumes one
+    /// of those 8: it stays pending, in its order, and fires when the hold is lifted.
     record tick-plan {
         reconciled: u64,
         due: list<due-wake>,
