@@ -123,3 +123,77 @@ scripts/test-deploy-release-node.sh was already a fast-path row (check deploy-re
   individually under the suite lock.
 * docs/KERNEL.md / docs/SELF-LOOP.md are not updated for installed_tree/installed_commit or KEPT_PROMPT_LIMIT.
 
+
+## ready-2 - the SECOND part, MEASURED (the open mechanism and the acceptance)
+
+Commits after ready-1:
+
+| commit | what |
+| --- | --- |
+| 6aff331b | the install's own four phases, measured on a node's own files and tick (the answer to "is there a gap") |
+| b8118ffd | a conversation pauses again on its NEXT turn (agent:run clears the run's own pause mark), and the acceptance row runs two installs in ONE conversation |
+
+### 1. Is there a phase of a real install in which nothing waits, so release_due fires inside it?
+
+MEASURED, and the answer is NO. A real install's signals, in the order the product writes them
+(scripts/test-resume-window.lua walks them with the real files and the node's own tick):
+
+| phase | file that says an install is coming | release_due | paid turns |
+| --- | --- | --- | --- |
+| the request waits | `sentinel/requests/<id>.json` | 0 | 0 |
+| the sentinel has claimed it, nothing else yet | `sentinel/claimed/<id>.json` | **0** | 0 |
+| the swap | `deploy-pending.json` (the installer's marker) | 0 | 0 |
+| the install is over | `sentinel/done/<id>.json` | **1** | **1** |
+
+The suspected gap - "the request has left the box, the marker is not written yet" - is the CLAIMED lane, and
+`lua/core/deploy_wait.lua` reads it (`M.LANES = { "requests", "claimed" }`, and its own comment says why). So a
+release that required nothing waiting for two consecutive ticks would change nothing: nothing in that window is
+released today. The 41-check row is green here and green on the base by design - it is a measurement row, and it
+would only fail if this understanding were wrong.
+
+### 2. Did the live session's three resume deliveries each make a model request?
+
+Measured per KIND of delivery, on the tree as it stands:
+
+* a resume RELEASED by a release makes exactly ONE model request - 2 installs in one conversation, 4 requests total,
+  one per paused round and one per resume (scripts/test-deploy-release-node.sh, counted at the loopback stub);
+* a resume that is DUE while a deploy waits is offered to the gate and given back with **zero** requests, the same
+  row still pending and no duplicate armed (scripts/test-resume-window.lua, section 2);
+* a resume re-armed because its dispatch was CUT by the install is a new paid turn, and it carries
+  `deploy_pause.resume_prompt`'s own words ("[deploy pending] The deploy this session paused for is OVER, and the
+  resume that was armed for it was lost").
+
+That last one names the 18:15:43 message: the recorded text is `M.resume_prompt`'s, not the release's line, so that
+delivery was `ensure_resumes` paying a lost resume, not a release. The two later messages (18:18:32, 18:19:00) follow
+deliveries at 18:18:24 and 18:18:45 - two releases 21 s apart around ONE install, which is exactly what the base's
+`release_due` did: it made EVERY pending resume row of EVERY session due, and a session could hold more than one (a
+re-armed lost resume plus a fresh pause). This branch releases at most one row per session and `schedule` keeps one
+pending row per session, so that pair collapses to one turn.
+Source of the live facts: `deploy-hold-r8a4/r8c-all.txt` and `r8c-live2.txt` (the recorded deliveries and messages).
+The live node's own ledger was NOT read: it is not this mission's store to read.
+
+### 3. The acceptance (Fable's cut criterion), clause by clause
+
+| clause | status |
+| --- | --- |
+| per install, at most ONE resume turn that makes a model request per paused session | **proven** on a real scratch node, requests counted at the stub: 4 for 2 installs, one per paused round and one per resume |
+| a resume that finds a deploy waiting at its start ends BEFORE its first model request | **proven**: `scripts/test-deploy-wait.sh` (a served turn refused `deploy_waiting`, the stub called zero times) and `test-resume-window.lua` section 2 (a due resume while the request waits: 0 dispatches) |
+| two installs two minutes apart = at most two such turns per session | **proven** with a gap of SECONDS (stricter) in ONE conversation: `COUNT(DISTINCT session_id) = 1`, exactly 2 resume rows, 4 requests |
+
+### 4. What this round found and fixed on the way (it blocked the acceptance)
+
+A served conversation could pause only ONCE in its lifetime: `agent_for` caches one agent per thread,
+`deploy_pause.at_boundary` set `self.deploy_pause` on it and nothing cleared it, so every later turn of that thread
+returned before reading a marker. MEASURED: the second install of the same thread paused nothing (4 requests, no
+pause) while the same install on a fresh thread paused at once. `agent:run` clears the mark at the start (b8118ffd),
+which is what "one pause per run" always meant, and the acceptance row now runs both installs in one conversation.
+
+### 5. Not proven / not done
+
+* Three sessions mid-turn across two installs at once was not measured: each run in these rows pauses one thread at a
+  time. What the criterion needs per session is proven; the concurrent version is the same per-session rule applied
+  three times, and nothing in the release crosses sessions now.
+* The live incident was not re-read from its own ledger (not mine to read); its attribution comes from the recorded
+  deliveries/messages plus the code.
+* No new model- or operator-facing strings in this part (the run-start reset and the measurement row add none).
+
