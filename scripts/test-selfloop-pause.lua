@@ -419,6 +419,73 @@ for _, row in ipairs(rows2) do if row.status == "pending" then pending2 = pendin
 check((tonumber(again and again.rearmed) or 0) == 0 and pending2 == 1,
   "a second pass adds nothing: " .. json.encode(again) .. " pending=" .. tostring(pending2))
 
+-- r6, THE THREE TESTS (24/11). All of them through the product's own setup and stores - `selfloop.setup`, the real
+-- resources store via `lua/core/resources.lua`, host capabilities by their real names, params as JSON text, and ONE
+-- clock taken from the row itself; nothing injected.
+local pause_mod = dofile("lua/core/deploy_pause.lua")
+local r6_data = dofile("lua/core/paths.lua").data()
+local r6_now = os.time()
+
+-- (1) THE SWEEP RUNS BEFORE THE WAITING GATE: a record older than the window closes whatever is installing, and the
+-- daily stamp is written - the live node closed none for hours because the gate returns before the sweep.
+local paused_dir = pause_mod.paused_dir()
+local function put_record(name, body) pcall(host.write_file, paused_dir .. "/" .. name, body) return paused_dir .. "/" .. name end
+local function there(path) local ok, text = pcall(host.read_file, path) return ok and type(text) == "string" end
+local old_record = put_record("r6-old.json", json.encode({ session = "r6-old-session", since = r6_now - 7 * 3600 }))
+local live_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 live" })
+local young_record = put_record("r6-young.json", json.encode({ session = live_session, since = r6_now - 60 }))
+local marker = pause_mod.path and pause_mod.path() or (r6_data .. "/deploy-pending.json")
+pcall(host.write_file, marker, json.encode({ state = "deploy_pending", since = r6_now - 5, bound_seconds = 1800,
+  to = "e832e152", by = "installer" }))
+check(pause_mod.waiting(r6_now) ~= nil, "a deploy is installing in this fixture (the gate is up)")
+selfloop.tick({ now = r6_now })
+check(not there(old_record), "the sweep closed the expired record WHILE an install was waiting")
+check(there(young_record), "and kept the young record of a live session")
+check(there(r6_data .. "/pause-sweep.last"), "and said it ran: <data>/pause-sweep.last exists")
+pcall(host.remove_file, marker)
+pcall(host.remove_file, young_record)
+
+-- (2) A RESUME THAT MEETS AN INSTALL ALREADY WAITING SPENDS NOTHING: no model call, no message, row back to pending.
+local r6_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 wake" })
+local r6_wake = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume after the deploy" },
+  { session_id = r6_session, user_id = "master" })
+check(r6_wake and r6_wake.ok, "a resume row is due now: " .. json.encode(r6_wake))
+local claimed = selfloop.claim_due(r6_session, "master", { now = r6_now })
+check(claimed and claimed.id == r6_wake.wake.id, "and the node claimed it for its turn")
+pcall(host.write_file, marker, json.encode({ state = "deploy_pending", since = r6_now - 2, bound_seconds = 1800,
+  to = "e832e152", by = "installer" }))
+local messages_before = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=?]],
+  json.encode({ r6_session })) or "[]") or {})[1].n) or 0
+local deferred = selfloop.run_wake({ id = r6_wake.wake.id, owner = "master", session_id = r6_session })
+check(type(deferred) == "table" and deferred.deferred == true, "the run defers instead of starting: " .. json.encode(deferred))
+check(tostring(deferred.deploy_waiting):find("deploy_waiting", 1, true) ~= nil,
+  "with the sentence every other refusal uses (no new text): " .. tostring(deferred.deploy_waiting):sub(1, 60))
+local messages_after = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=?]],
+  json.encode({ r6_session })) or "[]") or {})[1].n) or 0
+check(messages_after == messages_before, "and writes NOTHING into the session: " .. tostring(messages_before)
+  .. " -> " .. tostring(messages_after))
+local back = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE id=?]],
+  json.encode({ r6_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(back.status) == "pending", "the row is pending again, not failed: " .. json.encode(back))
+pcall(host.remove_file, marker)
+
+-- (3) AT MOST ONE PENDING RESUME PER SESSION, seeded from c67c0609's real shape (two resume rows for one session):
+-- arming B while A is pending REPLACES it - one row, the OLDEST created_at, the LARGEST chain.
+local one_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 one" })
+local first = selfloop.schedule({ in_seconds = 60, reason = pause_mod.RESUME_REASON, prompt = "A" },
+  { session_id = one_session, user_id = "master" })
+check(first and first.ok, "row A is armed")
+host.sql_exec([[UPDATE self_wakes SET created_at=?, resume_chain=2 WHERE id=?]], json.encode({ r6_now - 3600, first.wake.id }))
+local second = selfloop.schedule({ in_seconds = 120, reason = pause_mod.RESUME_REASON, prompt = "B", resume_chain = 1 },
+  { session_id = one_session, user_id = "master" })
+check(second and second.ok and second.replaced == true, "arming B REPLACES A instead of adding a row: " .. json.encode(second))
+local rows = json.decode(host.sql_query([[SELECT id, status, created_at, resume_chain, prompt FROM self_wakes
+  WHERE session_id=? AND reason=?]], json.encode({ one_session, pause_mod.RESUME_REASON })) or "[]") or {}
+check(#rows == 1, "exactly ONE resume row for the session: " .. json.encode(rows))
+check(tostring(rows[1].id) == tostring(first.wake.id), "and it is the row that was already owed")
+check(tonumber(rows[1].created_at) == r6_now - 3600, "keeping the OLDEST created_at for the window: " .. tostring(rows[1].created_at))
+check(tonumber(rows[1].resume_chain) == 2, "and the LARGEST chain: " .. tostring(rows[1].resume_chain))
+check(tostring(rows[1].status) == "pending", "pending again, with B's prompt: " .. tostring(rows[1].prompt))
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

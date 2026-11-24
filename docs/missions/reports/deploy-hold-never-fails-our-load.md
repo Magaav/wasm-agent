@@ -1429,3 +1429,62 @@ its first model call before it can pause - a paid turn that the install did not 
    with `M.defer_refused` if a build is waiting. Test: a wake dispatched, then the marker written, then the run →
    zero model calls (a stub provider counts them) and the row back to `pending`; and with no marker → the turn runs.
 3. Texts: none new if (2) reuses `deploy_waiting`'s sentence.
+
+## Addendum 9: r6 (24/11 ~03:00Z) - three fixes, three tests, all through the product's own stores
+
+**How the tests are built (Fable's requirement):** nothing is injected. Each test runs in a real `wa` script run with
+its own `WASM_AGENT_HOME`, uses `selfloop.setup()` and `lua/core/memory.lua` for the session and the ledger, the REAL
+resources store through `lua/core/resources.lua` (the r5-shaped case), host capabilities by their real names
+(`host.read_file`/`write_file`/`remove_file`/`sql_query`/`sql_exec`, params always JSON text), and gets its clock from
+the row it is testing (`SELECT created_at`) rather than mixing `os.time()` with the fixture's clock - the mistake that
+hid the r5 acceptance for three rounds.
+
+### (1) The sweep runs before the waiting gate - tested with the gate UP
+
+`selfloop.tick` now calls `sweep_records` beside the invariant statements, before the `deploy_waiting` early return
+(`selfloop.lua`), and the copy at the end of the tick is gone.
+
+Test (`scripts/test-selfloop-pause.lua`): a record 7 h old, a young record for a LIVE session, and
+`<data>/deploy-pending.json` with `state=deploy_pending`, a 1800 s bound and a target commit. `pause_model.waiting()`
+is asserted non-nil first (the gate really is up), then one `selfloop.tick`:
+
+* the expired record is GONE (closed while an install waits);
+* the young record of a live session is KEPT;
+* `<data>/pause-sweep.last` exists - the stamp that was missing on the live node for hours.
+
+Measured before the fix on a scratch node seeded with the two LIVE records: with the marker up, `records after=2`,
+`stamp=none`, no sweep line; without it, `sweep ran: 2 record(s) seen, 1 closed` and the stamp written.
+
+### (2) A resume spends nothing on an install already waiting - tested with a real claim
+
+`run_wake` re-reads `deploy_pause.refuse` after the row is claimed and BEFORE the agent is built, and returns
+`M.defer_refused(row, waiting_now, …)` - the same `deploy_waiting` sentence, no new text.
+
+Test: a resume row due now is scheduled and claimed through `claim_due` (the node's own path), the installer marker is
+written, then `run_wake` is called for real. Asserted: the return is `deferred = true` with the `deploy_waiting`
+sentence, the session's message count is UNCHANGED (no model call, so nothing written), and the row is `pending` again
+rather than failed or dispatching.
+
+### (3) At most one pending resume per session - seeded from c67c0609's shape
+
+`M.schedule`, for the deploy-resume reason only, looks for a `pending`/`dispatching` row with the same session and
+REPLACES it instead of inserting: the row keeps its id and its OLDEST `created_at` (so the six-hour window cannot be
+extended by re-arming), takes the LARGEST `resume_chain` (so the cap of two still bites), and gets the new `due_at`,
+prompt and `updated_at`.
+
+Test: row A armed (chain forced to 2, `created_at` moved back an hour), then row B armed with `resume_chain = 1` and a
+different prompt. Asserted: `replaced = true`; exactly ONE resume row for the session; its id is A's; its
+`created_at` is A's (an hour back); its `resume_chain` is 2 (the max); its status is `pending` with B's prompt.
+
+### Rows
+
+| row | result |
+| --- | --- |
+| `scripts/test-selfloop-pause.lua` | `self-loop pause: 146 checks passed` (was 129) |
+| `scripts/test-deploy-pause.lua` | `deploy claim wait ok (100 checks)` |
+| `scripts/test-handle-wake.lua` | `handle wake: 17 checks` |
+| `scripts/test-cli-wake-row.lua` | `cli wake row ok (30 checks)` |
+| `scripts/test-deploy-bound.sh` | `deploy bound ok` |
+| `scripts/test-deploy-wait.sh` | `deploy wait ok` (one run hit the known step-6 flake, green on the re-run) |
+
+No new texts: (2) reuses the `deploy_waiting` sentence, and the sweep's lines were approved as 26 and 28.
