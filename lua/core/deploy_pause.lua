@@ -1019,22 +1019,50 @@ function M.release_due(now, opts)
   local waiting = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>? LIMIT 8]],
     { M.RESUME_REASON, now })
   if type(waiting) ~= "table" or #waiting == 0 then return 0 end
+  -- A HELD SESSION IS NOT WAITING FOR THIS INSTALL (Fable 24/11). `self_wake_pauses` holds a session for a reason of
+  -- its own - a park (a mission stopped on purpose, 22/11) or an interrupt - and the node's tick dispatches none of
+  -- its rows. A release must therefore neither supersede those rows nor make them due: a parked session's resume
+  -- fires once, after ITS release, which is the whole promise session_park makes. Read by the same statement the
+  -- tick reads, so the two cannot disagree about which sessions are held.
+  local held = {}
+  for _, row in ipairs(query("SELECT session_id FROM self_wake_pauses", {}) or {}) do
+    if type(row) == "table" and tostring(row.session_id or "") ~= "" then held[tostring(row.session_id)] = true end
+  end
+  local function is_held(session) return session ~= "" and held[session] == true end
   -- The other half of the pause log (M.note): the install is done, so the wait each paused session paid ends
   -- here. Logged before the rows are updated, because a row that is updated is a wait that ended.
   for _, row in ipairs(waiting) do
-    if type(row) == "table" then M.note("released", tostring(row.session_id or ""), { wake = row.id, at = now }) end
+    if type(row) == "table" then
+      local session = tostring(row.session_id or "")
+      if not is_held(session) then M.note("released", session, { wake = row.id, at = now }) end
+    end
   end
-  -- ONE RESUME ROW PER SESSION, ALWAYS (Fable 24/11, second live case: session 9a7edd49 got resume wakes
-  -- DELIVERED at 18:18:24, 18:18:45 and 18:19:42 around one install). Back-to-back requests and installs each
-  -- released and re-armed their own row, and the tick dispatches every due row it sees - so one pause became
-  -- several paid resumes. The session's other pending resumes are SUPERSEDED here, before the release, so the
-  -- re-arm below leaves exactly one claimable row per session.
-  pcall(function()
-    exec([[UPDATE self_wakes SET status='superseded', last_error='superseded: one resume row per paused session',
-      updated_at=? WHERE status='pending' AND reason=? AND id NOT IN (
-        SELECT id FROM (SELECT id FROM self_wakes WHERE status='pending' AND reason=? ORDER BY due_at, created_at LIMIT 1))]],
-      { now, M.RESUME_REASON, M.RESUME_REASON })
-  end)
+  -- ONE RESUME ROW PER SESSION - PER SESSION, NOT PER TABLE (Fable 24/11, the blocker).
+  --
+  -- MEASURED in review of 9a7edd49: this statement's first version kept the earliest pending resume in the WHOLE
+  -- TABLE (`... LIMIT 1` with no session in it), so on a node with eight paused sessions SEVEN lost their only
+  -- resume at the first release - and the rows of PARKED sessions, which were not waiting for this install at all,
+  -- were superseded with them - all of it inside a pcall, so nothing said a word. The rule is one row per SESSION
+  -- inside the queue a release is about: each session keeps its own oldest pending resume (the row released below),
+  -- every other row of THAT session is superseded, and a held session is not touched. The statement stays under a
+  -- pcall - an install must not fail because a queue could not be tidied - but a failure is now SAID on the log and
+  -- the release below still runs: a released row is better than none, and silence is not a choice this tree makes.
+  local collapsed, collapse_error = pcall(exec, [[UPDATE self_wakes SET status='superseded',
+      last_error='superseded: one resume row per paused session', updated_at=?
+    WHERE status='pending' AND reason=?
+      AND session_id IS NOT NULL AND session_id<>''
+      AND session_id NOT IN (SELECT session_id FROM self_wake_pauses)
+      AND id NOT IN (
+        SELECT w.id FROM self_wakes w
+        WHERE w.status='pending' AND w.reason=?
+          AND w.id = (SELECT x.id FROM self_wakes x
+            WHERE x.status='pending' AND x.reason=? AND x.session_id=w.session_id
+            ORDER BY x.due_at, x.created_at, x.id LIMIT 1))]],
+    { now, M.RESUME_REASON, M.RESUME_REASON, M.RESUME_REASON })
+  if not collapsed and type(host) == "table" and type(host.log) == "function" then
+    pcall(host.log, "deploy pause: the per-session resume collapse FAILED (the release still runs): "
+      .. tostring(collapse_error))
+  end
   -- A RELEASE IS ONE RESUME TURN PER SESSION, AND IT SAYS WHAT THE PAUSE WAITED FOR (r8c 1). The marker this
   -- node read is passed in (`opts.released_marker`): the tick knows whether it saw an expired marker or none at
   -- all, and the line it stamps is the machine's own statement - "the update did not happen" - not a silence a
@@ -1051,24 +1079,28 @@ function M.release_due(now, opts)
   local changes = 0
   for _, row in ipairs(type(released) == "table" and released or {}) do
     local session = tostring(row.session_id or "")
-    local was_build = M.paused_build(session, opts)
-    local text
-    if was_build and now_build ~= "unknown" and was_build ~= now_build then
-      text = table.concat({
-        M.INSTALLED .. ": this node now runs " .. tostring(now_build):sub(1, 12) .. " (was " .. tostring(was_build):sub(1, 12) .. ").",
-        "The pause this turn took was for that install and it completed, so the work continues on the new build.",
-        "This is the same request continuing, not a new one: verify the machine (`wa --version`) before you claim",
-        "anything about what was installed.",
-      }, "\n")
-    else
-      text = M.not_happened_text(opts.released_marker or M.marker_on_disk(opts), now)
+    -- A held session's row is neither released nor stamped: its own release decides when it fires.
+    if not is_held(session) then
+      local was_build = M.paused_build(session, opts)
+      local text
+      if was_build and now_build ~= "unknown" and was_build ~= now_build then
+        text = table.concat({
+          M.INSTALLED .. ": this node now runs " .. tostring(now_build):sub(1, 12) .. " (was " .. tostring(was_build):sub(1, 12) .. ").",
+          "The pause this turn took was for that install and it completed, so the work continues on the new build.",
+          "This is the same request continuing, not a new one: verify the machine (`wa --version`) before you claim",
+          "anything about what was installed.",
+        }, "\n")
+      else
+        text = M.not_happened_text(opts.released_marker or M.marker_on_disk(opts), now)
+      end
+      local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
+        prompt = ? || char(10) || char(10) || prompt
+        WHERE id=? AND status='pending']], { now, now, text, tostring(row.id) })
+      changes = changes + (tonumber(type(changed) == "table" and changed.changes or 0) or 0)
     end
-    local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
-      prompt = ? || char(10) || char(10) || prompt
-      WHERE id=? AND status='pending']], { now, now, text, tostring(row.id) })
-    changes = changes + (tonumber(type(changed) == "table" and changed.changes or 0) or 0)
   end
   return changes
 end
+
 
 return M

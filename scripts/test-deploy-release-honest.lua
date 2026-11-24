@@ -112,36 +112,64 @@ check((swap_row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) == nil,
   "and it does NOT tell the worker that nothing was installed")
 check((swap_row.prompt or ""):find("aaaa1111bbbb", 1, true) ~= nil, "naming the build it was paused on")
 
--- ---- 4. BACK-TO-BACK RELEASES LEAVE EXACTLY ONE RESUME ROW PER SESSION ---------------------------
--- The second live case (session 9a7edd49): resume wakes DELIVERED at 18:18:24, 18:18:45 and 18:19:42 around one
--- install, because each release re-armed its own row and the tick dispatches every due row it sees.
-local multi = memory.start_session("local", "chat", { id = "r8c-multi", user_id = "master", title = "multi" })
-local rows_before = rows([[SELECT COUNT(*) AS n FROM self_wakes WHERE session_id=? AND reason=?]],
-  { multi, pause.RESUME_REASON })[1]
-eq(tonumber(rows_before.n), 0, "a fresh session starts with no resume rows")
--- THE SHAPE THE LIVE LEDGER HAD (fixtures, written the way the release writes them: one resume row per request
--- that arrived while the pause was up). `selfloop.schedule` collapses resume rows of its own accord, so the
--- three-row queue is built directly - it is exactly what back-to-back releases used to leave behind.
+-- ---- 4. ONE RESUME ROW PER SESSION - AND A HELD SESSION IS NOT TOUCHED -------------------------
+-- Fable 24/11, the blocker: the first version of that supersede kept the earliest pending resume in the WHOLE TABLE,
+-- so with eight paused sessions seven lost their only resume at the first release - the rows of PARKED sessions
+-- included - and it did it inside a pcall, silently. The shape here is the brief's row: THREE paused sessions, each
+-- carrying the two-to-four resume rows back-to-back releases left behind, plus ONE parked session that is not
+-- waiting for this install at all (and whose rows are already overdue, the 24/11 shape: 13 overdue held rows).
+local paused = {}
 for i = 1, 3 do
+  local session = memory.start_session("local", "chat", { id = "r8c-paused-" .. i, user_id = "master", title = "paused " .. i })
+  paused[i] = session
+  for j = 1, i + 1 do
+    host.sql_exec([[INSERT INTO self_wakes (id, owner, session_id, status, reason, prompt, due_at, created_at, updated_at)
+      VALUES (?, 'master', ?, 'pending', ?, ?, ?, ?, ?)]],
+      json.encode({ "r8c-p" .. i .. "-" .. j, session, pause.RESUME_REASON, "resume " .. i .. "." .. j,
+        T0 + 300 + j, T0 + j, T0 + j }))
+  end
+end
+local parked = memory.start_session("local", "chat", { id = "r8c-parked", user_id = "master", title = "parked" })
+local park = selfloop.park(parked, "master", "a stop recipe parked this session", { now = T0 })
+check(type(park) == "table" and park.parked == true, "the parked session is held the product's own way: " .. json.encode(park))
+for j = 1, 2 do
   host.sql_exec([[INSERT INTO self_wakes (id, owner, session_id, status, reason, prompt, due_at, created_at, updated_at)
     VALUES (?, 'master', ?, 'pending', ?, ?, ?, ?, ?)]],
-    json.encode({ "r8c-multi-" .. i, multi, pause.RESUME_REASON, "resume " .. i, T0 + 300 + i, T0, T0 }))
+    json.encode({ "r8c-parked-" .. j, parked, pause.RESUME_REASON, "parked resume " .. j, T0 - 10 + j, T0 + j, T0 + j }))
 end
-eq(tonumber(rows([[SELECT COUNT(*) AS n FROM self_wakes WHERE session_id=? AND reason=? AND status='pending']],
-  { multi, pause.RESUME_REASON })[1].n), 3, "three back-to-back requests leave three pending resume rows (the shape)")
+local function live_rows(session)
+  return rows([[SELECT id, status, due_at, prompt FROM self_wakes WHERE session_id=? AND reason=?
+    AND status IN ('pending','dispatching') ORDER BY id]], { session, pause.RESUME_REASON })
+end
+for i = 1, 3 do eq(#live_rows(paused[i]), i + 1, "session " .. i .. " starts with its whole queue of pending resumes") end
+local parked_before = rows("SELECT id, status, due_at, prompt FROM self_wakes WHERE session_id=? ORDER BY id", { parked })
+eq(#parked_before, 2, "the parked session has two pending resumes this install never asked for")
+
 sent = { count = 0, ids = {} }
 marker(T0 - 3600, 900)
-pause.release_due(T0 + 7, { exec = function(sql, params) return json.decode(host.sql_exec(sql, json.encode(params))) end,
-  query = function(sql, params) return json.decode(host.sql_query(sql, json.encode(params))) end })
-eq(tonumber(rows([[SELECT COUNT(*) AS n FROM self_wakes WHERE session_id=? AND reason=? AND status='pending']],
-  { multi, pause.RESUME_REASON })[1].n), 1, "the release leaves exactly ONE pending resume row for the session")
-local claimed_many = 0
-for _ = 1, 3 do
-  local got = selfloop.claim_due(multi, "master", { now = T0 + 200 })
-  if got then claimed_many = claimed_many + 1; selfloop.settle_interrupted(got, { now = T0 + 201 }) end
+selfloop.tick({ now = T0 + 8, dispatch = counted })
+eq(sent.count, 3, "ONE resume turn per paused session: three paused sessions, three turns, and none for the parked one")
+local seen = {}
+for _, id in ipairs(sent.ids) do
+  local row = rows("SELECT session_id FROM self_wakes WHERE id=?", { id })[1]
+  check(row ~= nil, "the dispatched row is in the ledger: " .. tostring(id))
+  local session = tostring(row.session_id)
+  check(not seen[session], "each turn belongs to a different session (this one is " .. session .. ")")
+  seen[session] = true
 end
-eq(claimed_many, 1, "so at most ONE resume turn can be claimed for that session, not three")
+for i = 1, 3 do
+  eq(#live_rows(paused[i]), 1, "session " .. i .. " is left with exactly ONE pending-or-dispatching resume row")
+  check(seen[paused[i]] == true, "and that row is the one turn session " .. i .. " got")
+end
+local parked_after = rows("SELECT id, status, due_at, prompt FROM self_wakes WHERE session_id=? ORDER BY id", { parked })
+eq(#parked_after, #parked_before, "the parked session keeps every row it had")
+for k = 1, #parked_before do
+  eq(tostring(parked_after[k].status), tostring(parked_before[k].status), "parked row " .. k .. " keeps its status")
+  eq(tostring(parked_after[k].due_at), tostring(parked_before[k].due_at), "parked row " .. k .. " keeps its own time (a held session is not released)")
+  eq(tostring(parked_after[k].prompt), tostring(parked_before[k].prompt), "parked row " .. k .. " keeps its prompt (no release line was stamped on it)")
+end
 
 pcall(host.remove_file, record_dir .. "/" .. swap_session .. ".json")
 pcall(host.remove_file, MARKER)
-print("deploy release ok (" .. checks .. " checks): a leaked or crashed marker releases ONE resume turn that says the update did not happen")
+print("deploy release ok (" .. checks .. " checks): a leaked or crashed marker releases ONE resume turn per paused session, that says what happened, and leaves a held session alone")
+
