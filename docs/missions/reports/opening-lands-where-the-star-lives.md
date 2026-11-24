@@ -258,6 +258,8 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
   executable" - measured on a base worktree (`git worktree add /tmp/base-ffd2 ffd2a0a5`) and identical there,
   so it is PRE-EXISTING and not this branch's.
 * The narrowed `scripts/fast.sh` run over the touched paths (`WA_FAST_ROWS=/tmp/rows-opening-star.txt`, the
-  rows for the files this branch changes) was started under `flock -o ~/Work/missions/.suite.lock`; the node's
-  suite lock was held by another mission's run for the whole of this session, so its result is not claimed
-  here - the same rows were each run singly above.
+  rows for the files this branch changes) was started under `flock -o ~/Work/missions/.suite.lock` and waited
+  31 minutes for the lock: three other missions' suites were queued ahead of it on this node (the holder at
+  the end had run 28 minutes), so it never started and was CANCELLED, not left running. Its result is not
+  claimed here. Every row the branch touches was run singly, above and green; the narrowed run the landing
+  does (`wa land`, land-quick) is the one that will see them together.
