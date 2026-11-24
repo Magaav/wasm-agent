@@ -71,6 +71,11 @@ feeds both `scrub_inherited_env` (`process.rs:76`, unix) and `windows.rs:187` - 
 platforms, and `spec.env` (a name a caller explicitly hands over) is still applied afterwards.
 * **189d24a0** - `rust/wa-operation/src/lib.rs` adds `pub fn scrub_git_env`; `disk.rs:452` and `disk.rs:1063`
 build their `Command` by hand and call it, so the node's own git reads and removes the worktree it names.
+* **de290e59** - `scrub_inherited_env` also SAYS it, once per (name, serving pid)
+(`report_git_env_withheld`, `rust/wa-operation/src/lib.rs`): the line carries that pid and the SERVING
+process's own command line (`/proc/self/cmdline`, with `std::env::args` as the fallback), so the next
+occurrence of this accident names its own source instead of costing an investigation like this one. A line
+per spawn would bury the log - one session starts hundreds of children a minute.
 
 Withheld now, by shape: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
 `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_PREFIX`,
@@ -103,7 +108,7 @@ must still be staged and in no commit of the other.
 | run | verdict |
 | --- | --- |
 | **base 51c2cf62** (`/tmp/base-gitenv`, own `CARGO_TARGET_DIR=.../m-session-isolation-git-base`, no git-env change) | **RED, exit 1**: `session a (.../repo/s1): its bash child inherits NO GIT_DIR, it saw: .../repo/main/.git/worktrees/s1` and `session b (exit 1): Another git process seems to be running in this repository, or the lock file may be stale` - session b (own worktree s2) died inside the 50-commit loop because both sessions were committing into worktree s1's index. The two lines name the whole accident |
-| **this branch** (7eb845ac + 189d24a0) | **GREEN, exit 0**: `git env isolation ok (110 checks, two sessions, 50 commits each, one repository)` |
+| **this branch** (7eb845ac + 189d24a0 + de290e59) | **GREEN, exit 0**: `git env isolation ok (116 checks, two sessions, 50 commits each, one repository)` (110 checks before de290e59 added the reporting section) |
 
 Wired: `scripts/fast.sh:976` as the check `git-env-isolation`; `scripts/test-git-env-isolation.lua` is
 declared a helper in `scripts/fast-path.exclude:57` for the same reason `scripts/test-session-isolation.lua`
@@ -177,6 +182,14 @@ The row's own lines (a reader sees one of these when it fails):
 28. `session %s (%s): its final commit failed: %s`
 29. `session %s (%s): its final commit is in its own worktree`
 30. `session %s: git env isolation ok (%d checks) in %s`
+
+31. The node log line, once per (name, serving pid) - `rust/wa-operation/src/lib.rs`, de290e59:
+    `[tool-env] withheld %s from a tool child: this node's own environment carries it, and it can point a git
+    command at another repository - the child runs with it removed, whatever directory it cd's into. Reported
+    once per name and serving process: pid %s cmdline %s`
+    Its row (`scripts/test-git-env-isolation-report.lua`, de290e59) checks four things from the node's own
+    stderr: exactly one line per name for two spawns, the serving pid, the serving process's command line,
+    and that the child's command line is NOT the one in the line.
 
 Changed operator-visible BEHAVIOUR with no new sentence: a node started under a git hook now lists those
 names in the existing `withheld_from_tool_children: ...` note (`rust/wa-operation/src/lib.rs`, unchanged
