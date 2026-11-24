@@ -686,6 +686,24 @@ fn held_past_bound(held_ms: u64, bound_seconds: u64) -> bool {
     held_ms >= bound_seconds.saturating_mul(1000)
 }
 
+/// The state a lane reports (r7c, Fable 24/11). "stalled" is the WEDGED case only - the beat is dead, `age_ms`
+/// past `stall_seconds()` - because a lane working a long turn still beats, and painting it red would make every
+/// turn longer than two minutes look like a dead node (measured: 79230887 after the restart was working and would
+/// have read stalled). A lane holding a label is "busy", with `held_seconds` beside it; the RED-by-name signal is a
+/// COMPLETION WAITING past `completion_wait_bound_seconds()` (`over_bound`), never a lane at work.
+fn lane_state(age_ms: u64, held_ms: Option<u64>, stall_seconds: u64, held_bound_seconds: u64) -> &'static str {
+    if stall_seconds > 0 && age_ms >= stall_seconds.saturating_mul(1000) {
+        "stalled"
+    } else if held_ms.map(|held| held >= held_bound_seconds.saturating_mul(1000)).unwrap_or(false) {
+        // A lane at work for longer than the bound is BUSY - `held_seconds` says how long - never stalled.
+        "busy"
+    } else if age_ms < 1000 {
+        "alive"
+    } else {
+        "busy"
+    }
+}
+
 fn node_thread_is_stalled(index: usize) -> bool {
     node_thread_busy_for_ms(index).map(|held| held_past_bound(held, node_stall_seconds())).unwrap_or(false)
 }
@@ -883,7 +901,12 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
                     eprintln!("[placement] no background lane is eligible (busy or stalled): background run borrows reserve node-thread {index} ({borrowed} already borrowed); it is handed back when the run ends");
                     return Some(index);
                 }
-                eprintln!("[placement] no background lane is eligible and the borrow is spent ({}/{}); refusing rather than queueing behind a busy lane", borrowed, borrowable_reserve());
+                // The line said "refusing" and the code QUEUES, one paragraph below: the saturated branch hands the
+                // item to a background lane's bounded queue - what /health shows as `queue_sessions` with its
+                // waited_ms - and if that lane refuses the send (queue full) admission answers `not_started`, the
+                // wake's row goes back to `pending` with a due time and a line (r7, `M.note_dispatch_failure`). The
+                // item always comes back; it is never dropped. The words now say exactly that.
+                eprintln!("[placement] no background lane is eligible and the borrow is spent ({}/{}); it queues on a background lane's bounded queue and is visible in /health until it runs, or comes back as pending if that queue refuses", borrowed, borrowable_reserve());
             }
         }
     }
@@ -1416,6 +1439,18 @@ fn execution_path_health() -> serde_json::Value {
 
 #[cfg(test)]
 mod execution_path_tests {
+    /// r7c (Fable, 24/11): a lane held ten minutes with a LIVE BEAT is busy, not stalled. Stalled is the wedged case
+    /// - a dead beat - and painting a working node red would make every long turn look like a dead node.
+    #[test]
+    fn a_lane_held_ten_minutes_with_a_live_beat_is_busy_not_stalled() {
+        // Live beat (age 200 ms), label held ten minutes: BUSY, with held_seconds, never stalled.
+        assert_eq!(super::lane_state(200, Some(600_000), 30, 120), "busy", "ten minutes of work with a live beat is busy");
+        assert_eq!(super::lane_state(200, None, 30, 120), "alive");
+        assert_eq!(super::lane_state(5_000, Some(1_000), 30, 120), "busy");
+        // A dead beat past the stall bound is the wedged case, whatever the label says.
+        assert_eq!(super::lane_state(31_000, Some(600_000), 30, 120), "stalled");
+    }
+
     /// r7c (Fable, 24/11): one background lane is not a pool. With a reserve of two lanes, exactly one may be lent
     /// to background work, so a person's next run always finds a lane of its own; with a reserve of one, nothing is
     /// lent, because lending it would leave the person with no lane at all.
@@ -1549,10 +1584,11 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     // is turning. Measured: one lane sat 29 minutes inside `wa_completion_run` with a fresh beat
                     // and a "child completion" label, and /health called it busy the whole time. `stalled` names
                     // it, with the label, the session and how long it has been held, so it is not invisible again.
-                    "state": if age >= stall_seconds() * 1000 || node_thread_is_stalled(index) { "stalled" } else if age < 1000 { "alive" } else { "busy" },
-                    "stalled": node_thread_is_stalled(index),
+                    "state": lane_state(age, node_thread_busy_for_ms(index), stall_seconds(), node_stall_seconds()),
+                    "held_seconds": node_thread_busy_for_ms(index).map(|held| held / 1000),
+                    "held_past_bound": node_thread_is_stalled(index),
+                    "held_bound_seconds": node_stall_seconds(),
                     "borrowed": borrowed_reserve(index),
-                    "stalled_after_seconds": node_stall_seconds(),
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
                     "label": busy.as_ref().map(|(label, _)| label.clone()),

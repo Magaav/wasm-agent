@@ -672,6 +672,24 @@ check(tostring(busy_row.last_error):find("session_busy", 1, true) ~= nil,
 check(tonumber(busy_row.due_at) ~= nil and tonumber(busy_row.due_at) > r6_now, "with a time to try again")
 resources.finish({ session_id = busy_session, user_id = "master", run_id = "run-held-1" })
 check(pause_mod.claim_state(busy_session) == "free", "with the claim released the session is not held")
+-- (8) A COMPLETION THAT CANNOT BE ADMITTED COMES BACK (r7c, Fable 24/11). The placement line used to say
+-- "refusing rather than queueing" while the code actually queued on a background lane with a bounded queue; if that
+-- queue refuses the send, admission answers `not_started`, and the wake must return to `pending` with a due time -
+-- never `failed`, never gone. This is that path, driven through the tick with the same answer a full queue gives.
+local back_wake = selfloop.schedule({ in_seconds = 0, reason = "a wake that meets a full background queue", prompt = "retry",
+  now = r6_now }, { session_id = silent_session, user_id = "master" })
+check(back_wake and back_wake.ok, "the wake exists")
+local tick_out = selfloop.tick({ now = r6_now + 1, dispatch = function()
+  return { not_started = true, error = "completion_queue_full" }
+end })
+check(tonumber(tick_out.deferred) >= 1, "the tick defers completions the node could not admit: " .. json.encode(tick_out))
+check(tonumber(tick_out.unknown) == 0, "and none of them becomes unknown: " .. json.encode(tick_out))
+local back_row = (json.decode(host.sql_query([[SELECT status, last_error, due_at FROM self_wakes WHERE id=?]],
+  json.encode({ back_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(back_row.status) == "pending", "it comes back as pending, never failed and never gone: " .. json.encode(back_row))
+check(tostring(back_row.last_error):find("completion_queue_full", 1, true) ~= nil,
+  "and the row names the refusal: " .. tostring(back_row.last_error))
+check(tonumber(back_row.due_at) ~= nil and tonumber(back_row.due_at) > r6_now, "with a due time to try again")
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

@@ -1840,3 +1840,34 @@ needs a stub provider first; that is the next step, not a claim I can make now.
 
 **Rows:** deploy-resume 25, deploy-pause 101, selfloop 109, selfloop-pause 185, handle-wake 17, cli-wake-row 30,
 placement defer ok.
+
+### r7 final: what happens after the borrow is spent, and the red signal turned the right way round (24/11 ~08:45Z)
+
+**(a) The line said "refusing"; the code QUEUES.** `pick_run_node_thread` after the borrow-spent line
+(`serve.rs:900`) falls through to the saturated branch (`serve.rs:905-914`), which picks a background lane
+(`index >= floor, <= ceiling, not wedged`) and hands the completion to **that lane's bounded queue** - which is
+exactly what `/health` reports as `queue_sessions` with `waited_ms` and now `over_bound`. If that lane refuses the
+send (queue full) admission answers `not_started`, and `selfloop.tick` puts the row back to `pending` with
+`due_at = now + backoff(attempts)` and `last_error = completion_queue_full` (`lua/core/selfloop.lua:1631-1637`),
+counting it as `deferred`. It comes back; it is never `failed` and never dropped. The words now say that, and the
+comment above them names the three outcomes.
+
+**Assertion that proves it comes back** (`scripts/test-selfloop-pause.lua`, row 8): a tick whose dispatch answers
+`{not_started = true, error = "completion_queue_full"}` leaves the wake `pending` with a due time, names the
+refusal on the row, and the tick reports `unknown = 0`. `191 checks passed`.
+
+**(b) The red signal was the wrong way round; fixed.** `lane_state(age_ms, held_ms, stall_seconds, held_bound)`:
+`stalled` is the WEDGED case only (the beat is dead, `age_ms` past `stall_seconds()`); a lane whose label has been
+held past the bound is **`busy`** with `held_seconds` beside it (`held_past_bound` is informational, not a state).
+So 79230887 mid-turn after the restart - working, holding a label for minutes - reads `busy`, not `stalled`. The
+RED-by-name signal is a **completion waiting past `completion_wait_bound_seconds()`**: `over_bound` on each
+`queue_sessions` entry, which the placement row already asserts (`queue_ok=1 count=0`).
+
+**Readers checked:** nothing in `lua/` or the CLI keys on the per-lane `state` word for health (the only "stalled"
+in Lua is `done_gate`'s own outcome), and `wa-sentinel status` builds its busy lines from the request/queue tables,
+not from this field - so the change is contained in `serve.rs` and the canaries that read `over_bound` get the
+signal they should.
+
+**Assertion:** `a_lane_held_ten_minutes_with_a_live_beat_is_busy_not_stalled` - `lane_state(200, Some(600_000), 30,
+120) == "busy"`, and `lane_state(31_000, Some(600_000), 30, 120) == "stalled"` (dead beat). Serve module:
+**48 passed, 0 failed**.
