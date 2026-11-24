@@ -1753,3 +1753,13 @@ of them mine and none of them new.
   request was held by "session 79230887 is still working (child completion)" - so the restart bound uses a different
   rule than the status line, and I did not locate it in `rust/wa-sentinel/src/main.rs` this round. `recover` on a
   unit-owned node (`wa-serve.service`) is likewise untouched.
+
+### Landing gate round 1: the branch is rebased onto main 4c720beb (24/11 ~07:30Z)
+
+The gate was red on `land-quick`: `rust/wa-capabilities/src/operations.rs` conflicted. **Main already carried the two
+`foreground(..., None)` arguments** that I repaired in r7c, so the rebase took main's side and my version of that
+repair was dropped - the credit in the r7c addendum for fixing the lib-test target belongs to main, not to this
+branch. Everything else rebased cleanly (`git merge-tree` against main: 0 conflicts).
+
+Rows re-run on the rebased tip (`build=0`): deploy-resume 25, deploy-pause 101, selfloop 109 (ok), selfloop-component
+30, selfloop-pause 185, handle-wake 17, cli-wake-row 30, deploy-bound ok, deploy-wait ok.
