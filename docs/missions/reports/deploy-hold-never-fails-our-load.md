@@ -1262,3 +1262,38 @@ params from inside the call, which the committed probe does not yet do.
 
 **Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **126**; `test-deploy-bound.sh`
 `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+### r5g: what the probes measured, as far as they got (24/11 ~02:12Z)
+
+The turn was spent on the live-shaped acceptance and it is still **not green**. What the probes established, in
+order:
+
+1. **`host.resource("list")` was never the problem.** After `resources.finish(ctx)`: `FINISH={"ok":true}` and
+   `INV={"claims":[],"complete":true,...}` - the claim is gone, so `claim_state` answers `free`.
+2. **The messages lookup was never the problem either.** `seen=[{"n":0}]` for a session with no activity.
+3. **The lost-row SELECT returned `[]` inside the call while the identical statement, run standalone against the same
+   ledger, returned the row.** Printed with its params: `params=["deploy pending: resume after the node swap",<cutoff>]`.
+4. **A real defect found on the way, and fixed:** `encode_for` compared function VALUES to decide whether to
+   `json.encode` the params (`fn == host.sql_rows`). A host function is a fresh closure on every access, so that was
+   never true, `exec`/`query` handed the host a Lua table, and **every statement in this module ran with its WHERE
+   values unbound**: `reason=?` matched nothing, the reclaim's `UPDATE` carried no id (r5e's "matched nothing"), and
+   `SELECT COUNT(*) ... created_at>=?` counted 0 - which would have made a RUNNING turn look quiet and paid a
+   duplicate resume. The contract is now decided by WHICH function is used (host -> `json.encode`, injected seam ->
+   the table), never by identity.
+5. **The reclaim loop does run and does decide correctly** - one earlier call printed
+   `debug loop: row=… state=held quiet=true known=true dispatched_at=1795485840 now=1795486240`, i.e. it reached the
+   claim check and kept the row because the claim was held. So the loop, the claim question and the quiet question
+   are all live-shaped and right.
+6. **The remaining difference is the stale-row SELECT of a particular call**, not the loop: in the acceptance call it
+   finds no rows (`lost=[]`, `reclaimed=0`) while the loop in another call found the same row. Two clock mismatches
+   were found and fixed in the fixture along the way (the file installs a clock at `T0`; `os.time()` was used for the
+   dispatch marker and for `now`, so the row looked 6 h+ old and the migration retired it, or looked brand new and
+   nothing matched). After unifying them the acceptance call still reclaims nothing.
+
+**Where that leaves install #1: not guaranteed.** The reclaim was shown working live-shaped in a diagnostic run
+(`rearmed=1`, row `superseded`); the committed acceptance test does not reproduce it, so nothing here should be read
+as "it works". The next datum is one line - `#stale_rows` plus its params plus that row's `updated_at` from inside the
+acceptance call - which the committed `WA_PAUSE_DEBUG` probes do not yet print together.
+
+**Fixed and safe to keep in either case:** the param-binding contract (5), which was silently breaking every
+statement in the module on the live node.

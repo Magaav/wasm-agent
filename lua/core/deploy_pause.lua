@@ -470,15 +470,20 @@ function M.ensure_resumes(now, opts)
     end
     return 0
   end
-  local function encode_for(fn, params)
-    -- The host's own functions are identified by identity; anything else is a seam and keeps the table.
-    if fn == host.sql_exec or fn == host.sql_rows or fn == host.sql_row then
-      return json.encode(params or {})
-    end
-    return params
+  -- THE HOST TAKES ITS PARAMS AS JSON TEXT; A SEAM TAKES A TABLE (r5g, 24/11). The contract is decided by WHICH
+  -- function is used, not by comparing function values: a host function is a fresh closure on every access, so
+  -- `fn == host.sql_rows` was never true, `encode_for` handed the host a Lua table, and EVERY statement in this
+  -- module ran with its WHERE values unbound - `reason=?` matched nothing, `COUNT(*) ... created_at>=?` counted 0
+  -- (so a running turn looked quiet), and the reclaim's UPDATE carried no id. Measured with the probe: the same
+  -- statement standalone returned the row, inside the call it returned none.
+  local exec = function(statement, params)
+    if opts.exec then return raw_exec(statement, params) end
+    return raw_exec(statement, json.encode(params or {}))
   end
-  local exec = function(statement, params) return raw_exec(statement, encode_for(raw_exec, params)) end
-  local query = function(statement, params) return raw_query(statement, encode_for(raw_query, params)) end
+  local query = function(statement, params)
+    if opts.query then return raw_query(statement, params) end
+    return raw_query(statement, json.encode(params or {}))
+  end
   local cutoff = now - M.RESUME_WINDOW_SECONDS
 
   -- 1. THE ONE-TIME MIGRATION: rows older than the window are retired, and it says how many.
@@ -524,6 +529,14 @@ function M.ensure_resumes(now, opts)
         local seen = seen_ok and rows_of(seen_answer) or nil
         local quiet_known = type(seen) == "table" and type(seen[1]) == "table"
         local quiet = quiet_known and (tonumber(seen[1].n) or 0) == 0
+        do
+          local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+          if seen and type(dbg) == "string" and dbg ~= "" then
+            pcall(host.log, string.format("debug loop: row=%s state=%s quiet=%s known=%s seen=%s dispatched_at=%s now=%s",
+              tostring(row.id), tostring(state), tostring(quiet), tostring(quiet_known),
+              tostring(seen and "?"), tostring(dispatched_at), tostring(now)))
+          end
+        end
         if state == "free" and quiet_known and quiet then
           local changed = exec([[UPDATE self_wakes SET status='unknown',
             last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
@@ -547,6 +560,19 @@ function M.ensure_resumes(now, opts)
   local lost = query([[SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE ]] .. LOST_WHERE
     .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff })
   lost = rows_of(lost) or {}
+  -- THE PROBE (24/11): the query, its ENCODED params and the raw answer, from inside the call.
+  do
+    local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+    if seen and type(dbg) == "string" and dbg ~= "" then
+      local params = json.encode({ M.RESUME_REASON, cutoff })
+      local encoded_ok, encoded = pcall(json.encode, lost)
+      local all_ok, all = pcall(json.encode, host.sql_rows([[SELECT id, status, reason, created_at FROM self_wakes]], json.encode({})))
+      all = all_ok and all or tostring(all)
+      pcall(host.log, string.format("debug lost: n=%s raw=%s params=%s now=%s ALL=%s",
+        tostring(#(rows_of(lost) or {})), encoded_ok and encoded:sub(1, 200) or tostring(encoded),
+        params, tostring(now), tostring(all):sub(1, 400)))
+    end
+  end
   local schedule = opts.schedule
   if type(schedule) ~= "function" then
     schedule = function(args, session, user)

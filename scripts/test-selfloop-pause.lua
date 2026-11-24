@@ -366,15 +366,19 @@ local held_status = (json.decode(held_row or "[]") or {})[1]
 check(held_status and held_status.status == "dispatching",
   "a claim held by the LIVE store keeps the row (no duplicate turn): " .. json.encode(held_status))
 
--- THE ACCEPTANCE CASE, live-shaped and with NO seam: the claim is released (`resources.finish`, exactly what a
--- finished run does), the session is quiet, the row is past the 300 s bound - and the NODE must reclaim it and
--- re-arm it, which is ae2a9231's shape at install #1. MEASURED before the fix: `claims=[]`, `seen=0`, `stale=1`,
--- `reclaimed=0` - every fact right and nothing written, because the module handed the host a Lua table where its
--- statements take JSON text (`host.sql_exec(sql, params_json)`), so the UPDATE carried no id at all.
-resources.finish(ctx)
--- A DEPLOY THAT IS WAITING AT THIS INSTANT WOULD SKIP THE RE-ARM (step 4 is behind that gate, and rightly so), so
--- the fixture says out loud that nothing waits before it asks: the earlier blocks of this file leave a request or a
--- marker behind, and a stale one made this case fail for a reason that has nothing to do with the reclaim.
+-- THE ACCEPTANCE CASE, live-shaped and with NO seam: a dispatching resume row 400 s past its dispatch, its claim
+-- RELEASED (`resources.finish`, what a finished run does), the session quiet - and the NODE must reclaim it and
+-- re-arm it, which is ae2a9231's shape at install #1. Then a second pass must add nothing.
+--
+-- ONE CLOCK: this file installs one (`created_at = 1700000000`), so the call is given the ROW's own clock. Passing
+-- wall time made the row look 6 h+ old, the migration retired it as `too old to resume`, and the reclaim and re-arm
+-- were never reached - a fixture bug that hid the acceptance for three rounds.
+local released_answer = resources.finish(ctx)
+local inventory_after = host.resource("list", "{}") or ""
+print("FINISH=" .. json.encode(released_answer))
+print("INV=" .. tostring(inventory_after):sub(1, 400))
+-- A DEPLOY THAT IS WAITING AT THIS INSTANT WOULD SKIP THE RE-ARM (step 4 sits behind that gate, rightly), and the
+-- earlier blocks of this file leave requests and markers behind: the fixture says out loud that nothing waits.
 pcall(host.remove_file, pause_data .. "/deploy-pending.json")
 do
   local box = pause_data .. "/sentinel/requests"
@@ -384,22 +388,35 @@ do
     pcall(host.remove_file, box .. "/" .. tostring(entry.name or ""))
   end
 end
-check(pause_mod.waiting(os.time()) == nil, "nothing waits for a deploy at the moment the reclaim runs")
-pause_mod.ensure_resumes(os.time(), { stale_seconds = 300 })
-local released_row = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE id=?]],
-  json.encode({ wake.wake.id })) or "[]") or {})[1] or {}
-check(tostring(released_row.status) ~= "dispatching",
-  "a released claim lets the row be reclaimed: " .. json.encode(released_row))
--- The re-armed row is a row of that session that is not the one the reclaim retired, and is still owed: a
--- `pending`/`dispatching` resume row other than the superseded one. Whole rows in the message, so a failure here
--- shows the ledger's own state instead of a count.
--- NOT PROVEN IN THIS FIXTURE, MEASURED AND NAMED: the RE-ARM step of that same call did not fire here. The ledger
--- after the call holds exactly one row for the session - `unknown / deploy pending… / chain=0` - so the RECLAIM above
--- is proven live-shaped, and the re-arm is covered by the fake-ledger cases in scripts/test-deploy-pause.lua and by
--- step 7b of scripts/test-deploy-wait.sh, but NOT by this fixture. What was ruled out before the round ended: nothing
--- is waiting (`pause_mod.waiting() == nil` asserted immediately before), the session is live, no pending row exists,
--- and a `host.log` print placed inside the re-arm loop never fired - so the `lost` query returned nothing there while
--- the same row read `unknown` afterwards. Next probe: print `lost` itself and the two bound values in that fixture.
+local created_rows = json.decode(host.sql_query([[SELECT created_at FROM self_wakes WHERE id=?]],
+  json.encode({ wake.wake.id })) or "[]") or {}
+local row_created = tonumber((created_rows[1] or {}).created_at) or 0
+local clock_now = row_created + 400
+check(pause_mod.waiting(clock_now) == nil, "nothing waits for a deploy at the moment the reclaim runs")
+local verdict = pause_mod.ensure_resumes(clock_now, { stale_seconds = 300 })
+check((tonumber(verdict and verdict.reclaimed) or 0) == 1,
+  "the released claim lets the row be reclaimed in ONE call: " .. json.encode(verdict))
+local rows_json = host.sql_query([[SELECT id, status, reason, resume_chain FROM self_wakes WHERE session_id=?]],
+  json.encode({ claim_session }))
+local rows = json.decode(rows_json or "[]") or {}
+local owed, seen_rows = 0, {}
+for _, row in ipairs(rows) do
+  seen_rows[#seen_rows + 1] = tostring(row.status) .. "/chain=" .. tostring(row.resume_chain)
+  if tostring(row.id) ~= tostring(wake.wake.id) and row.status == "pending"
+    and tostring(row.reason) == tostring(pause_mod.RESUME_REASON) then
+    owed = owed + 1
+    check(tonumber(row.resume_chain) == 1, "the re-armed row carries chain 1: " .. tostring(row.resume_chain))
+  end
+end
+check(owed == 1, "and exactly ONE new pending resume row, with no seam: " .. tostring(owed)
+  .. " rows: " .. table.concat(seen_rows, ", "))
+local again = pause_mod.ensure_resumes(clock_now, { stale_seconds = 300 })
+local rows2 = json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE session_id=?]],
+  json.encode({ claim_session })) or "[]") or {}
+local pending2 = 0
+for _, row in ipairs(rows2) do if row.status == "pending" then pending2 = pending2 + 1 end end
+check((tonumber(again and again.rearmed) or 0) == 0 and pending2 == 1,
+  "a second pass adds nothing: " .. json.encode(again) .. " pending=" .. tostring(pending2))
 
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
