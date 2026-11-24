@@ -53,6 +53,14 @@ nodes.operator_status = function() return { operator_of_peer = true } end
 nodes.remote_call = function(selector, capability, args)
   sent_arguments = args
   if capability == 'read' and answer ~= nil then return answer end
+  -- The calls batch: the peer answers one result per entry, in order (lua/core/server.lua's own shape).
+  -- An entry that read a picture answers the reference this node cannot use - the case the batch
+  -- refusal below has to name.
+  if capability == 'batch' and answer ~= nil then
+    local results = {}
+    for index = 1, #((args or {}).calls or {}) do results[index] = answer end
+    return { batch = 1, results = results }
+  end
   return { error = 'fixture_peer_answered_nothing' }
 end
 local loaded = {}
@@ -249,6 +257,28 @@ do
     'master', { user_id = 'master' })
   eq(old.error, 'remote_image_transport_unsupported', 'a peer that sent no bytes keeps the named refusal of today')
   ok(old._images == nil, 'and no path from the other machine is handed on')
+  answer = nil
+end
+
+-- 7. A PICTURE INSIDE A calls BATCH IS REFUSED BY NAME, AND THE REFUSAL NAMES THE CALL THAT WORKS
+-- (mission run-images-two-node, item 2). The batch is 1-8 reads in one signed round trip and its answer
+-- is ordered text entries; a picture rides out with ONE call's own result. The refusal says so, with the
+-- node and the path in it, instead of leaving a path on the other machine or a bare code.
+do
+  answer = fresh()
+  local batch = tools.dispatch(memory, 'remote', { node = 'scratch-peer', capability = 'batch',
+    calls = { { capability = 'read', path = PICTURE }, { capability = 'ls', path = '/tmp' } } }, 'master',
+    { user_id = 'master' })
+  local entry = (type(batch) == 'table' and batch.results or {})[1] or {}
+  eq(entry.error, 'remote_image_batch_unsupported', 'a picture read inside calls is refused by name: '
+    .. json.encode(entry))
+  ok(tostring(entry.note or ''):find('as its own call', 1, true) ~= nil,
+    'and the refusal names the single call: ' .. tostring(entry.note))
+  ok(tostring(entry.note or ''):find('scratch-peer', 1, true) ~= nil, 'with the node in it')
+  ok(tostring(entry.note or ''):find(PICTURE, 1, true) ~= nil, 'and the path in it')
+  eq(entry.capability, 'read', 'the entry says which capability was refused')
+  ok(entry._images == nil, 'and no path from the other machine is handed on')
+  ok(type(batch.failed) == 'number' and batch.failed >= 1, 'the batch counts it as a failed entry')
   answer = nil
 end
 

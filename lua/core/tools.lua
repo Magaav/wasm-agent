@@ -638,7 +638,7 @@ M.admin = {
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
     path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
-  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"} or {\"node\":\"<name>\",\"capability\":\"edit\",\"path\":\"...\",\"edits\":[{\"old_text\":\"...\",\"new_text\":\"...\"}]}: an edit there is the edit you know here - exactly-once match, the nearest region on a miss, the read-before-edit fence judged by what this session read on that node - and the change is recorded here, so /undo restores that file there. Text reads work; image results are refused until the node protocol has bounded binary transfer. Inside codemode tools.remote runs the read-only capabilities (read, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"} or {\"node\":\"<name>\",\"capability\":\"edit\",\"path\":\"...\",\"edits\":[{\"old_text\":\"...\",\"new_text\":\"...\"}]}: an edit there is the edit you know here - exactly-once match, the nearest region on a miss, the read-before-edit fence judged by what this session read on that node - and the change is recorded here, so /undo restores that file there. Text reads work. A read of a picture (png, jpeg, gif, webp) on that node comes back as the picture itself, attached to this call's result, when it is at most 1000000 bytes - a bigger one is refused by name with its size, and the fix is to read it on the node that holds it or copy it here first. A calls batch on one peer carries text only: a picture read inside calls is refused by name, and the refusal names the single call above. Inside codemode tools.remote runs the read-only capabilities (read, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
     node = { type = "string", description = "Peer name or node_id (the nodes tool lists them)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
     command = { type = "string", description = "For bash/shell: the command." },
@@ -1468,7 +1468,23 @@ local function remote_batch(memory, args, role, ctx)
   for index, entry in ipairs(entries) do
     local value = results[index]
     if carries_local_images(value) then
-      value = { error = "remote_image_transport_unsupported", capability = entry.capability }; results[index] = value
+      -- A PICTURE DOES NOT TRAVEL IN A BATCH (mission run-images-two-node, item 2). One call carries one
+      -- picture because the picture rides out with THAT call's own result (lua/core/remote_image.lua: the
+      -- caller verifies the digest the peer named, stores the bytes here, and hands the pipeline this
+      -- node's own reference). Eight ordered text entries have no such place, and the answer must never
+      -- be a path on the other machine - so the entry is refused BY NAME and the refusal says the one
+      -- form that works, with this node and this path in it, instead of leaving the model to guess.
+      local path = tostring(entry.args and entry.args.path or "")
+      local name = tostring((value._images or {})[1] and (value._images[1].name or value._images[1].sha256) or "image")
+      value = { error = "remote_image_batch_unsupported", capability = entry.capability, node = node.name,
+        path = path, image = name,
+        note = "The picture " .. name .. " on " .. tostring(node.name) .. " was not sent: a calls batch "
+          .. "carries text only (1-8 reads in one signed round trip). Read it as its own call - "
+          .. "tools.remote({node:\"" .. tostring(node.name) .. "\",capability:\"read\",path:\"" .. path
+          .. "\"}) - and the picture arrives with that call result, up to 1000000 bytes.",
+        fix = 'send {"node":"' .. tostring(node.name) .. '","capability":"read","path":"' .. path
+          .. '"} as its own remote call, not as an entry of calls' }
+      results[index] = value
     end
     if type(value) ~= "table" or value.error or value.ok == false then failed = failed + 1 end
     -- A page read in a BATCH was still served to this session (mission remote-edit-first-class). Without
