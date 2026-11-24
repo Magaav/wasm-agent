@@ -1006,6 +1006,14 @@ gate_run bash scripts/test-upgrade-ui-fonts.sh | grep 'ui fonts install: ok'
 # node-7ddbfa98036a while the bytes were node-bfad4f8fbe59). This asserts both the source shape and, on a real
 # scratch node, that /health follows a record written after it started - with no restart.
 WA_BIN="$BIN" gate_run bash scripts/test-health-build-label.sh | grep 'health build label: ok'
+# THE VERSION LINE NAMES WHAT THIS NODE RUNS (Fable, 24/11). MEASURED after a scripts-only landing
+# (fe108a8c): installed.txt said commit=fe108a8c - the Lua tree that fast-path deploy installed - while
+# `wa --version` and /health said v9a0c589a, the binary's compile-time commit. The one command an operator
+# is told to check named a commit that does not hold what the node runs. This row installs a fast-path
+# record in a scratch home and asserts that --version, /health (a real node) and `wa update --follow`'s
+# final line all name the tree, that a record naming the bytes adds no tree, and that an empty record
+# still answers a name.
+gate_run bash scripts/test-version-names-the-tree.sh | grep 'version names the tree: ok'
 # The watchdog (docs/KERNEL.md, "Watchdog"): its own tests plus the CLI contract the upgrade path depends on,
 # then a scratch install upgraded THROUGH the flag - including the assertion that the default path does not
 # touch the watchdog at all. The fake kernel is `wa-watchdog selftest-kernel`; no real node is involved.
@@ -2834,6 +2842,18 @@ run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
+# THE NODE REPORTS ITS OWN WAKE STATE (Fable 24/11, from the live stall: 2.5 hours of zero dispatch while /health
+# answered and the loopback canary stayed green, because that canary runs a CHILD node with a fresh ledger). A
+# real scratch node - own HOME, WASM_AGENT_HOME/DATA/DB, own port, stub provider - must show a due wake
+# dispatched with last_tick ok, and must NAME selfloop_tick_failed, with the oldest dispatchable age growing,
+# when a column its tick reads is dropped from its own ledger. `wakes` is /health's, so nothing here costs a turn.
+gate_run node scripts/test-node-wake-facts.cjs "$BIN"
+# THE RULE EVERY READER OF THE FACTS RUNS (r8c item G, approved 24/11). Four reds by name - wakes_unknown,
+# selfloop_tick_failed, self_wake_stalled, wakes_not_publishing - each produced on a REAL scratch node and judged
+# by the SHIPPED judge (scripts/lib/health-wakes.sh for the shell readers, run end to end through
+# scripts/verify-install.sh, and the same rule in jq), plus the green case. Not a copy of the rule: a row that
+# re-implemented it would pass while the shipped judge was wrong.
+gate_run node scripts/test-health-wakes-rule.cjs "$BIN"
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
   run_proof_fixture sentinelInstall 30 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800

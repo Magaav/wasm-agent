@@ -58,7 +58,13 @@ try {
   fs.writeFileSync(path.join(install,'serve.pid'),'1234');
 
   fs.mkdirSync(path.join(procRoot,'1234'),{recursive:true});fs.writeFileSync(path.join(procRoot,'1234','exe'),path.join(install,'wa')+'\n');
-  writeExec(path.join(mock,'curl'),'#!/usr/bin/env bash\necho \'{"ok":true}\'\n');
+  // THE NODE'S OWN WAKE STATE IS PART OF WHAT AN INSTALL IS JUDGED ON (r8c item G, approved 24/11): the fixture's
+  // node answers a REAL /health shape, and a dead loop has a scenario of its own below. Without a wakes object the
+  // verifier reports UNKNOWN - correctly, and that would make the "consistent fixture" case red.
+  const HEALTH_OK='{"ok":true,"worker":"alive","node_state":{"state":"idle"},"wakes":{"dispatchable":0,"due":0,"held_due":0,"known":true,"deploy_waiting":0,"first_tick_at":1795547600,"ticks_since_start":42,"ticking_for_s":84,"last_dispatch_at":1795547610.602,"last_tick":{"at":1795547610,"error":"","outcome":"ok"},"oldest_dispatchable_age_s":0,"published_age_ms":386}}';
+  const HEALTH_RED='{"ok":true,"worker":"alive","node_state":{"state":"idle"},"wakes":{"dispatchable":1,"due":1,"held_due":0,"known":true,"deploy_waiting":0,"first_tick_at":1795547616,"ticks_since_start":3,"ticking_for_s":400,"last_dispatch_at":1795547610.9721,"last_tick":{"at":1795547620,"error":"no such column: run_id","outcome":"selfloop_tick_failed"},"oldest_dispatchable_age_s":200,"published_age_ms":1907}}';
+  const mockHealth=(body)=>writeExec(path.join(mock,'curl'),`#!/usr/bin/env bash\necho '${body}'\n`);
+  mockHealth(HEALTH_OK);
   writeExec(path.join(mock,'ss'),'#!/usr/bin/env bash\necho \'LISTEN 0 4096 127.0.0.1:8799 0.0.0.0:* users:(("wa",pid=1234,fd=3))\'\n');
   writeExec(path.join(mock,'powershell.exe'),'#!/usr/bin/env bash\necho 1234\n');
 
@@ -66,6 +72,15 @@ try {
   const clean=verify();
   check(clean.status===0&&clean.result.failed===0&&clean.result.skipped===0,`consistent fixture passes without skips: ${JSON.stringify(clean.result.results)}`);
   check(clean.result.results.some(item=>item.name==='shipped skills/git-orchestrator/SKILL.md == repo'&&item.status==='ok'),'repository skill is compared to its installed copy');
+  // A DEAD SELF-WAKE LOOP FAILS THE INSTALL, BY NAME (r8c item G). The node can answer 200 and say ok:true for
+  // 2.5 hours while it dispatches nothing (measured 24/11); this is the line that refuses it, once per red.
+  check(clean.result.results.some(item=>item.name==='the self-wake loop'&&item.status==='ok'),`a healthy node passes the self-wake rule: ${JSON.stringify(clean.result.results.filter(r=>r.name==='the self-wake loop'))}`);
+  mockHealth(HEALTH_RED);
+  const deadLoop=verify();
+  const wakeRows=deadLoop.result.results.filter(r=>r.name==='the self-wake loop');
+  check(deadLoop.status===1&&wakeRows.some(r=>r.status==='fail'&&/selfloop_tick_failed/.test(r.detail)),`a dead self-wake loop fails verification by name: ${JSON.stringify(wakeRows)}`);
+  check(wakeRows.some(r=>r.status==='fail'&&/self_wake_stalled/.test(r.detail)),`and every red is its own row: ${JSON.stringify(wakeRows)}`);
+  mockHealth(HEALTH_OK);
   check(clean.result.results.some(item=>item.name==='shipped skills/git-orchestrator/scripts/audit.mjs == repo'&&item.status==='ok'),'repository audit helper is compared to its installed copy');
 
   for(const rel of ['scripts/codemode-build.mjs','scripts/check-embedded-runtime.lua']){

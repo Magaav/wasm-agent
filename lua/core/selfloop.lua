@@ -89,6 +89,9 @@ local SCHEMA = {
   )]],
   [[CREATE INDEX IF NOT EXISTS self_wakes_due_idx ON self_wakes(status, due_at)]],
   [[CREATE INDEX IF NOT EXISTS self_wakes_session_idx ON self_wakes(session_id, status, due_at)]],
+  -- The last dispatch (`selfloop.wake_facts`): `attempts>0` is "a claim handed this row to the scheduler",
+  -- and this index makes the newest of those a range end instead of a walk of the ledger /health polls.
+  [[CREATE INDEX IF NOT EXISTS self_wakes_attempt_idx ON self_wakes(attempts, updated_at)]],
   [[CREATE TABLE IF NOT EXISTS self_notes (
     session_id TEXT PRIMARY KEY,
     text TEXT NOT NULL DEFAULT '',
@@ -191,6 +194,25 @@ local function slice(text, limit)
   text = tostring(text or "")
   if #text <= limit then return text end
   return text:sub(1, limit)
+end
+
+-- WHERE THE LAST TICK'S OUTCOME COMES FROM. The tick that drives this module records its own outcome
+-- (`lua/core/subagents.lua`'s `selfloop_tick_state`), and it hands that reader here once, at load: this
+-- module does not reach back into the one that drives it (a dofile cycle per tick, and two copies of the
+-- scheduler's own state).
+local tick_state_source
+function M.set_tick_state_source(fn) tick_state_source = fn end
+
+-- WHEN THIS PROCESS STARTED TICKING (Fable 24/11, from the install that would have failed a good build). The stall
+-- rule has to count a due row's age from the moment THIS process could have dispatched it: right after a restart,
+-- rows that came due during the install are minutes old and the first tick has not run yet, so judging them by
+-- their own date would call every good install a stall. Per PROCESS, not per instance: `dofile` runs this file
+-- again for every tick, so a module-local would reset on every call - the Lua state is the process's own.
+function M.note_tick(now)
+  now = tonumber(now) or tonumber(host.now())
+  if type(WAKE_FIRST_TICK_AT) ~= "number" or WAKE_FIRST_TICK_AT <= 0 then WAKE_FIRST_TICK_AT = now end
+  WAKE_TICKS_SINCE_START = (tonumber(WAKE_TICKS_SINCE_START) or 0) + 1
+  return WAKE_FIRST_TICK_AT, WAKE_TICKS_SINCE_START
 end
 
 -- ---------------------------------------------------------------- the self-loop seam
@@ -1685,15 +1707,97 @@ function M.run_wake(args)
   return ok and { ok = true } or { error = tostring(result) }
 end
 
+-- ---- what the node's OWN wake state is ------------------------------------------------------------
+--
+-- THE NODE MUST REPORT ITS OWN WAKE STATE (Fable 24/11, from the live stall). MEASURED: this laptop's node
+-- delivered zero self-wakes for 2.5 hours (15:15Z -> 17:55Z). The tick raised "no such column: run_id" before
+-- its claim loop, and nothing said so: /health answered, and the loopback self-wake canary passed the whole
+-- time because it runs a CHILD node with a fresh ledger. The fleet was blind three times that day, and the
+-- only symptom was the absence of deliveries.
+--
+-- These are the facts a post-install check and a watchdog read instead, from the node itself (/health's
+-- `wakes`, fed every placement tick by `wa_orchestrator_tick`):
+--
+--   last_tick         when it last ran, and its outcome BY NAME: `ok`, or `selfloop_tick_failed` with the
+--                     error it raised (the seam is `subagents.selfloop_tick_state()`)
+--   due               pending rows whose time has come
+--   dispatchable      of those, the ones no hold covers: the SAME `self_wake_pauses` exclusion the plan uses
+--                     (rust/components/selfloop/src/lib.rs), so a held session's rows never make a node that
+--                     is doing the right thing look stalled
+--   held_due          the rest of the due rows: held, and why `dispatchable` is smaller than `due`
+--   oldest_dispatchable_age_s  how long the earliest dispatchable row has been due. This is the number that
+--                     GROWS while a lane is idle and nothing is delivered - the stall, in one field
+--   last_dispatch_at  when a row was last handed to the run scheduler (a claim is what sets `attempts`)
+--
+-- Cheap on purpose: four indexed aggregates, no row walked in Lua - and NOTHING here reads a column the claim
+-- loop could be missing. That is deliberate: the facts must still come back when the tick itself cannot run,
+-- which is exactly the state they exist to report.
+function M.wake_facts(opts)
+  M.setup()
+  local now = clock(opts or {})
+  local state = (opts or {}).tick or (type(tick_state_source) == "function" and tick_state_source() or nil)
+  -- NO SOURCE IS NOT A HEALTHY TICK. A caller that asks without one gets `unknown` and says so; only a tick
+  -- that ran and did not raise reports `ok`.
+  local tick = { at = tonumber(state and state.at or 0) or 0, outcome = "unknown", error = "" }
+  if state then
+    local raised = tostring(state.error or "")
+    if raised ~= "" then
+      tick.outcome, tick.error = "selfloop_tick_failed", raised
+    else
+      tick.outcome = "ok"
+    end
+  end
+  local due = query([[SELECT COUNT(*) AS n FROM self_wakes
+    WHERE status='pending' AND due_at IS NOT NULL AND due_at<=?]], { now })[1]
+  local live = query([[SELECT COUNT(*) AS n, MIN(due_at) AS oldest FROM self_wakes
+    WHERE status='pending' AND due_at IS NOT NULL AND due_at<=?
+    AND session_id NOT IN (SELECT session_id FROM self_wake_pauses)]], { now })[1]
+  local held = query([[SELECT COUNT(*) AS n FROM self_wakes
+    WHERE status='pending' AND due_at IS NOT NULL AND due_at<=?
+    AND session_id IN (SELECT session_id FROM self_wake_pauses)]], { now })[1]
+  -- `attempts` is incremented by the claim that hands a row to the run scheduler, so the newest row ever
+  -- claimed is the last dispatch. Indexed (`self_wakes_attempt_idx`), so this is a range end, not a walk.
+  local dispatched = query("SELECT MAX(updated_at) AS at FROM self_wakes WHERE attempts>0", {})[1]
+  local oldest = tonumber(live and live.oldest)
+  -- HOW LONG THIS PROCESS HAS BEEN TICKING, and how many ticks it ran: the age a stall may count a row by, and the
+  -- reader's proof that a tick has happened at all (a WAITING, not a red, before the first one).
+  local first_tick = tonumber(WAKE_FIRST_TICK_AT)
+  local ticking_for = first_tick and first_tick > 0 and math.max(0, math.floor(now - first_tick)) or nil
+  -- ROWS THE NODE IS DELIBERATELY HOLDING FOR A DEPLOY: the last tick refused them because a build waits or
+  -- installs (deploy_pause), which is not a stall. Passed through from the tick's own result.
+  local waiter = (opts or {}).tick_out
+  local deploy_held = type(waiter) == "table"
+    and (tonumber(waiter.deploy_wait_due) or (tonumber(waiter.deploy_waiting) == 1 and tonumber(waiter.deferred) or nil))
+    or 0
+  return {
+    last_tick = tick,
+    due = tonumber(due and due.n) or 0,
+    dispatchable = tonumber(live and live.n) or 0,
+    held_due = tonumber(held and held.n) or 0,
+    -- ALWAYS A NUMBER, 0 when nothing is due: a reader cannot tell "nothing is due" from "the field is not
+    -- there", and the rule treats a missing field as unknown (a red).
+    oldest_dispatchable_age_s = oldest and math.max(0, math.floor(now - oldest)) or 0,
+    last_dispatch_at = tonumber(dispatched and dispatched.at or 0) or nil,
+    first_tick_at = first_tick,
+    ticking_for_s = ticking_for or 0,
+    ticks_since_start = tonumber(WAKE_TICKS_SINCE_START) or 0,
+    deploy_waiting = tonumber(deploy_held) or 0,
+    now = now,
+  }
+end
+
 -- The scheduler's tick, called from the node's placement thread (`wa_orchestrator_tick`).
 --
 -- `opts.dispatch(row)` returns a receipt: `{accepted=true}` (the run scheduler will call back),
 -- `{not_started=true, error=...}` (put it back, retry later) or `{error=...}` (an ambiguous outcome:
 -- never replayed). Tests inject one; the node uses `enqueue_completion`.
 function M.tick(opts)
-  M.setup()
   opts = opts or {}
   local now = clock(opts)
+  -- BEFORE SETUP, so the count is the process's own even when setup is what raises: a tick that cannot get as far
+  -- as its claim loop is exactly the one the facts must name (the 24/11 stall raised in setup's shadow).
+  M.note_tick(now)
+  M.setup()
   local out = { dispatched = 0, skipped = 0, deferred = 0, unknown = 0, reconciled = 0, paused = 0, deploy_waiting = 0 }
   -- A pause for a deploy is released when the deploy ENDS, not when its bound runs out (deploy_pause). This
   -- runs before the due-row query below, so a row released here is dispatched in the same tick - and it is the

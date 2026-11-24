@@ -19,6 +19,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 PORT="${WA_PORT:-8799}"
+# THE SELF-WAKE RULE (r8c item G, approved 24/11): /health.wakes judged in ONE place, so this checker, the
+# watchdog and upgrade.sh cannot disagree about what a dead loop is. See scripts/lib/health-wakes.sh.
+HAVE_WAKE_RULE=0
+if [ -f "$ROOT/scripts/lib/health-wakes.sh" ]; then
+  . "$ROOT/scripts/lib/health-wakes.sh"
+  HAVE_WAKE_RULE=1
+fi
 if command -v wa_install_target >/dev/null 2>&1; then
   INSTALL_DIR="$(wa_install_target)"
   CONFIG="$(wa_config_dir)"
@@ -265,6 +272,30 @@ record "$(wa_same_dir "$WRITER_CONFIG" "$CONFIG" && echo ok || echo fail)" \
 # 3. the node answers, and the pid answering is the pid the install recorded
 HEALTH="$(curl -s -m 6 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
 record "$([ -n "$HEALTH" ] && echo ok || echo fail)" "the node answers /health on $PORT"
+# 3b. THE NODE'S OWN SELF-WAKE LOOP (r8c item G). MEASURED 24/11: this node delivered ZERO self-wakes for
+# 2.5 hours (15:15Z-17:55Z) and nothing said so - /health answered, and the loopback canary stayed green the
+# whole time because it runs a CHILD node with a fresh ledger. An install is judged on the node's OWN state
+# here, one FAIL line per red, by name: the tick raised, the publisher stopped, a due row nobody can dispatch
+# is older than 120 s with no turn running, or the node cannot say what its wake state is (UNKNOWN IS NOT YES).
+#
+# WAIT, THEN JUDGE (Fable 24/11): this check runs at the moment the node has JUST started, when rows that came
+# due during the install are minutes old and the first tick has not published yet - so the verdict WAITING (no
+# tick yet) is not a red. The reader polls /health up to WA_WAKES_WAIT_SECONDS (default 30 s, sized against the
+# placement tick's own 2 s interval in rust/wa-capabilities/src/serve.rs: fifteen ticks, because a first tick on a
+# loaded node with a large ledger can take much longer than a scratch node's) and only what it finds after that
+# bound is judged; a node that never publishes is a FAILURE, not a pass.
+if [ "$HAVE_WAKE_RULE" = "0" ]; then
+  record fail "the self-wake loop" "scripts/lib/health-wakes.sh is missing from this tree"
+elif [ -z "$HEALTH" ]; then
+  record skip "the self-wake loop" "the node did not answer /health"
+else
+  WAKE_LINES="$(wa_health_wakes_wait "$PORT" "${WA_WAKES_WAIT_SECONDS:-30}")"; WAKE_RC=$?
+  case "$WAKE_RC" in
+    0) record ok "the self-wake loop" "$WAKE_LINES" ;;
+    1) while IFS= read -r wake_line; do [ -n "$wake_line" ] && record fail "the self-wake loop" "$wake_line"; done <<< "$WAKE_LINES" ;;
+    *) record fail "the self-wake loop" "$WAKE_LINES" ;;
+  esac
+fi
 SERVE_PID="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
 if command -v powershell.exe >/dev/null 2>&1; then
   LISTENER="$(powershell.exe -NoProfile -Command "Get-NetTCPConnection -State Listen -LocalPort $PORT -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { \$_.OwningProcess }" 2>/dev/null | tr -d '\r')"

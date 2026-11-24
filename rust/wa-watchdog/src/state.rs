@@ -252,6 +252,10 @@ pub struct Status {
     pub last_swap: Option<SwapSummary>,
     /// `false` while `run` has not written a status at all (a fresh home).
     pub supervisor_alive: bool,
+    /// The node's own self-wake loop, as the last probe judged it (r8c item G): "GREEN wakes: ...", every
+    /// "RED <name>: <detail>", or "UNKNOWN wakes: ..." when the node cannot say. Empty when no probe has run.
+    /// It is a FACT in the record and never a reason to restart or roll back - see health::Wakes.
+    pub wakes: String,
 }
 
 impl Status {
@@ -284,6 +288,7 @@ impl Status {
                 Some(swap) => json::Json::Raw(swap.to_json()),
                 None => json::Json::Null,
             }),
+            ("wakes", self.wakes.as_str().into()),
         ])
     }
 
@@ -319,6 +324,12 @@ impl Status {
         if !self.supervisor_alive {
             line.push_str("; no supervisor status has been written yet");
         }
+        // The node's own self-wake loop, when a probe has judged it: the one line that would have said
+        // "selfloop_tick_failed" on 24/11, when /health answered ok for 2.5 hours while nothing was dispatched.
+        if !self.wakes.is_empty() {
+            line.push_str("; ");
+            line.push_str(&self.wakes);
+        }
         line
     }
 
@@ -330,6 +341,7 @@ impl Status {
             kernel_pid: json::field_u64(text, "kernel_pid").map(|pid| pid as u32),
             kernel: json::field_str(text, "kernel").map(PathBuf::from),
             sha256: json::field_str(text, "sha256"),
+            wakes: json::field_str(text, "wakes").unwrap_or_default(),
             port: json::field_u64(text, "port")? as u16,
             restarts: json::field_u64(text, "restarts").unwrap_or(0),
             attempt: json::field_u64(text, "attempt").unwrap_or(0) as u32,
@@ -448,6 +460,9 @@ mod tests {
             attempt: 0,
             updated_ms: 1_700_000_000_000,
             last_exit: Some(LastExit { pid: 40, code: Some(1), uptime_ms: 250, at_ms: 1_699_999_999_000 }),
+            // The node's own loop as a probe judged it: it must survive the round trip like any other fact, so
+            // `status` keeps saying it after a restart of THIS process.
+            wakes: "RED selfloop_tick_failed: no such column: run_id".to_string(),
             last_swap: Some(SwapSummary {
                 id: "swap-7".into(),
                 ok: false,
@@ -463,5 +478,10 @@ mod tests {
         assert_eq!(parsed, status);
         assert!(status.summary().contains("restarts 3"), "{}", status.summary());
         assert!(status.summary().contains("rolled back"), "{}", status.summary());
+        // The node's own loop reaches the line an operator reads (r8c item G): `wa-watchdog status` must say it
+        // without a --json flag, because that is what somebody runs when a node looks alive and does nothing.
+        assert!(status.summary().contains("RED selfloop_tick_failed: no such column: run_id"), "{}", status.summary());
+        let quiet = Status { wakes: String::new(), ..status };
+        assert!(!quiet.summary().ends_with("; "), "a status with no probe does not print an empty fact: {}", quiet.summary());
     }
 }

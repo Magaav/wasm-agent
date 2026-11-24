@@ -120,6 +120,17 @@ pub fn display_label(label: &str) -> String {
     }
 }
 
+/// Two ids that name the same commit: equal, or one a prefix of the other (both at least seven hex).
+/// The records carry whatever the writer had - `git rev-parse --short` (7-8), the twelve `ship.sh`
+/// printed, or a full 40 - so equality alone would call one commit two.
+fn same_commit(left: &str, right: &str) -> bool {
+    let clean = |value: &str| value.trim().to_ascii_lowercase();
+    let (a, b) = (clean(left), clean(right));
+    let looks_like_commit = |value: &str| value.len() >= 7 && value.chars().all(|c| c.is_ascii_hexdigit());
+    if !looks_like_commit(&a) || !looks_like_commit(&b) { return false; }
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
 pub fn install_label(state: &std::path::Path, install: &std::path::Path, node_name: &str, node_id: &str) -> String {
     let base = label();
     let field = |path: &std::path::Path, key: &str| -> Option<String> {
@@ -136,10 +147,32 @@ pub fn install_label(state: &std::path::Path, install: &std::path::Path, node_na
         .or_else(|| field(&install.join("installed.txt"), "release"));
     let pin = std::fs::read_to_string(state.join("pins.txt")).ok()
         .and_then(|text| active_pin_for(&text, node_name, node_id));
-    match (released, pin) {
+    // WHAT THIS INSTALL RUNS, WHEN IT IS NOT WHAT THESE BYTES ARE (Fable, 24/11).
+    //
+    // MEASURED on this node after a scripts-only landing: installed.txt said `commit=fe108a8c` (the LUA TREE
+    // that deploy installed - scripts/deploy.sh, 21/11) while `wa --version` and /health said `v9a0c589a`,
+    // the binary's compile-time commit, because the fast path keeps the older binary beside the newer tree.
+    // The one command Victor is told to check named a commit that does not hold what he runs. So when the
+    // record's commit is not these bytes' own, the label names BOTH: the bytes first (they are what is
+    // executing), then the tree this install put beside them.
+    //
+    // AND THE ONE FIELD THAT SAYS SO IS `lua_tree=`, not `commit=`. MEASURED shapes of the record
+    // (`scripts/deploy.sh`): a Lua fast-path deploy writes `commit=` = the TREE and `lua_tree=` = the tree;
+    // a prebuilt deploy writes `commit=` = the BINARY and `lua_tree=` = the tree it installed beside it; a
+    // release install (the bootstrap) writes no `lua_tree=` at all. So "the tree is not the bytes" is
+    // exactly `lua_tree=` present and different - read from `commit=` instead, an ordinary release record
+    // (whose `commit=` names the release's source, not these bytes) grew a tree half it does not have, and
+    // `scripts/test-version-prints-once.sh` says so by name.
+    let tree = field(&install.join("installed.txt"), "lua_tree")
+        .filter(|value| value != "unknown" && !COMMIT.is_empty() && !same_commit(value, COMMIT));
+    let label = match (released, pin) {
         (_, Some(commit)) => format!("{} (pinned)", &commit[..commit.len().min(8)]),
         (Some(release), None) => release,
         (None, None) => base,
+    };
+    match tree {
+        Some(tree) => format!("{label} \u{00b7} tree {}", &tree[..tree.len().min(12)]),
+        None => label,
     }
 }
 
@@ -294,6 +327,44 @@ mod tests {
             assert!(document.lines().any(|line| line.starts_with(key)), "missing {key} in:\n{document}");
         }
         assert!(document.ends_with('\n'), "the document is line-oriented");
+    }
+
+    /// A SCRIPTS-ONLY INSTALL NAMES BOTH. MEASURED on this node, 24/11: installed.txt said
+    /// `commit=fe108a8c` (the Lua tree the deploy installed) while `wa --version` and /health said
+    /// `v9a0c589a`, the binary's compile-time commit - the fast path keeps the older binary beside the
+    /// newer tree. The label names the bytes AND the tree when they differ, and nothing extra when they
+    /// are one commit in two spellings.
+    #[test]
+    fn install_label_names_the_tree_when_the_bytes_are_older() {
+        let root = std::env::temp_dir().join(format!("wa-build-info-label-{}", std::process::id()));
+        let install = root.join("install");
+        let state = root.join("state");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let tree = "fe108a8c9d1e0b2a3c4d5e6f708192a3b4c5d6e7";
+        std::fs::write(install.join("installed.txt"),
+            format!("commit={tree}\nlua_tree={tree}\nlua_fast_path=1\n")).unwrap();
+        if COMMIT.is_empty() || COMMIT == "unknown" {
+            // A build that cannot name a commit must not invent one, and it has nothing to compare.
+            assert_eq!(install_label(&state, &install, "", ""), "unknown build");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let label = install_label(&state, &install, "", "");
+        assert!(label.contains(&format!("tree {}", &tree[..12])), "the label names the tree the install runs: {label}");
+        assert!(label.contains(&COMMIT[..COMMIT.len().min(8)]), "and it still names the bytes: {label}");
+        // The SAME commit, spelled short: one commit is not two.
+        std::fs::write(install.join("installed.txt"),
+            format!("commit={}\n", &COMMIT[..COMMIT.len().min(7)])).unwrap();
+        let same = install_label(&state, &install, "", "");
+        assert!(!same.contains("tree "), "a record naming these bytes adds no tree: {same}");
+        // A record that names nothing, or says unknown, adds nothing either.
+        std::fs::write(install.join("installed.txt"), "commit=unknown\n").unwrap();
+        assert!(!install_label(&state, &install, "", "").contains("tree "));
+        std::fs::write(install.join("installed.txt"), "").unwrap();
+        assert!(!install_label(&state, &install, "", "").contains("tree "));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A build with no git and no stamp says unknown rather than inventing an identity.
