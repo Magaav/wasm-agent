@@ -1623,3 +1623,43 @@ own line with the queue's receipt, which names the gap on the first repeat. I am
 
 **Texts to approve (r7):** the two new lines above - `selfloop: dispatched wake <id> of session <id> (reason …):
 <receipt>` and `selfloop: wake <id> of session <id> did NOT run: <why> (row back to pending, retried)`.
+
+### r8: the completion path after a fresh boot - the links, and the one that can park silently (24/11 ~05:30Z)
+
+**What the orchestrator's journal shows** (04:37:03Z boot, `wa-serve.service` PID 755496): not one self_wake delivered;
+the 04:37:08 claims still `dispatching` 35 min later; the journal carries no line from the scheduler, the node-thread or
+`wa_completion_run`. So the item was **accepted and parked** - a link answered "yes" and then nothing read it.
+
+**(a) The links, and what each one writes today** (`rust/wa-capabilities/src/serve.rs`):
+
+| # | link | line | logs? |
+| 1 | `host.enqueue_completion` (Lua host fn) | `serve.rs:1777` -> `serve::enqueue_completion` | **no** (r7 added the caller's line in Lua) |
+| 2 | scheduler admission | `scheduler::admit(session, owner, Background, pick_run_node_thread)` | **was no** - now **yes** (r8) |
+| 3 | node-thread choice | `serve.rs:756` `pick_run_node_thread`, falls through to `spawn_node_thread` on an empty pool | no |
+| 4 | slot spawn | `serve.rs:637` `spawn_node_thread` - reserves `slots[index]`, builds an interpreter | **was no** for the reservation - now **yes** (r8) |
+| 5 | delivery | `Work::Completion` in the node-thread loop -> `lua.call_string("wa_completion_run")` | logged only if the script raises |
+
+The link that can park an item **silently after a restart** is **3 -> 4**: `pick_run_node_thread` (L756) prefers a
+*live* id from `live_node_thread_ids()`; when none is live it grows the pool and returns the new slot's index
+(L784-790) **without any line saying a slot was reserved**, and from then on the item is counted admitted. If that
+slot's thread is not yet in its loop - the spawn happens behind an interpreter build, and the boot line itself reads
+`reads: 0 warm, up to 4, spawned on demand` (`serve.rs:2433`) - the item waits in a channel no thread drains: no run,
+no journal line, row `dispatching` for ever. That is exactly the measured shape, and it was invisible.
+
+**(b) Done:** three new lines, each at the decision rather than near it:
+* `[completion] admitted run <id> of session <id> to node-thread <n>` / `... BEHIND, node-thread <n>` /
+  `[completion] refused for session <id>: <reason>` - `scheduler::admit`'s answer is now matched and named;
+* `[spawn] run node-thread requested (min <i>, max <j>)`, `[spawn] run node-thread at slot <n>`,
+  `[spawn] refused: no free slot between <i> and <j>` - at the spawn, so a slot without a thread is named.
+With r7's Lua line (`selfloop: dispatched wake <id> …: <receipt>`), the next repeat will say which link took the item
+and whether a thread was there to read it.
+
+**NOT done, carried by name:** (c) the boot test that enqueues a completion right after startup and asserts a run or a
+logged refusal - it needs a spawned `serve` path, and an assertion written without it would be a claim rather than a
+test; (d) narrowing the reclaim's activity check to the wake's **own** run - the row carries no run id today, so a
+column (or a link table) comes first, then the check; (B) the abandoned-resume line (`resume_abandoned` -> one visible,
+model-free line on opening the session, counted by `wa-sentinel status` and `wa status`) - the queued red-r7-add, not
+started.
+
+**Rows after r8:** build `exit=0` (34.95s); `test-deploy-resume.lua` 25, `test-selfloop-pause.lua` 169 (re-run against
+the rebuilt binary).

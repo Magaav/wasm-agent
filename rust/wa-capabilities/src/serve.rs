@@ -639,12 +639,18 @@ fn spawn_node_thread(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>,
     // `min_index`/`max_index` keep a spawned node-thread inside its lane. Background work starts at the
     // interactive reserve, and run node-threads stop below the control floor; gaps are `None`, which is
     // exactly what an unused slot is.
+    // A SLOT IS NOT A THREAD (r8, 24/11): the completion path hands its `Work::Completion` to `slots[index]` and counts
+    // it admitted. If the slot exists but no thread is reading it, the item waits for ever and nothing says so - the
+    // shape measured after the 04:37:03Z boot. This line names the spawn; the interpreter build's own line follows it.
+    eprintln!("[spawn] run node-thread requested (min {min_index}, max {max_index})");
     let index = (min_index..slots.len().min(max_index + 1))
         .find(|index| slots[*index].is_none())
         .unwrap_or_else(|| slots.len().max(min_index));
     if index > max_index {
+        eprintln!("[spawn] refused: no free slot between {min_index} and {max_index}");
         return None;
     }
+    eprintln!("[spawn] run node-thread at slot {index}");
     // Building an interpreter opens the database (`expect` on failure) on the accept thread; a full disk or
     // a permissions change then took the whole node down. A failed build is now one refused request (503,
     // the caller retries) and a log line, and the next spawn tries again. On the component core the same
@@ -3797,7 +3803,20 @@ pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
     if session.is_empty() || owner.is_empty() || POOL.get().is_none() {
         return serde_json::json!({"error":"completion_runtime_unavailable","not_started":true});
     }
-    match scheduler::admit(session,owner,scheduler::RunClass::Background,pick_run_node_thread) {
+    let admitted = scheduler::admit(session,owner,scheduler::RunClass::Background,pick_run_node_thread);
+    // NAMED, EVERY TIME (r8, 24/11). MEASURED on the live node: after the boot at 04:37:03Z not one self_wake was ever
+    // delivered - the claims were accepted (`dispatching`, attempts 1) and the journal said nothing at all about them,
+    // so the link that dropped the item could not be identified. This is that link's own line: what was admitted, to
+    // which node-thread, and the refusal by name when there was one.
+    match &admitted {
+        scheduler::Decision::Run { node_thread, run_id, .. } =>
+            eprintln!("[completion] admitted run {run_id} of session {session} to node-thread {node_thread}"),
+        scheduler::Decision::Behind { node_thread, run_id, .. } =>
+            eprintln!("[completion] admitted run {run_id} of session {session} BEHIND, node-thread {node_thread}"),
+        scheduler::Decision::Refused(reason) =>
+            eprintln!("[completion] refused for session {session}: {}", reason.as_error().0),
+    }
+    match admitted {
         scheduler::Decision::Run {run_id,node_thread,cancel,sockets}
         | scheduler::Decision::Behind {run_id,node_thread,cancel,sockets} => {
             let recorded=scheduler::global().is_some_and(|s| s.record_request(run_id,body).is_ok());
