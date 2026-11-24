@@ -662,21 +662,6 @@ impl Transcript {
         }
     }
 
-    /// The content row the next frame will show first, as far as it can be known BEFORE it is drawn:
-    /// the bottom-anchored arithmetic while the view follows the output (which is nearly always,
-    /// during a run), the frozen position while it does not. `None` = only the frame itself knows
-    /// (a focus, a page step, a freeze that has not landed yet).
-    fn expected_first(&mut self, width: usize, rows: usize) -> Option<isize> {
-        if self.focus.is_some() || self.nav || self.page_delta != 0 || (self.freeze && self.top.is_none()) {
-            return None;
-        }
-        let total = self.total_rows(self.text_width(width)) as isize;
-        match self.top {
-            None => Some(total - rows as isize),
-            Some(top) => Some(top),
-        }
-    }
-
     /// The pill when the window is too narrow for `pill_text`: the count and the key, without the
     /// words that name the action (the key IS the action). Never a clipped key.
     fn pill_compact(key: &str, new_lines: usize) -> String {
@@ -687,6 +672,15 @@ impl Transcript {
             (n, true) => format!("\u{2193} {n} more line{} \u{2193}", if n == 1 { "" } else { "s" }),
             (n, false) => format!("\u{2193} {n} more line{} \u{b7} {key} \u{2193}", if n == 1 { "" } else { "s" }),
         }
+    }
+
+    /// The row the pinned request is measured against: the last frame's, or - on the very first
+    /// frame, when nothing has been drawn yet - the bottom-anchored arithmetic that frame is about to
+    /// use. The second case is used once; from then on the drawn frame is the only source, which is
+    /// what keeps the row from flipping.
+    fn pin_first(&mut self, width: usize, rows: usize) -> isize {
+        if self.first_row != isize::MAX { return self.first_row }
+        self.total_rows(self.text_width(width)) as isize - rows as isize
     }
 
     /// The reader's own request that sits entirely ABOVE the row `first`: the LAST such block, so
@@ -974,27 +968,40 @@ impl Transcript {
     /// chat is that much shorter, and every row below them keeps its own place in the chat.
     pub fn view_at(&mut self, width: usize, height: usize, now: std::time::Instant) -> Vec<String> {
         let (width, height) = (width.max(1), height.max(1));
-        let mut top: Vec<String> = Vec::new();
-        let has_notice = self.notice_line(width, now);
-        if let Some(row) = has_notice.clone() { top.push(row); }
-        // One row of the region always stays the chat's, however short the window is.
-        let mut has_pin = false;
-        if height > top.len() + 1 {
-            let first = self.expected_first(width, height - top.len()).unwrap_or(self.first_row);
-            if let Some(index) = self.pinned_block(width, first) {
+        let notice_row = self.notice_line(width, now);
+        let notice_rows = usize::from(notice_row.is_some());
+        // The chat is drawn first, with whatever the notice row takes; the pin is then decided from
+        // the rows that pass ACTUALLY drew (`first_row`), not from this frame's height. A decision
+        // that depended on the height would flip as soon as the row it reserves changed the height it
+        // was measured at, and every flip moves the whole chat by one row (measured: a press on a
+        // fence's copy icon landed on a row whose icon had just moved).
+        // The rows the last frame gave the pin: the first pass is drawn with them, so a frame that
+        // keeps its rows is painted once.
+        let expected = self.pin_shown;
+        let mut reserved = notice_rows + usize::from(expected);
+        let mut shown = self.paint(width, height.saturating_sub(reserved).max(1), reserved);
+        let rows = height.saturating_sub(reserved).max(1);
+        let pin = if rows >= 2 {
+            let first = self.pin_first(width, rows);
+            self.pinned_block(width, first)
                 // Clipped with an ellipsis, one row, never wider than the window (a very long or
                 // multi-line request is one row of the reader's own words).
-                top.push(clip_row(&self.pin_line(index), width));
-                has_pin = true;
-            }
+                .map(|index| clip_row(&self.pin_line(index), width))
+        } else { None };
+        // A frame that keeps the rows it had paints ONCE: the second pass is only for the frame in
+        // which the pinned row appears or goes, and that is a change of state, not a per-frame cost.
+        if pin.is_some() != expected {
+            reserved = notice_rows + usize::from(pin.is_some());
+            shown = self.paint(width, height.saturating_sub(reserved).max(1), reserved);
         }
+        let mut top: Vec<String> = Vec::new();
+        if let Some(row) = notice_row { top.push(row); }
+        if let Some(row) = pin { top.push(row); }
         top.truncate(height.saturating_sub(1).min(top.len()));
         let reserved = top.len();
         self.reserved = reserved;
-        self.notice_shown = has_notice.is_some() && reserved >= 1;
-        self.pin_shown = has_pin && reserved >= 1 + usize::from(self.notice_shown);
-        let rows = height - reserved;
-        let mut shown = self.paint(width, rows, reserved);
+        self.notice_shown = reserved >= 1 && notice_rows == 1;
+        self.pin_shown = reserved >= 1 + usize::from(self.notice_shown);
         // The way back: the reader is not following the newest output, so a pill says so on the
         // region's last row and answers a press and the key. It never reaches the row below it.
         self.pill_row = None;
@@ -3001,10 +3008,18 @@ mod tests {
     /// The band a pinned row wears: the reader's own turn's grey, never the notice's accent.
     fn is_pin(row: &str) -> bool { row.contains(PIN_BAND) }
 
+    /// Two frames. The pinned request is decided from the LAST DRAWN frame (`Transcript::view_at`,
+    /// which is what keeps it from flipping with the height of the row it reserves), so a test that
+    /// wants the settled picture draws once to establish where the view is and once to read it.
+    fn settled(t: &mut Transcript, width: usize, height: usize) -> Vec<String> {
+        let _ = t.view(width, height);
+        t.view(width, height)
+    }
+
     #[test]
     fn the_request_above_the_viewport_is_pinned_on_the_top_row() {
         let mut t = two_turns();
-        let view = t.view(40, 8);
+        let view = settled(&mut t, 40, 8);
         assert_eq!(view.len(), 8, "the region keeps every row it was given: {view:?}");
         assert!(is_pin(&view[0]) && view[0].contains("second question"),
             "the top row is the last request, on its band: {view:?}");
@@ -3025,8 +3040,8 @@ mod tests {
         plain_t.block(false); for n in 0..12 { plain_t.write(&format!("answer one {n}\n")); }
         plain_t.block(false); plain_t.write("\u{276f} second question\n\n");
         plain_t.block(false); for n in 0..12 { plain_t.write(&format!("answer two {n}\n")); }
-        let pinned = marked.view(40, 8);
-        let free = plain_t.view(40, 8);
+        let pinned = settled(&mut marked, 40, 8);
+        let free = settled(&mut plain_t, 40, 8);
         assert!(is_pin(&pinned[0]), "the marked chat pins: {pinned:?}");
         assert!(!free.iter().any(|row| is_pin(row)), "an unmarked chat pins nothing: {free:?}");
         assert_eq!(pinned[1..].to_vec(), free[1..].to_vec(),
@@ -3066,7 +3081,7 @@ mod tests {
         t.block(false);
         t.write_marked(&format!("\u{276f} {}\n\n", "\u{4f60}\u{597d}\u{4e16}\u{754c}".repeat(20)), true);
         t.block(false); for n in 0..30 { t.write(&format!("answer {n}\n")); }
-        let view = t.view(40, 8);
+        let view = settled(&mut t, 40, 8);
         assert!(is_pin(&view[0]), "{view:?}");
         assert!(visible(&view[0]) <= 40, "the row never overflows its window: {view:?}");
         assert!(view[0].contains("\u{2026}"), "and says so with an ellipsis: {view:?}");
@@ -3078,6 +3093,7 @@ mod tests {
         let mut t = two_turns();
         let now = std::time::Instant::now();
         assert!(t.notice("Copied 12 characters", now, false), "a copy says so on the notice row");
+        let _ = t.view_at(40, 8, now);
         let view = t.view_at(40, 8, now);
         assert!(view[0].contains("Copied 12 characters") && !is_pin(&view[0]),
             "the notice is the top row, and not on the band: {view:?}");
@@ -3150,11 +3166,11 @@ mod tests {
     #[test]
     fn a_press_on_the_pinned_request_scrolls_to_it() {
         let mut t = two_turns();
-        let view = t.view(40, 8);
+        let view = settled(&mut t, 40, 8);
         assert!(t.on_pin(1), "the pinned row answers a press: {view:?}");
         assert!(!t.on_pin(2), "and only that row does");
         assert!(t.jump_to_pinned(40), "the press scrolls to the request it stands for");
-        let jumped = t.view(40, 8);
+        let jumped = settled(&mut t, 40, 8);
         assert!(jumped.iter().any(|row| row.contains("second question") && !is_pin(row)),
             "the request itself is on screen now, as a chat row: {jumped:?}");
         // What is above the viewport now is the turn BEFORE it, and that is what the pin names -
@@ -3177,7 +3193,7 @@ mod tests {
         assert!(blocks >= 2 && !t.blocks[1].request, "the answer is a block of its own: {blocks} blocks");
         assert!(t.blocks[1].lines.iter().any(|line| line.contains("answer 3")), "{:?}", t.blocks[1].lines);
         // And the view pins it once the answer has pushed it off the top.
-        let view = t.view(40, 4);
+        let view = settled(&mut t, 40, 4);
         assert!(view[0].contains(PIN_BAND) && view[0].contains("a question"), "{view:?}");
     }
 

@@ -336,3 +336,251 @@ call's own arguments unchanged — 1060 checks in that row, green.
 
 (§11's table above was measured before this fix; §13 supersedes its "open blocker" line.)
 
+
+## 14. STEP 1 (23/11 ~20:05Z): the check is REPORT-ONLY on main
+
+The refusal was too sharp for the tree it landed in: real call sites send fields their own schemas never
+declared (the pending path's `operation`, the `wake` tool's `now`, the managed-list gate, `searchTools`), so
+main went red in fifteen rows. STEP 1 turns the same check into a measurement, in one small commit:
+
+* `lua/core/tool_arguments.lua`: `M.undeclared(name, args, parameters)` is the rule (names only, the two
+  allow-lists unchanged); `M.refusal(...)` now RECORDS and answers `nil` always, so the call runs exactly as
+  it did before `86399e56` - an undeclared field is ignored, as it always was. Nothing else changed:
+  `bash.stdin`, `grep.context`, the `node=` routing and `peer_field_unsupported` are untouched.
+* The record is ONE telemetry event per distinct tool+field, for the life of the process (a chatty caller
+  costs one row, not one per call), carrying **names only - never a value**, because a value can be a secret
+  or a whole file. The caller is classified from the CONTEXT (`peer_call` → peer, `codemode_nested` /
+  `subagent` → internal, otherwise model), never from the arguments.
+
+`scripts/test-tool-arguments.lua` rewritten for the new contract (32 checks, green): an undeclared field does
+not refuse and the command really runs; the event is recorded once and a repeat adds nothing; peer and
+internal calls are classified from the context; `budget_ms` and `file_path` are never reported; an open
+schema, a no-argument tool and an unreadable schema each answer correctly.
+
+### Texts to approve (STEP 1)
+
+11. The telemetry event (names only, no values):
+
+    > kind: `tool_arguments`, phase: `undeclared`
+    > payload: `{"tool":"<tool name>","field":"<the undeclared field>","fields":["<every undeclared name on that one call>"],"caller":"model|internal|peer"}`
+
+    Recorded once per distinct tool+field per process. No argument value, no path, no text ever travels in it.
+
+
+### The 21 rows, run singly on this tree (scratch home, the tree's own binary)
+
+| row | verdict | note |
+|---|---|---|
+| test-codemode-default | **ok** | was red with `unknown_argument:path` |
+| test-efficiency | **ok (119 checks)** | was red with `unknown_argument:...` |
+| test-orchestration-mode | **ok (77 checks)** | was red with `unknown_argument:route` |
+| test-remote-pending | **ok (90 checks)** | |
+| test-selfloop | **ok** | was red with `unknown_argument:now` (the wake tool's clock seam) |
+| test-session-watch | **ok (107 checks)** | was red with `unknown_argument:control` |
+| test-tool-arguments | **ok (32 checks)** | rewritten for the report-only contract |
+| test-turn-signal | **ok (152 checks, 0 failed)** | |
+| test-file-tool-node | **ok (36 checks)** | was 4 red: the routed `grep` case sent `context` to a fixture peer with no catalogue, so the MIXED-FLEET refusal fired (correctly); the case no longer sends it, and that refusal stays covered by `test-remote-field-support` |
+| test-remote-field-support | **ok (13 checks)** | |
+| test-remote-edit | **ok (46 checks)** | |
+| test-federation | **ok (49 checks)** | |
+| test-tool-args-parity | **ok (1060 checks)** | |
+| test-bash-stdin | **ok (11 checks)** | |
+| test-grep-context | **ok (14 checks)** | |
+| test-graph-automatic | SKIP | `WA_COMPONENTS_DIR` unset: the row names its own hole and does not claim a pass |
+| test-cli-flow | RED (1 of 14: "exactly one blank line under it") | CLI spacing; not the validator (report-only now records nothing for it) - to classify in STEP 2 |
+| test-raw-view-stream | RED (3 of 19) | to classify in STEP 2 |
+| test-remote-call-shape | RED (`mis-nested remote call now succeeds via hoisting`, line 76) | **mine**: the `remote` schema now declares `additionalProperties: true`, and `tool_call`'s hoisting path reaches `remote` with a shape that used to be refused; STEP 2 |
+| test-run-live | RED (2 checks) | to classify in STEP 2 |
+| esc-stops-pty / test-land-until | not re-run singly | a pty row and a landing row; they need their own harness (fast.sh sets it) and were red on main for reasons of their own |
+
+Fifteen of the fifteen rows the orchestrator named that carried `unknown_argument` are green again with the
+check report-only; the four still red are named above with what is known about each.
+
+
+## 15. STEP 2 (23/11 ~20:30Z): the switch, the walker, and where it stands
+
+**What shipped in this commit.**
+
+1. **One enforcement switch** (`lua/core/tool_arguments.lua`, `M.ENFORCE`). `'model'` refuses an undeclared
+   field again for a call the MODEL sent and only records for internal and peer callers; `'off'` is STEP 1
+   (record, refuse nothing). It SHIPS `'off'`, with the reason in the code: STEP 2's field work is not
+   finished, and turning it on today would re-red the rows whose callers still send an undeclared field. The
+   flip is one line, so G can ship model-door enforcement the moment the full main-health is green with it.
+   The 24 h rule is measured, not promised: internal and peer callers come under enforcement only when this
+   node's telemetry holds no `tool_arguments` event with `caller: internal|peer` in the last 24 h. While
+   enforcement is `'off'` every call records, so that measurement is always running.
+2. **The walker** (`scripts/test-tool-args-walker.lua`): reads every `lua/core/*.lua`, finds each
+   `tools.dispatch` / `M.dispatch` / `wa_peer_dispatch` call whose target is a STRING LITERAL and whose
+   arguments are a table literal, and judges every top-level key against `tools.parameters` plus the two
+   allow-lists. Measured on this tree: **180 files, 20 call sites, 47 keys judged, 0 undeclared**; 6 call
+   sites carry a literal that spans lines and are SKIPPED AND COUNTED, not guessed at (the first version
+   tried to brace-match a multi-line table and read a much later table - 150 false findings from one call
+   site, which is why the rule is one line only).
+3. **The event shape** is unchanged from STEP 1 (§14, item 11).
+
+**The field table, as far as it is measured.** The walker's verdict on literal internal call sites is "none
+undeclared". The offenders the red rows named are all calls with a name or an arguments table built at run
+time (the code-mode `searchTools` path, the pending layer's resume, `wake{now}`, the managed-list gate), so
+the walker counts them as unresolved rather than guessing. Declaring or stopping each one is the remaining
+work of STEP 2, and this commit does not claim it.
+
+**Two reds I was told to fix and did NOT.**
+
+* `scripts/test-codemode-default.lua:20` - **not fixed, classified**: the row drives the scripted model
+  through `searchTools`, and the failing attempt is
+  `{"admitted":false,"arguments":{"bytes":28,"path":"…/.wasm-agent/tool-results/<sha>.txt","sha256":"…"},"id":1,"name":"searchTools","ok":true,...}`
+  - a TOOL-RESULT reference (`bytes/path/sha256`) offered as `searchTools` arguments. That shape is not this
+  mission's: no field of `searchTools` was added or removed here, and the check is report-only now, so this
+  row's red does not come from an `unknown_argument` refusal. It needs its own reading against
+  `lua/core/codemode.lua`'s discovery entry.
+* `scripts/test-remote-call-shape.lua:76` ("mis-nested remote call now succeeds via hoisting") - **not
+  fixed, mine**: `remote`'s schema gained `additionalProperties: true` so the argument validator stops
+  guessing which capability's parameters it carries, and the `tool_call` hoisting path now reaches `remote`
+  with a shape that used to be refused. The next step is in `lua/core/routed_calls.lua`'s hoist, not in the
+  schema.
+
+**Rows run singly on this tree (all after the switch was set to 'off')**
+
+| row | verdict |
+|---|---|
+| test-tool-arguments | 32 checks, 0 failed |
+| test-tool-args-walker | 4 checks, 0 failed (180 files, 20 call sites) |
+| test-file-tool-node | 36 checks, 0 failed |
+| test-bash-stdin | 11 checks, 0 failed |
+| test-grep-context | 14 checks, 0 failed |
+| test-remote-field-support | 13 checks, 0 failed |
+| test-tool-args-parity | 1060 checks, 0 failed |
+| test-remote-pending | ok, 90 checks |
+| test-remote-edit | ok, 46 checks |
+| test-federation | ok, 49 checks |
+| test-selfloop | ok, 114 checks (1 skipped) |
+| test-session-watch | ok, 107 checks |
+| test-efficiency | ok, 119 checks |
+| test-orchestration-mode | ok, 77 checks |
+| test-codemode-default | **RED** (see above) |
+| test-turn-signal | no verdict line captured in this batch (its row prints `turn-signal: N checks, M failed`; not re-run) |
+
+
+## 16. STEP 2, second pass (23/11 ~20:35Z): what is fixed, what is diagnosed, what is not done
+
+**Fixed in this commit.**
+
+* `scripts/test-edit-aliases.lua:37` - **the test, not the code.** With the check report-only again the
+  handler's own refusal answers a typo option, so the row asserts `unsupported_edit_option` (the code it
+  asserted before the validator existed) instead of `unknown_argument:old_txt`. Verdict after the change:
+  **ok, 34 checks**.
+
+**Verdicts run singly, this tree.**
+
+| row | verdict |
+|---|---|
+| test-edit-aliases | ok, 34 checks (fixed above) |
+| test-turn-signal | ok, 152 checks, 0 failed |
+| test-codemode-default | **RED**, diagnosed below, NOT fixed |
+| test-remote-call-shape | **RED**, diagnosed below, NOT fixed |
+
+**`test-codemode-default.lua:20` — diagnosis, not a fix.** The row's script asks
+`searchTools({query:"read",limit:3})`, `searchTools("*")`, `searchTools("")`, `searchTools({query:"*",limit:1,offset:1})`
+and requires `Array.isArray(a)` to be true. Measured: the helper's answer comes back to the script as a
+STORED REFERENCE, not an array -
+
+```
+{"admitted":false,"arguments":{"bytes":28,"sha256":"bfb6c24b…"},"name":"searchTools","ok":true,
+ "result":{"bytes":2632,"path":"…/.wasm-agent/tool-results/bfb6c24b….txt"}}
+```
+
+- so `Array.isArray(a)` is false and the row fails. The inline/stored decision is taken on the answer's size,
+and this mission's schema additions (the `stdin`/`context`/`node` properties and their clauses, ~1.5 KB across
+the catalogue) push `searchTools`'s listing over that bound - which is why the row is red from the landing
+that added them and not before. The fix belongs in the helper (`searchTools`/'describeTool' answers are the
+model's own discovery surface and must reach a script as the array they are, never as a reference), and I did
+not get to it.
+
+**`test-remote-call-shape.lua:76` — diagnosis, not a fix.** `remote`'s schema gained
+`additionalProperties: true` so the argument validator stops guessing which capability's parameters it carries;
+`tool_call`'s hoisting then reaches `remote` with the mis-nested shape the row expects to be REPAIRED into a
+success. The hoist is in `lua/core/routed_calls.lua`; that is where the fix goes, and I did not get to it.
+
+**The field table - the dynamic call sites (decisions NOT yet made, and that is the open work).**
+
+| site | field | caller | decision |
+|---|---|---|---|
+| `lua/core/agent.lua` (wake tool dispatch) | `now` | internal | declare it on `wake` as an explicit TEST-ONLY seam (a clock), or stop sending it |
+| `lua/core/codemode_pending.lua` (`remote_operation`) | `capability`, `node` | internal | stop sending them: the wire carries the capability's own arguments (already fixed in the row's stand-in; the layer itself was not changed) |
+| managed-list gate (session-watch, `operation` admitted list) | the gate's own field | internal | declare it on `operation` or pass it in the context, never in the arguments |
+| `lua/core/codemode.lua` (`searchTools` discovery entry) | the `{bytes,path,sha256}` shape | internal | not an argument at all: the helper must answer an array (see above) |
+
+**What is NOT done and must not be read as done**: the `tool_arguments` events this node recorded since
+`51b63d9a` were NOT read, so the table above is from the red rows' evidence, not from a census; none of the
+four decisions above has been implemented; enforcement stays `'off'`.
+
+
+## 17. STEP 2, third pass: the two rows the bisect blamed on me
+
+**1. `test-remote-call-shape.lua` — GREEN (89 checks).** Cause, measured: the mis-nested evidence shape
+`{args:{node, capability:"read", path}}` is refused `remote_node_ambiguous`. That refusal is CORRECT and new:
+`read`/`grep`/`write`/`edit`/`ls` declared a `node` argument of their own in this mission, so `node` inside
+`args` really can mean the remote node or the file tool's node. The row was asserting the old outcome (repair
+and run). It now pins BOTH halves of the new contract: the ambiguous shape is refused with the sentence that
+says where to put the remote node, and a mis-nested call whose capability has no `node` of its own
+(ȧbash`) still hoists, runs, and reports the repair - `normalized: "remote: moved capability from args, node
+from args to the top level"`. So the fix is the TEST, and the null: the code's refusal is the honest answer to
+a genuinely ambiguous call.
+
+**2. `test-edit-aliases.lua` — GREEN (34 checks).** With the argument check report-only, the handler's own
+refusal answers a typo option again, so the row asserts `unsupported_edit_option` (the code it asserted before
+the validator existed). The fix is the TEST.
+
+**3. `test-turn-signal.lua` — GREEN, 152 checks, 0 failed** (run singly, scratch home).
+
+**4. `test-codemode-default.lua` — STILL RED, diagnosed, not fixed.** Measured: the script asks
+`searchTools({query:"read",limit:3})` and the helper's answer reaches it as a STORED REFERENCE
+(`{"bytes":2632,"path":"…/tool-results/<sha>.txt"}`), so `Array.isArray(a)` is false. The inline-or-stored
+decision is taken on the answer's size, and this mission's schema additions (≈1.5 KB across the catalogue)
+push `searchTools`'s listing over that bound - which is why the row is red from the landing that added them
+(793d910f) and not before. The fix belongs in the helper: a discovery answer is an ARRAY, and a script must
+never be handed a reference in its place. I did not make that change.
+
+**5. The field table's dynamic sites — decisions still NOT implemented** (unchanged from section 16:
+`wake.now` test-only seam or stop sending; `codemode_pending.remote_operation` stop sending
+`capability`/`node`; the managed-list gate declare-or-context; `searchTools` is not an argument problem at
+all - see 4). I did NOT read the recorded `tool_arguments` events, so no census line is claimed here.
+
+
+## 18. STEP 2, fourth pass: the codemode-default cause, and the rows
+
+**The cause, measured twice.** `searchTools({query:"read",limit:3})` inside a run answered
+`["capture_inspect","client","codemode"]` on my tip AND, identically, on the base `28fb526d` when the probe
+used a full master catalogue - so the ranking of a word search over the whole catalogue was not mine. What WAS
+mine was the word: the `bash` description gained "stdin is the text the command **reads** and then sees
+closed", and a worker profile's smaller catalogue ranks on those words. That clause is now
+"stdin is the text the command takes as its standard input, then closed", and the `node` clauses of
+`read`/`grep`/`write`/`edit`/`ls` no longer borrow another tool's verb either ("answers from that peer",
+"that node's file instead of this one's"). `test-codemode-default` is **GREEN: 39 checks, 0 paid calls**.
+
+So the fix was a TEXT fix in the catalogue, not a code path: a tool's description must not steal the word
+that names another tool, because that word is how a model (and `searchTools`) finds it. The stored-reference
+reading in §16/§17.4 was the wrong hypothesis and is withdrawn.
+
+**Rows run singly on this tree**
+
+| row | verdict |
+|---|---|
+| test-codemode-default | **ok, 39 checks** (was the last G blocker) |
+| test-selfloop | ok, 114 checks (1 skipped) |
+| test-session-watch | ok, 107 checks |
+| test-remote-pending | ok, 90 checks |
+| test-tool-arguments | ok, 32 checks |
+| test-tool-args-walker | ok, 4 checks (180 files, 20 call sites) |
+| test-remote-field-support | ok, 13 checks |
+| test-tool-args-parity | ok, 1060 checks |
+| test-edit-aliases | ok, 34 checks |
+| test-remote-call-shape | ok, 89 checks |
+| test-turn-signal | ok, 152 checks, 0 failed (run singly before this batch; the batch row printed no verdict line of its own) |
+
+**Not done, and not claimed.** The four dynamic call-site decisions of §16 are still unimplemented (`wake.now`
+seam, `codemode_pending.remote_operation` dropping `capability`/`node`, the managed-list gate moving its field
+to the context), and the recorded `tool_arguments` events were not read, so the census is not claimed.
+Enforcement stays `'off'`; model-door enforcement is one line away once those are done and main-health is
+green with it.
+

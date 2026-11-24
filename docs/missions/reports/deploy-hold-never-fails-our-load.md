@@ -324,3 +324,1018 @@ value`); the Rust tests do not compile (`cannot find function wait_notice` / `wa
 13. `still waiting after <N>s on the same holder, unchanged: <the reason>. The request stays in the box; this is a
     notice, not a failure (wa-sentinel request withdraw <id> stops it)` — console and audit `hold-wait-notice`
 14. `WA_DEPLOY_HOLD_NOTICE` — the new knob (default 900 s, `0` turns the notice off)
+
+## Addendum (Fable, 23/11 ~20:50Z): 18 completions "admitted, not started" for finished workers
+
+**Short answer.** The entry `wa-sentinel status` printed is not the `child_completions` row: it is a `PendingRun`
+in the node's own scheduler queue (`rust/wa-capabilities/src/serve.rs`), pushed when a run is admitted to a
+node-thread and removed when that thread STARTS it. Its age (`waited_ms`, which status prints as `13m`) is how
+long it has been in a node thread's channel. So "the worker finished" is not the question: the completion is a
+turn of its SESSION, and the session's node thread had a turn in front of it (the worker's own last turn, or the
+deploy's pause). It is cleared by the node thread that dequeues it, and by nothing else.
+
+**Who admits them.** `scheduler::admit(session, owner, RunClass::Background, pick_run_node_thread)` →
+`Decision::Run`/`Decision::Behind` → `pending_admitted(run_id, session, node_thread, "completion")` —
+`rust/wa-capabilities/src/serve.rs:3789` for a completion (the `"run"` sibling is line 2724). The DB-side
+admission is a different lifecycle: `child_completions.state` (`ready` → `dispatching` → `running`) in
+`lua/core/completions.lua`, dispatched by the node's tick (`lua/core/selfloop.lua`).
+
+**Who releases them.** `pending_started(run_id)` — called by the node-thread loop when it takes the item
+(`serve.rs:2857` for a completion work item, `:2904` for an HTTP run), and by the give-back paths at `:2747`,
+`:2763`, `:2778`, `:2789`, `:2806` when an admission is returned (each paired with `scheduler::complete_run`).
+There is no timeout in `pending_registry`: an entry lives exactly as long as its turn waits. That is the right
+shape while the turn ahead is real work, and it is why 18 of them can be 13 minutes old without anything leaking.
+
+**Measured on a scratch node** (`wa serve`, a stub model, ONE conversation, one 4 s turn ahead of three others;
+the fixture is the one `scripts/test-deploy-wait.sh` uses):
+
+```
+-- sample 1  queue=3 named=3 entries=[{T1,kind=run,ms=1196},{T1,run,1190},{T1,run,1186}]
+-- sample 2  queue=3 named=3 entries=[{T1,run,ms=2489},{T1,run,2486},{T1,run,2483}]
+-- sample 3  queue=3 named=3 entries=[{T1,run,ms=3779},{T1,run,3776},{T1,run,3773}]
+```
+
+Three runs admitted behind one turn, each entry's `waited_ms` growing by exactly the clock, `named` counting all
+three because `/health` names the session of each. (In that scratch run my stub turn never finished, so the queue
+did not drain — a fixture fault, not the node's; the release is the code path above, and the drain is measured by
+`scripts/test-deploy-wait.sh` step 2c, which builds a real queue and then sees it empty.)
+
+**Whether they can ever hold a deploy: no.** Three independent reasons, all in this branch:
+
+1. `holders::bound_verdict` SKIPS `completion` holders (`c4420837`): a completion is admitted, not started, and
+   starts after the install — so a deploy proceeds over it. The measured shape is in
+   `scripts/test-deploy-bound.sh` (five holders, three sessions: installs in 15 ms), and the field's 18 entries
+   are the same shape with more of them;
+2. while a request waits, a NEW completion never gets admitted at all: `wa_deploy_admission`
+   (`lua/core/server.lua`) refuses the run at the door, and the node's tick defers it before dispatch
+   (`lua/core/selfloop.lua:1262`);
+3. what those entries wait for is a node thread, not the deploy: the deploy no longer waits on them, so the queue
+   they are in is served as soon as the thread ahead finishes.
+
+**Not a defect, and not fixable by a timeout.** Cancelling a queued completion after N minutes would delete a
+child's report; the honest lever is the one this branch added — the deploy stops waiting for it. If a queued
+completion's session is gone by the time it runs, `wa_completion_run` refuses it by name
+(`completion_forbidden`, `lua/core/completions.lua`) and the queue entry is released at dequeue, as above.
+
+## Addendum 2 (Fable, 23/11 ~21:40Z - G BLOCKER): a paused session is ALWAYS resumed by the node
+
+A session paused for a deploy must be resumed by the node after the install, or after the request is withdrawn.
+It was not, and a fleet node - or a person's own chat on `work` - has no factory watchdog to cover it.
+
+### 1. Measured, read-only, on this laptop
+
+| what | the record |
+| --- | --- |
+| the pause | `~/.wasm-agent/deploy-paused/603425eb-...json`: `{"since":1795465178,"source":"request","request":"1795465166243274647-...","to":"7e38abe976a0"}`; `66c0d5c1-...json`: `since:1795465172`, same request |
+| the resume it armed | both mission logs say `paused after its step and scheduled a resume` with **no** `the resume wake could NOT be scheduled` (`esc-stops-now/out.log:36080`, `worker-write-guard/out.log:19`) |
+| the deploy it waited for | `sentinel.log:903` `1795465166 maintenance-deferred deploy 1795465166243274647 ...`; `:906` `return-observation-problem ... missing binding.json`; `:912` `return-observation-retired ...` - and the request is in `~/.wasm-agent/sentinel/done/` |
+| the state today | `wa session status` for both: `0 wakes pending` |
+| the mission's own clock | `worker-write-guard/out.log`: `the node owns session 603425eb after a deploy pause: waiting for it to go quiet 2026-11-23T19:29:43Z`, then `still paused for a deploy after 2 h: no done written ... the orchestrator resumes it` |
+| a third case, live | this mission's own session, paused at ~22:0xZ for the install of `dd76f874`, was resumed by the orchestrator and by no node (`paused-evidence.log`: `rows-that-render session 93cf1a67 ... sat 901s`) |
+
+**Why `release_due` did not fire.** It fired nothing because there was nothing for it to fire: `release_due`
+(`lua/core/deploy_pause.lua`) only ever touches rows that are still `pending`
+(`SELECT ... WHERE status='pending' AND reason=? AND due_at>?`). The resume row of each session had already left
+`pending` without a turn: its dispatch was cut by the very install it paused for, and the reconcile then wrote
+`unknown` with `dispatch interrupted; not replayed` - which is by design never replayed. So the promise was
+armed once and then lost, and the ledger had no owner for it.
+
+### 2. The fix (`94c66c5b`)
+
+`deploy_pause.ensure_resumes(now, opts)`, called by the node's own tick (`lua/core/selfloop.lua`, right after
+`release_due`, once nothing waits or installs): every resume row that ended `unknown`, `failed` or `cancelled`
+is a DEBT - the node arms a fresh resume for that session, marks the lost row `superseded` (so it is re-armed
+exactly once) and says so on the log it keeps (`deploy pause: re-armed the LOST resume of session ...`). A
+session that already has a `pending`/`dispatching` resume is left alone, and while a build waits or installs
+nothing is re-armed at all. The new wake carries `deploy_pause.resume_prompt()`: the deploy is over, the resume
+that was armed was lost, re-establish the real state and continue (text listed below).
+
+### 3. Tests: every session kind, both endings
+
+`scripts/test-deploy-wait.sh` step **7b** (real node, real ledger, real scheduler stub; `deploy wait ok`, six
+cases green): for `served`, `worker` and `selfwake`, and for `install` and `withdraw`:
+
+1. a paused session whose resume row is `unknown` is written by the fixture (the record, the armed wake, the cut);
+2. while the deploy waits (request in the box; marker up for `install`): `dispatched=0`, `rearmed=0`;
+3. the deploy ends (marker down for `install`, request withdrawn for `withdraw`): `rearmed=1`, and the resumed
+   turn is dispatched on that tick or the next one (measured: `rearmed=1 dispatched=0`, then `dispatched=1`,
+   because `selfloop.schedule` never arms a past time);
+4. and once only: `rearmed=0` on every later tick.
+
+Unit level, with a **fake ledger, scheduler and clock** (`scripts/test-deploy-pause.lua`, 37 checks): a waiting
+deploy re-arms nothing; two lost resumes are re-armed and one that already owes a newer pending row is not; the
+lost rows are marked `superseded`; the prompt is the new sentence; a later tick re-arms nothing.
+
+### 4. The health line
+
+`wa-sentinel status` prints it always, so "none" is a fact an operator can check rather than an absence they
+have to notice:
+
+```
+paused sessions: 2, oldest 2h
+paused sessions: 0, oldest none
+```
+
+Asserted in `scripts/test-deploy-bound.sh` (two records, one two hours old: `paused sessions: 2, oldest 2h`), and
+built from the same `<data>/deploy-paused/*.json` records the sentinel already read for `paused_since`
+(`paused_summary`, **94c66c5b**). An undated record is counted, so it never reads as "none".
+
+### 5. Texts to approve (23/11, G blocker)
+
+15. the re-armed wake's prompt (it goes to a model): `[deploy pending] The deploy this session paused for is OVER,
+    and the resume that was armed for it was lost (a dispatch cut by the install it was waiting for). Nothing was
+    replayed and nothing was cut mid-call. Re-establish the real state from the machine first (files, `git status`,
+    processes, and this session's own notes checkpoint under "Deploy pause"), then continue the request you were
+    already working on and say plainly what had already been done before the pause.`
+16. the log line of a re-arm: `deploy pause: re-armed the LOST resume of session <id> (wake <lost> had no outcome,
+    new wake <new>)` — `host.log`, once per re-arm
+17. `wa-sentinel status`: `paused sessions: <n>, oldest <age>` (or `oldest none`)
+
+### 6. Scope (G blocker)
+
+The guarantee is the node's, not the runner's: it is the same `selfloop.tick` for every session kind, and it
+holds with no watchdog present - which is what makes it safe for a fleet node and for a person's chat, neither of
+which has the orchestrator's paused-marker watchdog. That watchdog can stay until this is rolled out.
+
+## Addendum 3 (Fable, 23/11 ~22:35Z): the resume repair, bounded
+
+Fable accepted the root cause of `94c66c5b` and found three defects in it, plus one question. All four are fixed
+on this branch; the texts 15-17 he approved are unchanged.
+
+### 1. No age bound -> a 6 h window, and a one-time migration
+
+`ensure_resumes` now reads only rows whose own `created_at` is inside `M.RESUME_WINDOW_SECONDS` (**6 h**), and
+only for a session that still exists and is not parked. Without the bound, the first tick after an install on
+every node at G would wake every session that ever lost a resume - paid model turns, days later, on stale
+requests. Rows older than the window are retired ONCE, by a migration that says how many it retired
+(`deploy pause: migration: N lost resume row(s) older than 21600s marked superseded (too old to resume)`), keyed
+by `<data>/resume-migration-1` so it runs once per node.
+
+Tested with a fake ledger: an `unknown` row created 7 h ago and one created 1 min ago -> exactly one wake, for
+the recent one; and with the marker absent, the migration reports `changes` and writes it with that count, while
+still waking nothing old.
+
+### 2. "Exactly once" was false -> a chain of 2, with backoff, then abandoned
+
+The re-armed wake is itself a resume row, so a session that can never run would be re-armed every tick for ever.
+The chain is carried on the new row's own `attempts` (`+1` per re-arm), the wait grows
+(`M.RESUME_BACKOFF_SECONDS * chain`: 30 s, then 60 s), and past `M.RESUME_MAX_REARMS` (**2**) the row becomes
+`resume_abandoned`, the session's pause record is marked `abandoned` (so the health line can count it) and ONE
+log line says so. So a resume that always fails is tried **3 times in total** (the original turn, one re-arm, a
+second re-arm) and then stops.
+
+Tested: a row at the cap is abandoned, not re-armed (`rearmed=0, abandoned=1`), no wake is scheduled, its row
+says `resume_abandoned` and the pause record is marked; and in the same pass both under-cap rows are re-armed
+with 1x and 2x backoff and carry their place in the chain.
+
+### 3. An operator's cancel is final
+
+`cancelled` is re-armed ONLY when the NODE cancelled the dispatch - `last_error = 'cancelled before execution'`
+(`lua/core/selfloop.lua:1262`, the run's own cancellation before it started) - and never a bare `cancelled`,
+which is what `wa wake cancel` writes (`lua/core/selfloop.lua:612`) and what the due-cancel writes (`:822`).
+Tested: one row of each; only the node's is re-armed, and the person's stands.
+
+### 4. An interactive chat whose window was CLOSED during the pause
+
+**It is resumed, and it is not a new policy: it is the existing behaviour of every wake in this tree.** Closing
+the window ends the SSE stream and nothing else - no code parks a session when a reader goes away (the only
+writer of a hold is `wa session park`, `lua/core/session_park.lua`, whose state is a `self_wake_pauses` row of
+kind `park`; `lua/core/server.lua:782-792` is a ­reader of that state, not a writer). `selfloop.tick` dispatches
+the rows of every session that is not parked, exactly as it does for a `--once` worker and a self-wake, so the
+resume runs with nobody attached and its answer is written into the transcript - which is what the person finds
+when they reopen the conversation, and what the ledger's `unfinished` state already assumes.
+
+The two mechanisms that DO stop a session are honoured by `ensure_resumes`: a session row that no longer exists
+is not woken, and a parked one (`self_wake_pauses`) is not woken - the same rule the tick uses. If the product
+ever wants "no turn without a reader", that is a park, and `wa session park` already exists for it; this mission
+does not invent a second rule.
+
+### Rows run for this review
+
+| row | result |
+| --- | --- |
+| `scripts/test-deploy-pause.lua` (window, migration, chain, backoff, operator cancel, gone/parked, waiting) | `deploy claim wait ok (49 checks)` |
+| `scripts/test-deploy-wait.sh` (incl. 7b: served/worker/selfwake x install/withdraw) | `deploy wait ok` |
+| `scripts/test-deploy-bound.sh` (incl. the health line with `abandoned:`) | `deploy bound ok` |
+| `scripts/test-selfloop-pause.lua` | `self-loop pause: 113 checks passed` |
+| `scripts/test-cli-wake-row.lua` | `cli wake row ok (30 checks)` |
+| `scripts/test-handle-wake.lua` | `handle wake: 17 checks` |
+
+### Texts to approve (added by this review)
+
+18. `deploy pause: ABANDONED the resume of session <id> after <n> re-arm(s) (wake <lost>); the pause record says so`
+19. `deploy pause: migration: <n> lost resume row(s) older than 21600s marked superseded (too old to resume)`
+20. `wa-sentinel status`: `paused sessions: <n>, oldest <age>, abandoned: <m>` (text 17 now carries the count)
+
+## Addendum 4 (Fable, 23/11 ~23:40Z): what `sync tick` is, and should it hold an install?
+
+Read-only measurement; the proposal is on a branch that is **not** merged.
+
+### What it is
+
+`sync tick` is one label around the node's whole **housekeeping pass** on node-thread 0 - peer sync, the sync
+cadence, retention - set by `begin_work("sync tick".to_string())` in the node-thread loop
+(`rust/wa-capabilities/src/serve.rs:3145`, the block at `:3128` "Housekeeping last, and only when nobody is
+waiting and the node has been quiet"). `begin_work` is what `/health` publishes as the thread's `label`, and
+`holders::holders_from` turns every labelled thread into a holder; with no session on it, it lands in
+`Verdict::Wait` ("the holder `sync tick` names no session, so nothing proves it paused") - so the install keeps
+waiting, which is what the sentinel logged.
+
+### How long it held today (`~/.wasm-agent/sentinel/sentinel.log`, read-only)
+
+| deploy request (reason) | sync-tick hold lines | span of the hold | first tick line -> installer started |
+| --- | --- | --- | --- |
+| `179540254619617968` | 5 | **602 s** | 1264 s |
+| `179546726666232120` (tool-args-honest c618da4f) | 8 | **661 s** | 705 s |
+| `179546963874689690` (4287aae1) | 6 | **422 s** | 584 s |
+| `179547102933736299` (4425f670) | 6 | **481 s** | 500 s |
+| `179547337894649177` (ad3fb3c5) | 5 | **361 s** | 529 s |
+| `179547471149786849` (ffd2a0a5 - this mission) | 1 | 0 s | **297 s** |
+
+Six installs, and between 6 and 11 minutes of waiting each; the install of this mission's own fix waited 297 s on
+it (`sentinel.log:1016`, `1795475023  maintenance-deferred  deploy 1795474711497868497 … the holder `sync tick`
+names no session`, with the installer at `1795475320`). It is new in the sense that matters: no other unnamed
+holder appears this often, and a pass that the node itself decides to start (because it looks quiet) is exactly
+the work that a queued install should not have to outlast.
+
+### Should it be excluded, the way admitted-not-started completions are? YES - within an allow-list
+
+A housekeeping pass is not a turn: it holds no session, it can never pause, and the node the install brings up
+runs the same pass again (sync and retention are idempotent and their progress is a file/ledger, not a
+conversation). Waiting for it costs the install minutes and buys nothing a resume would not give back. So the
+proposal skips it in `bound_verdict`, exactly as `completion` is skipped, under two rules:
+
+1. an **ALLOW-LIST** (`is_housekeeping`: `sync tick`, `sync tick:*`), so a label this tree does not know still
+   holds the install - unknown is not yes;
+2. it changes nothing before the bound: the install still waits its `WA_DEPLOY_HOLD_BOUND` first, and the pass is
+   only passed over afterwards.
+
+Residual risk, stated: the installer stops the unit with SIGTERM while a pass may be mid-write. That risk already
+exists for any run at the bound, the pass is idempotent, and a cut pass is redone by the new node - but it is the
+one thing to weigh, and it is why this is proposed rather than landed. A second, independent lever (not proposed
+here) is to make the node not START housekeeping while a deploy request waits: the node can read the sentinel's
+box (`deploy_wait.read`), which is the same signal the pause uses.
+
+### The proposal (branch `proposal/housekeeping-holds-no-install`, commit `5aba5a93`) - NOT merged
+
+```diff
+diff --git a/rust/wa-sentinel/src/holders.rs b/rust/wa-sentinel/src/holders.rs
+index db283cc8..a7ab2848 100644
+--- a/rust/wa-sentinel/src/holders.rs
++++ b/rust/wa-sentinel/src/holders.rs
+@@ -54,25 +54,40 @@ pub(crate) struct Holder {
+     /// operation settled. It starts after an install, never before, so the install never waits on it (see the
+     /// module note, measurement 2).
+     pub completion: bool,
++    /// A NODE-INTERNAL pass: work the node does FOR ITSELF (`sync tick`, the housekeeping block of
++    /// rust/wa-capabilities/src/serve.rs `node_thread_loop`), with no session behind it and no turn to finish.
++    /// MEASURED (23/11, ~/.wasm-agent/sentinel/sentinel.log): it was named as the holder of six installs and held
++    /// each for 6-11 minutes (`span=661s`, `481s`, `422s`, `361s`, `602s`), because it is a single label around a
++    /// whole pass - so a node that had just decided it was quiet looked busy to the sentinel for as long as the
++    /// pass took, and `Verdict::Wait` waited it out.
++    pub housekeeping: bool,
++}
++
++/// The labels the node gives to its OWN housekeeping: an ALLOW-LIST, because a label this list does not know is
++/// not housekeeping - and an unknown label still holds the install ("unknown is not yes"). One entry today, with
++/// its prefix form so a later pass that says `sync tick: peers` is still recognised.
++pub(crate) fn is_housekeeping(label: &str) -> bool {
++    let label = label.trim();
++    label == "sync tick" || label.starts_with("sync tick:")
+ }
+ 
+ impl Holder {
+     fn new(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+-        Holder { session: session.into(), label: label.into(), ms, queued: false, completion: false }
++        Holder { session: session.into(), label: label.into(), ms, queued: false, completion: false, housekeeping: false }
+     }
+ 
+     pub(crate) fn admitted(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+-        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: false }
++        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: false, housekeeping: false }
+     }
+ 
+     /// A child completion, admitted and not started. Its own constructor, because "admitted and not started"
+     /// and "admitted, not started, and a completion" are the two answers the bound treats differently.
+     pub(crate) fn completion(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+-        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: true }
++        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: true, housekeeping: false }
+     }
+ 
+     fn counted(label: impl Into<String>, completion: bool) -> Holder {
+-        Holder { session: String::new(), label: label.into(), ms: 0, queued: false, completion }
++        Holder { session: String::new(), label: label.into(), ms: 0, queued: false, completion, housekeeping: false }
+     }
+ }
+ 
+@@ -106,11 +121,11 @@ pub(crate) fn holders_from(health: &Value) -> Vec<Holder> {
+             if entry.get("label").map(|label| label.is_null()).unwrap_or(true) {
+                 continue;
+             }
+-            holders.push(Holder::new(
+-                field_str(entry, "session"),
+-                field_str(entry, "label"),
+-                field_u64(entry, "busy_ms"),
+-            ));
++            let label = field_str(entry, "label");
++            let housekeeping = is_housekeeping(&label);
++            let mut holder = Holder::new(field_str(entry, "session"), label, field_u64(entry, "busy_ms"));
++            holder.housekeeping = housekeeping;
++            holders.push(holder);
+         }
+     }
+     if let Some(current) = health.get("current") {
+@@ -291,6 +306,12 @@ where
+         if holder.completion {
+             continue;
+         }
++        // A NODE-INTERNAL PASS IS NOT A TURN, so the install does not wait for it to finish: it is the node's own
++        // sync/retention, it holds no session and can never pause, and the node that the install brings up runs the
++        // same pass again (both are idempotent). Only labels on the allow-list (`is_housekeeping`) are skipped.
++        if holder.housekeeping {
++            continue;
++        }
+         if holder.session.is_empty() {
+             unnamed.get_or_insert_with(|| format!(
+                 "the holder `{}` names no session, so nothing proves it paused", holder.label));
+diff --git a/rust/wa-sentinel/src/holders_tests.rs b/rust/wa-sentinel/src/holders_tests.rs
+index 4c45683e..9a0680c6 100644
+--- a/rust/wa-sentinel/src/holders_tests.rs
++++ b/rust/wa-sentinel/src/holders_tests.rs
+@@ -94,9 +94,9 @@ fn current_is_a_holder_once() {
+ #[test]
+ fn holder_lines_name_the_session_and_its_duration() {
+     let holders = vec![
+-        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false, completion: false },
+-        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false, completion: false },
+-        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false },
++        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false, completion: false, housekeeping: false },
++        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false, completion: false, housekeeping: false },
++        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false, housekeeping: false },
+     ];
+     let lines = holders::holder_lines(&holders, |session| session.starts_with("8082b42e"));
+     assert_eq!(lines.len(), 3, "one line per holder: {lines:?}");
+@@ -109,9 +109,9 @@ fn holder_lines_name_the_session_and_its_duration() {
+ /// for this request and over nothing else - not a working session, not a subagent, not a run with no session.
+ #[test]
+ fn the_bound_passes_over_paused_sessions_only() {
+-    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
+-    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
+-    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false };
++    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false, housekeeping: false };
++    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false, housekeeping: false };
++    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false, housekeeping: false };
+ 
+     // Before the bound: held, whatever the holders are doing.
+     let early = holders::bound_verdict(10, 180, &[paused_one.clone()], |_| true);
+@@ -383,3 +383,38 @@ fn a_wait_that_never_ends_is_noticed_once() {
+     }
+     let _ = std::fs::remove_dir_all(&home);
+ }
++
++/// 16. A NODE-INTERNAL PASS DOES NOT HOLD AN INSTALL (proposal, 23/11 ~23:40Z; NOT landed). MEASURED in
++/// ~/.wasm-agent/sentinel/sentinel.log: `sync tick` was named as the holder of six installs and held each for 6-11
++/// minutes (`span=661s`, `481s`, `422s`, `361s`, `602s`), because one label covers a whole housekeeping pass - so a
++/// node that had just decided it was quiet read as busy for as long as the pass took.
++///
++/// The rule is an ALLOW-LIST: `is_housekeeping` knows `sync tick`, and a label it does not know still holds.
++#[test]
++fn a_node_internal_pass_does_not_hold_an_install() {
++    let body = health(
++        r#"{"ok":true,"queue":0,"operation_overdue":false,"current":null,
++             "node_threads":[{"id":0,"session":null,"label":"sync tick","state":"busy","busy_ms":600000}],
++             "workers":[],"subagents":{"queued":0,"running":0,"active":0}}"#,
++    );
++    let holders = holders::holders_from(&body);
++    assert_eq!(holders.len(), 1, "the pass is named as a holder: {holders:?}");
++    assert!(holders[0].housekeeping, "and it is known to be node-internal: {holders:?}");
++    assert_eq!(holders::bound_verdict(200, 180, &holders, |_| false), holders::Verdict::Proceed,
++        "the install does not wait for the node's own housekeeping pass");
++    assert!(holders::is_housekeeping("sync tick: peers"), "the prefix form is recognised too");
++    assert!(!holders::is_housekeeping("POST /chat"), "a run is not housekeeping");
++
++    // An UNKNOWN internal label is not on the allow-list: it holds, exactly as it did before this proposal.
++    let unknown = health(
++        r#"{"ok":true,"queue":0,"operation_overdue":false,"current":null,
++             "node_threads":[{"id":0,"session":null,"label":"some new maintenance pass","state":"busy","busy_ms":600000}],
++             "workers":[],"subagents":{"queued":0,"running":0,"active":0}}"#,
++    );
++    let holders = holders::holders_from(&unknown);
++    assert!(!holders[0].housekeeping, "a label the allow-list does not know is not housekeeping");
++    match holders::bound_verdict(200, 180, &holders, |_| false) {
++        holders::Verdict::Wait(why) => assert!(why.contains("names no session"), "{why:?}"),
++        other => panic!("an unknown internal label must still hold: {other:?}"),
++    }
++}
+```
+
+The tests that go with it, on the same branch:
+
+* `rust/wa-sentinel/src/holders_tests.rs::a_node_internal_pass_does_not_hold_an_install` - a node whose only
+  thread is `sync tick` PROCEEDS, an unknown internal label still WAITS, and `is_housekeeping` is asserted on the
+  allow-list rule (`holders 16 passed`);
+* a new step in `scripts/test-deploy-bound.sh` - the real sentinel binary against that `/health` body: the
+  installer runs (`deploy bound ok`).
+
+**Not landed, by instruction:** the branch is `proposal/housekeeping-holds-no-install` at `5aba5a93`, and this
+report commit only records it. Fable decides.
+
+## Addendum 5 (Fable, 23/11 ~23:50Z): a spawned installer always ends in a verdict; and `sync tick` stops starting
+
+### 1. LOST INSTALL REQUEST (G blocker): measured, then fixed
+
+**What happened to `1795474711` (ffd2a0a5), read-only:**
+
+* the request was held on holders (a worker turn, then `sync tick`, then `busy, names no holder`) until `1795475320`
+  (22:28:40Z), when the installer was spawned: `done/1795474711497868497-….json` says
+  `phase: spawned`, `detail: "deploy started detached (unit wa-deploy-1795475320-1196761, output appended to
+  …/sentinel/deploy.out) … no session was named, so no notice can be delivered for it (pass --session)"`, and its
+  request names `target_commit: ffd2a0a5dd92…`;
+* the installer **refused**: `sentinel/deploy.out`, last block - `--- deploy unit wa-deploy-1795475320-1196761 at
+  1795475320 script /home/victor/wasm-agent/checkout/scripts/deploy.sh reason land-quick
+  deploy-hold-never-fails-our-load (ffd2a0a5)` … `deploy: refused(component_proof_failed): the candidate binary did
+  not answer a graph call through the staged component; nothing installed`, and above it the cause:
+  `component: lua error: …:16: graph_index: graph_dormant`;
+* it wrote **none** of `binding.json`, `ack.json`, `intent.json` into `sentinel/deploy-protocol/<id>/` - so the
+  return engine (`sentinel_return` + the `onSentinelReturn` job, the owner of a protocol deploy's report) could not
+  observe it: `sentinel.log` `1795475660 return-observation-problem … cannot be observed: missing binding.json,
+  ack.json, intent.json`, then `1795475960 return-observation-retired … unchanged for 300s`;
+* the retired directory holds **only `result.json`** (523 bytes) - no protocol files at all;
+* `~/.local/bin/installed.txt` still named `commit=4425f670…`, and the box answered `0 waiting`. So: not installed,
+  not failed, not re-queued. The orchestrator re-requested it by hand at ~23:35Z.
+
+**Why the installer wrote nothing:** it refused *before* the protocol return step, at its component proof
+(`deploy.sh`'s `component_proof_failed`, caused by `graph_dormant`). The refusal is a legitimate outcome; what was
+missing is that nothing turned "installer ended, nothing installed" into a request outcome.
+
+**Fix (`installer_outcome.rs`, wired into `observation.rs`).** The lane that decides whether a protocol directory
+can still be observed no longer retires a directory whose installer already ended. It asks the installer's own
+three files instead:
+
+| fact | source |
+| --- | --- |
+| the commit the request asked for, and its reason | the sentinel's own `done/<id>.json` (the `spawned` record) |
+| what is installed | `installed.txt` beside the installed binary |
+| what the installer said | its block in `deploy.out`, found by the request's own reason (`--- deploy unit … reason <reason>`) |
+
+`verdict_of` is pure and answered in three ways: `Installed` (the record names the request's commit, or the
+installer's block ends `deploy: installed`), `Uninstalled(<the installer's line>)` (its block ends in any other
+terminal line, or there is no block at all - said as such), `Running` (a block with no terminal line: nothing is
+claimed). `fail_unobserved` then writes `failed/<id>.json` with `phase: unobserved` and that sentence, one queue
+record, ONE re-queue (`schedule_requeue`, the same once-per-request path the bound uses) and - when the request
+named a session - the exactly-once deploy-outcome notice; otherwise the audit line `deploy-unobserved-failed` is
+the notice, since a request with no session has nobody to wake (the record says so itself).
+
+So a request whose installer started now ends in exactly one of: **installed**, or **failed with the installer's
+reason and re-queued once**. Retiring an unobservable directory with nothing installed is no longer possible while
+the installer's verdict can be read.
+
+Tests: `installer_outcome_tests.rs` (6) - the measured case word for word, an install that reached the record, an
+installer with no terminal line (still `Running`), an earlier landing's `installed` never answering for this one,
+no target commit = no verdict, and `fail_unobserved` writing `failed/` + exactly one re-queue and doing nothing on
+a second pass. `rust/wa-sentinel` unit tests: **159 passed**.
+
+### 2. `sync tick`: Fable's alternative, implemented (the allow-list is gone)
+
+* **It does not START while a deploy waits or installs.** `serve.rs`'s housekeeping block now asks
+  `wa_deploy_pending()` (Lua, one predicate that reuses `deploy_pause.waiting`: the installer's marker, the request
+  box and the claimed lane) before starting `wa_sync_tick` and `wa_retention`. A reader that cannot answer returns
+  `0` (the previous behaviour) and the node prints one line - a broken reader must not silence the node's sync for
+  ever.
+* **A pass already running finishes, and yields before its network phase.** `wa_sync_tick` does the cheap phases
+  (update banner, backup *due* check - the snapshot itself already runs as a supervised operation) and then, if a
+  deploy is waiting, returns with `yielded: a deploy is waiting for or installing on this node` before the peer
+  push; the next quiet window after the install does it.
+* **Worst case, stated.** The sentinel's own record cannot say how long ONE pass lasts - its intervals are
+  observation spans across the 20 s cadence (the six installs' spans were 361-661 s in total, each a series of
+  passes), so I do not claim a per-pass number I did not measure. What is bounded now: a pass cannot *start* while
+  a deploy waits, and a pass that is running stops before its one network phase, which is the phase bounded by the
+  peer call's own timeout. If the residual (the cheap phases of an already-running pass) ever proves long enough
+  to matter, the next yield point belongs between the backup-due check and the banner refresh; that is where the
+  remaining work is, and it is milliseconds today.
+* **What is NOT asserted, said plainly:** the gate itself has no row. A test was written for it in
+  `scripts/test-deploy-wait.sh` (step 7c: sample `/health` for the `sync tick` label with nothing waiting, then
+  under a request) and it printed `SKIP`: the label lives only for the duration of the call, which is milliseconds
+  when there is nothing to push, so a 3 s sampling loop cannot observe it - the label measured in `sentinel.log` was
+  long because that pass was doing network work. It was removed rather than kept as a test that proves nothing. The
+  gate's two halves are covered by reading: `wa_deploy_pending` reuses `deploy_pause.waiting` (the signal the pause
+  rows already assert), and `serve.rs` adds one `&& !deploy_pending()` to each housekeeping start. A counter (a
+  `health` field or a per-tick log line) is what would make it assertable, and it is the first thing to add if
+  Fable wants this row.
+* **No label allow-list after the bound:** `holders.rs` is unchanged on this branch, and
+  `proposal/housekeeping-holds-no-install` stays **unmerged** (its allow-list is superseded by this).
+
+### Texts to approve (23/11, this review)
+
+21. `deploy <id> failed without a verdict: the installer ended and nothing was installed: <the installer's line>; it is re-queued automatically once, when this node is next quiet; re-request with: wa-sentinel request deploy --expected-sha <sha> --reason '<reason>'` - console, `failed/<id>.json`, the queue record, and audit `deploy-unobserved-failed`
+22. `return-observation-failed` audit line: `<problem>; the installer ended and nothing was installed, so the request failed with its own reason and was re-queued once (no retirement)`
+23. node log: `sync tick: yielded to a waiting deploy; the next quiet window does the rest`
+24. node stderr, once: `[sync] wa_deploy_pending unavailable, housekeeping starts as before: <error>`
+
+## Addendum 6 (r4, Fable, 24/11 ~00:55Z): the repair counted the wrong column
+
+### What was wrong (measured on this laptop after `bd37681f`, read-only, by Fable)
+
+The first tick after the install (`00:32:20-28Z`) marked **46 resume rows in 16 live factory sessions**
+`resume_abandoned`. Their `self_wakes.attempts` values: 2,3,4,5,6,7,9,11,13,73,82,199,249,308,464,486,533. Cause:
+the chain cap read `attempts`, a column that already counts DISPATCH attempts, so every recent lost resume hit
+"max 2 re-arms" on its first pass and the repair did nothing for any of them (the safe direction - 0 wakes fired -
+and the wrong result). Separately, `paused sessions: 53, oldest 1d` counted every `<data>/deploy-paused/*.json`
+ever written, and nothing deleted one; the migration retired 86 rows, as designed.
+
+### 1. A dedicated chain counter (never `attempts`)
+
+`self_wakes` gains **`resume_chain INTEGER NOT NULL DEFAULT 0`**, added by the same conditional `ALTER TABLE` this
+table already uses for `kind` (`lua/core/selfloop.lua`, `M.setup`). `deploy_pause.ensure_resumes` reads and writes
+only that column; `attempts` is neither read nor written by the repair again, and the unit test asserts that no
+statement of the repair writes `attempts`.
+
+### 2. The health line counts what is live, and dead records are closed
+
+* `paused_summary` (`main.rs`) counts a record as **live** only when its `since` is inside the same window the repair
+  uses (`pause_window_secs()` = 6 h, documented as the same number as `deploy_pause.RESUME_WINDOW_SECONDS`); the
+  rest are **stale**. The line is now
+  `paused sessions: <live>, oldest <age of the oldest live>, stale: <n>, abandoned: <m>`.
+* `deploy_pause.sweep_records` closes the records that can never be resumed: older than the window, or their session
+  no longer exists (ended/closed). A young record whose session is live is never touched - it is the proof the
+  bound uses. It runs **last in the node's tick**, because called early it moved a released resume's dispatch out of
+  that tick (measured: `test-deploy-wait.sh` step 6 failed twice in a row, green once the call moved to the end).
+
+### 3. Tests, and how the fixtures match the real ledger
+
+**How I checked the shapes this time (Fable's item 4).** The fixture rows in `scripts/test-deploy-pause.lua` are the
+ledger's own numbers, copied from Fable's read-only select of the 16 factory sessions - `attempts`
+`2,3,4,5,6,7,9,11,13,73,82,199,249,308,464,486,533`, status `unknown`, reason
+`deploy pending: resume after the node swap`, `resume_chain = 0` - and not zeroes. I could not re-run that select
+myself: `~/.wasm-agent/memory.db` is refused to the agent's shell by the node's own guard (`secret_path_denied`,
+`lua/core/secret_guard.lua`: "it holds the MCP registry, every connector's approval and the session ledger, so an
+agent tool neither reads nor writes it"), and `wa` exposes no verb for raw wake rows. So the shapes are Fable's
+measurement, quoted, and every one of them asserts the outcome the bug broke: **exactly one re-arm, whatever
+`attempts` says** (`rearmed == 17, abandoned == 0`, and `resume_chain=1` written on each new row).
+
+* the cap is asserted on the same real shapes: `resume_chain` 0 -> re-arm, 1 -> re-arm (backoff doubled), 2 ->
+  `resume_abandoned` with the pause record marked - **three tries in total**;
+* an operator's `cancelled` is still final and the node's own `cancelled before execution` is still re-armed, on
+  rows with `attempts` 73 and 464;
+* gone/parked sessions are not woken (attempts 199, 249); a seven-hour-old row is not woken and the migration
+  reports what it retired; a waiting deploy re-arms nothing;
+* `sweep_records` closes exactly the old, the gone and the undated record, keeps the young live one, and never looks
+  at a non-JSON entry.
+
+### Rows run for r4
+
+| row | result |
+| --- | --- |
+| `scripts/test-deploy-pause.lua` | `deploy claim wait ok (81 checks)` |
+| `scripts/test-deploy-wait.sh` | `deploy wait ok` |
+| `scripts/test-deploy-bound.sh` | `deploy bound ok` |
+| `scripts/test-selfloop-pause.lua` | `self-loop pause: 113 checks passed` |
+| `scripts/test-handle-wake.lua` | `handle wake: 17 checks` |
+| `scripts/test-cli-wake-row.lua` | `cli wake row ok (30 checks)` |
+| `rust/wa-sentinel` unit tests | `159 passed; 0 failed` |
+
+Also changed in the row, and said plainly: the six cases of step 7b now run on **their own ledger** (a tick
+ dispatches at most eight due rows, so six cases sharing one measured each other's backlog - the dispatch assertion
+ moved between cases from run to run), and the dispatch assertion allows up to twelve ticks instead of one, because
+ the re-armed row is armed a second out and the node's real cadence is five ticks a second.
+
+### Texts to approve (r4)
+
+25. `wa-sentinel status`: `paused sessions: <live>, oldest <age>, stale: <n>, abandoned: <m>`
+26. node log, once per sweep that closes anything: `deploy pause: closed <n> pause record(s) that can never be resumed
+    (older than 21600s, or their session is gone)`
+
+### r4.1 (Fable's review of the r4 diff, 24/11 ~01:00Z): a record is closed only on a POSITIVE fact
+
+Two fixes in `deploy_pause.sweep_records`, both required before landing:
+
+* **(a) a lookup that fails is not a dead session.** The default lookup now answers three ways - `true` live,
+  `false` positively gone, `nil` the lookup itself failed (a locked ledger, a module error) - and only a positive
+  `false` deletes. Before this, `pcall` collapsing to `false` on a transient error deleted a live pause record.
+* **(b) an unreadable or undated record is judged by its FILE's age.** `since == 0` (a record caught mid-write) is
+  no longer deleted at once: `host.list_dir` gives the file's `modified` time, and the record is closed only when the
+  file itself is older than the window. A young half-written record is kept - unreadable is not dead.
+
+Tests (the two Fable asked for, plus one on the same path): a lookup that raises keeps the record (`closed == 0`,
+`removed == {}`); a half-written young file is kept; and the undated record in the existing sweep case is now given
+an OLD mtime, so it still proves a deletion. `scripts/test-deploy-pause.lua`: **84 checks**.
+
+One flake, named again: `scripts/test-deploy-wait.sh` step 6 ("the held wakes run once the deploy ends") failed once
+in this pass and passed on an immediate re-run with nothing changed - the same step, and the same behaviour, as the
+three earlier observations of it today (before r4 as well). It is not touched by this change; it is load-dependent
+and it is named here rather than called fixed.
+
+## Addendum 7 (Fable, 24/11 ~01:32Z): why the sweep is silent, and the 22/11 row that never fires
+
+Read-only. Installed: `commit=0d8657e5…` (`~/.local/bin/installed.txt`), which contains the r4 code (`git show
+0d8657e5:lua/core/deploy_pause.lua | grep -c sweep_records` = 1, and its log shows `9598d3f6`, `4b9b4a45`,
+e7367ad7).
+
+### Q1: `sweep_records` runs on every tick - and can never delete anything
+
+The sweep asks the host for a remover that does not exist:
+
+* `lua/core/deploy_pause.lua:515` - `local remover = opts.remove or (host and host.delete_file)`;
+* there is no `host.delete_file`. The capability is **`host.remove_file`**
+  (`rust/wa-capabilities/src/host.rs:1690-1695`, "host.remove_file(path) -> one boolean"), and the only other
+  caller in the tree uses that name (`lua/core/telemetry.lua:442`).
+
+So `type(remover) ~= "function"` holds on every live tick, nothing is removed, `closed` stays 0 - and the log line
+is inside `if closed > 0`, so a sweep that can never close is exactly the silence measured. The r4.1 rule is fine:
+`host.list_dir` returns `modified` in **epoch seconds** (`host.rs`, `d.as_secs()`), the same unit as `now`, so once
+the remover exists the age rule is correct.
+
+That the tick itself runs is not in doubt: the 22/11 row's `updated_at = 2026-11-24 01:18:06Z` is written by the
+`deploy_waiting` branch of the same tick (`lua/core/selfloop.lua:1385-1391`), i.e. during the install of
+0d8657e5 - the tick ran, reached that branch, and the sweep at its end did nothing it could log. `/health` shows
+nothing either, because `pause_records_closed` is only set when something was closed.
+
+Why the test passed while the live node could not delete: **the test injected the remover**
+(`test-deploy-pause.lua`, `remove = function(path) ... end`), so it never asked the host for the capability's name.
+That is the same class of mistake as r2's `attempts = 0` fixtures: the fixture replaced precisely the thing that
+was wrong.
+
+### Q2: the 22/11 pending row
+
+`reason='deploy pending: resume after the node swap'`, `status='pending'`, `due_at 2026-11-22 10:45Z`,
+`attempts=1`, `last_error='deploy_waiting: waiting for the install of unknown …'`, `updated_at 01:18:06Z`.
+
+What keeps it `pending`: while a deploy waits, the tick's `deploy_waiting` branch selects every pending row whose
+`due_at <= now` and rewrites `last_error` and `updated_at` on it (`selfloop.lua:1386-1391`) - so a row that is
+overdue is re-stamped every tick and never dispatched; and the r3 repair never touched it either, because
+`ensure_resumes` selects only `unknown`/`failed`/node-cancelled rows of the resume reason inside the 6 h window,
+and this one is `pending` and two days old.
+
+Should the sweep or the migration retire it: **the sweep**, and not only for the resume reason. A row that is
+`pending`, overdue by more than the window, and has been deferred by a deploy wait every time it came due can
+never fire; leaving it `pending` is the same lie as a `paused session` nobody owes. The rule belongs beside the
+record sweep, because it is the same question ("is this still a promise?") asked of the other ledger.
+
+### r5 (proposal; NOT written - waits for go)
+
+1. **Delete with the capability that exists**: `host.remove_file`, with the boolean checked. When the capability is
+   missing the sweep must SAY so once (`deploy pause: sweep cannot remove …`), not return 0 silently.
+2. **A sweep that ran must be visible**: one counter on the node's `/health`
+   (`paused_records: {seen, closed, kept}`) and one line per tick that changed something. The bug was invisible
+   because "closed nothing" and "never ran" were the same output.
+3. **Retire the row that can never fire**: `pending` + `due_at` older than the window + `last_error` naming a deploy
+   wait → `superseded`, `last_error='superseded: too old to fire'`, counted and logged once; the one-time migration
+   does the same for the backlog.
+4. **The test must not inject the capability** (Fable's rule, applied to capabilities this time): a **live-shaped
+   tick** - a scratch `WASM_AGENT_HOME` with real `deploy-paused/*.json` files (one young, one older than the window,
+   one half-written) and a real pending overdue row, then `selfloop.tick` run through the **real host** (`wa --db …
+   WA_SCRIPT=…`, no `opts.remove`, no `opts.remove`/`list`/`read_file` injection) - asserting the old record's file
+   is gone, the young and half-written ones are there, the overdue row is `superseded` with that sentence, and
+   `/health`/the log shows the sweep. It fails on today's code for the exact reason the live node is silent.
+5. Same rows as r4 plus the new one; `scripts/test-selfloop-pause.lua` and `test-deploy-pause.lua` extended.
+
+### r5: the state table of a resume row, and the one invariant
+
+Read from the code (`lua/core/selfloop.lua`, `lua/core/deploy_pause.lua`); line numbers are the write sites.
+
+| status | moved IN by | moved OUT by | longest it may stay |
+| --- | --- | --- | --- |
+| `pending` | `schedule` INSERT (446/481); `defer_refused` (1251); `run_wake`'s deferrals (1284, 1293, 1330); `finish` for a repeating row (1228); the tick's `not_started` receipt (1520) | the tick's claim -> `dispatching` (1200, 1509); `cancel` (621) / due-cancel and park (831) -> `cancelled`; the repair or the migration -> `superseded`; the r5 invariant -> `superseded: too old to fire` | until its `due_at`, then its own backoff; while a deploy waits the tick only re-stamps it (1386-1391), so **before r5: for ever** - now the invariant retires it once it is older than the window |
+| `dispatching` | the tick's claim (1200, 1509); `run_wake`'s own claim | `finish` -> `delivered`/`failed` (1228, 1232); `cancel_claimed` -> `cancelled` (1271, `cancelled before execution`); reconcile -> `unknown` (1469); the r5 invariant reclaims it at the same bound | `stale_seconds` (300 s) - but reconcile lives in the tick's inline path while the seam's plan owns the other, so on a node whose component is older than that code: **for ever**. That is ae2a9231 |
+| `unknown` | reconcile (1469, `dispatch interrupted; not replayed`); `run_wake`'s unknown receipt (1524) | the repair re-arms it inside the window (chain rule) or retires it outside | one tick: seconds |
+| `failed` | `finish` (1232) | the repair re-arms it inside the window; terminal otherwise | as `unknown` |
+| `cancelled` | an operator's `cancel` (621), the due-cancel/park (831), and the NODE's own `cancel_claimed` (1271) | the repair re-arms **only** the node's kind (`cancelled before execution`); everything else is final | terminal |
+| `delivered` | `finish` ok (1232) | - (a repeating row goes back to `pending`) | terminal |
+| `superseded` | the repair ("a newer resume was armed"), the migration ("too old to resume"), the r5 invariant ("too old to fire") | - | terminal |
+| `resume_abandoned` | the repair when the chain is spent | - | terminal |
+
+**THE INVARIANT (r5).** EVERY RESUME ROW REACHES A TERMINAL STATE WITHIN THE WINDOW. Stated as a bound: a row
+created t ago is `delivered`/`failed`/`resume_abandoned`/`superseded` by t = WINDOW (6 h) at the latest, and in
+practice by t = stale (300 s) + chain (2 re-arms, 30 s and 60 s). `deploy_pause.ensure_resumes` enforces it before
+anything else, in both tick paths and regardless of the seam:
+
+1. `dispatching` past `stale_seconds` -> `unknown` ("dispatch interrupted; not replayed") - the same rule and the
+   same sentence reconcile uses, applied by the module that runs on both paths;
+2. `pending` whose `created_at` is older than the window -> `superseded: too old to fire` (the 22/11 row);
+3. then the existing pass: a lost row (`unknown`/`failed`/node-cancelled) inside the window is re-armed under the
+   chain rule (max 2, 30 s/60 s backoff), and outside it is retired.
+
+### Q1-Q3, read-only
+
+* **Q1 - has the sweep run live?** Yes, on every tick, and it could not delete: it asked for `host.delete_file`
+  (deploy_pause.lua:515) while the host exposes `host.remove_file` (host.rs:1690), so `remover` was nil, `closed`
+  stayed 0 and the log line (inside `if closed > 0`) never fired. The tick itself demonstrably reaches its end - the
+  22/11 row's `updated_at = 01:18:06Z` is written by the `deploy_waiting` branch of the same tick (1385-1391).
+  **Now proven:** r5 uses `host.remove_file`, says so once when the capability is missing, and writes ONE line a day
+  even when it closes nothing: `deploy pause: sweep ran: <n> record(s) seen, <m> closed` (stamped in
+  `<data>/pause-sweep.last`, so the line is daily and not per tick).
+* **Q2 - the 22/11 pending row.** It is re-stamped every tick by the `deploy_waiting` branch while a deploy waits
+  (1386-1391) and never dispatched; the r3 repair never looked at it because it selects `unknown`/`failed`/node-
+  cancelled rows only. r5 retires it (`superseded: too old to fire`) because a row that can never fire must not
+  stay `pending` - and it does so BEFORE the waiting gate, so a deploy that never ends cannot hold it hostage.
+* **Q3 - the `dispatching` row (ae2a9231).** `last_error='deploy ended: resumed now'`, attempts 1, chain 0, no
+  message after the pause: its dispatch was interrupted and reconcile - the only owner of that bound - lives in the
+  inline tick path, so with the seam's plan owning the live path nothing reclaimed it. r5's invariant reclaims it at
+  `stale_seconds` and the chain rule re-arms it inside the window.
+
+### Tests (one per non-terminal state, seeded from real rows)
+
+| state | fixture |
+| --- | --- |
+| `dispatching` | ae2a9231's shape - asserts the reclaim statement (`status='dispatching'` -> `unknown`) and the re-arm |
+| `pending` overdue | the 22/11 row's shape - asserts the retire statement is scoped to `pending` and that nothing is armed for it |
+| `unknown`/`failed` (inside the window) | r4's real-attempts fixtures: exactly one re-arm, then the chain cap |
+| `cancelled` | operator cancel stays, node cancel re-arms (attempts 73 and 464) |
+| live-shaped sweep, no injected capability | `scripts/test-selfloop-pause.lua`: real `deploy-paused/*.json` files and `selfloop.tick` with no options - an old record goes, a young one with a REAL session stays, a half-written young one stays |
+
+`scripts/test-deploy-pause.lua`: **93 checks**; `scripts/test-selfloop-pause.lua`: **116 checks** (was 113);
+`scripts/test-deploy-bound.sh`: `deploy bound ok`; `scripts/test-deploy-wait.sh`: `deploy wait ok`.
+
+One flake named again (unchanged): `test-deploy-wait.sh` step 6 failed once in one of these runs and passed on the
+re-run; the same step, the same behaviour as the four earlier observations today.
+
+### Texts to approve (r5)
+
+27. `deploy pause: the sweep has no host.remove_file, so no pause record can be closed` (once per run, when the
+    capability is missing)
+28. `deploy pause: sweep ran: <n> record(s) seen, <m> closed` (once a day, even when nothing was closed)
+29. `superseded: too old to fire` - the `last_error` of a resume row the invariant retires
+
+### r5.1 (Fable's review of r5, 24/11 ~01:55Z): `dispatching` spans the whole turn
+
+**(1) WHEN a resume row leaves `dispatching`: at turn END, never at start.**
+
+* `lua/core/selfloop.lua:1200-1201` (the component-plan path) and `:1509-1510` (the inline path) claim a due row with
+  `UPDATE self_wakes SET status='dispatching', boot=?, attempts=attempts+1, updated_at=? WHERE id=? AND
+  status='pending'` - i.e. at DISPATCH, before the turn starts;
+* `M.finish` (`:1214`) writes `delivered`/`failed` (`:1228`, `:1232`) and is called after the run returns
+  (`:1355`, `M.finish(row, ok, result, ...)`), i.e. at turn END.
+
+So a row is `dispatching` for the entire turn. **`M.stale_seconds()` is `max(60, WA_SELF_WAKE_STALE_SECONDS or
+1800)` (`:166-167`) - 1800 s**, and r5's `300` was both the wrong number and the wrong owner (this module cannot
+load `selfloop`, which loads it).
+
+**(2) The reclaim now requires that NOTHING HAPPENED.** Two facts, not one: the row older than the bound **and** no
+message for its session at or after the row's `updated_at` (`SELECT COUNT(*) FROM messages WHERE session_id=? AND
+created_at>=?`). That is ae2a9231's exact shape - dispatched, `last_error='deploy ended: resumed now'`, and nothing
+written afterwards. A long turn writing messages is untouched, so no second resume is ever paid beside a running
+turn. The bound is `deploy_pause.wait_stale_seconds()` (the same `WA_SELF_WAKE_STALE_SECONDS`, floor 60), and the
+reclaim counts `changed.changes`, not `pcall`'s boolean.
+
+**(3) Tests, both directions.**
+
+| case | assertion |
+| --- | --- |
+| `dispatching` 400 s, NO session activity | reclaimed as `unknown`, and **exactly one** re-arm for that session |
+| `dispatching` 400 s, WITH messages after the dispatch (a long turn in progress) | **untouched**, no `status='unknown'` statement, **ZERO** new wakes |
+| `dispatching` 400 s with the default bound (1800 s) | inside the tick's own bound: nothing reclaimed |
+
+`scripts/test-deploy-pause.lua`: **113 checks**; `scripts/test-selfloop-pause.lua`: **116**;
+`scripts/test-deploy-bound.sh`: `deploy bound ok`; `scripts/test-deploy-wait.sh`: `deploy wait ok`.
+
+### r5c (Fable, 24/11 ~01:55Z): the claim is the primary signal
+
+**(A) A failed lookup can never reclaim.** r4b's pattern was back: `query(...) or {}` on the messages lookup turns a
+`db is locked` into `n = 0`, i.e. `quiet = true`, i.e. a duplicate turn. Every lookup is now `pcall`ed and must answer
+a TABLE; anything else keeps the row. (The same rule covers the claim lookup and the list of stale rows itself.)
+
+**(B) The bound.** `M.RESUME_DISPATCH_BOUND_SECONDS = 300`, this module's own constant, for RESUME rows only. The
+1800 s `selfloop.M.stale_seconds()` stays the bound for every other wake - at 1800 s the operator's watchdog
+(~20 min) beats the node to a lost dispatch. `wait_stale_seconds()` was removed rather than left as a second owner.
+
+**(C) Three facts, and the claim comes first.** A `dispatching` resume row is reclaimed only when ALL hold:
+
+1. it is past `RESUME_DISPATCH_BOUND_SECONDS`;
+2. **no run claim is held for its session by THIS boot** - `SELECT boot FROM claims WHERE key='session:<id>'`, the
+   claim `lua/core/agent.lua` takes at the start of a turn (`rust/wa-capabilities/src/resources.rs`), the one that
+   answered `resource_busy` today. A turn holds it before it writes any message, so it is the primary signal and
+   messages are the secondary;
+3. **zero messages** for the session at or after the row's `updated_at`.
+
+**(D) What a restart does to a claim: IT SURVIVES.**
+
+* `claims` is a table with `key, principal, session, run, boot, uncertain` (`resources.rs:363-365`); it is opened by
+  `Store::open`, and nothing sweeps it at boot - there is no boot hook in the module at all;
+* a row is dropped only by the run's own `finish`, or reclaimed lazily when a LATER run claims the same session and
+  `lease_released(root, boot)` proves the old process gone (`resources.rs:46-59`, `lease_released` locks
+  `<boot>.lease.sqlite`);
+* so a claim left by a process that was killed mid-turn persists with its old `boot`, and the measured shape
+  `{"boot":"7d72…","key":"session:…"}` is exactly that. Counting it as "a turn is running" would block the reclaim
+  for ever, so **only a claim whose `boot` is the one running now counts** - and the boot is injectable
+  (`opts.boot`) for the tests, because a script run's `runtime_info` names the test interpreter.
+
+**Tests (seven cases, real-row shapes).**
+
+| case | assertion |
+| --- | --- |
+| quiet and unclaimed | exactly ONE re-arm for that session |
+| claim held by THIS boot, no message yet (a long first tool call) | untouched, ZERO new wakes |
+| claim from ANOTHER boot (dead process) | reclaimed - a dead claim does not block |
+| claim lookup raises | untouched |
+| messages lookup fails | untouched (r4b's exact defect) |
+| messages written since the dispatch | untouched, zero wakes |
+| 200 s (inside the 300 s bound) | untouched |
+
+`scripts/test-deploy-pause.lua`: **98 checks** (the three earlier loop-assertions were replaced by these seven cases;
+no assertion was deleted, the count is lower only because those loops asserted once per update row);
+`scripts/test-selfloop-pause.lua`: **116**; `scripts/test-deploy-bound.sh`: `deploy bound ok`;
+`scripts/test-deploy-wait.sh`: `deploy wait ok`.
+
+Texts: none new (the reclaim writes `dispatch interrupted; not replayed`, already approved as text 12's sibling).
+
+### r5d (Fable, 24/11 ~02:00Z): the claim is asked of the store that holds it
+
+Both live defects were invisible to my fixture, and both are measured facts about the node:
+
+1. **The claims are not in the ledger.** `SELECT boot FROM claims ...` ran through deploy_pause's `query`, i.e.
+   against `~/.wasm-agent/memory.db`, which has no `claims` table: the claim lives in
+   `<data>/resources/claims.sqlite` (`rust/wa-capabilities/src/resources.rs:354-361`, `Store::open`). Live, the
+   lookup raised, every stale row was kept, and nothing was ever reclaimed - a lost dispatch stayed lost and the
+   watchdog won again.
+2. **The wrong boot.** `claims.boot` is the uuid `Store::open` mints (`resources.rs:356`), not
+   `runtime_info().boot_id`, so `claim.boot == boot_id` never matched - every claim was ignored: the duplicate
+   direction.
+
+**The fix asks the capability, which already knows both.** `host.resource("list")` is `inventory_at`
+(`resources.rs:281-321`), which computes each claim's `liveness` itself:
+
+| liveness | meaning | what the reclaim does |
+| --- | --- | --- |
+| `held` | `boot == the store's own boot` | keeps the row |
+| `held_or_unavailable` | the lease is busy (another live process, or unverifiable) | keeps the row |
+| `lease_released` | the boot's lease can be taken: that process is gone | **free** - may reclaim |
+| `unverifiable` | neither | keeps the row |
+
+No capability, a raise, an unknown shape, or any other liveness -> **unknown -> keep**. The key absent after a
+successful `list` -> **free** (asked and answered at the source). The injected answer is `pcall`'ed too, so a test
+seam cannot turn an error into a reclaim. This module compares no boot of its own any more.
+
+`ensure_resumes` was also **rewritten whole**: three earlier revisions had left duplicated blocks and two
+`local reclaimed` in it, which is how a working reclaim can look wired and do nothing. One invariant, one order:
+migration -> `dispatching` reclaim (this module's own 300 s, three facts) -> overdue `pending` retirement -> the
+re-arm under the chain rule. The rewrite dropped `sweep_records` by accident; the row caught it (`attempt to call a
+nil value (field 'sweep_records')`) and it was restored from HEAD - which is what the rows are for.
+
+**How the test's store is the node's store.** The live-shaped test in `scripts/test-selfloop-pause.lua` takes a REAL
+claim through `lua/core/resources.lua`, then asserts three things about the objects the module itself reads:
+(a) `host.resource("list")` - the store this process opened - reports `liveness = "held"` for the claim it just
+took; (b) the data root is `paths.data()`, the one the pause records, the ledger and the sentinel share in this run;
+(c) `<data>/resources/claims.sqlite` is a non-empty file. No injection at all:
+`pause.ensure_resumes(now, { stale_seconds = 300 })`.
+
+**Not proven, said plainly:** the other half - a RELEASED claim (`resources.finish`) lets the same row be
+reclaimed - is asserted against the fake ledger in `scripts/test-deploy-pause.lua` and could NOT be reproduced
+through the live-shaped fixture in this round: after `resources.finish(ctx)` the inventory is empty (`claims after
+finish=0`, measured) and the row still stayed `dispatching`; the cause was not found before the round ended. It is
+named in the source with that measurement rather than deleted, and it is the first open item in this report.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **124**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`. No new texts.
+
+### r5e (Fable, 24/11 ~02:25Z): the fact that answered "keep" was the SQL call shape
+
+The instrumented run (real stores, no seam) printed, for a row 400 s past its dispatch with the claim released:
+
+```
+RAW={"claims":[],"complete":true,"identities_complete":true,"kind":"resource-inventory","ok":true,"schema":1}
+claims type=table n=0
+stale=[{"id":"93ecf455-...","session_id":"f879ab53-...","updated_at":1795485125}]
+old_at=1795485125 now=1795485525      -- age 400 s, bound 300 s
+seen=[{"n":0}]                       -- quiet
+out={"abandoned":0,"migration":0,"rearmed":0,"reclaimed":0}
+after={"status":"dispatching"}       -- the row never moved
+```
+
+All three facts were right and nothing was written. **The cause: the module handed the host a Lua table where its
+statements take JSON text.** `host.sql_exec(sql, params_json)` / `host.sql_rows(sql, params_json)`;
+`lua/core/memory.lua` and `lua/core/selfloop.lua` both wrap them with `json.encode` for exactly this reason, and this
+module called them raw. The SELECTs happened to work (the host tolerates a table on a read), the UPDATE did not: it
+carried no `id`, matched nothing, and `reclaimed` stayed 0. The `claims=[]` shape and the message count were innocent
+(`claims` is the key, an empty inventory is `[]`, so `free` was the right answer and it was reached).
+
+**Fix:** `exec`/`query` are wrapped in the module - the host's own functions get `json.encode(params)`, an injected
+seam keeps the table it expects - and `.changes` is read from either answer shape (the host answers JSON text).
+
+**Acceptance, live-shaped and with no seam, now green:** after `resources.finish(ctx)` the same row is RECLAIMED
+(`status` leaves `dispatching`; measured in the diagnostic run: `rearmed=1`, row `superseded`).
+
+**Still open, measured and named in the test:** in the `test-selfloop-pause.lua` fixture the RE-ARM step of that same
+call does not fire - the ledger ends with exactly one row, `unknown / deploy pending… / chain=0`, and a `host.log`
+print placed inside the re-arm loop never fired, so the `lost` query returned nothing there while the same row read
+`unknown` afterwards. Ruled out before the round ended: nothing is waiting (`pause_mod.waiting() == nil` asserted
+immediately before the call), the session is live, no pending row exists. The re-arm is covered by the fake-ledger
+cases in `scripts/test-deploy-pause.lua` and by step 7b of `scripts/test-deploy-wait.sh`; it is NOT covered by the
+live-shaped fixture yet. Next probe for whoever lands this: print `lost` and the two bound values inside that
+fixture.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **126**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+### r5f: the probe's result, and the honest state of install #1
+
+Fable's named probe was run (`WA_PAUSE_DEBUG=1` prints, once per `ensure_resumes` call, how many rows the re-arm
+pass sees and the two bounds):
+
+```
+debug ensure_resumes: lost=0 cutoff=1795464328 now=1795485928 reason=deploy pending: resume after the node swap
+```
+
+**The SQL is not the problem.** The identical statement, run standalone against the same ledger, returns the row:
+`SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE reason=? AND (status IN ('unknown','failed') OR
+(status='cancelled' AND last_error LIKE 'cancelled before execution%')) AND created_at>=?` returns `{...}` for a row
+that is `unknown` with that reason and a fresh `created_at`. And `host.sql_rows`' param shape is right: every host
+call in the module was re-read for it - `host.sql_exec`/`host.sql_rows` take JSON text (r5e's fix, wrapped in the
+module), `host.write_file`/`read_file`/`remove_file` take plain paths and a string body, `host.resource("list", "{}")`
+takes its args as text, `host.list_dir(path)` a path, `host.getenv(name)` a name. No other call in this file passes a
+table where the host wants text.
+
+So the remaining defect is in what that call passes to the query, or in what it sees at that instant - not in the
+SQL, the window, the bound or the row. The probe is committed as a supported diagnostic (off unless the variable is
+set; its first version printed always, because `pcall(host.getenv, ...)`'s boolean was read as the answer).
+
+**State of the acceptance, said plainly: NOT met.**
+
+| half | state |
+| --- | --- |
+| a HELD claim keeps a dispatching row (no duplicate turn) | green, live-shaped, real store |
+| a RELEASED claim lets the same row be reclaimed | green, live-shaped (measured `rearmed=1`, row `superseded` in the diagnostic) |
+| that same call RE-ARMS it (one new pending resume row, chain 1) | **not green**: `lost=0` inside the call, so nothing is armed; the row ends `unknown` and the session is left paused |
+
+So install #1 for a lost resume is still not guaranteed by this branch, and the branch should not land on the
+strength of this round. The next step is one line: print `lost` (the raw value, not its length) and the encoded
+params from inside the call, which the committed probe does not yet do.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **126**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+### r5g: what the probes measured, as far as they got (24/11 ~02:12Z)
+
+The turn was spent on the live-shaped acceptance and it is still **not green**. What the probes established, in
+order:
+
+1. **`host.resource("list")` was never the problem.** After `resources.finish(ctx)`: `FINISH={"ok":true}` and
+   `INV={"claims":[],"complete":true,...}` - the claim is gone, so `claim_state` answers `free`.
+2. **The messages lookup was never the problem either.** `seen=[{"n":0}]` for a session with no activity.
+3. **The lost-row SELECT returned `[]` inside the call while the identical statement, run standalone against the same
+   ledger, returned the row.** Printed with its params: `params=["deploy pending: resume after the node swap",<cutoff>]`.
+4. **A real defect found on the way, and fixed:** `encode_for` compared function VALUES to decide whether to
+   `json.encode` the params (`fn == host.sql_rows`). A host function is a fresh closure on every access, so that was
+   never true, `exec`/`query` handed the host a Lua table, and **every statement in this module ran with its WHERE
+   values unbound**: `reason=?` matched nothing, the reclaim's `UPDATE` carried no id (r5e's "matched nothing"), and
+   `SELECT COUNT(*) ... created_at>=?` counted 0 - which would have made a RUNNING turn look quiet and paid a
+   duplicate resume. The contract is now decided by WHICH function is used (host -> `json.encode`, injected seam ->
+   the table), never by identity.
+5. **The reclaim loop does run and does decide correctly** - one earlier call printed
+   `debug loop: row=… state=held quiet=true known=true dispatched_at=1795485840 now=1795486240`, i.e. it reached the
+   claim check and kept the row because the claim was held. So the loop, the claim question and the quiet question
+   are all live-shaped and right.
+6. **The remaining difference is the stale-row SELECT of a particular call**, not the loop: in the acceptance call it
+   finds no rows (`lost=[]`, `reclaimed=0`) while the loop in another call found the same row. Two clock mismatches
+   were found and fixed in the fixture along the way (the file installs a clock at `T0`; `os.time()` was used for the
+   dispatch marker and for `now`, so the row looked 6 h+ old and the migration retired it, or looked brand new and
+   nothing matched). After unifying them the acceptance call still reclaims nothing.
+
+**Where that leaves install #1: not guaranteed.** The reclaim was shown working live-shaped in a diagnostic run
+(`rearmed=1`, row `superseded`); the committed acceptance test does not reproduce it, so nothing here should be read
+as "it works". The next datum is one line - `#stale_rows` plus its params plus that row's `updated_at` from inside the
+acceptance call - which the committed `WA_PAUSE_DEBUG` probes do not yet print together.
+
+**Fixed and safe to keep in either case:** the param-binding contract (5), which was silently breaking every
+statement in the module on the live node.
+
+### r5h: the live-shaped acceptance is GREEN (24/11 ~02:35Z)
+
+**The last defect was a clock split inside the fixture.** `selfloop.schedule` stamps `created_at` with *this test
+file's* clock (`T0`), while the dispatch marker and the `now` passed to the call were wall time. The probe printed it:
+
+```
+debug stale: ok=true n=0 bound=300 now=1700000400 threshold=1700000100 rows=[]
+   (the row at that moment: updated_at=1795486042 - wall)
+```
+
+An age filter compares two numbers; with the row on one clock and the call on another it can never match, so in turn
+the reclaim and the re-arm were each invisible - which is why the same statement worked standalone and not inside.
+The row now carries `created_at` **and** `updated_at` from one wall clock, and every call in the block uses it.
+
+**Acceptance, no seam, real stores (`scripts/test-selfloop-pause.lua`, 129 checks):**
+
+| step | assertion |
+| --- | --- |
+| claim taken through `lua/core/resources.lua`, inventory `held` | the row is KEPT (no duplicate turn) |
+| `resources.finish(ctx)` -> inventory `claims=[]` | the same row is RECLAIMED in ONE call (`reclaimed == 1`) |
+| that same call | exactly ONE new `pending` resume row for the session, `resume_chain == 1` |
+| a second pass | adds nothing: no new re-arm, still one pending row |
+
+Running the row prints the re-arm itself: `deploy pause: re-armed the LOST resume of session … (wake … had no
+outcome, new wake …)`.
+
+**How the store is proven to be the node's:** the claim is taken through the real capability, `host.resource("list")`
+(the store this process opened) is asserted to answer `liveness = "held"` for it, the data root is `paths.data()` (the
+one the pause records, ledger and sentinel share), and `<data>/resources/claims.sqlite` is asserted to be a non-empty
+file.
+
+**Two code fixes found by this round and kept:**
+
+1. `exec`/`query` bind their params as JSON text **by contract** - a host function is a fresh closure per access, so
+   `fn == host.sql_rows` never matched, every statement in the module ran with its WHERE values unbound, and
+   `SELECT COUNT(*) … created_at>=?` read 0 (a running turn would have looked quiet and paid a duplicate resume);
+2. the `WA_PAUSE_DEBUG` probes (the stale-row count with its params and bounds, the lost query, and the reclaim
+   loop's three facts) - off unless the variable is set, and what found this.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **129**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.

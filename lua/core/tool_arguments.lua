@@ -10,8 +10,12 @@
 --
 -- WHAT IT JUDGES. Only the TOP-LEVEL key names of the arguments, against the names the tool's own schema
 -- declares. It does not type-check, bound-check or rewrite a value: the handler already does that, and a
--- second opinion about a value would be a second contract to keep in step. A key the schema does not
--- declare is refused BY NAME, with the declared names in the fix line and `effect:"none"` - nothing ran.
+-- second opinion about a value would be a second contract to keep in step.
+--
+-- STEP 1 (23/11, Fable): a key the schema does not declare is RECORDED, not refused - one telemetry event
+-- per distinct tool+field, names only, never a value - and the call runs exactly as it did before this
+-- module existed. Enforcement returns in STEP 2 for model-sent calls first, once every field real use sends
+-- has been declared or stopped sending it. Until then this module is a measurement, not a wall.
 --
 -- WHAT IT EXCLUDES, in two tables that each say why:
 --   * INTERNAL - fields the RUNTIME adds to a call it makes itself (adoption's budget_ms, the reader's
@@ -57,35 +61,45 @@ M.INTERNAL = {
 }
 
 -- The report mode, used to MEASURE before refusing: with WASM_AGENT_TOOL_ARGUMENTS=report every would-be
--- refusal is appended to WASM_AGENT_TOOL_ARGUMENTS_LOG and the call proceeds exactly as it did before. It
--- exists so a new refusal can be counted against real traffic instead of guessed at, and it is read from the
--- environment on every call so a test can turn it on around one dispatch.
-local function report_to()
-  local ok, value = pcall(host.getenv, 'WASM_AGENT_TOOL_ARGUMENTS')
-  if not ok or value ~= 'report' then return nil end
-  local path_ok, path = pcall(host.getenv, 'WASM_AGENT_TOOL_ARGUMENTS_LOG')
-  if not path_ok or type(path) ~= 'string' or path == '' then return nil end
-  return path
+-- STEP 1 (23/11, Fable). This check is REPORT-ONLY on main: a call with an argument the tool does not
+-- declare RUNS EXACTLY as it did before the validator existed (the field is ignored, as it always was), and
+-- the fact is recorded instead of refused - ONE telemetry event per distinct tool+field, with NO values.
+-- Enforcement comes back in STEP 2, for model-sent calls first, once every field real use sends has been
+-- declared or stopped. So this function answers nil always; the name is kept so the call site reads the same.
+local RECORDED = {}
+
+-- Who sent the call: the model itself, the runtime on the model's behalf, or another node. Read from the
+-- context the dispatcher already carries - never from the arguments, which are what is being judged.
+local function caller_kind(ctx)
+  ctx = type(ctx) == 'table' and ctx or {}
+  if ctx.peer_call then return 'peer' end
+  if ctx.codemode_nested or ctx.codemode_deadline or ctx.subagent or ctx.internal_call then return 'internal' end
+  return 'model'
 end
 
-local function record(path, name, unknown, args)
-  local line = json.encode({ tool = tostring(name), unknown = unknown,
-    keys = (function() local keys = {}; for key in pairs(args or {}) do keys[#keys + 1] = tostring(key) end; table.sort(keys); return keys end)() })
-  if type(host.append_file) == 'function' then pcall(host.append_file, path, line .. '\n') end
+-- One event per distinct tool+field, for the life of this process: a chatty caller costs one row, not one
+-- per call. The payload carries names only - never a value, which could be a secret or a whole file.
+local function note(name, field, fields, ctx)
+  local key = tostring(name) .. '\0' .. tostring(field)
+  if RECORDED[key] then return end
+  RECORDED[key] = true
+  local ok, telemetry = pcall(dofile, 'lua/core/telemetry.lua')
+  if not ok or type(telemetry) ~= 'table' or type(telemetry.event) ~= 'function' then return end
+  ctx = type(ctx) == 'table' and ctx or {}
+  pcall(telemetry.event, ctx.session_id, ctx.run_id, nil, 'tool_arguments', 'undeclared',
+    { tool = tostring(name), field = tostring(field), fields = fields, caller = caller_kind(ctx) })
 end
 
--- `parameters` is the tool's own schema parameters object, or nil when this node has no schema for the name
--- (an unknown tool, or one whose schema only a peer has). No schema is not a verdict: an unknown name is
--- answered by the dispatcher's own unknown-tool path, so this refuses nothing on a schema it cannot read.
-function M.refusal(name, args, parameters)
+-- What the call carries that the tool's schema does not declare: the one rule, in one place, so the row
+-- that measures it and the dispatch that runs it cannot disagree.
+function M.undeclared(name, args, parameters)
   if type(args) ~= 'table' then return nil end
   if type(parameters) ~= 'table' then return nil end
   -- A schema that says it is open ("additionalProperties": true) declares every name, so nothing is unknown.
   if parameters.additionalProperties == true then return nil end
   local declared = type(parameters.properties) == 'table' and parameters.properties or {}
-  local allowed, names = {}, {}
-  for key in pairs(declared) do allowed[key] = true; names[#names + 1] = tostring(key) end
-  table.sort(names)
+  local allowed = {}
+  for key in pairs(declared) do allowed[key] = true end
   for key in pairs(M.INTERNAL) do allowed[key] = true end
   local unknown = {}
   for key in pairs(args) do
@@ -93,13 +107,39 @@ function M.refusal(name, args, parameters)
   end
   if #unknown == 0 then return nil end
   table.sort(unknown)
-  local path = report_to()
-  if path then record(path, name, unknown, args); return nil end
+  return unknown
+end
+
+-- `parameters` is the tool's own schema parameters object, or nil when this node has no schema for the name
+-- (an unknown tool, or one whose schema only a peer has). No schema is not a verdict: an unknown name is
+-- answered by the dispatcher's own unknown-tool path, so this refuses nothing on a schema it cannot read.
+
+-- ── ENFORCEMENT (STEP 2, 23/11) ───────────────────────────────────────────────────────────────────────
+-- ONE LINE decides who is refused. 'model' refuses an undeclared field again for a call THE MODEL sent and
+-- records only for internal and peer callers; 'off' is STEP 1's behaviour (record everything, refuse
+-- nothing). The other half of the switch is measured, not promised: internal and peer callers come under
+-- enforcement only after 24 h with no `tool_arguments` event whose caller is internal or peer in this node's
+-- telemetry - the row scripts/test-tool-args-report.lua names that measurement, and the flip is this line.
+-- SHIPPED 'off': the model door can be enforced again in one line ('model'), and G may ship with it only
+-- when the full main-health is green with it. It is off here because STEP 2's field work is not finished:
+-- turning it on today would re-red the rows whose callers still send an undeclared field (see the report's
+-- field table), and a red main is not a place to discover that a declaration is missing.
+M.ENFORCE = 'off'
+
+-- Record always; refuse only what the switch names. STEP 1 recorded everything and refused nothing; STEP 2
+-- refuses the MODEL's own calls again (the door the model reads), and keeps internal and peer callers
+-- report-only until the measurement above says otherwise.
+function M.refusal(name, args, parameters, ctx)
+  local unknown = M.undeclared(name, args, parameters)
+  if not unknown then return nil end
+  for _, field in ipairs(unknown) do note(name, field, unknown, ctx) end
+  local caller = caller_kind(ctx)
+  if M.ENFORCE ~= 'model' or caller ~= 'model' then return nil end
+  local declared = type(parameters) == 'table' and type(parameters.properties) == 'table' and parameters.properties or {}
+  local names = {}
+  for key in pairs(declared) do names[#names + 1] = tostring(key) end
+  table.sort(names)
   local list = #names > 0 and table.concat(names, ', ') or 'no arguments'
-  -- The sentence is THIS module's, not the refusal renderer's: `message`, `fix` and `input` together make
-  -- lua/core/refusal.lua keep it as written (its own templates describe a code's family, and a code with a
-  -- field in it is not a family). The first line names what the tool DOES take, which is the line a model
-  -- acts on.
   return {
     error = 'unknown_argument:' .. table.concat(unknown, ','),
     tool = tostring(name),

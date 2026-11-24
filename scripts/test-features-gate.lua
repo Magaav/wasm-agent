@@ -151,7 +151,17 @@ check(type(attribution) == 'table' and attribution.enabled == true,
 ------------------------------------------------------------------ 5. the two tables agree
 local table_answer = features.status()
 check(type(table_answer) == 'table' and type(table_answer.features) == 'table', 'the resolver answers the whole table')
-check(#(table_answer and table_answer.features or {}) == 8, 'eight features, got ' .. tostring(table_answer and #table_answer.features))
+check(#(table_answer and table_answer.features or {}) == 9, 'nine features, got ' .. tostring(table_answer and #table_answer.features))
+-- The ninth is the graph, the first row that defaults OFF (docs/GRAPH.md): it answers off with its own
+-- reason, and the env name it is switched with is `WA_GRAPH_COMPONENT`, in both tables.
+local graph_row
+for _, entry in ipairs((table_answer and table_answer.features) or {}) do
+  if entry.feature == 'graph' then graph_row = entry end
+end
+check(graph_row ~= nil, 'the graph is one of the rows')
+check(graph_row and graph_row.env == 'WA_GRAPH_COMPONENT', 'the graph is switched by WA_GRAPH_COMPONENT, got ' .. tostring(graph_row and graph_row.env))
+check(graph_row and graph_row.enabled == false, 'and it is off when nobody asks, got ' .. tostring(graph_row and graph_row.enabled))
+check(graph_row and graph_row.reason == 'default_off', 'with the default_off reason, got ' .. tostring(graph_row and graph_row.reason))
 for _, entry in ipairs((table_answer and table_answer.features) or {}) do
   check(entry.env == features.env[entry.feature],
     'env name for ' .. tostring(entry.feature) .. ': resolver ' .. tostring(entry.env) .. ' vs lua ' .. tostring(features.env[entry.feature]))

@@ -202,10 +202,16 @@ do
   check(tail[1]:find('script output \194\183 2,549 chars', 1, true) ~= nil,
     'a 2,549-character result reads `2,549 chars`: ' .. tostring(tail[1]))
   local unicode = block.new({ code = 'return u;' }, 0)
-  block.finish(unicode, { ok = true, value = string.rep('\226\156\147', 10) }, 0.1)
+  block.finish(unicode, { ok = true, value = string.rep('\226\156\147', 600) }, 0.1)
   local t2 = block.tail_rows(unicode, 80, o)
-  check(t2[1]:find('script output \194\183 10 chars', 1, true) ~= nil,
-    'ten ticks are ten characters, not thirty bytes: ' .. tostring(t2[1]))
+  check(t2[1]:find('script output \194\183 600 chars', 1, true) ~= nil,
+    'six hundred ticks are six hundred characters, not eighteen hundred bytes: ' .. tostring(t2[1]))
+  -- ...and a result that FITS one row is that row, folded into nothing (scripts/test-cli-flow.lua).
+  local short = block.new({ code = 'return 6 * 7;' }, 0)
+  block.finish(short, { ok = true, value = 42 }, 0.1)
+  local t3 = block.tail_rows(short, 80, o)
+  check(#t3 == 1 and t3[1]:find('⎿ 42', 1, true) ~= nil,
+    'a one-row result is drawn as itself, never behind a click: ' .. table.concat(t3, '|'))
 end
 
 -- A FAILED script is drawn OPEN, its error first, and no press needed: a fold over a failure would hide
@@ -236,8 +242,15 @@ do
     stdout = 'fine\n', stderr = '', process_exit_code = 0 }) }, 0.1)
   check(block.failed(good) == false, 'exit 0 is not a failure')
   local good_rows = block.tail_rows(good, 80, o)
-  check(#good_rows == 1 and good_rows[1]:find('script output', 1, true) ~= nil,
-    'and a command that worked is the one row: ' .. table.concat(good_rows, '|'))
+  check(#good_rows == 2 and good_rows[1]:find('script output', 1, true) ~= nil,
+    'a command that worked is one result row: ' .. table.concat(good_rows, '|'))
+  check(good_rows[2]:find('the whole result is in /console', 1, true) ~= nil,
+    'with the note that says where the whole object is (scripts/test-raw-view-stream.lua): '
+      .. tostring(good_rows[2]))
+  check(good_rows.expand and good_rows.expand[1]:find('operation_id', 1, true) ~= nil,
+    'and its click carries the raw object after the output: ' .. tostring(good_rows.expand and good_rows.expand[1]))
+  check(good_rows.expand and good_rows.expand[1]:sub(1, 4) == 'fine',
+    'the output first, because that is what the reader opened it for')
 end
 
 -- The snapshot says what it looks like; these say why, so a failure names the rule that broke.

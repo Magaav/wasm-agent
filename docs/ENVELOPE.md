@@ -76,7 +76,6 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `operation`: Run or collect a supervised long command
 - `ls`: List a directory
 - `grep`: Find lines matching literal text
-- `graph`: Retrieve symbol source, trace relationships, or audit patch impact
 - `diagnose`: Run a fixed read/grep check sequence once
 - `client`: Act on the user's machine: screen, mouse, keyboard, browser
 - `shell`: Run a shell command on the client machine
@@ -157,7 +156,6 @@ runs on the client too, while `bash` runs on this node.
 | `edit` | `path` `edits?` `node?` `range_edits?` | Replace a versioned range returned by read |
 | `ls` | `node?` `path?` | List a directory |
 | `grep` | `pattern` `context?` `extensions?` `ignore_case?` `limit?` `max_depth?` `node?` `path?` | Find lines matching literal text |
-| `graph` | `action` `aspects?` `byte_offset?` `commit?` `critique?` `cursor?` `cwd?` `depth?` `direction?` `evidence?` `force?` `from?` `grade?` `hours?` `kind?` `limit?` `line?` `max_bytes?` `name?` `offset?` `outcome?` `path?` `prefer_implementations?` `reason?` `run_id?` `source?` `source_version?` `to?` | Retrieve symbol source, trace relationships, or audit patch impact |
 | `diagnose` | `steps` | Run a fixed read/grep check sequence once |
 | `client` | `action` `button?` `id?` `key?` `max_chars?` `port?` `profile?` `reuse?` `script?` `target?` `text?` `timeout_ms?` `url?` `x?` `y?` | Act on the user's machine: screen, mouse, keyboard, browser |
 | `shell` | `command` `cwd?` `shell?` | Run a shell command on the client machine |

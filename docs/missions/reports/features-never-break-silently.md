@@ -256,3 +256,28 @@ separately, and **never recorded** as a success (so an off feature does not read
 canary-sourced row is labelled, a hook's is not) and in the crate's tests (the rendered line carries the
 marker).
 
+## 13. main-health RED: `scripts/test-land-until.lua` (`0238b6dd` fixes it)
+
+**The cause was mine, in the code, not the test.** Fable's fix 1 made the canaries step ask the nodes the
+deploy installed on - correct - but the ask was gated only on `options.release`, and `test-land-until.lua` is
+a RELEASE fixture: it runs the loop with `release = true` against `SOLO_RING`, whose single node is the
+invented `work`. Its deploy stub answers `installed`, the step recorded the node, asked it, and got
+`unknown_node:work` - so a fixture with no fleet was reported `not proven`, and the run stopped before
+`publish` (the `publish_failed: fake gh refused` in the row was collateral: the round never reached it).
+
+Two changes, and neither one weakens an assertion (nothing in any row was removed or relaxed):
+
+1. **A ROSTER RULE in `impl.canaries`** (the real fix). A node is asked only if this machine can address it:
+   when the deploy's node is in this node's roster it is asked; a roster that is missing one of the deployed
+   nodes makes THAT node `not proven` (red, named); and a machine with **no roster at all** asks nobody and
+   says so in its evidence - it cannot address a peer, so the deploy could not have reached one from here
+   either. This is real, observable state, not a test hook: a scratch home has no roster, a node does.
+2. **the fixture's own answer** (`scripts/lib/land-row.lua`): the shared land harness answers the peer call
+   once with "this node passed", because its ring names an invented node and a row must never call a live
+   peer. `scripts/test-land-canary-step.lua` is where the asking is proven (49 checks: both nodes asked,
+   an unreachable node red as `canary_unproven`, a peer's failing canary red by name, the rollback naming
+   the previous release).
+
+Rows run after the fix (this node, tree binary `dc2a60ce` + this change): `test-land-until 102`,
+`test-land-canary-step 49`, `test-land-rows 137`, `test-land-plan 109`, `test-land-marks 27`,
+`test-feature-health 99`, `test-feature-canary 61`, `test-feature-notice 30` - all green.

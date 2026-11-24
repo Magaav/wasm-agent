@@ -1476,8 +1476,14 @@ echo "deploy: $COMPONENT_COUNT pinned component(s) staged:$COMPONENT_SET"
 # The pair has to answer, not merely load: a component built for another engine, or a core whose
 # graph path is broken, fails here with nothing installed.
 COMPONENT_PROOF_HOME="$(mktemp -d)"
+# THE GRAPH IS OFF BY DEFAULT (docs/GRAPH.md, 23/11) AND THIS PROOF STILL HAS TO PROVE THE COMPONENT. The
+# switch below is the documented per-process one: with it, `host.graph_*` answers through the STAGED
+# component exactly as a node that uses the graph does; without it, the call is refused as dormant before
+# the component is touched - which would prove nothing at all about the bytes being installed. The proof
+# itself refuses by name if the switch is missing (`scripts/check-graph-component.lua`), so it cannot
+# silently degrade back into proving nothing.
 if ! WA_COMPONENTS_DIR="$COMPONENT_STAGE" WASM_AGENT_HOME="$COMPONENT_PROOF_HOME" WASM_AGENT_MANAGED=0 \
-  WA_GRAPH_WATCH=0 WA_SCRIPT="$ROOT/scripts/check-graph-component.lua" \
+  WA_GRAPH_WATCH=0 WA_GRAPH_COMPONENT=1 WA_SCRIPT="$ROOT/scripts/check-graph-component.lua" \
   env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY -u WA_GRAPH_ROOT -u WA_GRAPH_DB \
   "$NEW" --db "$COMPONENT_PROOF_HOME/proof.db" >"$COMPONENT_PROOF_HOME/proof.log" 2>&1; then
   tail -5 "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null | sed 's/^/  component: /' >&2

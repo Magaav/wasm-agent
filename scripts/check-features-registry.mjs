@@ -51,6 +51,12 @@ for (const [index, row] of (document.features || []).entries()) {
   for (const field of ['name', 'role', 'canary', 'last_success']) {
     if (typeof row[field] !== 'string' || row[field].trim() === '') fail(`${where} has no ${field}`);
   }
+  // A row may declare that its feature is OFF unless the operator asks (`"default": "off"`, the graph on
+  // every node from G - docs/GRAPH.md). A value this list does not know is refused by name: a reader that
+  // guessed would decide a feature's default from a typo.
+  if (row['default'] !== undefined && row['default'] !== 'on' && row['default'] !== 'off') {
+    fail(`${where} declares default ${JSON.stringify(row['default'])}, which is not on or off`);
+  }
   if (typeof row.name === 'string') {
     if (seen.has(row.name)) fail(`${where} is listed twice`);
     seen.add(row.name);

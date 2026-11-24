@@ -88,6 +88,9 @@ mod deploy_protocol;
 mod deploy_bootstrap;
 // One deploy, one report, written on disk before the installer starts and settled by whichever process
 // outlives it: the sentinel's wait on the child, the installer's own result file, or the watchdog.
+mod installer_outcome;
+#[path = "installer_outcome_tests.rs"]
+mod installer_outcome_tests;
 mod deploy_outcome;
 mod sentinel_return;
 #[cfg(test)]
@@ -173,7 +176,7 @@ pub(crate) fn sentinel_dir() -> PathBuf {
     dir
 }
 
-fn log_path() -> PathBuf {
+pub(crate) fn log_path() -> PathBuf {
     sentinel_dir().join("sentinel.log")
 }
 
@@ -2707,7 +2710,7 @@ pub(crate) fn requeue_dir() -> PathBuf {
 /// node was busy with the very workers the deploy had paused, and the landing that asked for it got nothing but a
 /// `failed/` record - so the operator had to notice and ask again by hand. Once is the bound: the request that
 /// comes back carries `requeued`, and a second failure at its bound is terminal (it is not re-queued for ever).
-fn schedule_requeue(request: &Value, key: &str, detail: &str) -> Result<()> {
+pub(crate) fn schedule_requeue(request: &Value, key: &str, detail: &str) -> Result<()> {
     let dir = requeue_dir();
     std::fs::create_dir_all(&dir)?;
     let stored = json!({"request": request, "detail": detail, "at": now_epoch()});
@@ -4095,6 +4098,14 @@ fn status() -> Result<()> {
     let done = std::fs::read_dir(sentinel_dir().join("done")).map(|d| d.count()).unwrap_or(0);
     let failed = std::fs::read_dir(sentinel_dir().join("failed")).map(|d| d.count()).unwrap_or(0);
     say(&format!("requests:  {pending} waiting, {done} done, {failed} failed"));
+    // THE HEALTH LINE (23/11, G blocker): how many sessions are paused for a deploy right now, and how long the
+    // oldest has been waiting. A pause is a promise this node resumes; a promise two hours old must be visible.
+    let (paused_live, paused_oldest, paused_stale, paused_abandoned) = paused_summary(now_epoch());
+    say(&format!("paused sessions: {paused_live}, oldest {}, stale: {paused_stale}, abandoned: {paused_abandoned}",
+        match paused_oldest {
+            Some(since) => age(now_epoch(), since),
+            None => "none".to_string(),
+        }));
     let parked = requeue_pending();
     if parked > 0 {
         say(&format!("requeue:   {parked} request(s) that failed at their bound run when the node is quiet enough"));
@@ -4156,6 +4167,58 @@ fn status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every session this node has recorded as paused for a deploy: how many, and since when the oldest one.
+///
+/// THE HEALTH LINE (23/11, G blocker): a pause is a promise the node resumes, and two of them outlived their deploy
+/// by two hours with nothing visible anywhere. One line, always printed, so "paused sessions: 0, oldest none" is a
+/// fact an operator can check rather than an absence they have to notice. The records are the ones
+/// lua/core/deploy_pause.lua writes at the moment a session pauses (`<data>/deploy-paused/<session>.json`).
+/// The window a pause can be live in: the SAME number as lua/core/deploy_pause.lua's RESUME_WINDOW_SECONDS
+/// (6 h). One constant, stated here, because the health line must count what the repair acts on - a record the
+/// repair would never touch is not a promise in flight.
+pub(crate) fn pause_window_secs() -> u64 { 6 * 3600 }
+
+/// (live, oldest live, stale, abandoned) - see [`paused_summary`].
+pub(crate) fn paused_summary(now: u64) -> (usize, Option<u64>, usize, usize) {
+    let mut count = 0usize;
+    let mut oldest: Option<u64> = None;
+    // A record older than the window, or one the node cannot date, is STALE: it can never be resumed, and the
+    // sweep closes it. Counted apart, so "paused sessions" is work in flight and not a graveyard (measured 24/11:
+    // 53 records, "oldest 1d", none of them live).
+    let mut stale = 0usize;
+    // A pause the node gave up on (lua/core/deploy_pause.lua `mark_abandoned`): the resume could not run after its
+    // re-arms, and that is a fact an operator must see, not a pause that quietly stays.
+    let mut abandoned = 0usize;
+    if let Ok(entries) = std::fs::read_dir(paused_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            count += 1;
+            let read: Value = std::fs::read(&path).ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+            if read.get("abandoned").and_then(Value::as_bool) == Some(true) {
+                abandoned += 1;
+            }
+            let record: Value = std::fs::read(&path).ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+            let since = record.get("since").and_then(Value::as_u64).filter(|at| *at > 0);
+            // An undated record is still a pause the node owes: it is COUNTED, and it never reads as "none".
+            match since {
+                Some(since) if since <= now && now - since <= pause_window_secs() => {
+                    if oldest.map(|at| since < at).unwrap_or(true) {
+                        oldest = Some(since);
+                    }
+                }
+                _ => stale += 1,
+            }
+        }
+    }
+    let live = count.saturating_sub(stale);
+    (live, oldest, stale, abandoned)
 }
 
 fn print_help() {

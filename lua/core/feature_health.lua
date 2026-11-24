@@ -33,6 +33,10 @@
 --   failing  the last event failed (its stage and time are named) - nothing newer has succeeded
 --   never    nothing has ever been recorded for it on this node
 --   off-node the feature's component is not installed here, so this node cannot run it at all
+--   dormant  the row declares `"default": "off"` and the feature's own switch says off here: nothing is
+--            broken and nothing was proven - the graph's state on every node from G (docs/GRAPH.md). A
+--            reader that called that 'never' would report a feature nobody turned on as a feature that
+--            stopped, and a node that switches it on gets the ordinary verdicts back.
 -- A reader that treats off-node or never as working would rebuild the silence, so every renderer prints
 -- them, and M.red (what the release step and the notice use) counts them: 'never' on a node that runs
 -- the feature is a feature nobody has proven works.
@@ -151,9 +155,14 @@ function M.parse_registry(text, where)
     if bound > M.MAX_STALE_S then
       return registry_error(where, string.format('the feature %s has a stale_after_s of %d, past the %d ceiling', name, bound, M.MAX_STALE_S))
     end
+    local declared = row['default']
+    if declared ~= nil and declared ~= 'on' and declared ~= 'off' then
+      return registry_error(where, 'the feature ' .. name .. ' declares default ' .. tostring(declared) .. ', which is not on or off')
+    end
     rows[#rows + 1] = {
       name = name, role = row.role, canary = row.canary, last_success = row.last_success,
       stale_after_s = bound, why = type(row.why) == 'string' and row.why or nil,
+      default = declared or 'on',
     }
   end
   if #rows == 0 then return registry_error(where, 'the features array is empty') end
@@ -202,6 +211,19 @@ function M.applies(row)
   if not exists(dir .. component .. '.json') then return false, component .. ' is not installed on this node' end
   if not exists(dir .. component .. '.wasm') then return false, component .. ' has a definition but no component binary on this node' end
   return true
+end
+
+-- IS THIS ROW DORMANT HERE? A row may declare `"default": "off"` (the graph, docs/GRAPH.md), which says
+-- "nothing runs unless the operator asks". The only way to know whether the operator asked is the ONE
+-- feature resolver - so this asks the same door every gate asks, and answers dormant only on a definite
+-- `enabled == false`. A resolver that cannot answer is NOT permission to call it off: the row then falls
+-- through to its ordinary verdict, which is red, which is what an unreadable node should report.
+function M.dormant(row)
+  if not row or row.default ~= 'off' then return false end
+  local ok, entry = pcall(function() return dofile('lua/core/features.lua').resolve(row.name) end)
+  if not ok or type(entry) ~= 'table' or entry.enabled ~= false then return false end
+  return true, string.format('%s is off by default on this node and nobody switched it on (%s: %s); nothing is broken and nothing is proven - docs/GRAPH.md',
+    tostring(row.name), tostring(entry.source or 'source'), tostring(entry.reason or 'reason'))
 end
 
 -- ------------------------------------------------------------------ the snapshot
@@ -284,6 +306,8 @@ function M.report(now)
     local applies, not_applicable = M.applies(row)
     local verdict, detail = M.verdict(row, entry, now)
     if not applies then verdict, detail = 'off-node', not_applicable end
+    local dormant, why_dormant = M.dormant(row)
+    if applies and dormant then verdict, detail = 'dormant', why_dormant end
     out[#out + 1] = {
       name = row.name, role = row.role, canary = row.canary, stale_after_s = row.stale_after_s,
       applies = applies, verdict = verdict, detail = detail,
@@ -297,7 +321,8 @@ function M.report(now)
 end
 
 -- What has stopped, and the reason in one line each: what the release step refuses on and what the
--- notice speaks about. 'never' counts only where the node runs the feature; off-node never counts.
+-- notice speaks about. 'never' counts only where the node runs the feature; off-node and dormant never
+-- count: a feature nobody switched on is not a feature that failed.
 function M.red(now)
   local rows, why = M.report(now)
   if not rows then return nil, why end
@@ -314,11 +339,11 @@ end
 function M.lines(now)
   local rows, why = M.report(now)
   if not rows then return { 'features: unreadable (' .. tostring(why) .. ')' } end
-  local counts = { working = 0, stale = 0, failing = 0, never = 0, ['off-node'] = 0 }
+  local counts = { working = 0, stale = 0, failing = 0, never = 0, ['off-node'] = 0, dormant = 0 }
   local width = 0
   for _, item in ipairs(rows) do counts[item.verdict] = (counts[item.verdict] or 0) + 1; width = math.max(width, #item.name) end
-  local summary = string.format('features: %d listed  %d working  %d stale  %d failing  %d never  %d off-node',
-    #rows, counts.working, counts.stale, counts.failing, counts.never, counts['off-node'])
+  local summary = string.format('features: %d listed  %d working  %d stale  %d failing  %d never  %d off-node  %d dormant',
+    #rows, counts.working, counts.stale, counts.failing, counts.never, counts['off-node'], counts.dormant)
   local out = { summary }
   for _, item in ipairs(rows) do
     -- WHAT KIND OF SUCCESS IT WAS, in the same line as when it happened. Until real-traffic hooks land, most

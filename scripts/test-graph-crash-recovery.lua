@@ -13,6 +13,11 @@
 -- roll back to the exact answer it gave before the crash). So this row asserts recovery where the old path
 -- quarantined: the same store answers, its journal is spent, no `graph.db.malformed-*` is created, and the
 -- committed revision does not fall back to 1 as a rebuild's would.
+
+-- The graph is OFF by default on every node from G (docs/GRAPH.md, 23/11): this row drives it, so it
+-- switches it on in its own home and refuses if the switch did not take.
+local graph_on_ok, graph_on_why = dofile('scripts/lib/test-graph-on.lua').enable()
+if not graph_on_ok then error('graph-on: ' .. tostring(graph_on_why)) end
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 -- THE COMPONENT THIS ROW CANNOT RUN WITHOUT, NAMED SO THE RUNNER INSTALLS IT. scripts/fast.sh builds the

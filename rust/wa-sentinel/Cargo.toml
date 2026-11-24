@@ -9,6 +9,10 @@ edition = "2021"
 
 [dependencies]
 wa-operation = { path = "../wa-operation" }
+# The one feature resolver (docs/FEATURES.md), so `wa health` reads the same switch the node routes on
+# instead of inventing a second answer: a row that declares `"default": "off"` is dormant here exactly
+# when the node would run it - the graph, off on every node from G (docs/GRAPH.md).
+wa-features = { path = "../wa-features" }
 wa-jobs = { path = "../wa-jobs" }
 ring = "0.17"
 anyhow = "1"

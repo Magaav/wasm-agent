@@ -1162,16 +1162,40 @@ function M.tail_rows(model, width, options)
   for key, value in pairs(o) do inner[key] = value end
   inner.expandable = false
   local open = open_result_rows(model, width, inner)
-  -- Nothing to fold, or no transcript to fold it into (a captured log, a pipe): the rows are the answer.
-  if not o.expandable or #open == 0 or M.failed(model) then return open end
-  -- What the press shows is the WHOLE result, not the preview: the open rows are capped (a table is cut
-  -- to M.RESULT_ROWS), and a fold that hid the same rows twice would be a second ceiling for no reason.
+  -- Nothing to fold, nothing to fold it into (a captured log, a pipe), and nothing SHORT: a result that
+  -- already fits ONE row IS that row - `\u{23bf} 42` stays `\u{23bf} 42`, which is the answer, not a door
+  -- (scripts/test-cli-flow.lua, scripts/test-run-live.lua). Measured on main after this landed: the fold
+  -- hid a one-row value behind a click and three rows went red.
+  if not o.expandable or #open <= 1 or M.failed(model) then return open end
+  -- What the press shows is the WHOLE result, never the preview: a table is cut to M.RESULT_ROWS there,
+  -- so the fold carries the output rows (all of them) and, when the value is an operation, the raw object
+  -- after them - scripts/test-raw-view-stream.lua's rule (the expanded rows are the whole object, byte for
+  -- byte) is kept, and the output comes first because that is what the reader opened it for.
+  local parts = {}
   local text = M.result_text_of(model, o)
-  local whole = text ~= "" and text or table.concat(open, "\n")
-  local count = char_count(whole)
+  if text ~= "" then
+    for line in (text:gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do parts[#parts + 1] = line end
+    -- A text that ended in a newline does not have an empty row after it.
+    if parts[#parts] == "" then parts[#parts] = nil end
+  end
+  local operation = model.value ~= nil and M.operation_of(model.value) or nil
+  if operation then
+    local raw = M.raw_rows(model.value, o)
+    if #parts > 0 and #raw > 0 then parts[#parts + 1] = "" end
+    for _, line in ipairs(raw) do parts[#parts + 1] = line end
+  end
+  if #parts == 0 then parts = open end
+  local counted = text ~= "" and text or table.concat(parts, "\n")
   local rows = { o.paint("\226\142\191 ", "muted")
-    .. o.paint("script output \194\183 " .. thousands(count) .. " chars", "dim") }
-  rows.expand = { [1] = whole }
+    .. o.paint("script output \194\183 " .. thousands(char_count(counted)) .. " chars", "dim") }
+  -- An operation keeps its own note on screen (`operation <id> \u{b7} completed \u{b7} exit 0 \u{b7} the whole
+  -- result is in /console`): the reader is told where the object went without opening anything, and "the
+  -- full result is still reachable, named on the block" stays true.
+  if operation then
+    local _, hidden = M.operation_preview(operation, width, inner, false)
+    rows[#rows + 1] = o.paint("  " .. M.operation_note(operation, o, hidden), "dim")
+  end
+  rows.expand = { [1] = table.concat(parts, "\n") }
   return rows
 end
 

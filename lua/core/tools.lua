@@ -216,7 +216,19 @@ function M.remote_arguments(args, catalog)
             note = "`" .. key .. "` must be a non-empty string at the top level.", example = REMOTE_EXAMPLE }
         end
         local target = key == "node" and capability or value
-        if declares_param(catalog, target, key) then
+        -- BOTH MISSING, BOTH INSIDE: the pair is the remote call's own routing words, not a capability's
+        -- parameter. A call that names no capability at the top level cannot be addressing a capability's own
+        -- `node` argument, so hoisting the pair is the only reading that can be acted on - the mis-nested
+        -- shape weaker models produce (38 of 114 routed calls in the evidence behind this repair). The
+        -- ambiguity refusal below stays for the case where the top level DID name the capability: then the
+        -- inner `node` really could be either (mission tool-args-honest-and-same-on-peers: `read`/`grep`/
+        -- `write`/`edit`/`ls` now declare their own `node`, which is what made this pair ambiguous).
+        local pair_inside = function(want)
+          if params[want] ~= nil then return true end
+          return type(params.args) == "table" and params.args[want] ~= nil
+        end
+        local both_misnested = args.node == nil and args.capability == nil and pair_inside("node") and pair_inside("capability")
+        if declares_param(catalog, target, key) and not both_misnested then
           return nil, { error = "remote_" .. key .. "_ambiguous", found_in = where,
             note = "`" .. key .. "` is missing at the top level, and " .. tostring(target)
               .. " has its own `" .. key .. "` parameter, so the key inside " .. where
@@ -315,6 +327,17 @@ end
 -- ledger carried, and small enough that the temp file the launcher hands the child stays in the node root.
 local STDIN_MAX_BYTES = 1048576
 M.STDIN_MAX_BYTES = STDIN_MAX_BYTES
+
+-- THE GRAPH IS OFF BY DEFAULT ON EVERY NODE FROM G (docs/GRAPH.md, 23/11). A dormant feature must cost the
+-- model nothing: no catalogue line, no `searchTools` hit, no schema bytes in the prompt. The switch is the
+-- `graph` row of the one feature resolver, so it is `policy.json`'s `features.graph` (live: the resolver
+-- re-reads the file about once a second) or `WA_GRAPH_COMPONENT=1` for this process - the same answer
+-- `wa features` prints and the host's own capabilities refuse by. Read per catalogue build, not once at
+-- load, so switching it on reaches the next turn without a restart.
+local function graph_offered()
+  local ok, on = pcall(function() return dofile('lua/core/features.lua').on('graph') end)
+  return ok and on == true
+end
 
 -- Available to everyone.
 M.shared = {
@@ -477,7 +500,7 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a command on this machine with " .. platform.shell() .. ". Killed after " .. exec_deadline_seconds() .. "s unless timeout_seconds (1-86400) is larger; raise it for builds and long tests. Returns when the shell exits; descendants that remain continue as a supervised operation the result names. stdin is the text the command reads and then sees closed. For deliberate long-lived work use operation start.", {
+  schema("bash", "Run a command on this machine with " .. platform.shell() .. ". Killed after " .. exec_deadline_seconds() .. "s unless timeout_seconds (1-86400) is larger; raise it for builds and long tests. Returns when the shell exits; descendants that remain continue as a supervised operation the result names. stdin is the text the command takes as its standard input, then closed. For deliberate long-lived work use operation start.", {
     command = { type = "string" }, cwd = { type = "string" },
     stdin = { type = "string", maxLength = 1048576, description = "Text fed to the command's standard input, then closed. It is delivered as the command's input, not pasted into the command line." },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
@@ -500,14 +523,14 @@ M.admin = {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): read that node's file instead of this one's." },
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's file instead of this one's." },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes. node=<peer> writes that peer's file; the result names the node the bytes landed on.", {
+  schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes. node=<peer> answers from that peer, and the result names the node the bytes landed on.", {
     path = { type = "string" }, content = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): write that node's file instead of this one's." } }, { "path", "content" }),
-  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. An anchor that lies outside every byte range this session read from that file is refused by name (`edit_anchor_outside_read_page`): read the page that holds it. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced. node=<peer> edits that peer's file.", {
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's file instead of this one's." } }, { "path", "content" }),
+  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. An anchor that lies outside every byte range this session read from that file is refused by name (`edit_anchor_outside_read_page`): read the page that holds it. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced. node=<peer> answers from that peer.", {
     path = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): edit that node's file instead of this one's; the result names the node the bytes landed on." },
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's file instead of this one's; the result names the node the bytes landed on." },
     edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
       properties = {
         old_text = { type = "string", description = "Exact bytes to replace, copied from a read; must occur exactly once in the file." },
@@ -521,15 +544,15 @@ M.admin = {
         replacement_lines = {type="array",maxItems=2000,items={type="string"}}
       }, required = {"selection","replacement_lines"} } }
   }, { "path" }),
-  schema("ls", "List a directory (portable: works the same on every platform). node=<peer> lists that peer's directory.", {
+  schema("ls", "List a directory (portable: works the same on every platform). node=<peer> answers from that peer.", {
     path = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): list that node's directory instead of this one's." } }),
-  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots. context returns the lines around each match; node=<peer> searches that peer's files.", {
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's directory instead of this one's." } }),
+  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots. context adds the lines around each match; node=<peer> answers from that peer.", {
     pattern = { type = "string" }, path = { type = "string" },
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}},
     context={type="integer",minimum=0,maximum=10,description="Lines of context before and after each match; 0, the default, returns the matches alone."},
-    node = { type = "string", description = "Peer name or node_id (from nodes): search that node's files instead of this one's." }
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's tree instead of this one's." }
   }, { "pattern" }),
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
@@ -864,9 +887,16 @@ local CUES = {
 
 function M.snippet(name) return CUES[name] end
 
+-- THE CUE NAMES ARE THE ONES THE INDEX CAN USE. A cue belongs to a tool, and the graph's tool is not in the
+-- catalogue while the feature is dormant (docs/GRAPH.md): reporting its cue would be the same lie as
+-- offering the tool. The cue text itself stays in the table, so switching the graph on brings its index
+-- line back without a second edit.
 function M.cue_names()
   local names = {}
-  for name in pairs(CUES) do names[#names + 1] = name end
+  local graph = graph_offered()
+  for name in pairs(CUES) do
+    if graph or name ~= 'graph' then names[#names + 1] = name end
+  end
   table.sort(names)
   return names
 end
@@ -913,6 +943,18 @@ function M.catalog(role)
     for _, plugin in ipairs(plugins) do
       list[#list + 1] = schema_from(plugin.name, plugin.description or "", plugin.parameters)
     end
+  end
+  -- THE GRAPH IS OFF BY DEFAULT (docs/GRAPH.md, 23/11), and a dormant feature costs the model nothing: no
+  -- catalogue line, no `searchTools` hit, no schema bytes in the prompt. One filter over the assembled
+  -- list, because the graph arrives by several roads (its own admin schema, a plugin, a peer's connector)
+  -- and a rule that hid only one of them would be a rule with a hole in it. Asked per build, so the switch
+  -- reaches the next turn without a restart.
+  if not graph_offered() then
+    local kept = {}
+    for _, item in ipairs(list) do
+      if (item['function'] or {}).name ~= 'graph' then kept[#kept + 1] = item end
+    end
+    list = kept
   end
   return list
 end
@@ -1342,6 +1384,10 @@ local function reuse_own_client_claim(ctx,refused)
 end
 
 local function graph_hint(memory,ctx,path)
+  -- A DORMANT NODE CALLS NOTHING (docs/GRAPH.md): no hint is sent, so no scheduler entry, OS watch or
+  -- store can appear because a file was written. The write's answer carries no `graph_index` field at
+  -- all, which is the truth - there is no graph here to tell.
+  if not graph_offered() then return nil end
   if type(host.graph_notify)~='function' then return {error='graph_notify_unavailable'} end
   local root,err=patch_audit.workspace_root(memory,ctx)
   if err then return {error=err} end
@@ -1595,7 +1641,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   -- added to a schema later is accepted here the moment it is declared. A dropped argument used to be a
   -- call that ran as a different call and answered as if it had not; see lua/core/tool_arguments.lua.
   if not tool_arguments then tool_arguments = dofile('lua/core/tool_arguments.lua') end
-  local argument_refusal = tool_arguments.refusal(name, args, M.parameters(name, role))
+  local argument_refusal = tool_arguments.refusal(name, args, M.parameters(name, role), ctx)
   if argument_refusal then return argument_refusal end
   -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.
   -- One pathway (operator 14/11): under code mode a tool the MODEL calls directly runs as the one-line
@@ -2336,6 +2382,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not ok then return {error=tostring(result)} end
     return json.decode(result)
   elseif name == "graph" then
+    -- Off by default (docs/GRAPH.md): refused by name, before the module is loaded and before any store,
+    -- index or component call could exist. `searchTools` will not find it either - it reads the catalogue.
+    if not graph_offered() then return { error = "graph_dormant", effect = "none",
+      next = 'The code graph is OFF by default on this node (docs/GRAPH.md). Read with read/grep, or switch it on: WA_GRAPH_COMPONENT=1, or "graph": true in the features section of policy.json.' } end
     local graph = dofile("lua/core/graph.lua")
     local action = args.action or "explain"
     local root, root_err

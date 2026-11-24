@@ -41,6 +41,15 @@ local BROAD = {
   resource = true, integrate = true, codemode = true,
 }
 
+-- THE GRAPH'S OWN SENTENCE AND NAME, KEPT APART (docs/GRAPH.md, 23/11). The graph is OFF by default, and a
+-- profile may only name a tool the caller's catalogue offers (`profile_exceeds_caller`): naming it on a node
+-- that does not have it refuses every `explore` child over a tool the child simply does not need. Both are
+-- added back, per call, when the switch says on - so a node that switches it on gets the delegating child it
+-- had before, without a restart and without a second profile.
+local GRAPH_TOOL = "graph"
+local GRAPH_INSTRUCTIONS = " For a navigation question - where is X defined, who calls it, how does A reach B -"
+  .. " call `graph` first; use `grep`/`read` for the lines behind the answer."
+
 -- Built-in profiles. `explore` is the default and is read-only; `guest` is the
 -- only profile a guest may start. The explicit mode reserves its task owner below.
 -- Other broad profiles are a file under
@@ -52,12 +61,13 @@ local BUILTIN = {
     id = "explore",
     builtin = true,
     description = "Read-only investigation: search, read, navigate the code graph and diagnose. Cannot write or run a shell.",
-    instructions = "Investigate the task read-only and report what you found with exact file paths and line references. For a navigation question - where is X defined, who calls it, how does A reach B - call `graph` first; use `grep`/`read` for the lines behind the answer. Do not modify anything.",
+    instructions = "Investigate the task read-only and report what you found with exact file paths and line references."
+      .. " Do not modify anything." .. GRAPH_INSTRUCTIONS,
     -- `graph` is read-only in effect: query/explain/path/caps/stats only read the index, and
     -- `index` rebuilds the node's own local graph.db. It reaches no external state, so a
     -- read-only investigator may use it. Without it, a child delegated code exploration is
     -- blind to the navigation capability the parent already has.
-    allowed_tools = { "read", "grep", "ls", "graph", "diagnose" },
+    allowed_tools = { "read", "grep", "ls", "diagnose" },
     resources = {},
     limits = { max_depth = 0, timeout_seconds = 600, max_output_bytes = 65536 },
   },
@@ -65,7 +75,7 @@ local BUILTIN = {
     schema_version=1,id='orchestration-worker',builtin=true,operator_authorized=true,
     description='Explicit orchestration-mode task owner: implement, focused self-review, integrate and report. No nested workers or Sentinel.',
     instructions='Own the operator task end to end in your allocated worktree. Read session_worktree status, project docs and relevant skills. Implement using write/edit, self-review honestly, run focused checks, commit with Agent provenance, fetch/sync/refactor conflicts until mergeable, then use integrate to land through canonical main and verify remote. Do not directly edit canonical files, bypass hooks, force push or invent verification. If semantic conflict cannot be resolved safely, report the exact blocker and preserve work. No full release gate unless explicitly requested. NEVER call Sentinel, /update, deploy/install/restart scripts or write installed UI/assets/configuration. Only the coordinator publishes UI or installs code after readiness. Do not spawn children; no polling model loop. Complete and report; coordinator followup comes only after your report.',
-    allowed_tools={'skill','capabilities','recall','memories','session','search_messages','read','grep','ls','diagnose','graph','write','edit','bash','operation','session_worktree','tool_result','integrate','codemode'},
+    allowed_tools={'skill','capabilities','recall','memories','session','search_messages','read','grep','ls','diagnose','write','edit','bash','operation','session_worktree','tool_result','integrate','codemode'},
     resources={},limits={max_depth=0,timeout_seconds=0,max_output_bytes=131072,max_prompt_bytes=262144},
   },
   guest = {
@@ -136,7 +146,25 @@ end
 -- override a built-in with the same id only when they are authorized.
 function M.profiles()
   local profiles = {}
-  for id, profile in pairs(BUILTIN) do profiles[id] = profile end
+  local graph = false
+  local asked, on = pcall(function() return dofile('lua/core/features.lua').on(GRAPH_TOOL) end)
+  if asked and on == true then graph = true end
+  for id, profile in pairs(BUILTIN) do
+    if graph then
+      -- The switch is live, so the copy is made per call: the built-in table is shared by every caller and a
+      -- mutation here would follow a node that changed its mind back the other way.
+      local copy = {}
+      for key, value in pairs(profile) do copy[key] = value end
+      local allowed = {}
+      for _, name in ipairs(profile.allowed_tools or {}) do allowed[#allowed + 1] = name end
+      if id == 'explore' or id == 'orchestration-worker' then allowed[#allowed + 1] = GRAPH_TOOL end
+      copy.allowed_tools = allowed
+      if id == 'explore' then copy.instructions = tostring(profile.instructions) .. GRAPH_INSTRUCTIONS end
+      profiles[id] = copy
+    else
+      profiles[id] = profile
+    end
+  end
   local files, errors = file_profiles()
   for id, profile in pairs(files) do
     if id~='orchestration-worker' then profiles[id] = profile end -- Reserved operator opt-in contract cannot be weakened by a file override.

@@ -2,6 +2,11 @@
 -- The graph is a WASI component (docs/KERNEL.md, stream C): these checks are about its answers, so the
 -- row installs the pinned component built from this tree into this test's own home first, and a machine
 -- that could not build one gets a named SKIP rather than `component_not_installed` dressed as a failure.
+
+-- The graph is OFF by default on every node from G (docs/GRAPH.md, 23/11): this row drives it, so it
+-- switches it on in its own home and refuses if the switch did not take.
+local graph_on_ok, graph_on_why = dofile('scripts/lib/test-graph-on.lua').enable()
+if not graph_on_ok then error('graph-on: ' .. tostring(graph_on_why)) end
 local components = dofile('scripts/lib/test-components.lua')
 local seeded, why = components.require('graph')
 if not seeded then components.skip('graph-automatic', why); return end

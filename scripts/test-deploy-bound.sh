@@ -374,6 +374,19 @@ same "$(grep -c 'hold-wait-notice' "$SENT_DIR/sentinel.log")" "1"   "and it is m
 out="$(WA_DEPLOY_HOLD_BOUND=1 WA_DEPLOY_HOLD_NOTICE=1 once_out)"
 same "$(grep -c 'hold-wait-notice' "$SENT_DIR/sentinel.log")" "1" "a later tick does not repeat it"
 
+step "the health line says how many sessions are paused and how old the oldest is (23/11, G blocker)"
+# MEASURED: two sessions paused for a deploy and sat TWO HOURS with nothing visible anywhere (603425eb at 19:29:43Z,
+# 66c0d5c1 at 20:19:38Z). The line is printed always, so "paused sessions: 0, oldest none" is a fact an operator
+# can check rather than an absence they have to notice.
+reset_box; rm -rf "$PAUSED"; mkdir -p "$PAUSED"
+printf '{"session":"aaaa","since":%s}\n' "$((NOW - 7200))" > "$PAUSED/aaaa.json"
+printf '{"session":"bbbb","since":%s}\n' "$NOW" > "$PAUSED/bbbb.json"
+out="$(status_out)"
+want "$out" "paused sessions: 2, oldest 2h" "two paused sessions, and the oldest age on one line"
+rm -rf "$PAUSED"
+out="$(status_out)"
+want "$out" "paused sessions: 0, oldest none" "and none is said out loud, not left as an absence"
+
 step "three workers mid-turn, each with a child completion, one session paused: it installs (23/11)"
 reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
 busy_body "$COMPLETIONS"

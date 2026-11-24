@@ -279,6 +279,146 @@ check(tostring(refused_row.last_error):find("deploy_waiting", 1, true) ~= nil,
 eq(selfloop.defer_refused({ id = "no-such-wake", attempts = 0 }, refusal, { now = T0 + 10 }).error, "wake_not_pending",
   "a row that is not pending is refused by name, never guessed at")
 
+-- THE SWEEP ON A LIVE-SHAPED TICK, THROUGH THE REAL HOST (r5, 24/11). The r4 sweep asked for `host.delete_file`,
+-- which does not exist (the capability is `host.remove_file`), so it closed nothing on the live node for nine minutes
+-- and the unit test did not notice because it INJECTED the remover - the fixture replaced exactly the thing that was
+-- wrong. Here nothing is injected: real files in `<data>/deploy-paused`, and `selfloop.tick` with no options.
+--
+-- The oldest record must go, the young one and the half-written one must stay, and the sweep must say it ran.
+local data_dir = dofile("lua/core/paths.lua").data()
+local paused = data_dir .. "/deploy-paused"
+local now_s = os.time()
+local function write_record(name, body)
+  pcall(host.write_file, paused .. "/" .. name, body)
+  return paused .. "/" .. name
+end
+local function exists(path)
+  local ok, text = pcall(host.read_file, path)
+  return ok and type(text) == "string"
+end
+dofile("lua/core/deploy_pause.lua").paused_dir = function() return paused end
+local old_path = write_record("old-record.json", json.encode({ session = "sess-old", since = now_s - 7 * 3600 }))
+-- A REAL session, because the sweep closes a record whose session is gone - a made-up id would be "positively
+-- gone" and the case would prove the opposite of what it says.
+local live_session = memory.start_session("local", "chat",
+  { user_id = "master", node_id = "test-node", title = "a live pause record" })
+local young_path = write_record("young-record.json", json.encode({ session = live_session, since = now_s - 60 }))
+local half_path = write_record("half-record.json", "{\"session\":\"sess-half\"")
+selfloop.tick({ now = now_s })
+check(not exists(old_path), "a record older than the window is closed on a live tick (the capability's real name)")
+check(exists(young_path), "a young record whose session is live is kept")
+check(exists(half_path), "a half-written YOUNG record is kept: unreadable is not dead")
+for _, path in ipairs({ old_path, young_path, half_path }) do pcall(host.remove_file, path) end
+-- THE RECLAIM AGAINST THE REAL RESOURCES STORE (r5d, Fable, 24/11). The two live defects were that the claim was
+-- looked for in the wrong store (the ledger has no claims table: they are in `<data>/resources/claims.sqlite`,
+-- `resources.rs:354-361`) and compared against the wrong boot (`claims.boot` is the uuid `Store::open` mints, not
+-- `runtime_info().boot_id`). So this test uses NO injection at all: a real claim through lua/core/resources.lua, the
+-- real store the node reads for this HOME, and the module's own `claim_state`.
+--
+-- HOW THIS PROVES IT IS THE NODE'S OWN STORE: `host.resource("list")` is the store this process opened, `paths.data()`
+-- is the directory the whole run is using, and the test asserts the claim it just took is in the inventory it just
+-- asked for under that data root - the same root `deploy-pause`, `sentinel` and the ledger live in.
+-- A DEPLOY THAT IS WAITING WOULD RETURN THE RECLAIM EARLY and make this block pass for the wrong reason, so the
+-- fixture proves nothing waits first: no installer marker, no request in the sentinel box of THIS home.
+pcall(host.remove_file, dofile("lua/core/paths.lua").data() .. "/deploy-pending.json")
+do
+  local box = dofile("lua/core/paths.lua").data() .. "/sentinel/requests"
+  local listing = host.list_dir(box)
+  local decoded = listing and json.decode(listing) or nil
+  for _, entry in ipairs((decoded and decoded.entries) or {}) do
+    pcall(host.remove_file, box .. "/" .. tostring(entry.name or ""))
+  end
+end
+local resources = dofile("lua/core/resources.lua")
+local pause_mod = dofile("lua/core/deploy_pause.lua")
+local pause_data = dofile("lua/core/paths.lua").data()
+local claim_session = memory.start_session("local", "chat",
+  { user_id = "master", node_id = "test-node", title = "a session with a run claim" })
+local ctx = { user_id = "master", session_id = claim_session, run_id = "run-r5d" }
+check(pause_mod.waiting(os.time()) == nil, "nothing is waiting for a deploy in this fixture (the reclaim runs)")
+local taken = resources.claim(ctx, { "session:" .. claim_session })
+check(taken and taken.ok, "a real session claim is taken through the resources capability: " .. json.encode(taken))
+local inventory = json.decode(host.resource("list", "{}") or "{}") or {}
+local liveness, found_at = nil, nil
+for _, entry in ipairs(inventory.claims or {}) do
+  if tostring(entry.key or "") == "session:" .. claim_session then liveness = entry.liveness end
+end
+check(liveness == "held", "the inventory answers `held` for a claim THIS process holds: " .. tostring(liveness))
+check(type(pause_data) == "string" and pause_data ~= "", "the data root is the one this run uses: " .. tostring(pause_data))
+local store = pause_data .. "/resources/claims.sqlite"
+local store_ok, store_text = pcall(host.read_file, store)
+check(store_ok and type(store_text) == "string" and #store_text > 0,
+  "the store exists where the node reads it, under the same data root: " .. store)
+
+-- A dispatching resume row is written the way the tick writes one, then the reclaim is asked to judge it.
+local wake = selfloop.schedule({ in_seconds = 60, reason = selfloop.RESUME_REASON or "deploy pending: resume after the node swap",
+  prompt = "resume" }, { session_id = claim_session, user_id = "master" })
+check(wake and wake.ok, "a resume row exists for that session")
+local old_at = os.time() - 400
+-- ONE CLOCK, WALL: `selfloop.schedule` stamps `created_at` with THIS FILE's clock (T0), and a row carrying T0 while
+-- the calls here use `os.time()` satisfies neither the 6 h window nor the 300 s bound - measured: `stale: n=0` at
+-- `now=1700000400` for a row stamped `updated_at=1795486042`, so the reclaim and the re-arm were never reached.
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', created_at=?, updated_at=? WHERE id=?]],
+  json.encode({ old_at, old_at, wake.wake.id }))
+local before = host.sql_query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]],
+  json.encode({ claim_session, old_at }))
+local before_rows = json.decode(before or "[]") or {}
+check(tonumber(before_rows[1] and before_rows[1].n or 1) == 0, "the session has written nothing since the dispatch")
+pause_mod.ensure_resumes(os.time(), { stale_seconds = 300 })
+local held_row = host.sql_query([[SELECT status FROM self_wakes WHERE id=?]], json.encode({ wake.wake.id }))
+local held_status = (json.decode(held_row or "[]") or {})[1]
+check(held_status and held_status.status == "dispatching",
+  "a claim held by the LIVE store keeps the row (no duplicate turn): " .. json.encode(held_status))
+
+-- THE ACCEPTANCE CASE, live-shaped and with NO seam: a dispatching resume row 400 s past its dispatch, its claim
+-- RELEASED (`resources.finish`, what a finished run does), the session quiet - and the NODE must reclaim it and
+-- re-arm it, which is ae2a9231's shape at install #1. Then a second pass must add nothing.
+--
+-- ONE CLOCK: this file installs one (`created_at = 1700000000`), so the call is given the ROW's own clock. Passing
+-- wall time made the row look 6 h+ old, the migration retired it as `too old to resume`, and the reclaim and re-arm
+-- were never reached - a fixture bug that hid the acceptance for three rounds.
+local released_answer = resources.finish(ctx)
+local inventory_after = host.resource("list", "{}") or ""
+print("FINISH=" .. json.encode(released_answer))
+print("INV=" .. tostring(inventory_after):sub(1, 400))
+-- A DEPLOY THAT IS WAITING AT THIS INSTANT WOULD SKIP THE RE-ARM (step 4 sits behind that gate, rightly), and the
+-- earlier blocks of this file leave requests and markers behind: the fixture says out loud that nothing waits.
+pcall(host.remove_file, pause_data .. "/deploy-pending.json")
+do
+  local box = pause_data .. "/sentinel/requests"
+  local listing = host.list_dir(box)
+  local decoded = listing and json.decode(listing) or nil
+  for _, entry in ipairs((decoded and decoded.entries) or {}) do
+    pcall(host.remove_file, box .. "/" .. tostring(entry.name or ""))
+  end
+end
+local clock_now = old_at + 400
+check(pause_mod.waiting(clock_now) == nil, "nothing waits for a deploy at the moment the reclaim runs")
+local verdict = pause_mod.ensure_resumes(clock_now, { stale_seconds = 300 })
+check((tonumber(verdict and verdict.reclaimed) or 0) == 1,
+  "the released claim lets the row be reclaimed in ONE call: " .. json.encode(verdict))
+local rows_json = host.sql_query([[SELECT id, status, reason, resume_chain FROM self_wakes WHERE session_id=?]],
+  json.encode({ claim_session }))
+local rows = json.decode(rows_json or "[]") or {}
+local owed, seen_rows = 0, {}
+for _, row in ipairs(rows) do
+  seen_rows[#seen_rows + 1] = tostring(row.status) .. "/chain=" .. tostring(row.resume_chain)
+  if tostring(row.id) ~= tostring(wake.wake.id) and row.status == "pending"
+    and tostring(row.reason) == tostring(pause_mod.RESUME_REASON) then
+    owed = owed + 1
+    check(tonumber(row.resume_chain) == 1, "the re-armed row carries chain 1: " .. tostring(row.resume_chain))
+  end
+end
+check(owed == 1, "and exactly ONE new pending resume row, with no seam: " .. tostring(owed)
+  .. " rows: " .. table.concat(seen_rows, ", "))
+local again = pause_mod.ensure_resumes(clock_now, { stale_seconds = 300 })
+local rows2 = json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE session_id=?]],
+  json.encode({ claim_session })) or "[]") or {}
+local pending2 = 0
+for _, row in ipairs(rows2) do if row.status == "pending" then pending2 = pending2 + 1 end end
+check((tonumber(again and again.rearmed) or 0) == 0 and pending2 == 1,
+  "a second pass adds nothing: " .. json.encode(again) .. " pending=" .. tostring(pending2))
+
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

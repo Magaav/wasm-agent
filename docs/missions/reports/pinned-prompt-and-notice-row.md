@@ -193,6 +193,30 @@ In `docs/missions/reports/pinned-prompt-and-notice-row/`, produced by the real b
 * `state-d-after-two-seconds.txt` - the same as B, 2.5 s later: the message is gone and the pin is
   back on the top row.
 
+## The jump-to-bottom pill in its three widths (captures, added after Fable's review)
+
+Fable asked for the pill's own states, scrolled up, at three widths. Real binary in a real pty
+(tmux, 120x36 for the wide pair, resized to 40x24 for the narrow one), same slow fixture as
+`scripts/test-jump-to-bottom-pty.mjs`. The pill is drawn on the transcript region's last row, never on
+the status bar (row 36 keeps `deepseek-v4.1-flash`):
+
+* `state-e-pill-wide.txt` - **wide**, 120 columns, scrolled up during the stream:
+  `↓ 22 more lines · Jump to bottom (Ctrl+PageDown) ↓` (the whole sentence fits, so it is the whole
+  sentence, with the count first);
+* `state-f-pill-narrow.txt` - **narrow**, the same view in a 40-column window:
+  `↓ 44 more lines · Ctrl+PageDown ↓` - the sentence does not fit, so the words that name the action
+  go and the KEY and the count stay. That order is deliberate (`Transcript::view_at`): the key is what
+  the brief requires the pill to name, so a narrow window never clips it;
+* `state-g-pill-at-the-bottom.txt` - **at the bottom**, the view frozen with nothing below it (here by
+  Ctrl+Up into the transcript's blocks, where the run's tool call is a topic):
+  `Jump to bottom (Ctrl+PageDown) ↓`, the count-less form. That chat is shorter than the
+  window, so this frame pins nothing either (the request is on screen): it is the "neither" state
+  and the pill together, which is the state that form belongs to.
+
+What each of the three is drawn by: `Transcript::pill_text(key, new_lines)` (wide) and
+`Transcript::pill_compact(key, new_lines)` (narrow), both taking the key as an ARGUMENT - the caller
+reads it with `keymap::label(Act::Nav(NavAct::Bottom))`, so a rebinding changes what the screen says.
+
 ## Assertions I changed (named, as rule 6 requires)
 
 No assertion was deleted or loosened. Four had to follow a behaviour the brief changes, and each one
@@ -264,3 +288,80 @@ New operator-facing strings, verbatim:
 * **The `WA_CODEMODE_ALLOW_EMPTY=1` binary.** The pty rows here ran a test build without the
   code-mode assets (the gate's own switch), which is why a capture shows `! code mode unavailable`;
   that line is not this branch's and does not touch these rows.
+
+## Addendum 23/11 21:xxZ - main-health was right: both red pty rows were mine, both are fixed
+
+main-health reported `tui-chrome-pty` (17 ok, 1 failed) and `run-block-pty` (11 ok, 1 failed) red on
+main (`51b63d9a`, containing my landing `0238b6dd`). Neither row was in my narrowed set, which is why
+I did not see them.
+
+### What I ran, and where
+
+Built a binary for each commit in its own worktree (`git worktree add`, removed afterwards;
+`WA_CODEMODE_BUILD_ASSETS` set to the prepared `pi-1.2.0-quickjs-3.6.2` directory, so code-mode rows
+run), and ran each row from that worktree so its Lua is that commit's:
+
+| row | base `28fb526d` (before my landing) | main `c618da4f` (with it) |
+| --- | --- | --- |
+| `tui-chrome-pty` | **18 ok, 0 failed** | 17 ok, 1 failed - `a click on the icon cell reports Copied N characters` |
+| `run-block-pty` | **22 ok, 0 failed** | 11 ok, 1 failed - `timed out waiting for the run to settle` |
+
+Both: passing before, red after. Mine, not the esc worker's.
+
+### What broke (measured, not guessed)
+
+1. **The pinned row flipped between frames.** The row was decided from *this frame's height*, and the
+   row it reserves changes that height - so the decision could disagree with the frame already on
+   screen. Every flip moves the whole chat by one row, and a press holds the row number it read from
+   the screen: `tui-chrome-pty` clicked a fence's copy icon at row 29 while the press-time view had
+   put it at row 28. Instrumented (`copy_at row=29 col=4 right_at=Some((4, 17))` vs `right=[]` in the
+   frame before it) before touching anything.
+2. **The release of the copy click cleared its own message.** "An error stays until the next key"
+   counted a mouse report as a key, and the release arrives milliseconds after the press that sets
+   `Copied N characters` - so the message was erased before a reader could see it. The evidence is in
+   the row's own screen dump: no `Copied` anywhere.
+3. **`run-block-pty` waited for a marker I removed.** Its settle loop pages down while the screen says
+   `(PgDn)` - the old `↓ N more lines (PgDn)` row, which the pill replaced. With no `(PgDn)` on
+   screen the loop never went back to the bottom and timed out waiting for the last answer.
+
+### The fix (`23aed8ee`, on top of `origin/main`)
+
+* `Transcript::view_at` decides the pin from the LAST DRAWN frame (`first_row`), never from this
+  frame's height - with one exception, the very first frame, where nothing has been drawn yet and
+  the bottom-anchored arithmetic is the honest one-off guess (`pin_first`). The chat is painted
+  once with the rows the last frame gave the pin and painted again **only in the frame the pin
+  appears or goes**, so a steady frame costs what it cost before (the two-pass frame is a state
+  change, not a per-frame cost).
+* a **mouse report is not a key**: `clear_notice` runs only when the chunk carried keys.
+* a press **re-derives the maps** it is measured against (`state.transcript.view(width, rows)` at the
+  top of the press arm), so a click can never use a row some other frame put somewhere else.
+* `scripts/test-run-block-pty.mjs`: its "away from the bottom" test now reads the pill as well as
+  `(PgDn)` (`awayFromBottom`), because the marker it looked for is the row this change replaced.
+
+### Assertions I changed (named, as rule 6 requires)
+
+* `scripts/test-run-block-pty.mjs`: `settled.includes('(PgDn)')` -> `awayFromBottom(settled)`, which is
+  `includes('(PgDn)') || includes('Jump to bottom')` - a strict superset of the old test, so the loop
+  still pages down exactly when the view is away from the bottom. (Two call sites: the break condition
+  and the paging.)
+* `rust/wa-term/src/transcript.rs` unit tests: four tests that read the pinned row now draw two
+  frames through a `settled()` helper, because the pin follows the last drawn frame by design. The
+  assertions themselves are unchanged (`view.len() == 8`, the band, the notice above the pin,
+  `pinned[1..] == free[1..]`, the press on row 1). No assertion was deleted or weakened.
+
+### Re-run, after the fix (branch `change/pinned-prompt-and-notice-row`, `23aed8ee`)
+
+| row | result |
+| --- | --- |
+| `tui-chrome-pty` | **18 ok, 0 failed** (was 17/1) |
+| `run-block-pty` | **22 ok, 0 failed** (was 11/1, and equals the base) |
+| `pinned-request-pty` | 26 ok, 0 failed |
+| `jump-to-bottom-pty` | 14 ok, 0 failed |
+| `run-live-pty` | 22 ok, 0 failed |
+| `fence-card-pty` | 25 ok, 0 failed |
+| `wheel-lines-pty` | 12 ok, 0 failed |
+| `script-output-pty` | 11 ok, 0 failed |
+| `cargo test -p wa-term --lib` | 219 passed, 0 failed |
+
+`esc-stops-pty` stays with the esc worker (not mine, not run here).
+

@@ -1,0 +1,36 @@
+❯ stream a long answer and keep going
+step 4 of the long job is done                                                                                         │
+step 5 of the long job is done                                                                                         │
+step 6 of the long job is done                                                                                         │
+step 7 of the long job is done                                                                                         │
+step 8 of the long job is done                                                                                         │
+step 9 of the long job is done                                                                                         │
+step 10 of the long job is done                                                                                        │
+step 11 of the long job is done                                                                                        ┃
+step 12 of the long job is done                                                                                        ┃
+step 13 of the long job is done                                                                                        ┃
+step 14 of the long job is done                                                                                        ┃
+step 15 of the long job is done                                                                                        ┃
+step 16 of the long job is done                                                                                        ┃
+step 17 of the long job is done                                                                                        ┃
+step 18 of the long job is done                                                                                        ┃
+step 19 of the long job is done                                                                                        ┃
+step 20 of the long job is done                                                                                        ┃
+step 21 of the long job is done                                                                                        ┃
+step 22 of the long job is done                                                                                        ┃
+step 23 of the long job is done                                                                                        ┃
+step 24 of the long job is done                                                                                        │
+step 25 of the long job is done                                                                                        │
+step 26 of the long job is done                                                                                        │
+step 27 of the long job is done                                                                                        │
+step 28 of the long job is done                                                                                        │
+step 29 of the long job is done                                                                                        │
+step 30 of the long job is done                                                                                        │
+step 31 of the long job is done                                                                                        │
+step 32 of the long job is done                                                                                        │
+step 33 of the long job is done   ↓ 22 more lines · Jump to bottom (Ctrl+PageDown) ↓                                   │
+· ▸ 1·5s Δ↑0 ↓0 ◷ 0:05
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Type a message, or / for commands
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/ for commands · /login to sign in · ctrl+c twice to quit                                       deepseek-v4.1-flash·high

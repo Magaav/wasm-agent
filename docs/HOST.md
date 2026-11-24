@@ -312,6 +312,12 @@ one database rather than a silent per-interpreter split.
 
 ## The code graph
 
+**Status: DORMANT - OFF by default on every node from G (23/11, `docs/GRAPH.md`).** While the switch is off
+(the `graph` row of the feature resolver: `"features": { "graph": true }` in `policy.json`, or
+`WA_GRAPH_COMPONENT=1`) every capability below answers `graph_dormant` with `effect: none` and names the
+switch, the `graph` tool is not in the catalogue, and no store, worker or watch exists. The rest of this
+section describes them as they behave when the graph is switched on.
+
 `host.graph_index|query|search|source|overview|impact|explain|path|caps|stats|status` expose `wa-graph`'s SQLite
 index of the source tree to Lua. **Since stream C (05/11) the graph is the `graph` WASI component**
 (`rust/components/graph`, wasm32-wasip2, built by `scripts/build-components.sh graph`, needs
