@@ -168,33 +168,52 @@ function M.invoke(input,ctx,directory)
   end
   if not slot.ready or slot.ready.token~=slot.token or not tostring(slot.ready.url):match('^http://127%.0%.0%.1:%d+$') then return failure('mcp_session_not_ready',{operation_id=slot.operation_id}) end
  end
- if slot.unknown then
-  if expired(uncertain_key) and release_expired(uncertain_key) then pool[key]=nil;return M.invoke(input,ctx,directory) end
-  return failure('mcp_connection_uncertain',{operation_id=slot.operation_id,request=slot.unknown,
-   retry_after_s=M.READ_UNCERTAIN_EXPIRY_S,note='a read on this connector timed out or lost its answer; it is retried automatically after '..M.READ_UNCERTAIN_EXPIRY_S..' s - do not sleep in the script, do other work or report it'})
+ -- ONE EXIT FOR A PEER CALL (24/11, mission federated-connector-read). A call that arrives from another node
+ -- runs in an interpreter this node does not keep: the relay lane builds one per request and drops it
+ -- (rust/wa-rendezvous/src/binding_runtime.rs, `lua_serve`), so nothing will ever reuse the read session and
+ -- nothing closes it - the node keeps the operation `accepted` until the child's own idle timer fires.
+ -- MEASURED: ~30 s in which the node reports itself busy after ONE failed federated read (`/health`'s
+ -- `operations` non-empty, which is exactly what the sentinel reads for "the node is busy: a run, a subagent
+ -- or an operation is in flight"), and a successful one pays the same window for a session nobody will ask
+ -- for again. A node's OWN turn keeps its session for reuse - that is what the pool is for - so this closes
+ -- on `ctx.peer_call` and on nothing else, with the owner the start receipt answered.
+ local function done(value)
+  if ctx.peer_call then
+   local live=pool[key]
+   if live then
+    pcall(host.operation,'cancel',json.encode({id=live.operation_id,owner=live.owner}))
+    pool[key]=nil
+   end
+  end
+  return value
  end
- if not slot.ready then return failure('mcp_session_not_ready',{operation_id=slot.operation_id}) end
+ if slot.unknown then
+  if expired(uncertain_key) and release_expired(uncertain_key) then pool[key]=nil;return done(M.invoke(input,ctx,directory)) end
+  return done(failure('mcp_connection_uncertain',{operation_id=slot.operation_id,request=slot.unknown,
+   retry_after_s=M.READ_UNCERTAIN_EXPIRY_S,note='a read on this connector timed out or lost its answer; it is retried automatically after '..M.READ_UNCERTAIN_EXPIRY_S..' s - do not sleep in the script, do other work or report it'}))
+ end
+ if not slot.ready then return done(failure('mcp_session_not_ready',{operation_id=slot.operation_id})) end
  -- A clean idle shutdown may start a fresh read session; an uncertain one never does.
  local state=decode(host.operation('status',json.encode({id=slot.operation_id,owner=slot.owner})))
- if state and state.settled==true and state.ok==true then pool[key]=nil;return M.invoke(input,ctx,directory) end
- if not state or state.error or state.settled then return failure('mcp_session_unavailable',{operation_id=slot.operation_id,detail=state}) end
- if type(slot.ready.metadata)~='table' or type(slot.ready.metadata.schema_hash)~='string' then return failure('mcp_session_metadata_unverified',{operation_id=slot.operation_id}) end
+ if state and state.settled==true and state.ok==true then pool[key]=nil;return done(M.invoke(input,ctx,directory)) end
+ if not state or state.error or state.settled then return done(failure('mcp_session_unavailable',{operation_id=slot.operation_id,detail=state})) end
+ if type(slot.ready.metadata)~='table' or type(slot.ready.metadata.schema_hash)~='string' then return done(failure('mcp_session_metadata_unverified',{operation_id=slot.operation_id})) end
  -- Fixed built-in facades pin the first connected catalogue too; generic connectors already carry approval hashes.
  input.schema_hash=input.schema_hash or slot.ready.metadata.schema_hash
  local id=host.uuid();local request=request_dir..'/'..id..'.json';input.request_id=id;input.result_file=request..'.result.json'
- if not host.write_file(request,json.encode(input)) then return failure('mcp_request_not_written') end
+ if not host.write_file(request,json.encode(input)) then return done(failure('mcp_request_not_written')) end
  -- Reserve uncertainty BEFORE HTTP submission. A native crash cannot erase a possibly issued read.
  hold(slot,request)
  local ok,raw=pcall(host.http,'POST',slot.ready.url..'/call',json.encode({['Content-Type']='application/json',['x-wa-mcp-token']=slot.token}),json.encode(input))
  local response=ok and decode(raw);local answer=response and decode(response.body)
  if not response or tonumber(response.status)~=200 or not answer or answer.request_id~=id then
-  hold(slot,request);return failure('mcp_session_reply_unverified',{operation_id=slot.operation_id,request=request,detail=answer,tool_call_issued=true,outcome='unknown'})
+  hold(slot,request);return done(failure('mcp_session_reply_unverified',{operation_id=slot.operation_id,request=request,detail=answer,tool_call_issued=true,outcome='unknown'}))
  end
  local retained=host.read_file(input.result_file)
  if type(answer.result_path)~='string' or type(answer.result_bytes)~='number' or type(answer.result_sha256)~='string' or answer.result_path:gsub('\\','/'):gsub('^//%?/','')~=input.result_file:gsub('\\','/'):gsub('^//%?/','') or not retained or #retained~=answer.result_bytes or host.sha256(retained)~=answer.result_sha256 then
-  hold(slot,request);return failure('mcp_result_artifact_unverified',{operation_id=slot.operation_id,request=request,tool_call_issued=true,outcome='unknown'})
+  hold(slot,request);return done(failure('mcp_result_artifact_unverified',{operation_id=slot.operation_id,request=request,tool_call_issued=true,outcome='unknown'}))
  end
- local result=decode(retained);if not result or result.request_id~=id then hold(slot,request);return failure('mcp_session_result_unreadable',{outcome='unknown',tool_call_issued=true,request=request}) end
+ local result=decode(retained);if not result or result.request_id~=id then hold(slot,request);return done(failure('mcp_session_result_unreadable',{outcome='unknown',tool_call_issued=true,request=request})) end
  result.operation_id=slot.operation_id;result.request=request;result.evidence={path=input.result_file,sha256=answer.result_sha256,bytes=answer.result_bytes}
  local decided=M.accepted(result,input.schema_hash)
  if not decided then
@@ -211,7 +230,7 @@ function M.invoke(input,ctx,directory)
  -- A settled marker is named in the answer that follows it: the reader learns that an earlier reservation was
  -- reconciled from its evidence, not that a read was silently repeated.
  if reconciled then result.reconciled=reconciled end
- return result
+ return done(result)
 end
 function M.close()
  local results={}

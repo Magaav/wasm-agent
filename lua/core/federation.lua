@@ -652,6 +652,35 @@ function M.call(name, args)
   local answer = dofile('lua/core/nodes.lua').remote_call(peer.node_id, 'federation',
     { action = 'call', name = tool.name, args = args or {} })
   if type(answer) == 'table' then answer.peer = answer.peer or peer.name end
+  -- A PEER THAT CANNOT SERVE A CONNECTOR CALL SAYS SO, IN WORDS THE READER CAN ACT ON (24/11, G blocker).
+  --
+  -- The failure this names was measured on three pairs (main->main, main->v0.1.1, v0.1.1->v0.1.1): the peer
+  -- starts the read session, then refuses its OWN wait with `operation_not_yours` and answers
+  -- `mcp_session_startup_failed`. Nothing can be done from here - the caller cannot observe or cancel an
+  -- operation that node owns, and it must not pretend it did - so the answer names the one action that
+  -- works. An ALLOW-LIST: only that exact pair of codes is rewritten (the peer's own words stay in
+  -- `detail` and `peer_detail`), so no other refusal is ever restated as this one.
+  if type(answer) == 'table' and answer.error == 'mcp_session_startup_failed' then
+    local inner = answer.detail
+    local cause = type(inner) == 'table' and (type(inner.detail) == 'table' and inner.detail or inner) or nil
+    if type(cause) == 'table' and cause.error == 'operation_not_yours' then
+      local name = tostring(peer.name or peer.node_id)
+      return { ok = false, error = 'peer_connector_needs_update', effect = 'none',
+        node = peer.name, node_id = peer.node_id, tool = tool.name,
+        headline = name .. ' runs a build that cannot serve connector calls for another node; update ' .. name,
+        detail = 'operation_not_yours',
+        owner = tostring(cause.operation_id or ''),
+        peer_detail = inner,
+        message = name .. ' runs a build that cannot serve connector calls for another node; update ' .. name,
+        note = 'the connector server on ' .. name .. ' was not contacted and the tool did not run: that node '
+          .. 'refused to observe the read session it had just started, under the runtime owner that node '
+          .. 'recorded. A caller cannot observe or cancel an operation another node owns, so nothing was '
+          .. 'replayed and nothing is left for this node to stop.',
+        fix = 'update that node to a build that can serve connector calls for another node, then retry; '
+          .. 'until then this tool cannot work from here',
+        tool_call_issued = false, outcome = 'not_submitted' }
+    end
+  end
   return answer
 end
 

@@ -95,13 +95,33 @@ function homeOf(name) {
   fs.writeFileSync(path.join(home, '.wasm-agent/node.name'), name + '\n');
   return home;
 }
+// THE OLD-PEER ARM (24/11, item d of the fix). A caller cannot fix a peer's build: when WA_FED_PEER_BIN names
+// another wa (a released one), only the PEER changes - it runs its own embedded Lua and its own scripts, and
+// the caller keeps this tree's Lua - so the row proves what a real master sees against a node that has not
+// been updated yet.
+const PEER_BIN = process.env.WA_FED_PEER_BIN ? path.resolve(process.env.WA_FED_PEER_BIN) : BIN;
+const OLD_PEER = PEER_BIN !== BIN;
+if (OLD_PEER && !fs.existsSync(PEER_BIN)) {
+  console.log('federated connector read: FAIL (WA_FED_PEER_BIN is not a file: ' + PEER_BIN + ')');
+  process.exit(1);
+}
+const binOf = name => (name === 'peer' ? PEER_BIN : BIN);
+// A binary that carries its release beside it (a published bundle) finds its JS runtime there; a tree binary
+// finds it in the tree. The LUA stays the binary's own when the peer is another build.
+const scriptsOf = bin => {
+  const beside = path.join(path.dirname(bin), 'scripts');
+  if (bin !== BIN && fs.existsSync(path.join(beside, 'mcp-session.mjs'))) return beside;
+  return path.join(LUA_ROOT, 'scripts');
+};
 function envFor(name, extra = {}) {
+  const own = binOf(name) === BIN;
   return {...baseEnv, HOME: homeOf(name), WASM_AGENT_HOME: homeOf(name),
-    WASM_AGENT_LUA_ROOT: LUA_ROOT, WASM_AGENT_MANAGED: '0', WASM_AGENT_RELAY: '',
+    ...(own ? {WASM_AGENT_LUA_ROOT: LUA_ROOT} : {}), WA_MCP_SCRIPT_DIR: scriptsOf(binOf(name)),
+    WASM_AGENT_MANAGED: '0', WASM_AGENT_RELAY: '',
     WA_GRAPH_WATCH: '0', PATH: process.env.PATH, ...extra};
 }
 function cli(name, args, input, extra) {
-  return spawnSync(BIN, args, {cwd: homeOf(name), env: envFor(name, extra), input, encoding: 'utf8', timeout: 180000});
+  return spawnSync(binOf(name), args, {cwd: homeOf(name), env: envFor(name, extra), input, encoding: 'utf8', timeout: 180000});
 }
 function script(name, action, extra) {
   const r = cli(name, [], '', {WA_SCRIPT: NODE_SCRIPT, WA_FED_ACTION: action,
@@ -113,7 +133,7 @@ function script(name, action, extra) {
 function start(name, args, extra) {
   const logPath = path.join(work, name + '-' + children.length + '.log');
   const out = fs.openSync(logPath, 'a');
-  const child = spawn(BIN, args, {cwd: homeOf(name), env: envFor(name, extra), stdio: ['ignore', out, out], windowsHide: true});
+  const child = spawn(binOf(name), args, {cwd: homeOf(name), env: envFor(name, extra), stdio: ['ignore', out, out], windowsHide: true});
   fs.closeSync(out);
   children.push(child);
   return child;
@@ -149,7 +169,8 @@ async function until(probe, label, tries = 240) {
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
 
 async function main() {
-  console.log('federated connector read: ' + BIN + ' (lua ' + LUA_ROOT + ')');
+  console.log('federated connector read: ' + BIN + ' (lua ' + LUA_ROOT + ')' +
+    (OLD_PEER ? ' — peer ' + PEER_BIN + ' (its own build)' : ''));
   const identity = {};
   for (const name of ['caller', 'peer', 'registry']) {
     const r = cli(name, ['node']);
@@ -197,19 +218,61 @@ async function main() {
   // The connector: mcp.control put -> probe -> enable, the three steps /mcp <id> probe and on run.
   const setup = script('peer', 'setup');
   const tool = setup.tool;
-  check(setup.step === 'done' && typeof tool === 'string', 'the peer publishes the stub read tool', JSON.stringify(setup));
-  if (!tool) return finish(1);
+  const writeTool = setup.write_tool;
+  check(setup.step === 'done' && typeof tool === 'string' && typeof writeTool === 'string',
+    'the peer publishes the stub read tool and the stub write tool', JSON.stringify(setup));
+  if (!tool || !writeTool) return finish(1);
 
   const control = script('peer', 'local', {WA_FED_TOOL: tool});
   check(control.control && control.control.ok === true && control.control.session_mode === 'persistent-read',
     'the same read answers ON the peer with no relay lane under it (the control)', JSON.stringify(control).slice(0, 400));
 
-  const call = script('caller', 'call', {WA_FED_TOOL: tool, WA_FED_PEER: identity.peer.node_id,
+  // THE ROUTE IS THE MODEL'S OWN: `federation.call` is what `peer_<node>__<tool>` runs, and it is the one
+  // place a peer that cannot serve is turned into words the reader can act on (item d of the fix).
+  const call = script('caller', 'through_federation', {WA_FED_TOOL: tool, WA_FED_PEER: identity.peer.node_id,
     WASM_AGENT_RENDEZVOUS: service, WASM_AGENT_RELAY: service});
   const answer = call.call || {};
+  if (OLD_PEER) {
+    console.log('  (route detail: ' + JSON.stringify(call).slice(0, 700) + ')');
+    // A CALLER CANNOT FIX A PEER. What it must do is say so: the peer's own inner refusal stays in `detail`
+    // and `peer_detail`, and the answer names the node and the one action that works.
+    check(answer.error === 'peer_connector_needs_update',
+      'a caller against an un-updated peer answers with the named cause, not the peer\'s inner refusal',
+      JSON.stringify(answer).slice(0, 700));
+    check(typeof answer.headline === 'string' &&
+      answer.headline.indexOf('runs a build that cannot serve connector calls for another node; update') >= 0,
+      'the answer tells the reader to update that peer', String(answer.headline));
+    check(answer.detail === 'operation_not_yours' && answer.outcome === 'not_submitted' && answer.tool_call_issued === false,
+      'the inner cause is named and nothing is claimed to have run',
+      JSON.stringify({detail: answer.detail, outcome: answer.outcome, issued: answer.tool_call_issued}));
+    check(typeof answer.note === 'string' && answer.note.indexOf('was not contacted') >= 0,
+      'the answer says the connector server was not contacted', String(answer.note).slice(0, 300));
+    // Nothing may be left running HERE either: this node started nothing on the peer, and its own operation
+    // list must be empty of this call.
+    const callerOps = path.join(homeOf('caller'), '.wasm-agent/operations');
+    const leftHere = fs.existsSync(callerOps) ? fs.readdirSync(callerOps).filter(e => e.startsWith('op-')).filter(e => {
+      const f = path.join(callerOps, e, 'state.json');
+      if (!fs.existsSync(f)) return false;
+      const s = JSON.parse(fs.readFileSync(f, 'utf8'));
+      return s.settled !== true;
+    }) : [];
+    check(leftHere.length === 0, 'the caller leaves nothing running of its own', leftHere.join(', '));
+    console.log(fails === 0 ? 'federated connector read ok against an un-updated peer (' + checks + ' checks)'
+      : 'federated connector read FAILED (' + fails + ' of ' + checks + ' checks)');
+    return finish(fails === 0 ? 0 : 1);
+  }
   const echoed = answer.result && answer.result.structuredContent && answer.result.structuredContent.value;
   check(answer.ok === true && echoed && echoed.federated === 1,
     'the federated connector read answers the caller', JSON.stringify(call).slice(0, 600));
+
+  // (c) THE SECOND DOOR: a tool the registry declares a WRITE goes through the one-shot client, not the read
+  // pool, and names its own owner on its start and its await. It failed the same way and is fixed the same way.
+  const written = script('caller', 'write', {WA_FED_TOOL: writeTool, WA_FED_PEER: identity.peer.node_id,
+    WASM_AGENT_RENDEZVOUS: service, WASM_AGENT_RELAY: service});
+  const wrote = written.call || {};
+  const wroteEcho = wrote.result && wrote.result.structuredContent && wrote.result.structuredContent.value;
+  check(wrote.ok === true && wroteEcho && wroteEcho.federated_write === 1,
+    'the federated connector WRITE answers the caller', JSON.stringify(written).slice(0, 600));
 
   // ... and it answered FROM the relay lane: the row this call started carries the runtime owner the
   // lane imposed. This is what makes the check above cover the bug instead of passing beside it.
@@ -225,6 +288,39 @@ async function main() {
     rows.map(row => row.owner).join(', '));
   check(relayed.every(row => row.session === '' || typeof row.session === 'string'),
     'the read session rows carry the session the node recorded', JSON.stringify(rows.map(row => ({owner: row.owner, session: row.session}))));
+
+  // (a) OWNERSHIP IS NOT LOOSENED. The recorded owner is the one the row above names, and NOTHING ELSE may
+  // observe that operation: a second relay id is refused, by name, on exactly the row the first one started.
+  const liveOwner = relayed.length ? relayed[relayed.length - 1].owner : '';
+  const foreign = script('peer', 'foreign', {WA_FED_ID: relayed.length ? relayed[relayed.length - 1].operation_id : '',
+    WA_FED_OWNER: 'relay:00000000-0000-4000-8000-000000000000'});
+  check(foreign.status && foreign.status.error === 'operation_not_yours',
+    'a second relay id cannot observe the operation the first one started (refused by name)',
+    JSON.stringify(foreign).slice(0, 400));
+  check(foreign.status && foreign.status.operation_id === (relayed.length ? relayed[relayed.length - 1].operation_id : ''),
+    'the refusal names the operation it refused', JSON.stringify(foreign.status || {}).slice(0, 200));
+
+  // (b) NOTHING FROM THIS CALL STAYS RUNNING. The peer closes the read session the call started, so the
+  // operation list holds no running entry from it once the answer is in hand - measured, not assumed: the
+  // check polls, because a cancel is a request the child answers when it exits.
+  const running = async () => {
+    const dir = path.join(homeOf('peer'), '.wasm-agent/operations');
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir).filter(entry => entry.startsWith('op-')).map(entry => {
+      const file = path.join(dir, entry, 'state.json');
+      if (!fs.existsSync(file)) return null;
+      const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // FROM THIS CALL, not from everything the peer ever ran: a node's own read session (the control above,
+      // owner `mcp-read-session`) legitimately stays pooled for reuse - that is what the pool is for. A
+      // federated call owns its work under the relay id the lane recorded, and that is what must be gone.
+      const fromThisCall = typeof state.owner === 'string' && state.owner.startsWith('relay:');
+      return state.settled === true || !fromThisCall ? null
+        : {id: state.operation_id, owner: state.owner, session: state.session};
+    }).filter(Boolean);
+  };
+  let left = await running();
+  for (let i = 0; i < 40 && left.length; i += 1) { await sleep(500); left = await running(); }
+  check(left.length === 0, 'nothing the federated read started is still running on the peer', JSON.stringify(left).slice(0, 400));
 
   console.log(fails === 0 ? 'federated connector read ok (' + checks + ' checks)'
     : 'federated connector read FAILED (' + fails + ' of ' + checks + ' checks)');
