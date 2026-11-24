@@ -1104,6 +1104,25 @@ end
 local SELFLOOP_TICK_AT, SELFLOOP_TICK_ERROR, SELFLOOP_TICK_LOGGED = 0, "", ""
 function M.selfloop_tick_state() return { at = SELFLOOP_TICK_AT, error = SELFLOOP_TICK_ERROR } end
 
+-- The one rule the tick's caller follows, pure enough to drive from a row: a raise is logged BY NAME, once per
+-- distinct error, and a clean tick clears the memo so a returning error is logged again.
+function M.record_tick(called, failure)
+  SELFLOOP_TICK_AT = os.time()
+  if called then
+    SELFLOOP_TICK_ERROR, SELFLOOP_TICK_LOGGED = "", ""
+    SELFLOOP_TICK_OKS = (SELFLOOP_TICK_OKS or 0) + 1
+    return
+  end
+  local reason = tostring(failure):gsub("^.*:%d+: ", ""):sub(1, 200)
+  SELFLOOP_TICK_ERROR = reason
+  if reason ~= SELFLOOP_TICK_LOGGED then
+    SELFLOOP_TICK_LOGGED = reason
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, "selfloop_tick_failed: " .. reason)
+    end
+  end
+end
+
 function wa_orchestrator_tick()
   phase('orchestrator',function() dofile("lua/core/orchestrator.lua").tick(M) end)
   phase('completions',function() completions.tick(M) end)
@@ -1115,25 +1134,18 @@ function wa_orchestrator_tick()
   -- dispatches. This is the half that works with ONLY the node serving - no terminal, no reader
   -- (lua/core/handle_wake.lua).
   phase('handle-wake',function() dofile('lua/core/handle_wake.lua').sweep() end)
-  -- THE TICK NEVER DIES SILENTLY (Fable 25/11, from the live stall). MEASURED: this was a bare `pcall`, so when
+  -- THE TICK NEVER DIES SILENTLY (Fable 24/11, from the live stall). MEASURED: this was a bare `pcall`, so when
   -- the tick raised - "no such column: run_id", on a ledger created before r8a3 - nothing anywhere said so: the
-  -- node answered /health, looked alive, and dispatched nothing for 2.5 hours. A raise is a fact with a name:
-  -- it is logged once per distinct error, and the last one is kept for /health's wake facts.
+  -- node answered /health, looked alive, and dispatched nothing for 2.5 hours. The rule lives in M.record_tick so a
+  -- row can drive it with the same code the tick runs (a fixture that just breaks the schema can be healed by
+  -- setup()'s own upgrade before the tick ever runs).
   local called, failure = pcall(dofile('lua/core/selfloop.lua').tick)
-  SELFLOOP_TICK_AT = os.time()
-  if not called then
-    local reason = tostring(failure):gsub("^.*:%d+: ", ""):sub(1, 200)
-    SELFLOOP_TICK_ERROR = reason
-    if reason ~= SELFLOOP_TICK_LOGGED then
-      SELFLOOP_TICK_LOGGED = reason
-      if type(host) == "table" and type(host.log) == "function" then
-        pcall(host.log, "selfloop_tick_failed: " .. reason)
-      end
-    end
-  else
-    SELFLOOP_TICK_ERROR = ""
-  end
+  M.record_tick(called, failure)
   return "ok"
 end
+
+-- THE NODE'S ENTRY, ALSO BY NAME ON THE MODULE (r8c iii): the node calls the global, and a row that wants to
+-- exercise it had no reachable handle - so the same function object is exported here.
+M.orchestrator_tick = wa_orchestrator_tick
 
 return M

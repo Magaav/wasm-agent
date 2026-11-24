@@ -114,7 +114,7 @@ local SCHEMA = {
   )]],
 }
 
--- COLUMNS THE CODE READS THAT AN OLDER LEDGER DOES NOT HAVE (Fable 25/11, from the live stall).
+-- COLUMNS THE CODE READS THAT AN OLDER LEDGER DOES NOT HAVE (Fable 24/11, from the live stall).
 --
 -- MEASURED: `run_id` (r8a) was declared inside `CREATE TABLE IF NOT EXISTS self_wakes` ONLY. `IF NOT EXISTS`
 -- leaves an existing table exactly as it was, so every node installed from an older build and then updated kept a
@@ -391,6 +391,86 @@ local function entry_matches(entry, topic, payload, row)
   if base and topic:sub(1, #base + 1) == base .. "." then return true end
   return false
 end
+
+-- ONE KEPT TURN PER SESSION (r8c 2, Fable 24/11). MEASURED: session 99946441 accumulated SEVEN pending
+-- "kept: the start was refused, so this message is the session's next turn" rows between 16:35Z and 16:49Z.
+-- The writer was lua/core/chat.lua's `keep_refused_message`, which scheduled a NEW wake on every refused start -
+-- so a runner that retried the same message seven times queued the same promise seven times, and the session's
+-- next turn would have replayed that message up to seven times. r8a3's merge/withdraw could not help: it folds
+-- RESUMES and `handle:` wakes (M.withdraw_siblings), and a kept message is neither.
+--
+-- The rule: a session has at most ONE pending kept message. A later refusal RE-ARMS that row with the words as
+-- they stand now (the latest message is the one kept) instead of adding another, and answers the id of the row
+-- it reused so the CLI's line names a wake that exists.
+function M.keep_pending_message(session_id, owner, prompt, reason, opts)
+  M.setup()
+  session_id, owner = tostring(session_id or ""), tostring(owner or "master")
+  prompt, reason = tostring(prompt or ""), tostring(reason or "")
+  if session_id == "" or prompt == "" or reason == "" then return nil end
+  local now = clock(opts)
+  local seconds = tonumber(opts and opts.in_seconds) or 60
+  -- ONE KEPT TURN, INCLUDING WHAT IS ALREADY QUEUED (Fable 24/11): a session that had 27 kept rows kept them -
+  -- preventing new ones fixes nothing for a queue that already exists. Every other pending kept row of this session
+  -- is superseded here, first, and the survivor is the oldest (its row is the one re-armed with the latest words).
+  exec([[UPDATE self_wakes SET status='superseded', last_error='superseded: one kept message per session', updated_at=?
+    WHERE session_id=? AND reason=? AND status='pending' AND id NOT IN (
+      SELECT id FROM (SELECT id FROM self_wakes WHERE session_id=? AND reason=? AND status='pending'
+        ORDER BY created_at LIMIT 1))]], { now, session_id, reason, session_id, reason })
+  local existing = query([[SELECT id, prompt FROM self_wakes WHERE session_id=? AND owner=? AND reason=?
+    AND status='pending' ORDER BY created_at LIMIT 1]], { session_id, owner, reason })[1]
+  if existing then
+    -- APPEND, DO NOT REPLACE (r8c 2, Fable 24/11): two DIFFERENT messages from a person are two things they said, and
+    -- the first version kept only the newest - message A refused and kept, then message B refused and kept, left B
+    -- alone and A gone with nothing said. The row now holds both in the order they arrived, bounded (M.KEPT_PROMPT_LIMIT)
+    -- and saying so when the bound cuts. The same words again add nothing, so a runner retrying one message still
+    -- leaves one copy.
+    local words, cut = M.keep_prompt_text(existing.prompt, prompt)
+    exec([[UPDATE self_wakes SET prompt=?, due_at=?, updated_at=? WHERE id=? AND status='pending']],
+      { words, now + seconds, now, tostring(existing.id) })
+    return { ok = true, id = tostring(existing.id), reused = true, appended = (words ~= tostring(existing.prompt or "")) or nil,
+      cut = cut or nil }
+  end
+  local new_words, new_cut = M.keep_prompt_text("", prompt)
+  local armed = M.schedule({ in_seconds = seconds, reason = reason, prompt = new_words },
+    { session_id = session_id, user_id = owner })
+  if type(armed) == "table" and type(armed.wake) == "table" and armed.wake.id then
+    return { ok = true, id = tostring(armed.wake.id), reused = false, cut = new_cut or nil }
+  end
+  return nil
+end
+
+-- THE BOUND ON WHAT A SESSION KEEPS (r8c 2, Fable 24/11). A kept prompt is what the session's next turn reads, and a
+-- person can hand over more than a prompt holds: the row keeps their messages in order and stops at this many
+-- characters, keeping the NEWEST words (the ones just handed over) and cutting the oldest.
+M.KEPT_PROMPT_LIMIT = 8000
+-- Said INSIDE the prompt when the bound cut: a session holding part of what was kept must not read as if it held all
+-- of it. `%d` is the limit, so the line cannot disagree with the rule.
+M.KEPT_CUT_TEXT = "[kept] the earlier kept messages were cut here: a kept prompt is bounded at %d characters, and the most recent messages are what this row keeps"
+
+-- The kept prompt after one more message: append in order, never duplicate the same words, bound at the tail so the
+-- newest message survives whole, and cut on a UTF-8 boundary (a Lua string is bytes, and half a character is not a
+-- message). `cut` is true when something went, so the caller can say so where it reports.
+function M.keep_prompt_text(kept, message, limit)
+  kept, message = tostring(kept or ""), tostring(message or "")
+  limit = tonumber(limit) or M.KEPT_PROMPT_LIMIT
+  if kept == "" then
+    kept = message
+  elseif message ~= "" and kept ~= message and kept:sub(-(#message + 2)) ~= "\n\n" .. message then
+    kept = kept .. "\n\n" .. message
+  end
+  if #kept <= limit then return kept, false end
+  local notice = string.format(M.KEPT_CUT_TEXT, limit)
+  local room = limit - #notice - 1
+  if room < 1 then return notice:sub(1, limit), true end
+  local start = #kept - room + 1
+  while start <= #kept do
+    local byte = kept:byte(start)
+    if byte < 0x80 or byte >= 0xC0 then break end
+    start = start + 1
+  end
+  return notice .. "\n" .. kept:sub(start), true
+end
+
 
 function M.schedule(args, ctx)
   M.setup()

@@ -697,8 +697,13 @@ check(tonumber(back_row.due_at) ~= nil and tonumber(back_row.due_at) > r6_now, "
 local chat_ok, chat = pcall(dofile, "lua/core/chat.lua")
 check(chat_ok and type(chat) == "table" and type(chat.keep_refused_message) == "function",
   "chat exposes keep_refused_message")
-for _, refusal in ipairs({ "run_resource_refused: {\"error\":\"resource_busy\"}", "deploy_waiting: an install is waiting" }) do
-  local kept = chat.keep_refused_message(silent_session, "the brief that must survive: " .. refusal, "master", refusal)
+for index, refusal in ipairs({ "run_resource_refused: {\"error\":\"resource_busy\"}", "deploy_waiting: an install is waiting" }) do
+  -- A SESSION PER REFUSAL (r8c 2): two DIFFERENT messages in ONE session are APPENDED to the same kept row now, so a
+  -- row-per-message assertion needs a conversation per message - which is what the rule is about (one kept turn per
+  -- session, holding everything that person said).
+  local kept_session = memory.start_session("local", "chat", {
+    id = "r6-kept-" .. index, user_id = "master", title = "kept " .. index })
+  local kept = chat.keep_refused_message(kept_session, "the brief that must survive: " .. refusal, "master", refusal)
   check(type(kept) == "string", "a refused start keeps the message (" .. refusal:sub(1, 20) .. "): " .. tostring(kept))
   local kept_row = (json.decode(host.sql_query([[SELECT prompt, status FROM self_wakes WHERE id=?]],
     json.encode({ kept })) or "[]") or {})[1] or {}
@@ -706,6 +711,16 @@ for _, refusal in ipairs({ "run_resource_refused: {\"error\":\"resource_busy\"}"
   check(tostring(kept_row.prompt) == "the brief that must survive: " .. refusal,
     "with the message itself as its prompt: " .. tostring(kept_row.prompt))
 end
+-- AND TWO DIFFERENT REFUSALS IN ONE SESSION KEEP BOTH (r8c 2, Fable 24/11): the first version kept only the newest, so
+-- a person's earlier message disappeared silently. The row holds the messages in the order they arrived.
+local two_session = memory.start_session("local", "chat", { id = "r6-kept-two", user_id = "master", title = "two" })
+local first_kept = chat.keep_refused_message(two_session, "first: the install is waiting", "master", "deploy_waiting: an install is waiting")
+local second_kept = chat.keep_refused_message(two_session, "second: the claim was busy", "master", "run_resource_refused: {\"error\":\"resource_busy\"}")
+check(first_kept == second_kept, "one kept turn per session (the second refusal reuses the first row)")
+local two_row = (json.decode(host.sql_query([[SELECT prompt FROM self_wakes WHERE id=?]], json.encode({ first_kept })) or "[]") or {})[1] or {}
+check(tostring(two_row.prompt) == "first: the install is waiting\n\nsecond: the claim was busy",
+  "both messages are kept, in the order they arrived: " .. tostring(two_row.prompt))
+
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

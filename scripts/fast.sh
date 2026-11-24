@@ -1001,10 +1001,14 @@ check session-park bash scripts/test-session-park.sh
 # processes: a real node and a real `wa chat --once` worker, and the real sentinel binary against a stub /health.
 # Their Lua halves (scripts/test-deploy-wait.lua) are fast-path rows by name.
 WA_BIN="$bin" check deploy-wait bash scripts/test-deploy-wait.sh
-# THE UPGRADE FROM THE LAST RELEASE (Fable 25/11): a ledger created by v0.1.1's own setup, upgraded by THIS
+# THE UPGRADE FROM THE LAST RELEASE (Fable 24/11): a ledger created by v0.1.1's own setup, upgraded by THIS
 # tree, must have a fresh ledger's columns and must dispatch a wake. RED on main: self_wakes missing run_id.
 WA_BIN="$bin" check ledger-upgrade bash scripts/test-ledger-upgrade.sh
 WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
+# A REAL SCRATCH NODE RELEASES A PAUSE THAT NEVER HAPPENED (r8c 1): its own HOME, port and ledger; a live
+# marker mid-turn pauses the turn; the marker then goes with nothing installed and the node's own tick runs
+# exactly ONE resume turn whose ledger row carries '[deploy] the update did not happen'.
+WA_BIN="$bin" check deploy-release-node bash scripts/test-deploy-release-node.sh
 # ONE TURN, ONE PROVIDER REQUEST (r8a/4, 8ef62fea): the instrument every later paid-turn assertion needs - a
 # turn against a stub provider this row owns, asserting exactly ONE request for one turn. It needs no live
 # node and no real provider: its own `wa chat --once --offline` in a scratch home, a loopback stub on an

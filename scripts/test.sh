@@ -1405,6 +1405,20 @@ gate_run bash scripts/test-session-park.sh
 # marker covering only the swap. A real node refuses new turns and holds due wakes while it waits; the real
 # sentinel binary names each holder and, past its bound, proceeds over the sessions that have PAUSED only.
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-wait.sh
+# A PAUSE'S RELEASE SAYS WHAT HAPPENED, DECIDED BY THE INSTALLED RECORD (r8c 1, mission one-resume-per-install):
+# the pause record names installed.txt's tree and bytes, a scripts-only install makes the release say
+# "[deploy] installed", a marker gone with nothing installed says "[deploy] the update did not happen", the resume
+# queue is collapsed PER SESSION, and a parked session's rows are left alone.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-release-honest.lua" "$BIN" --db "$DB.deploy-release-honest" | grep 'deploy release ok'
+# ONE KEPT TURN PER SESSION, AND A DIFFERENT MESSAGE IS APPENDED (r8c 2): the real writer into the real ledger, the
+# bound on what a kept prompt holds, and the line that says the bound cut.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-kept-message-one.lua" "$BIN" --db "$DB.kept-message-one" | grep 'kept-message-one ok'
+# WHEN A PAUSE IS RELEASED, AND WHAT ONE INSTALL COSTS A SESSION (the r8c SECOND part, MEASURED):
+# the four phases of a real install (request waiting, claimed and performing, the installer's marker, done) on the
+# sentinel's own lanes and the installer's own marker file - the release fires in none of the first three, so the
+# suspected "gap" is covered by the CLAIMED lane; a due resume held by a waiting deploy spends no resume turn; and a
+# session that paused three times inside one install is owed ONE paid resume turn, not three.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-resume-window.lua" "$BIN" --db "$DB.resume-window" | grep 'resume window ok'
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.
