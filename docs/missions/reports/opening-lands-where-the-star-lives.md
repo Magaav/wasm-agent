@@ -288,6 +288,19 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
   mirrors a requirement), `test-publish-artifacts.sh`'s exact file list and sums row count (3 -> 4), and
   `scripts/test-icons.lua`'s "the chosen set is spaced" (the unicode set is glued now, which is the item).
 
+## The orchestrator's narrowed run: four reds, triaged (24/11)
+
+Rebased onto origin/main (4c720beb) first - clean, eight commits, tree clean.
+
+| red | whose | the failing assertion | what was done |
+|---|---|---|---|
+| `rust wa-term the_unknown_font_line_is_said_once_and_icons_wa_survives_a_restart` | MINE | panic at `icons.rs:196`, `written_path()`: the test parsed the config path out of `/icons`'s own answer, and a reply line is CLIPPED at the window's width - under the fast runner the scratch path is long enough for the closing bracket to be cut, so an answer that named the file read as one that did not | the test asserts what the answer SAID (`remembered`, never `this session only`) and finds the file ON DISK the way `lua/core/paths.lua` defines it (`<data>/env`, one-level walk); verified with TMPDIR on a deep mission scratch path |
+| `scripts/test-cli-wake-row.lua` (1 of 30) | MINE | `the snapshot matches what is drawn now`: the golden `tests/snapshots/balloon/wakes-80x24.txt` held the OLD unicode row (a spaced `U+21BB 0`); the item-7 set draws a glued `#0` | the snapshot is REGENERATED to what is drawn now (a golden follows the glyph change; the row is otherwise untouched) |
+| `status-midrun-pty` | MINE | `the panel shows the provider list cost instead of "cost unknown"`: the panel DID read `Cost list $0.0010`; the assertion also forbade the word "unknown" ANYWHERE on the screen, which the approved start-up line (text 1: "icons: unicode (font unknown here)...") now trips | narrowed to the row it names (the cost line) and strengthened on it: `!/Cost\s+unknown/`; 12 ok, 0 failed |
+| `esc-stops-pty` | NOT MINE | `bash: Esc ends the run at once, by the node clock (300 ms idle, 120 ms per unit of load, never over 2000)` - `618 ms by the node stamps (limit 425 ms at load 3.54; seen from the pty 797 ms, probe 3 ms over 1 looks, worst 3 ms)` | a wall-clock bound on a path this branch does not touch (`git diff --name-only origin/main...HEAD` names no Esc/stop/bash file). Standalone on the same tip binary: 3 of 3 runs 18 ok / 0 failed, five scenarios at 147-270 ms even at load 6-10; interleaved with the base binary: base 18/0, tip 18/0, twice each. It fails only inside the parallel suite, and only the `bash` scenario - the load-timing row the orchestrator already named. |
+
+THE FINAL NARROWED RUN (`WA_FAST_ROWS=/tmp/rows-run.txt`, 51 of 364 Lua rows, the binary built by the runner itself with code-mode assets): **151 checks, 1 failed** - `lua 51/51 passed`, `rust wa-term ok (12s)`, `rust wa-capabilities ok (9s)`, `status-midrun-pty ok`, and the one red `esc-stops-pty` above. A first re-run read 17 reds because I had left a hand-built (allow-empty, unstamped) binary in the target dir that the runner accepted as fresh; the run that builds its own binary is the one reported here.
+
 ## Rows run (each singly, this branch)
 
 * Lua: `test-opening.lua` (44 ok), `test-icons.lua` (267 ok), `test-cli-view.lua` (566 ok),
