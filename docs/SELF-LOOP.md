@@ -359,3 +359,10 @@ deploy gate with the installer's real `deploy-pending.json` marker) ahead of one
 one dispatch, and the obstruction untouched; for the gate, no turn while the marker is there and every
 row dispatched exactly once after it goes. The component half runs the same shapes through the seam and
 fails the row if any call fell back to the native path.
+
+`wa features canary self-wake` (`lua/core/canaries/tasks/self-wake.lua`, the `self-wake` row of
+`config/features/features.json`) runs the same two facts in a child node with its own home, so a release's
+per-node canary step catches it on every fleet node: a wake due now is dispatched by ONE call of the
+node's own tick (`M.tick`, the function a served node's placement thread calls), and it is still
+dispatched behind 9 overdue rows of a parked session - more than the plan's 8. On the code before
+24/11 that stage answers `dispatched 0, paused 8`, which is the live failure in one line.
