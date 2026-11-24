@@ -61,6 +61,19 @@ fn block<'a>(log: &'a str, reason: &str) -> Option<(Vec<&'a str>, Option<String>
     Some((lines, terminal))
 }
 
+/// Does the install record name this commit? The record is a commit, or a sentence saying why it names
+/// none ("no install record at …"), and only the first can answer. Either side may be abbreviated (a deploy
+/// records 12 characters, a request 40), so the shorter names the comparison.
+fn names(installed: &str, commit: &str) -> bool {
+    let commit = commit.trim();
+    if commit.len() < 7 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) { return false; }
+    let installed = installed.trim();
+    let hex = installed.bytes().take_while(|b| b.is_ascii_hexdigit()).count();
+    if hex < 7 { return false; } // "no install record at /x" names no commit: unknown is not a yes
+    let length = hex.min(commit.len()).min(40);
+    installed[..length].eq_ignore_ascii_case(&commit[..length])
+}
+
 /// The verdict for one request, from three facts - the commit it asked for, the commit the install record names,
 /// and the installer's log. Pure, so the decision is judged without a filesystem (installer_outcome_tests.rs).
 pub(crate) fn verdict_of(target: &str, installed: &str, log: &str, reason: &str) -> Outcome {
@@ -68,8 +81,11 @@ pub(crate) fn verdict_of(target: &str, installed: &str, log: &str, reason: &str)
     if target.is_empty() {
         return Outcome::Running; // no request, no verdict: unknown is not yes
     }
-    // Installed first: the record is the fact an install leaves, and it is named by commit.
-    if !installed.trim().is_empty() && target.starts_with(installed.trim()) {
+    // Installed first: the record is the fact an install leaves, and it is named by commit. It is POSITIVE
+    // evidence only - a record that names another commit proves nothing here, and never fails the request by
+    // itself; that is the installer's own block below. Caller: hand this the request's expected SHA when it
+    // has one (verdict(id) does), never the advisory target that was recorded at request time.
+    if names(installed, target) {
         return Outcome::Installed;
     }
     match block(log, reason) {
@@ -92,13 +108,20 @@ pub(crate) fn verdict_of(target: &str, installed: &str, log: &str, reason: &str)
 
 /// The verdict for `id`, read from the files a sentinel has: its own queue record for the request, the install
 /// record beside the installed binary, and the installer's log.
+///
+/// WHICH COMMIT THE REQUEST IS JUDGED BY (24/11). A protocol request carries two: `expected_sha`, the commit it
+/// demanded (`--expected-sha`; deploy.sh revalidates it and installs nothing else), and `target_commit`, what a
+/// deploy would have installed when the request was WRITTEN - advisory, and stale as soon as main moves. On
+/// `work` the second was a host bundle's main seven days behind, so a request that installed exactly what it
+/// demanded (`345e51be`) was judged against a commit it never mentioned (`74d48431`) and, with a rotated log,
+/// failed. The demanded commit is read first; the recorded one answers only when no commit was demanded.
 pub(crate) fn verdict(id: &str) -> Option<Outcome> {
     let record = std::fs::read(sentinel_dir().join("done").join(format!("{id}.json")))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())?;
     let request = record.get("request").cloned().unwrap_or(Value::Null);
-    let target = request.get("target_commit").and_then(Value::as_str)
-        .or_else(|| request.get("expected_sha").and_then(Value::as_str))
+    let target = request.get("expected_sha").and_then(Value::as_str)
+        .or_else(|| request.get("target_commit").and_then(Value::as_str))
         .unwrap_or("")
         .to_string();
     let reason = request.get("reason").and_then(Value::as_str).unwrap_or("");
