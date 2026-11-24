@@ -736,8 +736,12 @@ fn waiting_op_for_run(ops: &[serde_json::Value], run_id: u64, session: &str) -> 
     let owned = format!("run:{run_id}");
     let by_owner = (run_id != 0).then(|| ops.iter()
         .find(|op| op.get("owner").and_then(|value| value.as_str()) == Some(owned.as_str())));
+    // THE SESSION FALLBACK IS FOR A LANE WITH NO RUN (r8b 5a, Fable 24/11). As written it also ran for a lane
+    // that HAS a run id and no operation of its own: any unsettled operation of the same conversation - an older
+    // turn's background command, still running - then made a truly wedged lane read "waiting". A lane that knows
+    // its run is answered by that run alone; the session is only the identity of a lane that has none.
     let by_session = (|| {
-        if session.is_empty() { return None; }
+        if run_id != 0 || session.is_empty() { return None; }
         ops.iter().find(|op| op.get("session").and_then(|value| value.as_str()) == Some(session))
     })();
     by_owner.flatten().or(by_session)
@@ -1510,6 +1514,10 @@ mod execution_path_tests {
         assert_eq!(super::waiting_op_for_run(&ops, 9, ""), None, "another run's operation is not this lane's");
         // The session is the fallback for an operation adopted outside a run.
         assert_eq!(super::waiting_op_for_run(&ops, 0, "s-3"), Some("op-session".to_string()));
+        // ...and ONLY for a lane with no run: a lane that knows its run is answered by that run alone, or it is
+        // not waiting at all. (Run 9 owns nothing; session s-3 has an operation; the answer must be None.)
+        assert_eq!(super::waiting_op_for_run(&ops, 9, "s-3"), None,
+            "a lane with a run id does not inherit another turn's operation through the conversation");
         assert_eq!(super::waiting_op_for_run(&ops, 0, "s-9"), None, "another conversation's operation is not this lane's");
         assert_eq!(super::waiting_op_for_run(&ops, 0, ""), None, "no run and no conversation: nothing to wait on");
     }
