@@ -1115,7 +1115,7 @@ function wa_orchestrator_tick()
   -- dispatches. This is the half that works with ONLY the node serving - no terminal, no reader
   -- (lua/core/handle_wake.lua).
   phase('handle-wake',function() dofile('lua/core/handle_wake.lua').sweep() end)
-  -- THE TICK NEVER DIES SILENTLY (Fable 25/11, from the live stall). MEASURED: this was a bare `pcall`, so when
+  -- THE TICK NEVER DIES SILENTLY (Fable 24/11, from the live stall). MEASURED: this was a bare `pcall`, so when
   -- the tick raised - "no such column: run_id", on a ledger created before r8a3 - nothing anywhere said so: the
   -- node answered /health, looked alive, and dispatched nothing for 2.5 hours. A raise is a fact with a name:
   -- it is logged once per distinct error, and the last one is kept for /health's wake facts.
@@ -1131,7 +1131,10 @@ function wa_orchestrator_tick()
       end
     end
   else
-    SELFLOOP_TICK_ERROR = ""
+    -- A CLEAN TICK CLEARS THE MEMO (Fable, 24/11): with the once-per-error guard alone, an error that came back
+    -- after a good tick was never logged again - the operator saw it once and never learned it had returned.
+    SELFLOOP_TICK_ERROR, SELFLOOP_TICK_LOGGED = "", ""
+    SELFLOOP_TICK_OKS = (SELFLOOP_TICK_OKS or 0) + 1
   end
   return "ok"
 end

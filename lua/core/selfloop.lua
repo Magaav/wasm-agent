@@ -114,7 +114,7 @@ local SCHEMA = {
   )]],
 }
 
--- COLUMNS THE CODE READS THAT AN OLDER LEDGER DOES NOT HAVE (Fable 25/11, from the live stall).
+-- COLUMNS THE CODE READS THAT AN OLDER LEDGER DOES NOT HAVE (Fable 24/11, from the live stall).
 --
 -- MEASURED: `run_id` (r8a) was declared inside `CREATE TABLE IF NOT EXISTS self_wakes` ONLY. `IF NOT EXISTS`
 -- leaves an existing table exactly as it was, so every node installed from an older build and then updated kept a

@@ -1001,7 +1001,7 @@ check session-park bash scripts/test-session-park.sh
 # processes: a real node and a real `wa chat --once` worker, and the real sentinel binary against a stub /health.
 # Their Lua halves (scripts/test-deploy-wait.lua) are fast-path rows by name.
 WA_BIN="$bin" check deploy-wait bash scripts/test-deploy-wait.sh
-# THE UPGRADE FROM THE LAST RELEASE (Fable 25/11): a ledger created by v0.1.1's own setup, upgraded by THIS
+# THE UPGRADE FROM THE LAST RELEASE (Fable 24/11): a ledger created by v0.1.1's own setup, upgraded by THIS
 # tree, must have a fresh ledger's columns and must dispatch a wake. RED on main: self_wakes missing run_id.
 WA_BIN="$bin" check ledger-upgrade bash scripts/test-ledger-upgrade.sh
 WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
