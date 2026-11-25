@@ -205,6 +205,30 @@ for file in install.sh; do
   install -m755 "$ROOT/scripts/$file" "$stage/scripts/$file"
 done
 install -m755 "$ROOT/scripts/linux/bootstrap.sh" "$stage/scripts/linux/bootstrap.sh"
+# ...AND EVERY SCRIPT THE NODE EXECS FROM ITS INSTALL (Fable 25/11; D2 of the mission release-node-updates).
+# Measured on a peer installed from the published v0.1.1 bundle: `wa update <node> --release` was accepted,
+# the request was queued, and it then died one layer down with
+#   bash: <install>/scripts/release-install.sh: No such file or directory    (code 127)
+# because this block shipped install.sh, linux/bootstrap.sh and the MCP runtime and nothing else, while
+# lua/core/remote_update.lua:449 execs <install>/scripts/release-install.sh - and the rollback door at :475
+# execs <install>/scripts/rollback-node.sh. The list is DERIVED from the code by
+# scripts/lib/install-script-doors.mjs (every "<install>/scripts/..." a Lua or Rust path execs, plus every
+# lib those scripts source, to a fixpoint), so a door the code grows is a red gate HERE - before the bundle
+# is tarred, let alone published - instead of a 127 on somebody's node.
+door_list="$(node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --list)" \
+  || fail "door_list_refused: $(printf '%s' "$door_list" | tail -3)"
+doors=()
+while IFS= read -r member; do [ -n "$member" ] && doors+=("$member"); done <<< "$door_list"
+[ "${#doors[@]}" -gt 0 ] || fail 'door_list_empty: scripts/lib/install-script-doors.mjs derived no member, and a bundle that ships no door is the defect this line exists for'
+for member in "${doors[@]}"; do
+  [ -f "$ROOT/$member" ] || fail "door_missing: $member (the code execs it from the install; this tree does not have it)"
+  mkdir -p "$stage/$(dirname "$member")"
+  case "$member" in
+    *.sh) install -m755 "$ROOT/$member" "$stage/$member" ;;
+    *)    install -m644 "$ROOT/$member" "$stage/$member" ;;
+  esac
+done
+say "doors     ${#doors[@]} install-side script(s) staged: $(printf '%s' "${doors[*]##*/}" | tr ' ' ' ')"
 # Nothing that could carry a secret or a machine's state belongs in a public bundle.
 if find "$stage" \( -name 'env' -o -name '*.env' -o -name '*.db' -o -name '*.db-*' -o -name '*.key' -o -name '*.pem' \
      -o -name 'node.key' -o -name '.git' \) | grep -q .; then
@@ -222,6 +246,10 @@ esac
 
 ( cd "$stage" && find . -type f ! -name bundle.manifest ! -name files.sha256 -printf '%P\n' | LC_ALL=C sort \
     | while IFS= read -r f; do sha256sum -- "$f"; done ) > "$stage/files.sha256"
+# THE BUNDLE IS COMPLETE OR IT IS NOT A RELEASE: every script the code execs from the install is a
+# member of files.sha256, not merely a file that happens to sit in the directory.
+node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --check "$stage" \
+  || fail "bundle_incomplete: a script a node execs from its install is missing from this bundle (named above); nothing was tarred"
 built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
   echo 'schema=wa-linux-bundle/1'

@@ -1,0 +1,4 @@
+# DOORS THAT DO NOT SHIP, AND WHY (read by scripts/lib/install-script-doors.mjs).
+# One "<repo-relative path> # <why>" per line. A door belongs here ONLY when its absence is answered by
+# NAME instead of code 127 - an operator can read what is missing and what to set.
+scripts/deploy.sh # resolved beside the installed binary by rust/wa-sentinel (resolve_script: "no deploy.sh found (looked at ...; set WA_SENTINEL_DEPLOY to the full path)"), and a bundle node has no tree for it to deploy; a coordinator that has a tree sends that tree's copy, not this one

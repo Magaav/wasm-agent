@@ -215,6 +215,93 @@ else
   kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; STUB_PID=""
 fi
 
+# ---- 9. THE BUNDLE CARRIES EVERY DOOR THE CODE EXECS FROM THE INSTALL (25/11, release-node-updates D2) --
+# A peer installed from the published v0.1.1 bundle accepted `wa update <node> --release`, queued it, and then
+# died with "bash: <install>/scripts/release-install.sh: No such file or directory" (code 127): the packer's
+# member list was written by hand and the code had grown a door. The list is derived from the code now
+# (scripts/lib/install-script-doors.mjs), and these rows hold it to that: the derivation must read the code
+# (a fixture door appears and a tree-relative path does not), an unclassified door must be a red gate, and a
+# STAGED bundle missing a door must be refused before it can be tarred or published.
+DOORS="$ROOT/scripts/lib/install-script-doors.mjs"
+if [ ! -f "$DOORS" ]; then
+  ok 0 "the install-side door derivation exists (scripts/lib/install-script-doors.mjs)" "the file is missing: a bundle's member list would be hand-written again"
+else
+  list="$(node "$DOORS" --root "$ROOT" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 0 ] && echo 1)" "the door list is derived from this tree" "rc=$rc $(printf '%s' "$list" | tail -2)"
+  for member in scripts/release-install.sh scripts/upgrade.sh scripts/rollback-node.sh scripts/wave-entry.mjs scripts/lib/node-binaries.sh scripts/lib/install-record.sh; do
+    ok "$(printf '%s\n' "$list" | grep -qx "$member" && echo 1)" "$member is a derived bundle member" "$(printf '%s' "$list" | tr '\n' ' ')"
+  done
+
+  # A FIXTURE TREE, so "derived" is proven and not assumed: a door the code names appears, a path the code
+  # names only against a TREE does not, and a door the code names that the tree lacks is refused by name.
+  MINI="$W/doors-mini"; mkdir -p "$MINI/lua/core" "$MINI/rust/src" "$MINI/scripts/lib" "$MINI/scripts"
+  printf 'local install = "/opt/wa"\nlocal door = install .. "/scripts/fixture-door.sh"\nlocal tree = "/some/tree"\nlocal other = tree .. "/scripts/not-a-door.sh"\n' > "$MINI/lua/core/fixture.lua"
+  printf '#!/bin/sh\nexit 0\n' > "$MINI/scripts/fixture-door.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$MINI/scripts/not-a-door.sh"
+  mini="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 0 ] && printf '%s\n' "$mini" | grep -qx 'scripts/fixture-door.sh' && echo 1)" \
+    "a <install>/scripts path the code names IS derived (the list reads the code, it is not written down)" "rc=$rc $(printf '%s' "$mini" | tr '\n' ' ')"
+  ok "$(printf '%s\n' "$mini" | grep -qx 'scripts/not-a-door.sh' && echo 0 || echo 1)" \
+    "a TREE-relative scripts path is not a bundle member (that tree is not in a bundle)"
+  printf 'local install = "/opt/wa"\nlocal ghost = install .. "/scripts/ghost-door.sh"\n' > "$MINI/lua/core/ghost.lua"
+  ghost="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 1 ] && printf '%s' "$ghost" | grep -q 'door_absent_in_tree: scripts/ghost-door.sh' && echo 1)" \
+    "a door the code execs that this tree does not have is refused by name" "rc=$rc $(printf '%s' "$ghost" | tail -1)"
+  rm -f "$MINI/lua/core/ghost.lua"
+
+  # THE ALLOW-LIST IS A REVIEWED EXEMPTION, NOT A SILENT ONE: no reason is refused, and so is a line that
+  # exempts something no code needs any more.
+  printf 'scripts/fixture-door.sh\n' > "$MINI/scripts/lib/install-script-doors.allow"
+  bare="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 1 ] && printf '%s' "$bare" | grep -q 'exemption_without_reason' && echo 1)" \
+    "an exemption with no reason is refused" "rc=$rc $(printf '%s' "$bare" | tail -1)"
+  printf 'scripts/fixture-door.sh # a fixture: this door is answered by name instead\n' > "$MINI/scripts/lib/install-script-doors.allow"
+  exempted="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 0 ] && ! printf '%s\n' "$exempted" | grep -qx 'scripts/fixture-door.sh' && echo 1)" \
+    "an exempt door is not a required member (and the list still answers)" "rc=$rc $(printf '%s' "$exempted" | tr '\n' ' ')"
+  printf 'scripts/no-code-uses-this.sh # stale\n' > "$MINI/scripts/lib/install-script-doors.allow"
+  stale="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 1 ] && printf '%s' "$stale" | grep -q 'stale_exemption' && echo 1)" \
+    "an exemption nothing in the code needs is refused (an allow-list that drifts is a block-list)" "rc=$rc $(printf '%s' "$stale" | tail -1)"
+  rm -f "$MINI/scripts/lib/install-script-doors.allow"
+
+  # A STAGED BUNDLE: complete -> ok; a door removed -> refused BY NAME; a door present but not a member -> refused.
+  STAGE="$W/doors-stage"; mkdir -p "$STAGE"
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    mkdir -p "$STAGE/$(dirname "$member")"
+    cp "$ROOT/$member" "$STAGE/$member"
+  done <<< "$list"
+  sums() { ( cd "$STAGE" && find . -type f ! -name files.sha256 -printf '%P\n' | LC_ALL=C sort \
+    | while IFS= read -r f; do sha256sum -- "$f"; done ) > "$STAGE/files.sha256"; }
+  sums
+  out="$(node "$DOORS" --root "$ROOT" --check "$STAGE" 2>&1)"; rc=$?
+  ok "$([ "$rc" = 0 ] && echo 1)" "a bundle staged from the derived list is complete" "rc=$rc $out"
+  mv "$STAGE/scripts/release-install.sh" "$W/release-install.sh.kept"
+  out="$(node "$DOORS" --root "$ROOT" --check "$STAGE" 2>&1)"; rc=$?
+  ok "$([ "$rc" = 1 ] && printf '%s' "$out" | grep -q 'door_missing: scripts/release-install.sh' && echo 1)" \
+    "the published v0.1.1 bundle's defect is a red gate: no scripts/release-install.sh, named with the code site" \
+    "rc=$rc $(printf '%s' "$out" | head -1)"
+  mv "$W/release-install.sh.kept" "$STAGE/scripts/release-install.sh"
+  sed -i '\|scripts/release-install.sh$|d' "$STAGE/files.sha256"
+  out="$(node "$DOORS" --root "$ROOT" --check "$STAGE" 2>&1)"; rc=$?
+  ok "$([ "$rc" = 1 ] && printf '%s' "$out" | grep -q 'present but not a bundle member' && echo 1)" \
+    "a door that sits in the directory but is not a member (files.sha256 does not name it) is refused too" \
+    "rc=$rc $(printf '%s' "$out" | head -1)"
+  # ...and the cases where the question cannot be asked at all are UNKNOWN, never a pass.
+  mkdir -p "$W/doors-nosums"; out="$(node "$DOORS" --root "$ROOT" --check "$W/doors-nosums" 2>&1)"; rc=$?
+  ok "$([ "$rc" = 2 ] && printf '%s' "$out" | grep -q 'bundle_has_no_member_list' && echo 1)" \
+    "a directory with no files.sha256 is unknown, not complete" "rc=$rc $(printf '%s' "$out" | tail -1)"
+
+  # THE PACKER USES IT: the list is derived before staging and the stage is checked before it is tarred.
+  derive_line="$(grep -n 'install-script-doors.mjs" --root "$ROOT" --list' "$ROOT/scripts/release-linux.sh" | head -1 | cut -d: -f1)"
+  check_line="$(grep -n 'install-script-doors.mjs" --root "$ROOT" --check "$stage"' "$ROOT/scripts/release-linux.sh" | head -1 | cut -d: -f1)"
+  tar_line="$(grep -n 'tar -C "$out" -czf' "$ROOT/scripts/release-linux.sh" | head -1 | cut -d: -f1)"
+  ok "$([ -n "$derive_line" ] && [ -n "$check_line" ] && [ -n "$tar_line" ] && [ "$derive_line" -lt "$check_line" ] && [ "$check_line" -lt "$tar_line" ] && echo 1)" \
+    "scripts/release-linux.sh derives the doors, checks the staged bundle, and only then tars it" \
+    "derive=${derive_line:-none} check=${check_line:-none} tar=${tar_line:-none}"
+fi
+
 printf 'release completeness ok (%d checks, %d failed)\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
 exit 0
