@@ -48,7 +48,24 @@ skip_all() { printf 'SKIP test-deploy-alive-slow-download: %s\n' "$1"; exit 3; }
 
 command -v python3 >/dev/null 2>&1 || skip_all "python3 is needed for the paced stub server"
 TRIPLE="$(wa_node_target_triple 2>/dev/null)" || skip_all "this host has no node-binary target triple"
+# THE ROW'S OWN TREE IS ITS OWN origin/main (25/11, rows/20261125T092844Z-15279 and 20261125T093036Z-7284): on an
+# UNLANDED branch the row's detached checkout is behind origin/main, and deploy.sh refuses it (refused(source_pin_stale))
+# before it reaches anything this row measures - its pre-swap trap then clears the alive record, so the record checks
+# read an empty file and the second deploy falls through to the pin refusal. This has to happen BEFORE the deploy is
+# started (the first attempt put it after, where it changed nothing). It touches only this throwaway checkout, the way
+# the covering row touches only its own fixture remote.
 SHORT="$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)"
+# THE ROW DEPLOYS FROM A CLONE OF ITS OWN TREE (25/11, rows/20261125T093218Z-1824 ... rows/20261125T094028Z-26428).
+# deploy.sh refuses a detached worktree whose origin/main is ahead (refused(source_pin_stale)) - correct behaviour,
+# and on an UNLANDED branch the runner's shared checkout is exactly that, while a ref this row sets there does not
+# stick (the runner's own fetch owns it). A throwaway clone of the row's tree has nothing to be behind: its
+# origin/main IS its HEAD. Nothing outside the row is touched, and the deploy is told to use it.
+DEPLOY_TREE="$W/tree"
+env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git clone -q "$ROOT" "$DEPLOY_TREE" 2>/dev/null   || skip_all "cannot clone the row's tree into its scratch root"
+env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" checkout -q "$SHORT" 2>/dev/null   || skip_all "cannot check out $SHORT in the row's clone"
+env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" update-ref refs/remotes/origin/main "$SHORT"   || skip_all "cannot make the clone its own origin/main"
+echo "row: deploying from $DEPLOY_TREE, origin/main $(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" rev-parse --short=12 origin/main) HEAD $SHORT"
+
 
 # ---- the paced channel -------------------------------------------------------------------------------
 CH="$W/channel"; mkdir -p "$CH/node-$SHORT" "$W/tmp"
@@ -69,8 +86,8 @@ echo "slow channel: 127.0.0.1:$PORT, manifest 6 MB paced at 200 kB/s (~30 s)"
 INSTALL="$HOME/install"; mkdir -p "$INSTALL/scripts"
 DATA="$HOME/.wasm-agent"
 OUT="$W/deploy.out"
-wa_installer_run --root "$W" --cd "$ROOT" --port "$((30000 + RANDOM % 9000))" --install-dir "$INSTALL" --set WA_NODE_BINARIES_URL="http://127.0.0.1:$PORT" \
-  --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_TREE_WAIT=5 --set WA_DEPLOY_ROOT="$ROOT" \
+wa_installer_run --root "$W" --cd "$DEPLOY_TREE" --port "$((30000 + RANDOM % 9000))" --install-dir "$INSTALL" --set WA_NODE_BINARIES_URL="http://127.0.0.1:$PORT" \
+  --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_TREE_WAIT=5 --set WA_DEPLOY_ROOT="$DEPLOY_TREE" \
   --set WA_SENTINEL_SUPERVISOR=none --set WA_SERVICE_UNIT_FILE="$W/no-such.unit" \
   -- bash scripts/deploy.sh --reason "test-deploy-alive-slow-download" > "$OUT" 2>&1 &
 DEPLOY_PID=$!
@@ -99,8 +116,8 @@ ok "$([ "$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$ALIVE" | head -1)" = "$HOLDER"
 # ---- the second deploy, which must be turned away ------------------------------------------------------
 SECOND="$W/deploy2.out"
 rc2=0
-wa_installer_run --root "$W" --cd "$ROOT" --port "$((30000 + RANDOM % 9000))" --install-dir "$INSTALL" --set WA_NODE_BINARIES_URL="http://127.0.0.1:$PORT" \
-  --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_ROOT="$ROOT" --set WA_SENTINEL_SUPERVISOR=none \
+wa_installer_run --root "$W" --cd "$DEPLOY_TREE" --port "$((30000 + RANDOM % 9000))" --install-dir "$INSTALL" --set WA_NODE_BINARIES_URL="http://127.0.0.1:$PORT" \
+  --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_ROOT="$DEPLOY_TREE" --set WA_SENTINEL_SUPERVISOR=none \
   --set WA_SERVICE_UNIT_FILE="$W/no-such.unit" \
   -- bash scripts/deploy.sh --reason "a second deploy during the download" > "$SECOND" 2>&1 || rc2=$?
 ok "$([ "$rc2" = 1 ] && echo 1)" "a second deploy while the first is downloading is refused as a PRE-SWAP refusal (exit 1, not 3)" "rc=$rc2 $(tail -2 "$SECOND" | tr '\n' ' ')"

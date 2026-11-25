@@ -604,7 +604,10 @@ function M.record_pause(marker, now, session_id, user, opts)
   local ok = pcall(writer, path, json.encode({
     session = session_id,
     since = tonumber(now) or os.time(),
-    to = marker.to,
+    -- A RECORD WITH NO COMMIT LEAVES "to" EMPTY (25/11, Fable): alive-first writes the deploy record before COMMIT is
+    -- resolved, its commit reads "unknown", and that string used to land here - so pauses.jsonl said "to":"unknown"
+    -- and every reader repeated it. An empty value is the honest one: the reader says an install is starting.
+    to = no_commit(marker.to) and "" or tostring(marker.to),
     source = marker.source or "install",
     request = marker.id,
     by = tostring(user or marker.owner or ""),

@@ -67,4 +67,18 @@ local refusal_before = wait_module.refusal({ source = "deploy", to = "unknown", 
 has_not(refusal_before, "unknown", "the refusal a turn that did not start gets never says 'unknown'")
 has(refusal_before, "an install that is starting", "and says an install is starting")
 
+-- ---- 5. the PAUSED RECORD itself (pauses.jsonl): no commit is an empty "to", never the word unknown ----
+-- The paused event used to write marker.to straight through, so a deploy that had not resolved its commit yet wrote
+--  "to":"unknown" into pauses.jsonl and every reader repeated it. The record leaves the field empty.
+local captured = nil
+local wrote = pause.record_pause({ source = "request", id = "req-pause" }, now, "sess-pause", "op", {
+  dir = host.paths().home .. "/pause-fixture",
+  installed = { commit = "", branch = "main" },
+  write = function(_path, body) captured = body; return true end,
+})
+has(tostring(wrote ~= nil and captured ~= nil), "true", "a paused record was written through the module own writer")
+has(captured, [=["to":""]=], "the record leaves to EMPTY when the deploy has not resolved a commit")
+has_not(captured, "unknown", "and the word unknown is nowhere in the record")
+local paused_again = pause.say_wait({ source = "request", to = "", since = since, bound_seconds = 1800 }, now)
+has(paused_again, "an install that is starting", "and the reader of that record says an install is starting")
 print(string.format("deploy wait names the commit ok (%d checks)", checks))
