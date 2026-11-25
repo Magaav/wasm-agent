@@ -3167,8 +3167,12 @@ impl.artifacts = function(run, options)
     if not bundle_ok then return false, bundle end
     run.journal.artifacts.components = { dir = dir .. "/components", detail = tostring(bundle and bundle.detail or "") }
   end
+  -- --named-from-cover: a release NAMED for the commit being cut, carrying the cover bytes when the
+  -- compiled inputs are unchanged. A node with no tree (nextcloud) installs exactly node-<sha12>, and being
+  -- "covered" by another tag published nothing that such a node can fetch (25/11). This is the cut, not a
+  -- landing: a landing must not publish a release per merge.
   local command = "WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit " .. quote(sha) ..
-    " --out " .. quote(dir)
+    " --out " .. quote(dir) .. " --named-from-cover"
   evidence(command_line("build release", command))
   local result = M.exec(command, slashes(tree), 7200)
   evidence((result.stdout or "") .. (result.stderr or ""))
