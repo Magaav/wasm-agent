@@ -182,7 +182,11 @@ ok "$([ "$(sed -n 's/^commit=//p' "$PEER/install/installed.txt" | head -1)" = "$
 # scripts/install.sh is exactly what lua/core/update.lua runs on a release node (`wa update` -> the INSTALLED
 # updater), so running THIS CHECKOUT's copy against the peer is the local door after 1f8a34d4: it reads the
 # channel, hands the index to the core, and installs $SHORT.
-FIXED_ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 900 sh "$ROOT/scripts/install.sh" --update --prefix "$PEER/install" 2>&1)
+# --force IS THE PRODUCT'S OWN ANSWER TO ITS LAST GATE: the node is UP here (step 3a needs a verified watcher or
+# the v0.1.1 updater refuses the deploy), so the core's idle gate says "node_busy: the node on this port is
+# running a turn; re-run when idle, or --force" - measured 25/11. The row takes the flag the refusal names
+# rather than stopping the node to get around the gate, and scripts/install.sh forwards it to the core.
+FIXED_ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 900 sh "$ROOT/scripts/install.sh" --update --prefix "$PEER/install" --force 2>&1)
 FIXED_RC=$?
 printf '%s\n' "$FIXED_ANSWER" | sed 's/^/    fixed updater: /' | tail -6
 ok "$([ "$FIXED_RC" = 0 ] && echo 1)" "the fixed updater ran (exit $FIXED_RC)"
