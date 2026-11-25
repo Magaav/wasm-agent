@@ -1559,6 +1559,17 @@ WA_BIN="$BIN" gate_run bash scripts/test-deploy-alive-hold.sh
 # version a live process runs from, or a pinned one; and a full disk is refused by name before anything is
 # staged. Rows R3/R5 (a kill at every migration boundary) and R8 (the sentinel) come with their commits.
 gate_run bash scripts/test-versions.sh
+# THE INSTALLER OF A VERSION FOLDER, and a cut at every step boundary (R3): the install's own wa answers after a
+# SIGKILL at each of the 8 steps and the same install runs again to the end. It is an INSTALLER row, so it is
+# isolated by construction (scripts/lib/scratch-env.sh: clean prefix + stub systemctl + the checker) and refuses
+# to run unless the checker says ISOLATED - Fable's G condition, which is the row below it.
+WA_BIN="$BIN" gate_run bash scripts/test-version-install.sh
+# The shared scratch checker the version-folder rows use (scripts/lib/scratch-env.sh), judged on its own:
+# every live dimension refused by name, an IN-A-TURN run refused rather than stripped, ISOLATED when clean.
+gate_run bash scripts/test-scratch-env.sh
+# THE G CONDITION ITSELF: the checker rejects every live dimension on its own (HOME, install dir, unit dir, the
+# real systemctl, the ledger path, XDG_CONFIG_HOME, a live port, a vault URL), the installer row asks it before
+# it runs anything, and neutralising a live-inheriting harness lands on ISOLATED with no live file changed.
 # The half requirement 5 asks for: on the next start, wa IT ITSELF puts back a link the pointer names and a cut
 # left absent - and never replaces a real directory. The module's contract (no pointer / half-done / real dir /
 # idempotent) has its own row; the shell row above proves the same through the real start path.
