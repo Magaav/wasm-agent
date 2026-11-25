@@ -7,10 +7,14 @@ Branch: `change/version-folders` (based on origin/main `ebf6d2ec`). Requirements
 ## What this branch has, and what proves it
 
     commit     step                                   proof
-    094fdbb7   S1+S2: the share root, the version id,  scripts/test-versions.sh, 29 checks, wired in
+    094fdbb7   S1+S2: the share root, the version id,  scripts/test-versions.sh (S1+S2 rows), wired in
                the assembler (hard links), the pointer, scripts/test.sh; RED on the base (the library is
                installed.txt as a link, retention,      absent there, so the row cannot pass)
                the disk refusal
+    5a093959   S4: a cut is finished by wa ITSELF at  lua/core/version_repair.lua + init.lua + 12 checks in
+               the next start                     scripts/test-version-repair.lua + 5 more in
+                                                  scripts/test-versions.sh through the real start path:
+                                                  the absent link is back and the command answered
 
 Rows that exist and pass (each named in its failure message):
 
@@ -25,9 +29,11 @@ Rows that exist and pass (each named in its failure message):
 
 Rows that do NOT exist yet and are the next commits (named, not implied):
 
-    R3/R5  a SIGKILL at every migration and install step boundary; after each: wa --version, a /health
-           answer, and an update still completes. Needs S3 (the deploy path assembles a version) and S4
-           (wa finishes a half-done migration at its next start).
+    R5 first half IS green (5a093959): a cut leaves an absent link, and the next start puts it back through
+           the real binary (WA_SHARE_ROOT + WA_INSTALL_DIR + this tree's Lua), never replacing a real
+           directory and repairing nothing on a healthy install.
+    R3     a SIGKILL at every migration and install step boundary; after each: wa --version, a /health
+           answer, and an update still completes. Needs S3 (the deploy path assembles a version).
     R8     the sentinel's order and the old-supervisor fallback. Needs S6.
 
 ## The measured ground this is built on (24/11, read-only)
@@ -78,16 +84,19 @@ is back to ui/ alone, verified by `ls`), and the test itself refuses a scratch i
 lesson: the library operates on the real root by design, so anything that CALLS it in a probe must export
 `WA_SHARE_ROOT`; the row's own guard is what caught the same class in the test's first run.
 
-## Where S4 (a cut finishes itself) is decided: wa-host, not Lua
+## Where S4 lives, and a claim this report made that was WRONG
 
-Requirement 5 says a step is either atomic or finished by wa ITSELF at its next start. The repair cannot live in
-Lua: the interpreter has no capability to create a link (host.read_file and host.path_facts exist; there is no
-host.symlink), and exec-ing \`ln\` from an interpreter that has just failed to resolve its own tree is the wrong
-shape. It belongs in \`rust/wa-host/src/main.rs\`, before Lua is loaded: when \`<share>/current/version.txt\`
-exists, put back any legacy link that is missing or dangling (lua-core, scripts, wa, wa-sentinel, and ui in the
-share root), and do nothing when there is no current - which is every node today. The row that comes with it
-breaks a link, runs \`wa --version\` against the scratch install, and asserts the link is back and the command
-answered.
+An earlier version of this file (commit 02391009) said the repair belongs in \`rust/wa-host\` because Lua cannot
+create a link. That was wrong, and it was measured wrong within the hour: \`host.exec\` exists, so Lua can run
+\`ln\`. What IS true is narrower - there is no \`host.symlink\` capability, so a link is made by a child process,
+and the interpreter that needs the repair is the one whose tree may be absent (it then runs the binary's
+compiled-in copy, which carries this module once the binary is rebuilt).
+
+So S4 is Lua (\`lua/core/version_repair.lua\`, called from \`init.lua\` before the tree is needed and before
+\`memory.setup()\`), and two host facts learned by the row failing are recorded in the module's comments:
+\`host.file_exists\` does not exist in this host's surface (\`host.path_kind\` answers "missing" for both an absent
+path and a dangling link, which is exactly the question), and \`host.exec\` answers a JSON envelope rather than
+bare stdout (the row built a scratch path out of the envelope on its first run).
 
 ## Not in this slice
 
