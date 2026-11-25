@@ -436,7 +436,12 @@ done <<VERIFY_FAILS
 $(grep -E '^  FAIL ' "$VERIFY" 2>/dev/null)
 VERIFY_FAILS
 ok "$([ -z "$unexpected" ] && echo 1)" "verify-install's only FAIL lines are the two a scratch home forces (its verdict, and the sentinel)" "$unexpected"
-ok "$(grep -qE '^  FAIL the sentinel is watching' "$VERIFY" 2>/dev/null && echo 1)" "and it does say the sentinel is not watching (the one thing this scratch install cannot have)" "$(grep -c FAIL "$VERIFY") FAIL line(s)"
+# THE CHECK THIS REPLACES WAS TRUE ONLY WHILE NO WATCHER RAN (25/11, rows/20261125T055748Z): it asserted that
+# verify-install reports the sentinel as not watching - the state of a scratch home before the second pass starts one.
+# With a real sentinel answering, the honest assertion is the opposite one: verify-install must not be FAILING on the
+# sentinel at all, because here it is running.
+ok "$(grep -qE '^  (ok|skip) +the sentinel is watching' "$VERIFY" 2>/dev/null && echo 1)" \
+  "and it reports the sentinel as watching, because in this pass one is" "$(grep -E 'sentinel' "$VERIFY" 2>/dev/null | head -2 | tr '\n' ';')"
 
 printf 'deploy covering release ok (%d checks, %d failed)\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
