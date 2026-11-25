@@ -179,3 +179,164 @@ label, printed only when the fixture copy fails).
 * A cold-process timing row measures the process's first-use costs (here: a Cranelift compile of the
   code-mode module) unless the interrupt is placed after them. `ESC_SETTLE_MS` is the knob that separates
   "the stop is slow" from "the stop waited for first-use setup", and it should be the first thing run.
+
+## Round 2 (25/11): warm the row, measure the shell honestly — and the stop's real cause
+
+Base for this round: `change/release-rows-real` at `fb0be2a8` (its first commit `a2777c25` is on
+`origin/main` as `013a1aa3`). Commits this round: `27d1c7b1` (warm-up + cold line), `3d584615` (honest
+shell check), `792a4c5a` (the e2e wrapper drops every live pointer). Nothing pushed; no peer called; no
+installer, sentinel or systemd unit touched.
+
+### The scratch guard (Fable's binding decision, 25/11) — pasted, both environments
+
+`bash ~/Work/missions/_orch/scratch-guard.sh /home/victor/Work/missions/release-rows-real`
+
+**(1) the environment this session's bash tools run in** — NOT ISOLATED, and it is the session's own:
+`HOME=/home/victor`, `WASM_AGENT_DB=/home/victor/.wasm-agent/memory.db`, `XDG_CONFIG_HOME=/home/victor/.config`,
+`WASM_AGENT_VAULT_URL` set. **No child of either row of this branch ever receives this environment**:
+`scripts/test-esc-stops-pty.mjs` launches the CLI with `env -i` plus an allow-list written in the file
+(`environment()`), and `scripts/test-release-channel-e2e.sh` now drops every live pointer itself (`792a4c5a`).
+
+**(2) the environment the esc-stops row hands its child** (`env -i` + that allow-list, plus the guard's
+required scratch pointers):
+
+```
+  ok   HOME = /home/victor/Work/missions/release-rows-real/scratch/guard-probe/home
+  ok   WASM_AGENT_HOME = .../scratch/guard-probe/home
+  ok   data dir = .../scratch/guard-probe/home/.wasm-agent
+  ok   install dir (WA_INSTALL_DIR) = .../scratch/guard-probe/home/.local/bin
+  ok   unit dir = .../scratch/guard-probe/home/.config/systemd/user
+  ok   WASM_AGENT_DB unset
+  FAIL WA_SENTINEL_UNIT_SYSTEMCTL is the real systemctl (systemctl)
+  FAIL WASM_AGENT_PORT unset (defaults to the live 8799/8800)
+  FAIL WASM_AGENT_CLIENT_PORT unset (defaults to the live 8799/8800)
+```
+
+The three FAILs are the guard asking an **install row's** questions: this row starts no node server (its
+provider is the row's own HTTP fixture on an ephemeral port) and runs no installer, so it has no ports to
+move and no systemctl to stub — and it also never sets `WA_SENTINEL_*` for a child. Everything a child of
+this row COULD reach is under the scratch root, and no vault URL is set.
+
+### (1) The row warms the guest first; the cold call has its own line — `27d1c7b1`
+
+Measured cause of the old number: the ledger's own stamps show a tool call ANNOUNCED at 598.3 ms and the
+code-mode call only STARTING at 1522.7 ms — **924 ms of compile** between them
+(`rust/wa-capabilities/src/quickjs.rs:37-41` writes `<home>/.wasm-agent/cache/codemode/quickjs-<sha>-<engine>.cwasm`,
+`:53` is `Module::new` when it is absent) — while the nested bash call itself took 33 ms.
+
+The row now: one cheap call (`echo warm`) → waits for the `.cwasm` the product itself writes → waits for the
+warm turn's `run|end` → then types the measured line. The cold number is read from the harness's ledger
+stamps (announced call → final result), printed per scenario, and judged against a LOOSE 3000 ms bound.
+Unknown is never a pass.
+
+Measured, bash leg, this tree's binary: cold **947-1177 ms**, module cache written, `ok` on all five legs
+in the full row (`964, 964, 980, 983, 1022 ms`); on the published v0.1.1 the same line reads 993-1232 ms.
+
+### (2a) v0.1.1, the warm case: the shell survives there too
+
+Row, published asset (sha256-verified, `wasm-agent v0.1.1 · v2104a4d8`):
+
+```
+KNOWN-FAIL - bash: the shell the stop interrupted is gone 1000 ms after the prompt, measured from the prompt back
+       1 process(es) still alive 1000 ms after the prompt (pids 781506; the row killed them by pid: 781506)
+```
+
+Followed from outside, by pid, for the whole life of the shell (`ESC_SETTLE_MS=3000`, so the key lands while
+`sleep 30` really runs):
+
+```
+shell 557081 STARTED, pane 556398 DIED at +29581 ms, shell 557081 GONE after 30002 ms (pane already dead)
+```
+
+**v0.1.1: the shell outlives the stop AND the CLI and runs its own 30 s.**
+
+### (2b) main, the warm case: the same, and for the full time
+
+```
+shell 548893 STARTED, pane 548031 DIED at +11467 ms, shell 548893 GONE after 29970 ms (pane already dead)
+```
+
+**main: the stop does not signal the process group at all.** Not a 1-2 s grace: the shell is alive when the
+CLI itself dies and is alive when the `sleep 30` ends. Ledger for that run: interrupt 4027.4 ms,
+`tool/end` 4428.7 ms, `run/stopped` 4470.3 ms — the prompt is back while the shell has 26 s to run.
+
+### The class: NOT a regression
+
+Survives on main **and** on v0.1.1, for the full time on both → per Fable's tree this is not a regression and
+not mine to fix: it becomes week 1's first item ("Esc stops what it started": the process group, not only the
+prompt). The row now says it on every run as a **named known defect** (`3d584615`), never as a pass.
+
+### The honest check — `3d584615`
+
+* readiness is the PROCESS, not the transcript line: the leg starts only when a `sleep` descendant of the
+  pane exists (the old readiness was the "Bash(sleep 30)" line, printed up to 900 ms before the call starts —
+  measured "gone 7 ms" on a leg whose shell had not started);
+* the shell's pids are taken at the key from the pane's own tree and followed BY PID, so the measurement
+  survives the session's own death (a tree walk from a dead pane called a live shell "gone");
+* it measures from the prompt's return against a STATED bound, `SHELL_GONE_MS = 1000`; "no shell at the key"
+  is `unknown` and says so;
+* the row kills what it started, by pid (a known-failing run used to leak a 30 s shell);
+* `KNOWN-FAIL` is its own verdict and its own count: `esc-stops pty: 21 ok, 1 failed, 1 known-fail`. When it
+  starts passing, the same line says the named defect is FIXED.
+
+### The row's output, both binaries (full row, this round)
+
+**main (`3d584615`, load 2.4): `21 ok, 1 failed, 1 known-fail`**
+
+| leg | usable (pty) | stop (node) | cold first call | verdict |
+| --- | --- | --- | --- | --- |
+| headers | 150 ms | 1 ms | 984 ms | ok |
+| stream | 153 ms | 1 ms | 964 ms | ok |
+| bash | **780 ms** | **638 ms** | 980 ms | **FAIL** (see below) |
+| remote | 166 ms | 20 ms | 983 ms | ok |
+| subagent | 190 ms | 29 ms | 1022 ms | ok |
+
+`KNOWN-FAIL - bash: the shell the stop interrupted is gone 1000 ms after the prompt … 1 process(es) still
+alive (pids 738023; the row killed them by pid: 738023)`.
+
+**v0.1.1 (`13 ok, 9 failed, 1 known-fail`)**: bash 819 ms (stop unreadable: that build writes no stopped row);
+subagent 270 ms ok; headers and remote never give the prompt back inside 20 s; stream returns at 9737 ms —
+these are v0.1.1's own gaps (it predates the interrupt row and the socket shutdown), named here so nobody
+reads them as this branch's work. The shell check is the same KNOWN-FAIL on v0.1.1.
+
+### The bash leg's remaining red has a NAME: the code-mode poll slice
+
+With the guest warm the bash stop is still 395-907 ms, and the ledger says exactly where it goes (settle 2000
+run, load 3.37): interrupt at 3943.5 ms → the NESTED tool call returns at 4813.6 ms (**870 ms later**) →
+`run/stopped` 884.5 ms after the key; the operation store shows that call only ever reached `accepted`.
+That is the code-mode pending executor: `lua/core/codemode_pending.lua:79` (`M.SLICE_MS = 1000`) and
+`operation_poll` (`:375-390`), which asks `cancelled()` only BETWEEN 1 s slices — so a stop is quantised to
+the slice boundary (395 ms when the key fell just before one, 907 ms just after, 89 ms by luck). It is not
+the compile (that is the warm-up's own line) and it is not this branch: v0.1.1's bash leg is 813-819 ms.
+
+**This is why the bash leg is red on main, and it was red on main before this branch** (the brief's own
+figures: 690 ms at load 1.52). Nothing in this branch touches the stop path. Fable owns the decision —
+product (wake the wait on cancel, or poll in small slices) or budget — and the change to the stop path is
+theirs to order, not mine.
+
+### Texts to approve (row output, verbatim)
+
+1. `     warm-up: the first code-mode call took <n> ms, module cache written by the product - loose bound 3000 ms`
+2. `     warm-up: the first code-mode call took unknown (<why>), module cache MISSING - loose bound 3000 ms`
+3. `ok - <leg>: the first code-mode call of the process is setup, not the stop (3000 ms loose bound)`
+4. `FAIL - <leg>: the first code-mode call of the process is setup, not the stop (3000 ms loose bound)` + `unknown: …`
+5. `KNOWN-FAIL - bash: the shell the stop interrupted is gone 1000 ms after the prompt, measured from the prompt back`
+6. `       named known defect: Esc stops the prompt but not the process group (measured 25/11: …) - week 1 item "Esc stops what it started"`
+7. `ok - bash: the shell the stop interrupted is gone 1000 ms after the prompt, measured from the prompt back (…) - the named known defect is FIXED: …`
+8. `esc-stops pty: <n> ok, <n> failed, <n> known-fail`
+9. table cell `unknown (no shell at the key)`
+
+### Discrimination (`scripts/test-discriminates.sh ebf6d2ec`, HEAD `792a4c5a`)
+
+```
+environment        scripts/test-esc-stops-pty.mjs   the machine could not run it:        (empty reason)
+unchanged-verdict  scripts/test-release-channel-e2e.lua   still passes on the base's code; not blocking
+unchanged-verdict  scripts/test-release-channel-e2e.sh    still passes on the base's code; not blocking
+```
+
+Nothing blocks. The two `unchanged-verdict` rows are correct for a branch with no product change. The pty row
+is `environment` — the gate could not run it on the base's code and, worse, could not say WHY: the reason
+field is empty. That is a gap in the gate's own message (it is non-blocking by its own rules), and it is
+recorded here rather than left to look like a pass. The pty row's own red is pre-existing and named above
+(the bash stop's 1 s poll slice), and it is the same on the base.
+
