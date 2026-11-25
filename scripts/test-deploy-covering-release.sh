@@ -101,12 +101,15 @@ git -C "$ROOT" worktree add -q --detach "$BUILD_TREE" "$C1" 2>/dev/null   || ski
 # and signs the sums with the committed TEST key (scripts/lib/release-fixture-sign.py), which is the signature the
 # verifier accepts. Nothing here is published and nothing asks for a secret.
 BUILT="$W/built"; mkdir -p "$BUILT" "$RELEASE"
-ASSET_SRC="$ROOT/.git/codemode-assets"
-if [ -d "$ASSET_SRC" ]; then
-  mkdir -p "$BUILD_TREE/.git"; cp -a "$ASSET_SRC" "$BUILD_TREE/.git/" 2>/dev/null || true
-fi
+# THE ASSETS ARE READ WHERE THEY ALREADY ARE (measured: copying the directory lost quickjs.wasm, and build.rs then
+# panics by name). build.rs only READS them; the row writes nothing outside its own root.
 CODEMODE_ENV=""
-for cand in "$BUILD_TREE"/.git/codemode-assets/*; do [ -d "$cand" ] && CODEMODE_ENV="$cand" && break; done
+for cand in "$ROOT"/.git/codemode-assets/* "$BUILD_TREE"/.git/codemode-assets/*; do
+  [ -d "$cand" ] && [ -f "$cand/quickjs.wasm" ] && CODEMODE_ENV="$cand" && break
+done
+if [ -z "$CODEMODE_ENV" ]; then
+  for cand in "$ROOT"/.git/codemode-assets/* "$BUILD_TREE"/.git/codemode-assets/*; do [ -d "$cand" ] && CODEMODE_ENV="$cand" && break; done
+fi
 ( cd "$BUILD_TREE/rust" && WA_CODEMODE_BUILD_ASSETS="$CODEMODE_ENV" CARGO_TARGET_DIR="$W/target" \
     cargo build --release --offline -q -p wa-host ) > "$W/build-wa.log" 2>&1 \
   || skip_all "cannot build the node binary from $SHORT: $(tail -3 "$W/build-wa.log" | tr '\n' ' ')"
