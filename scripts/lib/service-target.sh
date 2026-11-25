@@ -32,6 +32,23 @@
 #
 # Every probe is read-only. Nothing here writes, starts, stops or deploys anything.
 
+# --- the node's port ---------------------------------------------------------------------------
+# ONE ANSWER TO "WHICH PORT IS THE NODE" (25/11). The node itself reads `WASM_AGENT_PORT`
+# (rust/wa-sentinel/src/main.rs; scripts/lib/sentinel-unit.sh writes it into the service), while these scripts
+# have always read `WA_PORT`. A runner that exports only the node's spelling therefore pointed a scratch deploy
+# at the LIVE node on 8799 - two names for one fact, and the one the machine listens on was not the one read
+# here. Both spellings are honoured and the node's own is the fallback: a caller that names neither gets the
+# historical default.
+wa_node_port() { printf '%s' "${WA_PORT:-${WASM_AGENT_PORT:-8799}}"; }
+
+# The node's second port, the one its UI and stream calls answer on. Named explicitly by either spelling it is
+# used as given; otherwise it follows the node port, which is the pairing every launcher in this tree writes.
+wa_node_client_port() {
+  if [ -n "${WA_CLIENT_PORT:-}" ]; then printf '%s' "$WA_CLIENT_PORT"; return 0; fi
+  if [ -n "${WASM_AGENT_CLIENT_PORT:-}" ]; then printf '%s' "$WASM_AGENT_CLIENT_PORT"; return 0; fi
+  printf '%s' "$(( $(wa_node_port) + 1 ))"
+}
+
 # --- the node's own directories ----------------------------------------------------------------
 # `WASM_AGENT_HOME` is the *home*, and the config lives under it - this is what the node itself uses
 # (rust/wa-host/src/main.rs resolve_home, lua/core/paths.lua paths.config()). `upgrade.sh` reads the same
@@ -112,9 +129,14 @@ wa_service_exec_start() {
   local unit value file
   if [ -n "${WA_SERVICE_UNIT_FILE:-}" ]; then wa_service_exec_line "${WA_SERVICE_UNIT_FILE}"; return 0; fi
   unit="$(wa_service_unit "${1:-}")"
-  if command -v systemctl >/dev/null 2>&1; then
+  # THE SYSTEMCTL A ROW GAVE THIS RUN (25/11). `WA_SENTINEL_UNIT_SYSTEMCTL` is the variable every other
+  # caller in this tree honours (scripts/lib/sentinel-unit.sh, scripts/lib/install-isolation.sh), and this
+  # probe was the one door that ignored it - so a scratch deploy asked the LIVE systemctl about the LIVE unit
+  # and read the operator's install as its own. A plain `systemctl` here is the operator's service.
+  local systemctl_bin="${WA_SENTINEL_UNIT_SYSTEMCTL:-systemctl}"
+  if command -v "$systemctl_bin" >/dev/null 2>&1; then
     # systemd's own answer, drop-ins and all: `{ path=/home/ubuntu/.local/bin/wa ; argv[]=... ; ... }`.
-    value="$(systemctl show "$unit" -p ExecStart --value 2>/dev/null | tr -d '\r')"
+    value="$("$systemctl_bin" show "$unit" -p ExecStart --value 2>/dev/null | tr -d '\r')"
     case "$value" in *path=*) printf '%s' "$value"; return 0 ;; esac
   fi
   file="$(wa_service_unit_file "$unit")"
@@ -145,9 +167,11 @@ wa_exec_binary() {
 wa_service_pid() {
   local unit value
   if [ -n "${WA_SERVICE_PID:-}" ]; then printf '%s' "$WA_SERVICE_PID"; return 0; fi
-  command -v systemctl >/dev/null 2>&1 || return 0
+  # The same one variable as the ExecStart probe above: a row's systemctl answers both questions or neither.
+  local systemctl_bin="${WA_SENTINEL_UNIT_SYSTEMCTL:-systemctl}"
+  command -v "$systemctl_bin" >/dev/null 2>&1 || return 0
   unit="$(wa_service_unit "${1:-}")"
-  value="$(systemctl show "$unit" -p MainPID --value 2>/dev/null | tr -d '\r')"
+  value="$("$systemctl_bin" show "$unit" -p MainPID --value 2>/dev/null | tr -d '\r')"
   case "$value" in ''|0) printf '' ;; *) printf '%s' "$value" ;; esac
 }
 
@@ -276,7 +300,7 @@ wa_service_install_dir() {
   # a witness is only a claim when the path is absolute and its directory is really there. Nothing is printed
   # when there is no witness: `wa_read_service_claim` reads line one as the directory and line two as the
   # sentence that came with it, so an answer and its source are never emitted apart.
-  pid="$(wa_port_pid "${WA_PORT:-8799}")"
+  pid="$(wa_port_pid "$(wa_node_port)")"
   [ -n "$pid" ] && image="$(wa_pid_image "$pid")"
   if [ -z "${image:-}" ]; then
     # No node answering (down, or restarting): the supervisor's own lifecycle record still names the binary
@@ -295,7 +319,7 @@ wa_service_install_dir() {
   dir="${image%/*}"
   [ -n "$dir" ] && [ "$dir" != "$image" ] && [ -d "$dir" ] || return 0
   printf '%s\n' "$dir"
-  printf '%s\n' "the node on port ${WA_PORT:-8799} runs $image"
+  printf '%s\n' "the node on port $(wa_node_port) runs $image"
 }
 
 # Where a deploy should install. `WA_INSTALL_DIR` when set - the caller has spoken, and whether it disagrees

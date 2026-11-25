@@ -536,6 +536,7 @@ gate_run bash scripts/test-publish-named-release.sh                          # a
 # whose compiled inputs a published release already covers must still be BUILT by the cut.
 gate_run bash scripts/test-cut-builds-own.sh                                # the cut builds node-<sha12> even when a signed cover already covers the commit
 gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
+gate_run bash scripts/test-installer-doors.sh                              # a scratch run reads its OWN unit and its OWN port, never the operator's (Fable 25/11)
 
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 # NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
