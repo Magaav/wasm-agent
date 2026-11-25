@@ -191,6 +191,18 @@ function M.run(feature, opts)
       stage = tostring(ran_stage or 'off'), detail = ran_detail and tostring(ran_detail) or nil,
     }
   end
+  -- THE FOURTH OUTCOME: 'not_proven'. A canary asked a question this node cannot answer - the mailbox and the
+  -- linked device live elsewhere - answers `return 'not_proven', stage, why`. No detector decides this:
+  -- the canary own answer does (Fable, 25/11).
+  -- It is NOT a pass (nothing was proven) and NOT a failure (nothing here is broken), and it records nothing:
+  -- the row's last real success keeps its own time, exactly as 'off' does. The release step refuses a release
+  -- whose canary is not_proven on EVERY node asked (feature_canary.aggregate).
+  if ok == 'not_proven' then
+    return {
+      feature = row.name, canary = row.canary, mode = ctx.mode, ok = false, not_proven = true,
+      stage = tostring(ran_stage or 'not_proven'), detail = ran_detail and tostring(ran_detail) or nil,
+    }
+  end
   if scratch_why and (ok == false or ok == nil) then ran_detail = tostring(ran_detail or '') .. ' (' .. scratch_why .. ')' end
   return {
     feature = row.name, canary = row.canary, mode = ctx.mode,
@@ -218,7 +230,7 @@ function M.run_all(opts)
         local result = M.run(row.name, opts)
         -- An 'off' canary records NOTHING: neither a success (nothing was proven) nor a failure (nothing is
         -- broken), so the row's last real success keeps its own time and the reason is the operator's switch.
-        if not result.off then
+        if not result.off and not result.not_proven then
           result.recorded = feature_health.record(row.name, result.ok, {
             stage = result.stage, detail = result.detail, source = 'canary' }) and true or false
         end
@@ -232,7 +244,7 @@ end
 -- One line per result: what an operator and the release report read.
 function M.lines(results)
   local out = {}
-  local passed, failed, off, skipped = 0, 0, 0, 0
+  local passed, failed, off, skipped, notproven = 0, 0, 0, 0, 0
   for _, result in ipairs(results or {}) do
     if result.skipped then
       skipped = skipped + 1
@@ -240,6 +252,9 @@ function M.lines(results)
     elseif result.off then
       off = off + 1
       out[#out + 1] = string.format('  %-22s OFF   %s: %s', result.feature, tostring(result.stage), tostring(result.detail))
+    elseif result.not_proven then
+      notproven = notproven + 1
+      out[#out + 1] = string.format('  %-22s NOT PROVEN  %s: %s', result.feature, tostring(result.stage), tostring(result.detail))
     elseif result.ok then
       passed = passed + 1
       -- THE MODE IS PART OF THE VERDICT (r8c item G). "self-wake PASS delivered" read as "this node's own
@@ -252,8 +267,45 @@ function M.lines(results)
       out[#out + 1] = string.format('  %-22s FAIL  %s: %s: %s', result.feature, tostring(result.mode or 'child-node'), tostring(result.stage), tostring(result.detail))
     end
   end
-  table.insert(out, 1, string.format('canaries: %d passed, %d failed, %d off, %d off-node', passed, failed, off, skipped))
+  table.insert(out, 1, string.format('canaries: %d passed, %d failed, %d off, %d not proven, %d off-node', passed, failed, off, notproven, skipped))
   return out
+end
+
+-- <answers> -> { failed = {...}, off = {...}, proven_nowhere = {...} }
+-- answers: a list of { node = <name>, results = { <run_all/run result tables> } } - this node first.
+--
+-- PROVEN NOWHERE IS A RED (25/11). A canary that answered `not_proven` on EVERY node asked was answered
+-- nowhere: the account lives on some other node, so the release has proven nothing about that feature. It is
+-- not a fail (no node said it was broken) and it is certainly not a pass - so it is named and it is red.
+function M.aggregate(answers)
+  local proven, asked, failed, off, nowhere = {}, {}, {}, {}, {}
+  for _, answer in ipairs(answers or {}) do
+    local node = tostring((type(answer) == "table" and answer.node) or "?")
+    for _, result in ipairs((type(answer) == "table" and answer.results) or {}) do
+      local feature = tostring(result.feature)
+      if result.ok and not result.skipped then proven[feature] = true end
+      if result.off then
+        off[#off + 1] = node .. "/" .. feature .. " (" .. tostring(result.stage) .. ")"
+      elseif result.skipped then
+        -- off-node is not an answer about this feature's health
+      elseif result.not_proven then
+        -- NO STAGE EXCEPTIONS (Fable's final shape, 25/11): a canary not_proven on every node asked was proven
+        -- nowhere, whatever its stage. 'no_data' included.
+        asked[feature] = (asked[feature] or 0) + 1
+      elseif result.ok then
+        -- a pass on this node: already recorded above, and it is not a failure of anything
+      else
+        failed[#failed + 1] = string.format("%s %s (%s)", node, feature, tostring(result.stage))
+      end
+    end
+  end
+  for feature, count in pairs(asked) do
+    if not proven[feature] then
+      nowhere[#nowhere + 1] = string.format("%s (not proven on %d node(s) asked)", feature, count)
+    end
+  end
+  table.sort(failed); table.sort(nowhere)
+  return { failed = failed, off = off, proven_nowhere = nowhere }
 end
 
 return M

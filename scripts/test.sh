@@ -527,6 +527,10 @@ gate_run bash scripts/test-install-window.sh                             # the w
 # The version window (Fable 25/11, the orphan rule): a fixture feed, so no node, no network, no clock.
 # It lives on the gate rather than in the declared list for the same reason its sibling above does.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$DB.version-window" | grep "version window ok"
+# A CANARY THAT CANNOT SEE AN ACCOUNT IS NOT A BROKEN FEATURE (25/11 stop): not_proven is a third state beside
+# pass/fail/off, account canaries answer it only when the node has no account of that kind, and a canary proven
+# on no node asked is red.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db "$DB.canary-not-proven" | grep "canary not proven ok"
 # A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
 # install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
 # the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.

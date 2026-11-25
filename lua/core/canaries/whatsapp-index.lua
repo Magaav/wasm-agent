@@ -53,7 +53,8 @@ function M.run()
     local contacts = type(raw) == 'string' and json.decode(raw) or raw
     if type(contacts) ~= 'table' then return false, 'index_unreadable', 'the contacts query answered nothing' end
     local list = contacts.chats or contacts.contacts or {}
-    if #list == 0 then return false, 'index_empty', 'the index answers, but knows no chat' end
+    -- RULING (c), 25/11: an account present with no chat indexed is no_data, not a broken feature.
+    if #list == 0 then return 'not_proven', 'no_data', 'no_data: no chat in the index' end
     -- The read contract of 23/11, on the node that holds the account: a read says how fresh it is
     -- (as_of), in which order (order), whether the writer is behind (index) - and two reads in a row
     -- never go backwards. Two read-only queries, no id and no message text in this report.
