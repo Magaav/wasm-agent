@@ -41,7 +41,15 @@ wa_install_isolation_guard() {
   fi
   local bad=0
   under() { # <what> <path>
+    # COMPARED PHYSICALLY ON BOTH SIDES (25/11, measured in rows/20261125T050751Z): the scratch root is resolved with
+    # pwd -P, and a caller's path that merely LOOKS different only because the scratch root is reached through a
+    # symlink (the mission rows live under one) was refused as not_isolated - a real path under the real root.
+    local phys
+    phys="$(CDPATH= cd -- "$(dirname -- "$2")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename -- "$2")")"
     case "$2" in
+      "$real"|"$real"/*) return 0 ;;
+    esac
+    case "$phys" in
       "$real"|"$real"/*) return 0 ;;
       *) printf 'not_isolated: %s = %s is not under the scratch root %s\n' "$1" "$2" "$real" >&2; return 1 ;;
     esac
