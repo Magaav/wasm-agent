@@ -167,7 +167,12 @@ says(refusal, "deploy_waiting:", "a refusal starts with the name a log and a tes
 says(refusal, "wa-sentinel request withdraw 1700000000000000000-1-0", "and names the way out")
 says(refusal, "Nothing was lost", "and says a wait is not a failure")
 local unnamed = wait.refusal({ id = "x", since = NOW - 5 }, NOW)
-says(unnamed, "an unnamed commit", "a request that recorded no commit says so")
+says(unnamed, "an install that is starting",
+  "a request that recorded no commit says an install is starting")
+ok(unnamed:find("waiting for the install of", 1, true) == nil
+   and unnamed:find("8082b42e1111", 1, true) == nil,
+  "and names no commit, because there is none to name")
+says(unnamed, "deploy request x", "it still names the request that is waiting")
 
 -- 4. One predicate for both halves of the signal: the installer's marker still wins (its sentence is the one
 -- an operator and the deploy tests already read), and with no marker the request answers instead.
