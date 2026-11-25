@@ -402,6 +402,27 @@ links <base>/main to it. And its assertion that the update was accepted matched 
 "nothing was installed": it now asserts the node is NOT told it is current, that the answer names the release
 the channel carries, and that the version and installed.txt actually move.
 
+### The five runs, and what each one measured
+
+1. install.sh ran the core WITHOUT --index: a v0.1.1 node answered "this node already runs the newest published
+   bundle (v0.1.1); nothing to do" while the channel it had been pointed at named a newer release. Fixed
+   forward in 1f8a34d4 (WA_INSTALL_INDEX, and the index the updater read is passed to the core).
+2. A file:// channel must be laid out PER COMMIT - <base>/<the commit the index names>/scripts/linux/
+   bootstrap.sh, the shape raw.githubusercontent.com/<repo>/<sha>/ has - or the core is unreachable.
+3. A file:// channel needs BOTH opt-ins: WA_INSTALL_ALLOW_LOCAL for the files the updater fetches and
+   WA_LINUX_RELEASE_ALLOW_LOCAL for the core's own index read. Each script makes a local URL opt in for
+   itself; a self-hosted channel therefore needs both.
+4. The v0.1.1 node's own updater cannot see a test channel at all (that copy predates the pass-through): the row
+   now asserts exactly that, and in production such a node moves when the PUBLIC index names v0.1.2.
+5. With the fixed updater the local door INSTALLED the release: the node came back as wasm-agent v0.1.2
+   v6299490f, installed.txt named the commit, the node id and the ledger fact were intact. That run still
+   failed on two of the ROW's own assertions - a version grep for the twelve-character commit when a bundle
+   prints eight, and the core's systemd user-unit step, which fires AFTER the install and cannot work where
+   there is no user manager ("systemd_user_unavailable ... or use --no-service"). Both fixed in a211269f.
+
+The row at a211269f is queued on the orchestrator's runner (position 1, behind another mission's rows); its
+verdict lands in row-result.txt. Everything except the final green is measured above.
+
 ## 10. Not done, and known failures
 
 - CUT CONDITION, not a landing condition (Fable 25/11): the v0.1.1 peer upgrading itself by LOCAL
