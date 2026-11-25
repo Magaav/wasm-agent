@@ -276,6 +276,13 @@ built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "local_only=$local_only"
   echo "built_utc=$built_utc"
   echo "files_sha256=$(sha256sum "$stage/files.sha256" | cut -d' ' -f1)"
+  # HOW MANY INSTALL-SIDE SCRIPTS THIS BUNDLE CARRIES (mission release-node-updates, Fable 25/11). A
+  # published bundle with ZERO of them cannot be updated from another node at all - the release door execs
+  # <install>/scripts/release-install.sh - so the count is written where the cut gate can read it without
+  # downloading the tarball. It is a count, not a promise: what it counts is derived from the tree code
+  # above, and scripts/check-release-complete.sh refuses a published entry whose count is 0 whatever this
+  # tree said about itself.
+  echo "install_doors=${#doors[@]}"
 } > "$stage/bundle.manifest"
 tar -C "$out" -czf "$out/$asset" "$name"
 manifest_sha=$(sha256sum "$stage/bundle.manifest" | cut -d' ' -f1)
@@ -357,12 +364,14 @@ done
 # Node, not python3: the index is also written from the Windows tree (--publish-bundle), where python3 is
 # not a given and Node is (the repository already needs it).
 index_file=$INDEX; command -v cygpath >/dev/null 2>&1 && index_file=$(cygpath -m "$INDEX")
-node - "$index_file" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" "$installer_sha" <<'JS' || fail 'index_update_failed'
+node - "$index_file" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" "$installer_sha" "${#doors[@]}" <<'JS' || fail 'index_update_failed'
 const fs=require('fs');
-const [file,commit,short,sha,url,size,triple,arch,tag,built,node,installer]=process.argv.slice(2);
+const [file,commit,short,sha,url,size,triple,arch,tag,built,node,installer,doors]=process.argv.slice(2);
 const doc=JSON.parse(fs.readFileSync(file,'utf8'));
 const entry={tag,commit,commit_short:short,target:triple,arch,manifest_sha256:sha,url,size:Number(size),node_version:node,built_utc:built};
 if(installer) entry.installer_sha256=installer;
+// the install-side script count: what the cut gate reads instead of downloading the tarball
+if(doors!==undefined) entry.install_doors=Number(doors);
 doc.releases=[entry,...(doc.releases||[]).filter(r=>!(r.commit===commit&&r.target===triple))];
 doc.generated_utc=built;
 fs.writeFileSync(file,JSON.stringify(doc,null,2)+'\n');
