@@ -61,6 +61,28 @@ The rest of the wall clock is the node's own start on this store (`wa mcp --help
 for `wa mcp list` is therefore impossible on this node today; the in-process list work is 57-65 ms, which is
 what the budget can mean here.
 
+## In-chat `/mcp` in a real fresh chat (pty, measured 25/11)
+
+A real `wa chat` in a pty (a private tmux server, 120x34), `/mcp` typed at the prompt, timed to the moment
+the panel's title drew - no pipe, because a piped line is a model turn and not the command:
+
+| tree | home | /mcp in a fresh chat |
+| --- | --- | --- |
+| `origin/main` (70eb209d) | the operator's real home (8 peer connectors) | **324 ms** |
+| this branch | the operator's real home | **271 ms**, **322 ms** |
+| this branch | scratch home (no peer, no account) | 59 ms, 59 ms |
+
+The panel drew with `On other nodes - 8 hidden` in all the real-home runs.
+
+**The 16-19 s figure does not reproduce as a command number, on either tree** - and the reason is in the
+code: `chat.lua` has passed `cache_only = true` to `/mcp` since 22/11 (the `chat-start-guard` hunk, in main),
+so a chat's `/mcp` never asked another node even before this round. What does still cost 16-19 s is the shape
+WITHOUT that cache, measured once here on the operator's store: `command.list(ctx, {})` - the call a surface
+that refreshes makes, and the call `wa mcp list` made until this branch - is **3478 ms** with a catalogue
+only 203 s old, of which the WhatsApp chat count alone was 2315.8 ms; when the catalogue is older than its
+600 s `TTL` it adds `federation.refresh`, up to `federation.BUDGET` = 15 s, and that is where 16-19 s comes
+from. After this branch no surface takes that shape unless a reader types `--refresh` / `/mcp refresh`.
+
 ## What changed
 
 **00b7a087 `mcp list: read the caches, print their age, refresh on request`**
@@ -70,6 +92,8 @@ what the budget can mean here.
 * `lua/core/mcp_cli.lua` `run`: `cache_only` is the default for every caller (only `fresh = true` or an
   explicit `cache_only = false` asks the fleet); `refresh` is a new verb.
 * `lua/core/mcp_command.lua`: `age_phrase`, `peers_age` on the view, the age line in the list page,
+(`refresh_text` was reworded on Fable's review, 25/11: `no answer in time: <name>` without the registry's
+code, and the failure line as `the other nodes were not asked again: <reason> (<code>)`),
   `refresh_peers`, `refresh_text`, `opts.list_only`, the memoized federation module, and the catalogue handed
   to the WhatsApp row once.
 * `lua/core/federation.lua`: the decoded catalogue memoized per process, keyed on the stored text (a
@@ -171,10 +195,13 @@ for.
    new usage line (usage line 1 becomes
    `usage: wa mcp list [--all] [--refresh] [--width <columns>]   the MCP connectors this node can use`).
 4. `catalogue re-read: 4 of 4 peers answered · 3 connectors · 34 tools` - the refresh summary.
-5. `catalogue re-read: 3 of 4 peers answered · 3 connectors · 34 tools · no answer: work (refresh_budget_spent)`
-   - the same line with the peers that did not answer.
+5. `catalogue re-read: 3 of 4 peers answered · 3 connectors · 34 tools · no answer in time: work`
+   - the same line with the peers that did not answer (the NAME only: a registry code is not a word in a
+   sentence a person reads - Fable, 25/11; the code is still on the connector's own page).
 6. `catalogue re-read: this node has no online peer to ask` - the same line on a node with no peer.
-7. `the peer catalogue was not re-read: federation_refresh_failed - <detail>` - the failure line.
+7. `the other nodes were not asked again: no reason given (federation_refresh_failed)` - the failure line:
+the reason first, the code in brackets after it (Fable, 25/11). <detail> carries the runtime's own text when
+it offers one.
 8. Removed from `wa mcp list`: `Enter opens a connector · Esc or ← closes` (the chat panel keeps it).
 9. `other nodes: not read yet · wa mcp list --refresh reads them` - a master's list before its catalogue was
    ever read (in a chat the verb is `/mcp refresh`, and the word is `reads`, not `re-reads`).
