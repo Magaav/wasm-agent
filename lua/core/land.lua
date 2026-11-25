@@ -4226,7 +4226,10 @@ impl.canaries = function(run, options)
   local nodes_asked, nodes_answered = 0, 0
 
   -- 1. THIS NODE, first: it is the one the operator is sitting at.
-  local results, why = canaries.run_all(options.canary_dir and { dir = options.canary_dir } or {})
+  -- cutting = true: this step runs INSIDE the cut, on the node that is cutting, which does not run the new
+  -- build yet - a canary that needs those bytes (release-update) answers not_proven, not a false red.
+  local peer_answers = {}
+  local results, why = canaries.run_all({ dir = options.canary_dir, cutting = true })
   if not results then
     return false, { error = "canaries_unreadable", observed = tostring(why),
       next = "the feature registry or its canaries could not be read; check config/features/features.json" }
@@ -4345,14 +4348,15 @@ impl.canaries = function(run, options)
           evidence(string.format("%s: NOT PROVEN - %s\n", node, because))
         else
           nodes_answered = nodes_answered + 1
+          peer_answers[#peer_answers + 1] = { node = node, results = document.features or {} }
           evidence("## " .. node .. "\n")
           evidence(string.format("%s: %s\n", node, document.ok == true and "all its canaries passed" or "canaries FAILED"))
           for _, row in ipairs(document.features or {}) do
             evidence(string.format("  %-22s %s %s%s\n", tostring(row.feature),
-              row.off and "OFF" or (row.skipped and "SKIP" or (row.ok and "PASS" or "FAIL")),
+              row.off and "OFF" or (row.skipped and "SKIP" or (row.not_proven and "NOT PROVEN" or (row.ok and "PASS" or "FAIL"))),
               tostring(row.stage or ""), row.detail and (": " .. tostring(row.detail)) or ""))
             if row.off then off[#off + 1] = node .. "/" .. tostring(row.feature) .. " (" .. tostring(row.stage) .. ")" end
-            if not row.ok and not row.skipped and not row.off then
+            if not row.ok and not row.skipped and not row.off and not row.not_proven then
               failed[#failed + 1] = string.format("%s %s (%s)", node, tostring(row.feature), tostring(row.stage))
             end
           end
@@ -4371,6 +4375,22 @@ impl.canaries = function(run, options)
     noticed = ok_call and tostring((answer or {}).reason or "") or ("raised: " .. tostring(answer))
   end
 
+  -- PROVEN NOWHERE IS RED BY NAME (25/11): an account canary nobody could answer proves nothing about the
+  -- release, and "unknown" is not yes. This is computed over this node AND every peer asked.
+  local aggregated = canaries.aggregate((function()
+    local list = { { node = "this node", results = results } }
+    for _, answer in ipairs(peer_answers) do list[#list + 1] = answer end
+    return list
+  end)())
+  if #aggregated.proven_nowhere > 0 then
+    local named = table.concat(aggregated.proven_nowhere, ", ")
+    return false, { error = "canary_proven_nowhere",
+      observed = "not proven on every node asked: " .. named,
+      detail = "release is RED by name - proven nowhere: " .. named,
+      evidence = M.evidence_path(run.id, "canaries"),
+      next = "ask the node that holds the account (wa features canary json on it) and cut again: a canary no node could answer has proven nothing about this release",
+      notice = noticed }
+  end
   if #failed > 0 then
     local how = {}
     for _, entry in ipairs(ring or {}) do
