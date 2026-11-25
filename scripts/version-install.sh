@@ -81,7 +81,7 @@ if [ -f "$VERSION_DIR/version.txt" ]; then
 else
   step_done 3
   # 4. Assemble it.
-  WA_VERSION_COMMIT="${COMMIT}" WA_VERSION_BINARY_COMMIT="${BINARY_COMMIT:-}" \
+  WA_VERSION_COMMIT="${COMMIT}" WA_VERSION_BINARY_COMMIT="${BINARY_COMMIT:-}" WA_VERSION_INSTALL_DIR="$INSTALL" \
     wa_version_assemble "$STAGING" "$ID" "$PREV_DIR" >/dev/null || die "version_assembled_failed: $ID"
   say "assembled $ID ($(wa_version_disk "$ID" | sed 's/^version_disk [^ ]* //'))"
 fi

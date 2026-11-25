@@ -114,6 +114,10 @@ wa_version_assemble() {
   mkdir -p "$versions" || { printf 'version_root_unwritable: %s\n' "$versions" >&2; return 4; }
   [ ! -e "$versions/$id" ] || { printf 'version_exists: %s already names a version; a version is never rewritten\n' "$id" >&2; return 6; }
   tmp="$versions/.staging-$id"
+  # A cut between the seal and the rename leaves this tree 0555 and read-only; rm -rf would then refuse forever and
+  # every later install of that version would die with version_staging_unwritable (Fable fix 5). Make it writable
+  # first - the tree is unfinished by definition.
+  [ ! -d "$tmp" ] || chmod -R u+w "$tmp" 2>/dev/null || true
   rm -rf "$tmp" || { printf 'version_staging_unwritable: %s\n' "$tmp" >&2; return 4; }
   mkdir -p "$tmp" || { printf 'version_staging_unwritable: %s\n' "$tmp" >&2; return 4; }
   linked=0; copied=0
@@ -140,6 +144,7 @@ wa_version_assemble() {
     printf 'id=%s\n' "$id"
     printf 'commit=%s\n' "${WA_VERSION_COMMIT:-$id}"
     printf 'binary_commit=%s\n' "${WA_VERSION_BINARY_COMMIT:-}"
+    printf 'install_dir=%s\n' "${WA_VERSION_INSTALL_DIR:-}"
     printf 'assembled_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'members=%s\n' "$((linked + copied))"
     printf 'linked=%s\n' "$linked"

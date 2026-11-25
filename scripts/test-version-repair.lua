@@ -28,7 +28,7 @@ sh("rm -rf '" .. root .. "' && mkdir -p '" .. root .. "/install' '" .. root .. "
 local share = root .. "/share"
 local install = root .. "/install"
 local version = share .. "/versions/aaaaaaaaaaaa"
-sh("printf 'id=aaaaaaaaaaaa\\ncommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' > '" .. version .. "/version.txt'")
+sh("printf 'id=aaaaaaaaaaaa\\ncommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ninstall_dir=" .. install .. "\\n' > '" .. version .. "/version.txt'")
 sh("printf 'wa' > '" .. version .. "/wa' && printf 'sentinel' > '" .. version .. "/wa-sentinel'")
 sh("printf 'init' > '" .. version .. "/lua-core/init.lua' && printf 'deploy' > '" .. version .. "/scripts/deploy.sh'")
 sh("printf 'ui' > '" .. version .. "/ui/index.html'")
@@ -37,12 +37,12 @@ sh("ln -sfn versions/aaaaaaaaaaaa '" .. share .. "/current'")
 local repair = dofile("lua/core/version_repair.lua")
 
 -- 1. No pointer: nothing to repair, nothing written (every node before this slice installs).
-local none = repair.repair({ share = root .. "/share-none", install = install, quiet = true })
+local none = repair.repair({ share = root .. "/share-none", install = install, exe = install .. "/wa", quiet = true })
 check("no current -> no_current, and no repair", none.reason == "no_current" and (none.repaired or 0) == 0)
 check("no current -> nothing was created", not exists(root .. "/share-none/current"))
 
 -- 2. A half-done migration: the install has NOTHING where the pointer names something -> every member is linked.
-local result = repair.repair({ share = share, install = install, quiet = true })
+local result = repair.repair({ share = share, install = install, exe = install .. "/wa", quiet = true })
 check("every missing link is put back (got " .. tostring(result.repaired) .. ")", (result.repaired or 0) == 5)
 for _, name in ipairs({ "wa", "wa-sentinel", "lua-core", "scripts" }) do
   check(name .. " resolves through current",
@@ -55,14 +55,24 @@ check("the share root's ui resolves through current",
 -- 3. A REAL directory is never replaced: today's layout, and evidence of a migration that has not started.
 sh("rm -rf '" .. install .. "/scripts' && mkdir -p '" .. install .. "/scripts' && printf 'mine' > '" .. install .. "/scripts/deploy.sh'")
 local before = host.canonical_path(install .. "/scripts")
-local again = repair.repair({ share = share, install = install, quiet = true })
+local again = repair.repair({ share = share, install = install, exe = install .. "/wa", quiet = true })
 check("a real directory is left alone", tostring(host.canonical_path(install .. "/scripts")) == tostring(before))
 check("its content is untouched", tostring(host.read_file(install .. "/scripts/deploy.sh")) == "mine")
 check("the run still reports the healthy paths as skipped", (again.skipped or 0) >= 4)
 
 -- 4. Idempotent: a second repair on a healthy install repairs nothing.
-local third = repair.repair({ share = share, install = install, quiet = true })
+local third = repair.repair({ share = share, install = install, exe = install .. "/wa", quiet = true })
 check("a healthy install repairs nothing", (third.repaired or 0) == 0)
+
+-- 5. A program that is NOT this install's plants NOTHING (Fable fix 1): this is the worktree-built `wa`, or a
+-- scratch binary started with the real home, which must never link the LIVE version into its own directory.
+sh("rm -rf '" .. install .. "' && mkdir -p '" .. install .. "' " .. "'" .. root .. "/worktree/target'")
+local foreign = repair.repair({ share = share, install = install, exe = root .. "/worktree/target/release/wa", quiet = true })
+check("a program outside the install plants nothing", (foreign.repaired or 0) == 0 and foreign.reason == "not_this_install")
+check("and it created no link in that directory", not exists(install .. "/lua-core"))
+-- the same program, when it IS inside the version the pointer names, acts (the installed program's case).
+local inside = repair.repair({ share = share, install = install, exe = version .. "/wa", quiet = true })
+check("a program inside the version does repair", (inside.repaired or 0) >= 1)
 
 sh("rm -rf '" .. root .. "'")
 print("version repair ok (" .. n .. " checks)")

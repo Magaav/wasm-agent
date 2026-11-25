@@ -60,7 +60,7 @@ do
   if ok and type(repair) == "table" and type(repair.repair) == "function" then
     local ok2, result = pcall(repair.repair, {})
     if ok2 and type(result) == "table" and (result.repaired or 0) > 0 then
-      print("wa: finished a half-done version migration (" .. result.repaired .. " link(s) put back)")
+      io.stderr:write("wa: finished a half-done version migration (" .. result.repaired .. " link(s) put back)\n")
     end
   end
 end
