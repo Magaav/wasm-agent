@@ -142,6 +142,67 @@ sites**.
 The count is also the arithmetic of this branch: the base run selects 412 tests under that filter, this
 branch 413 — exactly the one test 1fc54f29 adds.
 
+## 8. Move 3, continued: every read op on the seam (72b37107 .. f333068f)
+
+Eight commits, one per op plus the door it needs and the test fallout:
+
+| commit | what | row |
+|---|---|---|
+| **72b37107** | `host.whatsapp_index({op, ...args})` — one ReadOnly row carrying every read op; `answer_with`/`index_op`/`ask_index_in`; `M.invoke` hands the op from the catalogue row | Rust: generic vs named, byte-identical, for all six ops + payload identity + a no-op refusal; 18 passed |
+| **cb27c3d4** | `mcp_whatsapp_search` -> `whatsapp_index` | Lua 17 checks |
+| **268fc5bb** | `mcp_whatsapp_read` -> `whatsapp_index` | Lua 21 |
+| **0130cc5a** | `mcp_whatsapp_contacts` -> `whatsapp_index` | Lua 25 |
+| **329d17e0** | `whatsapp_message` on the seam (it has no tool door: the component points at it) | Lua 26 |
+| **aa9042e0** | `mcp_whatsapp_media` -> `whatsapp_index` | Lua 30 |
+| **437fdee5** | `mcp_whatsapp_reactions` -> `whatsapp_index` | Lua 34 |
+| **f333068f** | four rows that stubbed a capability by its old per-op name now follow the catalogue | 16 of 16 WhatsApp-adjacent Lua rows green, check counts unchanged |
+
+The per-op row is `scripts/test-whatsapp-reads-op-data.lua` (renamed from the reactions slice): for every
+op it compares the generic door's BYTES with the named row's still being there - a live before/after, not
+a remembered golden - plus the tool door's document and that the row's `capability` is `whatsapp_index`.
+`f333068f` is the finding of running them rather than reading them: repointing a tool row changes WHICH
+host capability the tool calls, and four rows in the tree had installed their stand-in under the old
+name, so they stopped stubbing the door that was actually called. Each now resolves through
+`whatsapp.by_verb[verb].capability`, and `test-whatsapp-route.lua` takes the op from the request the way
+the real door does. No assertion was deleted or loosened (32/59/207/140 checks, the base's numbers).
+
+### The stop condition, measured
+
+**`host.rs` never carried WhatsApp** (`rg -c -i whatsapp rust/wa-capabilities/src/host.rs` = 0, section 1),
+so the only file the condition could bite was `capabilities.rs`, and it no longer does: a read op - added
+or changed - is now a component change plus a Lua row, and the row it rides is `whatsapp_index`, whose
+name, description and effect class never move. The one-time price is visible and was paid once in
+72b37107: 12 WhatsApp rows -> 13, inventory sha256 `cee0c602...911e0d28` -> `393ffdfc...ae2614e`, and the
+tool catalogue the model reads did NOT move (`2a17427d...65e8c111b` on every commit since).
+
+What still forces a host rebuild for a WhatsApp change, stated so nobody reads the above as more than it
+is: `rust/wa-capabilities/src/whatsapp_query.rs` (the forwarder: enqueue, settle, the download writer,
+the absent answer) and the crate behind it, `wa-whatsapp-index` (the request/answer contract, a
+`wa-capabilities` dependency). The effectful rows - `whatsapp_send`, `_send_status`, `_approve`,
+`_archive`, `_download`, `_backfill` - stay per op on purpose: their effect class is what the sandbox
+joins and serializes on, and no WIT world exists to carry the policy, the operator's drafts or a bounded
+file write (section 2).
+
+### The 30-day count, re-measured under this design
+
+Method: the 19 commits in the window that touch `rust/wa-capabilities` and a WhatsApp file, each diffed
+for what it did to `capabilities.rs` (`+` lines) and which rust files it touched.
+
+| what it changed | commits | under this design |
+|---|---|---|
+| added read-op rows | **2** (297b2d86: 4 rows, 384b2b4d: 2 rows) -> 6 `plain!("whatsapp_...")` lines | those 6 lines are **no longer hub edits**: an op rides `whatsapp_index` |
+| added an effectful row | 4 (63a4fc68 send, 820d9b4c approve, b8b3ee10 archive, 9ca1d494 backfill) | still a row, by design |
+| changed the forwarder or the shared contract | 12 of 19 (whatsapp_query.rs, wa-whatsapp-index) | still rebuilds the host |
+| **whole commits that would now stay out of a host rebuild** | **0** | each commit that added a read row also changed `wa-whatsapp-index` or `whatsapp_query.rs`, which stay |
+
+That 0 is the honest number and it is smaller than the 4 the plan hoped for (section 5): making
+`capabilities.rs` stop naming ops is necessary but not sufficient, because the same commits also touched
+the contract crate and the forwarder. The next slice that would move whole commits is dropping
+`wa-whatsapp-index` from `wa-capabilities` (the component validates; the host forwards and bounds) plus
+making the forwarder op-agnostic. Three commits in the window (626a3339, 14bd0013, 514a1c41) touch only
+the contract crate, the component and Lua besides the forwarder - an **upper bound**, not a promise, and
+the number to measure on that branch, not here.
+
 ## 7. Texts to approve
 
 **None.** This slice adds, removes and rewords no model-facing and no operator-facing string: the
