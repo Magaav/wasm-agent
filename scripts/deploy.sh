@@ -1794,12 +1794,21 @@ fi
 # Fable's word, the laptop first - so nothing in this branch changes how any node installs until someone sets it.
 # With it off, this file is byte-for-byte the install path it was.
 #
-# WHAT IS ALREADY HERE: the conversion (scripts/versions-adopt.sh: convert an in-place node ONCE, verify, roll back
-# if the verification fails) and the staging half (upgrade.sh writes into WA_VERSION_STAGING and stops).
-# WHAT IS NOT: the sequence that SEALS the staged tree, MOVES the pointer and RESTARTS the node after the pointer
-# already names the new version (and the rollback that becomes a pointer move, with $BACKUP retired). Until that
-# hunk lands, turning the switch on would install a version the running node never restarts into, so it refuses
-# by name instead - a fast refusal is better than an install that silently waits for the next reboot.
+# WHAT THE SWITCH DOES, in the order the case runs it (the sequence is immediately below, not somewhere else):
+#   1 convert    scripts/versions-adopt.sh converts an in-place node ONCE, verifies it, and rolls itself back if
+#                the verification fails - the deploy stops there with the in-place install untouched;
+#   2 stage      upgrade.sh runs with WA_VERSION_STAGING: it writes the program, itself and the record into the
+#                staging tree and exits 0 (no swap, no restart); the deploy adds lua-core, scripts and ui, and
+#                REFUSES BY NAME if any of them is missing - a version sealed without them would be incomplete
+#                while looking complete;
+#   3 seal+point scripts/version-install.sh seals the tree (one folder, one rename) and moves the pointer BEFORE
+#                any restart, so a restart can only ever run a complete, immutable version;
+#   4 restart    upgrade.sh runs again through the pointer: the installed program is already the new bytes, so it
+#                takes its own already-the-installed-one branch and only restarts and verifies;
+#   5 sentinel   scripts/lib/sentinel-move.sh moves the sentinel LAST, only once the node answered on the new
+#                version, and a failed start leaves the previous version supervising.
+# If the restart fails, current is moved BACK by one rename (no copy, no reinstall) and the sentinel makes the next
+# restart. NOT here: retiring upgrade.sh own $BACKUP copy, and the other two record writers guard calls.
 case "${WA_VERSION_FOLDERS:-0}" in
   0) : ;;
   1)
@@ -1818,6 +1827,8 @@ case "${WA_VERSION_FOLDERS:-0}" in
 
     # 2. STAGE the new version: upgrade.sh writes the program, itself and the record into the staging tree and
     #    stops (no swap, no restart). It is the same invocation the live path uses, with one variable more.
+    [ -n "$VF_SHARE" ] && [ -n "$VF_ID" ] \
+      || fail "version_folders_names: an empty share root or version id (share='$VF_SHARE' id='$VF_ID') - refusing before anything is removed"
     VF_STAGE="$VF_SHARE/versions/.stage-$VF_ID"
     rm -rf "$VF_STAGE"; mkdir -p "$VF_STAGE" || fail "version_folders_stage_unwritable: $VF_STAGE"
     WA_VERSION_STAGING="$VF_STAGE" \
@@ -1826,10 +1837,19 @@ case "${WA_VERSION_FOLDERS:-0}" in
       WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
       bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
       || fail "version_folders_stage_failed: see $INSTALL_DIR/deploy-upgrade.log"
-    #    the trees the version also holds (the program and the record were staged by upgrade.sh)
-    [ -d "$LUA_STAGE" ] && cp -a "$LUA_STAGE" "$VF_STAGE/lua-core" 2>/dev/null || true
-    [ -d "$ROOT/scripts" ] && { mkdir -p "$VF_STAGE/scripts"; cp -a "$ROOT/scripts/." "$VF_STAGE/scripts/" 2>/dev/null || true; }
-    [ -d "$ROOT/ui" ] && cp -a "$ROOT/ui" "$VF_STAGE/ui" 2>/dev/null || true
+    #    the trees the version also holds (the program and the record were staged by upgrade.sh). EACH ONE IS
+    #    REQUIRED: a version folder missing lua-core, scripts or ui is INCOMPLETE but would look complete once
+    #    sealed, so a missing or uncopyable member fails the deploy by name instead of being skipped (Fable 25/11
+    #    fix c - the first version wrote "cp -a ... || true" here).
+    [ -d "$LUA_STAGE" ] || fail "version_folders_member_missing: lua-core ($LUA_STAGE is not there)"
+    cp -a "$LUA_STAGE" "$VF_STAGE/lua-core" \
+      || fail "version_folders_member_failed: lua-core ($LUA_STAGE -> $VF_STAGE/lua-core)"
+    [ -d "$ROOT/scripts" ] || fail "version_folders_member_missing: scripts ($ROOT/scripts is not there)"
+    mkdir -p "$VF_STAGE/scripts" && cp -a "$ROOT/scripts/." "$VF_STAGE/scripts/" \
+      || fail "version_folders_member_failed: scripts ($ROOT/scripts -> $VF_STAGE/scripts)"
+    [ -d "$ROOT/ui" ] || fail "version_folders_member_missing: ui ($ROOT/ui is not there)"
+    cp -a "$ROOT/ui" "$VF_STAGE/ui" \
+      || fail "version_folders_member_failed: ui ($ROOT/ui -> $VF_STAGE/ui)"
 
     # 3. SEAL it and MOVE THE POINTER - before any restart, so the restart runs a complete, immutable version.
     bash "$ROOT/scripts/version-install.sh" --staging "$VF_STAGE" --commit "$EXPECTED_SHA" --install "$INSTALL_DIR" \

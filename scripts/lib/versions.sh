@@ -286,6 +286,26 @@ wa_version_refuse_record_replace() {
   return 4
 }
 
+# 5b. THE ROLLBACK MUST NOT WRITE THROUGH THE POINTER (Fable 25/11, fix d).
+#
+# upgrade.sh own rollback restores $BACKUP over $INSTALL_DIR/wa. Once a node is on a version folder that path is a
+# LINK into the sealed current version, and a sealed version is read-only and never edited: the copy would either
+# fail or (worse) replace the pointer's own file. So the restore asks this first, and the answer for a link is that
+# the rollback IS a pointer move - which the deploy performs with wa_version_point, and which costs one rename.
+#
+#   wa_version_restore_program <installed-path> <backup-file>
+#     0  restored (a regular file path: the live in-place install, unchanged behaviour)
+#     3  version_rollback_is_a_pointer: the path is a link; move the pointer back instead
+wa_version_restore_program() {
+  local installed="${1:?installed path}" backup="${2:?backup}"
+  if [ -L "$installed" ]; then
+    printf 'version_rollback_is_a_pointer: %s is a link into the current version; roll back with wa_version_point <previous> (one rename), not with a file copy\n' "$installed" >&2
+    return 3
+  fi
+  [ -f "$backup" ] || { printf 'version_rollback_backup_missing: %s\n' "$backup" >&2; return 4; }
+  cp -f "$backup" "$installed.new" && mv -f "$installed.new" "$installed"
+}
+
 # 7. RETENTION. [<keep=3>]
 #
 # Removed only when ALL of these hold: it is not current, not the version before current, no LIVE process

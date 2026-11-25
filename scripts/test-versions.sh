@@ -275,7 +275,11 @@ ok
 [ -L "$rec_dir/install/installed.txt" ] || fail "fix 6: the guard itself replaced the link"
 wa_version_refuse_record_replace "$rec_dir/install/not-a-link.txt" 2>/dev/null || fail "fix 6: a regular file must be writable"
 ok
-grep -q 'wa_version_refuse_record_replace' scripts/upgrade.sh || fail "fix 6: upgrade.sh's record writer does not ask the guard"
+# The guard moved INTO the writer as a plain link test (Fable 25/11 fix a: no library sourced mid-function), so the
+# assertion follows the protection, not the spelling: the writer must test for a link AND name the refusal.
+grep -q 'version_record_is_a_link' scripts/upgrade.sh || fail "fix 6: upgrade.sh's record writer does not name version_record_is_a_link"
+rec_block="$(awk '/\} >> "\$record"/,/^}/' scripts/upgrade.sh)"
+case "$rec_block" in *'[ -L '*) ;; *) fail "fix 6: the record writer writes without testing for a link";; esac
 ok
 
 # --- THE ROLLBACK IS THE POINTER (Fable 25/11): the deploy's restart-failure branch moves it back --------------
@@ -296,6 +300,40 @@ WA_SHARE_ROOT="$rb/share" wa_version_point bbbbbbbbbbbb >/dev/null || fail "cann
 [ "$(WA_SHARE_ROOT="$rb/share" wa_version_current)" = bbbbbbbbbbbb ] || fail "the pointer does not name the version"
 WA_SHARE_ROOT="$rb/share" wa_version_point aaaaaaaaaaaa >/dev/null || fail "the rollback move failed"
 [ "$(WA_SHARE_ROOT="$rb/share" wa_version_current)" = aaaaaaaaaaaa ] || fail "the rollback move did not restore the previous version"
+ok
+
+# --- FIX (d): a rollback must never write THROUGH the pointer into a sealed version ---------------------------
+# upgrade.sh restores $BACKUP over $INSTALL_DIR/wa. On a version-folder node that path is a LINK into the sealed
+# current version (read-only, never edited), so the copy would either fail or replace the pointer own file.
+rp="$W/rp"; mkdir -p "$rp/sealed" "$rp/install"
+printf 'new-program' > "$rp/sealed/wa"; chmod 0444 "$rp/sealed/wa"
+chmod 0555 "$rp/sealed"
+ln -sfn "$rp/sealed/wa" "$rp/install/wa"
+printf 'old-program' > "$rp/backup"
+before="$(sha256sum < "$rp/sealed/wa" | awk '{print $1}')"
+wa_version_restore_program "$rp/install/wa" "$rp/backup" 2> "$rp/err" && fail "(d): a restore over a LINK must refuse"
+grep -q 'version_rollback_is_a_pointer' "$rp/err" || { sed -n 1,2p "$rp/err" >&2; fail "(d): the refusal is not named version_rollback_is_a_pointer"; }
+ok
+[ "$(sha256sum < "$rp/sealed/wa" | awk '{print $1}')" = "$before" ] || fail "(d): the sealed version was WRITTEN through the link"
+[ -L "$rp/install/wa" ] || fail "(d): the link was replaced by a file"
+ok
+# and on a real in-place install (no link) it restores exactly as before
+mkdir -p "$rp/plain"; printf 'new-program' > "$rp/plain/wa"
+wa_version_restore_program "$rp/plain/wa" "$rp/backup" || fail "(d): a regular file must still be restored"
+[ "$(cat "$rp/plain/wa")" = "old-program" ] || fail "(d): the restore did not put the backup back"
+ok
+# (a) upgrade.sh's record writer: no library sourced from inside the function, one plain link test
+# The writer's OWN lines: from the line that appends to $record, nine lines on (grep -A, not an awk range - the
+# first attempt spanned across the file's top-level library sources and accused the wrong lines).
+# COMMENTS STRIPPED: ".... a plain test" inside the comment is not a source line, and the first version of this
+# check counted it as one.
+rec="$(grep -A9 '>> "$record"' scripts/upgrade.sh | grep -vE '^[0-9]+-[[:space:]]*#')"
+# A SOURCE STATEMENT, not the string ". ": any sentence in a say or a path contains ". ", which is how the first
+# version of this check accused a line that sources nothing. A dot-command is a dot at the start of a statement.
+if printf '%s\n' "$rec" | grep -vE '^[0-9]+-' | grep -qE '^[[:space:]]*\.[[:space:]]'; then
+  fail "(a): the record writer still sources a library"
+fi
+case "$rec" in *'[ -L '*) ;; *) fail "(a): the record writer does not test for a link";; esac
 ok
 
 # --- the report's number: REAL disk, not apparent ------------------------------------------------------------
