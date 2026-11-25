@@ -390,6 +390,12 @@ function environment(home) {
     // The node's own diagnostic knobs pass through when the caller set them, because a row that
     // measures a stop has to be able to ask the stop why it was slow (operations.rs, cancel_trace).
     ...(process.env.WASM_AGENT_CANCEL_TRACE ? {WASM_AGENT_CANCEL_TRACE: process.env.WASM_AGENT_CANCEL_TRACE} : {}),
+    // THE GUARD'S VARIABLES TRAVEL WITH THE CHILD (Fable, 25/11, rule 1): this harness starts a CLI, not an
+    // installer, but an allow-list that drops WASM_AGENT_IN_TURN or WASM_AGENT_PROVENANCE hands the child the
+    // power to do what those guards refuse. They are passed through when the caller has them, and nothing
+    // else of the caller's runtime state is.
+    ...(process.env.WASM_AGENT_IN_TURN ? {WASM_AGENT_IN_TURN: process.env.WASM_AGENT_IN_TURN} : {}),
+    ...(process.env.WASM_AGENT_PROVENANCE ? {WASM_AGENT_PROVENANCE: process.env.WASM_AGENT_PROVENANCE} : {}),
     COLUMNS: '100',
     LINES: '30',
   };

@@ -36,12 +36,26 @@ fi
 # to the caller. The row itself never installs anything (install.sh and bootstrap.sh travel INSIDE the bundle
 # this row checks, and the sentinel is a stand-in), so this is defence in depth, and it is checkable: run
 # scripts/_orch/scratch-guard.sh against "$T" with this environment and it answers ISOLATED.
-unset WASM_AGENT_DB WASM_AGENT_VAULT_URL WASM_AGENT_OPENCODE_GO_VAULT_URL WASM_AGENT_VAULT_OPERATOR_URL
-unset WA_INSTALL_DIR WA_SENTINEL_UNIT_DIR WA_SENTINEL_UNIT_SYSTEMCTL WA_SENTINEL_SCRIPTS WA_RUNTIME_WORKTREE
-for v in $(compgen -e | grep -E '^(WASM_AGENT_|WA_)'); do
-  case "$v" in WASM_AGENT_HOME|WASM_AGENT_LUA_ROOT|WA_BIN) continue ;; esac  # WA_BIN is this row's own input
-  unset "$v"
-done
+# THE GUARD'S OWN VARIABLES ARE NEVER STRIPPED (Fable, 25/11, rule 1). WASM_AGENT_IN_TURN is what makes
+# deploy.sh / upgrade.sh refuse to run inside a turn, and WASM_AGENT_PROVENANCE=child is what makes "wa update"
+# answer update_coordinator_only (lua/core/update.lua:824): a child that loses them can do exactly what the
+# guard exists to refuse, which is how the live unit was rewritten tonight. So they are carried through
+# UNTOUCHED and only a LIVE POINTER is dropped. This is the repository's own fence in verify/slice.sh:14-22 -
+# a keep-list, never a blanket clear - and this row follows it instead of inventing one.
+while IFS= read -r variable; do
+  case "$variable" in
+    # the caller's one input to this row; HOME, WASM_AGENT_HOME and WASM_AGENT_LUA_ROOT are set BELOW from
+    # this run's own scratch root, so a caller's values are dropped like any other live pointer
+    WA_BIN) continue ;;
+    # the guards': never ours to clear
+    WASM_AGENT_IN_TURN|WASM_AGENT_PROVENANCE|WASM_AGENT_SKIP_UI_TESTS) continue ;;
+    # ONLY the runtime families are dropped - never PATH, HOME, TERM or anything the shell itself needs. The
+    # first shape of this fence said "unset everything else" and took PATH with it (measured: "git: No such
+    # file or directory", "HOME: unbound variable", rm missing) - a fence that strips too much is the same
+    # failure it exists to prevent. verify/slice.sh:14-22 names the same three families.
+    WASM_AGENT_*|WA_*|OPENAI_*|OPENCODE_*|ANTHROPIC_*) unset "$variable" ;;
+  esac
+done < <(compgen -e)
 mkdir -p "$T/config" "$T/units" "$T/install" "$T/bin"
 export XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" XDG_STATE_HOME="$T/state"
 export WA_INSTALL_DIR="$T/install" WA_SENTINEL_UNIT_DIR="$T/units"
