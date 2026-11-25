@@ -397,6 +397,13 @@ if [ "$MODE" = inject ]; then
   ok "$([ -n "$PROBLEMS" ] && printf '%s' "$PROBLEMS" | grep -qi 'download-asset' && echo 1)" \
     "the injected post-swap problem is IN THE RECORD, named by what could not be shipped" "post_swap_problem=${PROBLEMS:-none}"
 else
+# THE RESULT VERDICT ON THIS PATH (25/11, Fable fix 1): this deploy runs to its END with one recorded problem -
+# the normal end, not fail() - and that end used to write result.json without a verdict, so the file said failed
+# over an install that succeeded with a problem. Read the field here, on this path, where the defect was.
+RES="${DATA:-$HOME/.wasm-agent}/deploy-result.json"
+[ -f "$RES" ] || RES="$INSTALL_DIR/deploy-result.json"
+ok "$(grep -q '"verdict": *"installed_with_problems"' "$RES" 2>/dev/null && echo 1)" "result.json names installed_with_problems on the normal end, not failed" "$(tr -d '\n' < "$RES" 2>/dev/null | cut -c1-220)"
+ok "$(grep -q '"problems": *1' "$RES" 2>/dev/null && echo 1)" "and the count that goes with it, 1" "$(grep -o 'problems[^,]*' "$RES" 2>/dev/null | head -1)"
   ok "$([ -z "$PROBLEMS" ] && echo 1)" "a covering install whose watcher answers records NO post-swap problem" "post_swap_problem=${PROBLEMS:-none}"
 fi
 

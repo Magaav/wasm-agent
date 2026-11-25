@@ -90,7 +90,7 @@ wa_installer_run --root "$W" --cd "$ROOT" --port "$((30000 + RANDOM % 9000))" --
   --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_ROOT="$ROOT" --set WA_SENTINEL_SUPERVISOR=none \
   --set WA_SERVICE_UNIT_FILE="$W/no-such.unit" \
   -- bash scripts/deploy.sh --reason "a second deploy during the download" > "$SECOND" 2>&1 || rc2=$?
-ok "$([ "$rc2" != 0 ] && echo 1)" "a second deploy while the first is downloading does not succeed" "rc=$rc2 $(tail -2 "$SECOND" | tr '\n' ' ')"
+ok "$([ "$rc2" = 1 ] && echo 1)" "a second deploy while the first is downloading is refused as a PRE-SWAP refusal (exit 1, not 3)" "rc=$rc2 $(tail -2 "$SECOND" | tr '\n' ' ')"
 ok "$(grep -q 'refused(deploy_alive_held)' "$SECOND" && echo 1)" "and it is refused BY NAME: refused(deploy_alive_held)" "$(grep -m1 'refused(' "$SECOND")"
 ok "$([ -f "$ALIVE" ] && [ "$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$ALIVE" | head -1)" = "$HOLDER" ] && echo 1)" \
   "and the first deploy's record is still there, still naming it" "$(cat "$ALIVE" 2>/dev/null)"
