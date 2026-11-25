@@ -134,8 +134,8 @@ peer record first. I did not fake it.
 ## How the row proves it, and where it is wired
 
 `scripts/test-cover-lua.sh`, wired into `scripts/test.sh:534-537` (the release gate lane, next to
-`test-cut-builds-own.sh`). 24 checks, green in this tree, **15 of them failing on the base commit**
-(`bash /tmp/base-cover/scripts/test-cover-lua.sh` against a worktree of `origin/main`, the same file).
+`test-cut-builds-own.sh`). 36 checks, green in this tree, **24 of them failing on the base commit**
+(the same file run in a worktree of `origin/main`, `/tmp/base-cover`).
 
 * The classification rows use a **fixture git repository** with three commits, and the product's own
   `wa_compiled_inputs_digest` / `wa_lua_tree_digest`: a Lua-only commit leaves the compiled digest equal and
@@ -149,6 +149,12 @@ peer record first. I did not fake it.
   so the order (signature first, then the Lua gate) is what is proved. Nothing reaches the real node:
   `HOME`, `WASM_AGENT_HOME`, `TMPDIR` are a scratch home created through `wa_scratch_root` and checked with
   `wa_scratch_home_guard`; the vault is scratch on its own ports; no relay, no fleet call, no gh.
+* The seam that carries the two facts is proved with **two real processes**: `scripts/release-install.sh`
+  (env -i, its own install dir, a flat stub channel) downloads the cover it was told to fetch and runs
+  `scripts/upgrade.sh` as its child, which refuses `release_cover_lua_mismatch` naming both digests. The
+  door's own refusals are rows too: `release_cover_needed` (nothing published, naming the two flags),
+  `release_cover_lua_unknown` (a cover with no digest, before anything is downloaded) and
+  `cover_commit_pointless`.
 * `scripts/test-node-binaries.sh` gained the `--check` plan row and the `lua-tree.sh` copy its fixture needs
   (`726215ce`). That suite cannot run past its `not_on_main` row on the base either - see below.
 

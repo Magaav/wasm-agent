@@ -233,6 +233,52 @@ ok "$([ "$(says "$out" 'release_cover_lua_' && echo 0 || echo 1)" = 1 ] && echo 
   'and none of the cover refusals appears in its output'
 ok "$(says "$out" 'signed:' && echo 1 || echo 0)" 'it got past the signature gate, so the order is: signed first, then the Lua check' "$(printf '%s' "$out" | head -4)"
 
+# ---- 4. the two facts CROSS THE DOOR: scripts/release-install.sh hands them to scripts/upgrade.sh ------
+# The tree-less door cannot compute either fact (no tree, no git), so the caller names them. This is the seam
+# that carries them, proved with two real processes: release-install.sh (env -i, its own install dir) downloads
+# the cover and runs upgrade.sh as a CHILD, which is the process that refuses. Nothing is installed: every case
+# below stops at the cover gate, before anything is staged.
+DOOR="$INSTALL/scripts/release-install.sh"
+BASE_SHORT="${C_BASE:0:12}"
+# wa_node_binary_download reads a stub channel FLAT ($BASE/node-<sha12>.manifest, $BASE/wa-...), while the
+# digest SEARCH keys it by tag ($BASE/node-<sha12>/...). This channel is for the door, so it is flat.
+CHANNEL="$R/channel"
+mkdir -p "$CHANNEL"
+cp -R "$R1/." "$CHANNEL/"
+printf 'node-%s\n' "$BASE_SHORT" > "$CHANNEL/releases.txt"
+EMPTY_CHANNEL="$R/empty-channel"
+mkdir -p "$EMPTY_CHANNEL"
+printf '' > "$EMPTY_CHANNEL/releases.txt"
+door() { # <channel> <args...> -> the door's own output
+  local channel="$1"; shift
+  env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR="$TMPDIR" \
+    WA_INSTALL_DIR="$INSTALL" WA_NODE_BINARIES_URL="$channel" WA_NODE_RELEASE_REPO=fixture/repo \
+    WA_RELEASE_KEYS="$WA_RELEASE_KEYS" \
+    bash "$DOOR" "$@" 2>&1
+}
+
+out="$(door "$EMPTY_CHANNEL" "$C_LUA")"; rc=$?
+ok "$([ "$rc" = 2 ] && echo 1 || echo 0)" "a tree-less node asked for a commit nothing publishes is refused (rc $rc, expected 2)" "$(printf '%s' "$out" | tail -2)"
+ok "$(says "$out" 'release_cover_needed' && echo 1 || echo 0)" 'by name: release_cover_needed' "$(printf '%s' "$out" | tail -2)"
+ok "$(says "$out" '--cover-commit' && echo 1 || echo 0)" 'and it names the two facts the caller must pass'
+ok "$(says "$out" '--lua-inputs' && echo 1 || echo 0)" '...both of them'
+
+out="$(door "$EMPTY_CHANNEL" "$C_LUA" --cover-commit "$C_BASE")"; rc=$?
+ok "$([ "$rc" = 2 ] && echo 1 || echo 0)" "a cover named without the target's Lua digest is refused before anything is downloaded (rc $rc)" "$(printf '%s' "$out" | tail -2)"
+ok "$(says "$out" 'release_cover_lua_unknown' && echo 1 || echo 0)" 'by name: release_cover_lua_unknown' "$(printf '%s' "$out" | tail -2)"
+
+out="$(door "$EMPTY_CHANNEL" "$C_BASE" --cover-commit "$C_BASE" --lua-inputs "$BASE_DIGEST")"; rc=$?
+ok "$(says "$out" 'cover_commit_pointless' && echo 1 || echo 0)" 'a cover that names the commit itself is refused instead of silently used' "$(printf '%s' "$out" | tail -2)"
+
+# THE SEAM: the cover is on the channel, both facts are given, and the CHILD (upgrade.sh) is what refuses -
+# naming the two digests it got from a process that could not compute either one itself.
+out="$(door "$CHANNEL" "$C_LUA" --cover-commit "$C_BASE" --lua-inputs "$LUA_DIGEST")"; rc=$?
+ok "$([ "$rc" != 0 ] && echo 1 || echo 0)" "a cover whose embedded Lua differs from the target's is refused through the door too (rc $rc)" "$(printf '%s' "$out" | tail -2)"
+ok "$(says "$out" 'taking the cover node-' && echo 1 || echo 0)" 'the door fetched the cover it was told to fetch'
+ok "$(says "$out" 'release_cover_lua_mismatch' && echo 1 || echo 0)" 'and upgrade.sh, as its child process, refused it by name - the two facts crossed the boundary'
+ok "$(says "$out" "$BASE_DIGEST" && echo 1 || echo 0)" 'with the Lua tree those bytes embed'
+ok "$(says "$out" "$LUA_DIGEST" && echo 1 || echo 0)" 'and the Lua tree the target commit has'
+
 if [ "$failed" != 0 ]; then printf 'cover lua FAILED (%s checks, %s failed)\n' "$checks" "$failed" >&2; exit 1; fi
 printf 'cover lua: ok (%s checks)\n' "$checks"
 
