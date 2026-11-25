@@ -183,6 +183,44 @@ ok
 [ "${need_delta:-999999}" -lt 1000 ] || fail "R9: the need for a scripts-only version counts only the changed members (${need_delta:-?})"
 ok
 
+# --- R5: a cut is finished at the NEXT START, through the real binary and init.lua ---------------------------
+# This is the half requirement 5 asks for: not a script (it may be the missing thing), but wa itself. The install
+# is a scratch directory named by WA_INSTALL_DIR, the pointer a scratch share root, and the binary is this suite's
+# own - so the row runs the product's real start path and nothing of the operator's.
+if [ -z "${WA_BIN:-}" ]; then
+  echo "  R5 SKIPPED: WA_BIN is not set (the suite sets it; a bare run cannot prove the start path)"
+else
+  cut="$W/cut"
+  mkdir -p "$cut/share/versions/aaaaaaaaaaaa/lua-core" "$cut/share/versions/aaaaaaaaaaaa/scripts" "$cut/install" "$W/home2"
+  printf 'id=aaaaaaaaaaaa\ncommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$cut/share/versions/aaaaaaaaaaaa/version.txt"
+  printf 'init' > "$cut/share/versions/aaaaaaaaaaaa/lua-core/init.lua"
+  printf 'deploy' > "$cut/share/versions/aaaaaaaaaaaa/scripts/deploy.sh"
+  ln -sfn versions/aaaaaaaaaaaa "$cut/share/current"
+  # The cut: the legacy path the pointer names is ABSENT (that is what the two-rename order leaves behind).
+  if WA_SHARE_ROOT="$cut/share" WA_INSTALL_DIR="$cut/install" WASM_AGENT_HOME="$W/home2" \
+     WASM_AGENT_LUA_ROOT="$(pwd)" timeout 60 "$WA_BIN" --db "$W/db-cut.sqlite" > "$W/cut.log" 2>&1; then
+    ok
+  else
+    sed -n '1,5p' "$W/cut.log" >&2; fail "R5: wa did not start after the cut"
+  fi
+  [ -L "$cut/install/lua-core" ] || fail "R5: the absent lua-core link was NOT put back at the next start"
+  ok
+  [ "$(readlink -f "$cut/install/lua-core")" = "$(readlink -f "$cut/share/versions/aaaaaaaaaaaa/lua-core")" ] || fail "R5: the link put back does not resolve through the pointer"
+  ok
+  grep -q 'finished a half-done version migration' "$W/cut.log" || fail "R5: the repair did not say what it did"
+  ok
+  # A real directory is never replaced (today's layout, and evidence of a migration not started).
+  # The first run linked scripts too, so the real directory has to replace that link first: this is a node whose
+  # install still carries a real scripts/ (today's layout), not a half-done migration.
+  rm -f "$cut/install/scripts"
+  mkdir -p "$cut/install/scripts"; printf 'mine' > "$cut/install/scripts/deploy.sh"
+  WA_SHARE_ROOT="$cut/share" WA_INSTALL_DIR="$cut/install" WASM_AGENT_HOME="$W/home2" \
+     WASM_AGENT_LUA_ROOT="$(pwd)" timeout 60 "$WA_BIN" --db "$W/db-cut2.sqlite" > "$W/cut2.log" 2>&1 || fail "R5: wa did not start with a real scripts dir present"
+  [ ! -L "$cut/install/scripts" ] || fail "R5: a REAL directory was replaced by a link"
+  [ "$(cat "$cut/install/scripts/deploy.sh")" = "mine" ] || fail "R5: the real directory's content was touched"
+  ok
+fi
+
 # --- the report's number: REAL disk, not apparent ------------------------------------------------------------
 wa_version_disk eeeeeeeeeeee | grep -q '^version_disk eeeeeeeeeeee real=[0-9]* apparent=' || fail "report: wa_version_disk names real blocks and apparent bytes"
 ok

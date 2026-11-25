@@ -49,6 +49,22 @@ do
   end
 end
 
+-- A NODE THAT STARTS AFTER A CUT FINISHES THE MIGRATION ITSELF (slice (b), requirement 5). The shell half
+-- renames a legacy path aside and then links it through the pointer, so a cut between the two leaves the path
+-- absent on purpose (the binary falls back to its compiled-in Lua and says so once). Putting it back cannot be a
+-- shell script - the script may be the thing that is missing - so it happens here, before the tree is needed and
+-- before the ledger is opened. It is inert on a node with no version pointer (today's layout) and it never
+-- replaces a real file or directory. Its own module, so the one rule has one place.
+do
+  local ok, repair = pcall(dofile, "lua/core/version_repair.lua")
+  if ok and type(repair) == "table" and type(repair.repair) == "function" then
+    local ok2, result = pcall(repair.repair, {})
+    if ok2 and type(result) == "table" and (result.repaired or 0) > 0 then
+      print("wa: finished a half-done version migration (" .. result.repaired .. " link(s) put back)")
+    end
+  end
+end
+
 memory.setup()
 
 local function line(item)

@@ -1559,6 +1559,10 @@ WA_BIN="$BIN" gate_run bash scripts/test-deploy-alive-hold.sh
 # version a live process runs from, or a pinned one; and a full disk is refused by name before anything is
 # staged. Rows R3/R5 (a kill at every migration boundary) and R8 (the sentinel) come with their commits.
 gate_run bash scripts/test-versions.sh
+# The half requirement 5 asks for: on the next start, wa IT ITSELF puts back a link the pointer names and a cut
+# left absent - and never replaces a real directory. The module's contract (no pointer / half-done / real dir /
+# idempotent) has its own row; the shell row above proves the same through the real start path.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-repair.lua" "$BIN" --db "$DB.version-repair" | grep 'version repair ok'
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.
