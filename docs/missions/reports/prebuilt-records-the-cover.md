@@ -129,3 +129,97 @@ both are true: the ship step never ran, AND that file was never in the ship list
 * `scripts/test-deploy-covering-release.sh` needs the network (a published covering release) and cannot start a
   sentinel in a scratch HOME on a machine whose systemd user session belongs to the operator - it says SKIP by
   name when either stops it, and never passes by absence.
+
+# SECOND ROUND, 25/11: A SCRATCH RUN THAT IS ACTUALLY SCRATCH (`02067a0a`, `e0e62df9`, `000e49f3`, `09b7b54f`, `efa34ce4`)
+
+The previous worker on this branch is parked for a reason that is now code: its harness reported
+`deploy covering release ok (16 checks, 0 failed)` and left a `wa-sentinel` behind with `HOME=/home/victor` and no
+`WASM_AGENT_PORT` (pid 635976, killed 00:38:06Z). It had also rewritten the LIVE `~/.config/systemd/user/wa-sentinel.service`
+and `~/.local/bin/runtime-worktree.txt`, and run sentinels on the LIVE ledger.
+
+## Root cause, measured (the variable that led to the live paths)
+
+The harness replaced `HOME` and nothing else, and stripped the marker the turn guard reads:
+
+| what the installer resolved | from | value it got |
+| --- | --- | --- |
+| the systemd unit file | `scripts/lib/sentinel-unit.sh:41` - `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user` | inherited `XDG_CONFIG_HOME=/home/victor/.config` -> the LIVE unit dir |
+| the user manager it talked to | `XDG_RUNTIME_DIR` | inherited `/run/user/1000` -> `systemctl --user` on the LIVE manager, which restarted the LIVE sentinel |
+| the ledger | `WASM_AGENT_DB` | inherited `/home/victor/.wasm-agent/memory.db` -> the sentinel it started ran on the LIVE ledger |
+| the port | `WASM_AGENT_PORT` / `WA_PORT` | unset -> the live 8799 |
+| the guard | `WASM_AGENT_IN_TURN` | `env -u WASM_AGENT_IN_TURN`, so the deploy never refused inside the turn |
+
+The four variables are the ones this session inherited from its own turn (measured: `XDG_CONFIG_HOME=/home/victor/.config`,
+`XDG_RUNTIME_DIR=/run/user/1000`, `WASM_AGENT_DB=/home/victor/.wasm-agent/memory.db`, no `WASM_AGENT_PORT`), so the chain
+is: strip the guard -> the deploy runs -> `XDG_CONFIG_HOME` writes the LIVE unit -> `XDG_RUNTIME_DIR` lets `systemctl --user`
+restart the LIVE sentinel -> that sentinel runs on the LIVE ledger. A green row, and every step invisible to it.
+
+## What the branch now does about it
+
+* `scripts/lib/scratch-installer.sh` (`02067a0a`, `efa34ce4`): the environment an installer gets is REBUILT from an
+  allow-list (`env -i` + named variables) instead of filtered: `HOME`, `WASM_AGENT_HOME`, `WA_INSTALL_DIR`, the unit dir, a
+  `systemctl` STUB written under the scratch root, `WASM_AGENT_DB`, `XDG_CONFIG_HOME`/`XDG_RUNTIME_DIR`/data/cache/state, the
+  port pair - all under the caller's root, all refused when they are not; the live ports `8799/8800/8801/8810` refused by
+  name; nothing created before every refusal has answered; the guard's own names carried UNCHANGED (never stripped); the
+  vault URLs cannot survive `env -i`. It asks `scripts/lib/install-isolation.sh` (the reviewed six-answer guard from
+  mission release-node-updates) about the environment it just built, and refuses if the two disagree. It captures the
+  operator's home when it is SOURCED, because a row replaces `HOME` before it builds anything (the runner found that:
+  `refused(real_node_home)` about the row's own scratch home, 14 checks failing behind it).
+* `scripts/test-installer-data-isolation.sh` (`e0e62df9`, `efa34ce4`) keeps every assertion of the lint that was already here
+  (landing `5606ecd3`) and adds three sections: the six dimensions on a real child of the builder plus its refusals; the
+  CONCRETE case, where two replicas of what leaked must be caught by this file's checker (the harness's own child, and the
+  live-HOME sentinel a unit hands a program) while the same leftover started through the builder is clean; and the rule that
+  no statement running `deploy.sh`/`upgrade.sh` strips the guard or detaches an installer unless it names its own scratch
+  home, install dir and port (the one fixture whose SUBJECT is the guard - `scripts/test-deploy-ancestry.sh` - is that
+  shape, and its statements now name `HOME` as well). Measured: 51 checks, 0 failed. It is wired into `scripts/test.sh`
+  beside `test-install-guards.sh`.
+* The strips removed (`02067a0a`): `test-components-preflight.sh:147`, `test-deploy-on-main.sh:74`,
+  `test-release-install-exec.sh`, `test-upgrade-idle.sh:86`, `test-upgrade-ui-fonts.sh:203`,
+  `test-watchdog-upgrade.sh:73/95/160`, and this branch's own row. `test-deploy-ancestry.sh:89/241` keeps its strip and its
+  `setsid --fork` (that fixture measures the guard's ancestry rule) and now names its own scratch `HOME`.
+
+## The log line (`000e49f3`) - "deploy: command not found"
+
+`scripts/deploy.sh:1529` on `2d7ac300` (and still `origin/main:1551`): a wrapped COMMENT block ended one line early, so
+"deploy must never refuse because another session landed while it ran." sat at column 0 and bash ran `deploy` as a command.
+Non-fatal, invisible, and on every deploy. Fixed, and `scripts/test-install-guards.sh` now carries the rule (a fixture of
+that exact shape must be caught, then every installer is scanned; over the whole tree it matched one line - the one that
+was shipped). `09b7b54f` is the follow-up that made the rule able to fail at all: awk's `line` was never assigned, so it
+passed on the very file it was written for.
+
+## Alive-first, the two rows: ALREADY ON `origin/main`, and NOT YET ALIVE-FIRST
+
+Measured, not assumed: `origin/main` (82f57859, now 36b2d9ff) already carries `scripts/lib/deploy-alive.sh`, the write at
+deploy.sh:1216, the trap that clears it, and `scripts/test-deploy-alive-hold.sh` + `scripts/test-deploy-alive.lua` (landing
+"r8c", `docs/missions/reports/deploy-alive-holds.md`). This branch's base predates all of it. What the brief asks for and
+main does not do is the ORDER: the write is at `:1216`, while the components preflight (`:406`), the git fetches
+(`:457/:522`), the program download (`:997`) and provisioning (`:1181`) all run before it - so on a download install the
+whole download still says nothing. Carrying that fix on THIS branch means bringing in main's `deploy-alive.sh` on top of a
+`deploy.sh` that diverges from main's (`git diff HEAD origin/main -- scripts/deploy.sh`: 25 lines of main's, including a
+`fail()` main rewrote), i.e. hand-merging someone else's reviewed feature to move one call - which is Fable's decision,
+not a worker's. Reported, not done, and it is the honest answer rather than a second implementation of the same file.
+
+## The merge onto `origin/main`: NOT clean any more, measured
+
+`git merge-tree --write-tree origin/main 4773a0e4` (the branch before this round): **no conflicts**. The same probe with
+this round's tip: **two conflicts**, `scripts/test-installer-data-isolation.sh` and `scripts/test-release-install-exec.sh`.
+Both are files another mission changed on `origin/main` and this round had to change too (the state-dir lint, and the marker
+cleared in that row). The resolution is not a judgement call: this branch's copy of each CONTAINS `origin/main`'s
+(`git diff origin/main -- scripts/test-installer-data-isolation.sh`: 251 added, **0 deleted**), so the merge takes the
+branch's side and loses nothing. The branch is also 59 commits behind `origin/main`, which moves while this is written.
+
+## Texts to approve (operator-facing, second round)
+
+5. `refused(installer_env_no_root): a scratch root is required; an installer is never started in the caller environment`
+6. `refused(installer_env_live_port): <port> is a live port (8799/8800/8801/8810)`
+7. `refused(installer_env_install_escape): --install-dir <path> is not under the scratch root <root>`
+8. `refused(installer_env_set_dimension): --set <K> would move a dimension this library owns; use the option for it`
+9. `refused(installer_env_guard): install-isolation.sh refuses the environment this library built: <its reasons>`
+10. `refused(installer_env_operator_home): the operator home could not be resolved, so a child home cannot be proven
+    distinct from it`
+11. `refused(installer_env_guard_missing): scripts/lib/install-isolation.sh is not beside this library, so the
+    environment it built cannot be judged by the reviewed guard`
+12. `the six dimensions and the rows: <n> checks, <m> failed` (this row's own summary line)
+13. `not_isolated`-style failure lines of the new sections, in the row's own words: `HOME=<x> is not under the scratch
+    root <r>`, `XDG_CONFIG_HOME=<x> is not under the scratch root <r> (the unit dir follows it)`, `WASM_AGENT_DB=<x> is
+    not under the scratch root <r> (this is the live ledger)`, `WASM_AGENT_PORT is unset, which is the live 8799`.
