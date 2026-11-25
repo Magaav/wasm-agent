@@ -52,6 +52,7 @@ cleanup() {
   [ -n "$NODE_PID" ] && kill "$NODE_PID" 2>/dev/null
   [ -n "$TREE" ] && git -C "$ROOT" worktree remove --force "$TREE" >/dev/null 2>&1 || true
   chmod -R u+w "$W" 2>/dev/null
+  [ -n "${INSTALL:-}" ] && [ -x "$INSTALL/wa-sentinel" ] && "$INSTALL/wa-sentinel" stop >/dev/null 2>&1
   rm -rf "$W"
 }
 trap cleanup EXIT
@@ -313,14 +314,20 @@ fi
 # (deploy.sh:2367). MEASURED: the runner's systemctl stub logged ZERO calls in rows/20261125T052330Z, and a stub
 # cannot satisfy that proof. So this row starts a REAL sentinel from the binary its own first pass installed, waits
 # for exactly that status line, and runs the deploy once more - the record then read below is the second pass's.
-SENT=
-for _ in $(seq 1 60); do
-  "$INSTALL/wa-sentinel" status 2>/dev/null | grep -q 'sentinel:.*watching' && { SENT=1; break; }
-  [ "$_" = 1 ] && env HOME="$HOME" WASM_AGENT_HOME="$HOME" WASM_AGENT_DATA="${DATA:-$HOME/.wasm-agent}"       WA_PORT="$PORT" WA_CLIENT_PORT="${CLIENT_PORT:-$((PORT + 1))}" WA_SENTINEL_SUPERVISOR=none       WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl" "$INSTALL/wa-sentinel" start > "$W/sentinel-start.log" 2>&1
+# START ONCE, THEN POLL (25/11, rows/20261125T060735Z): the first version started the sentinel inside the wait loop
+# and never noticed it come up - the sentinel's own status at skip time said 'sentinel: up watching (pid 1386778)',
+# so the failure was the loop (it keyed off the loop variable $_), not the sentinel. Start it once, then poll the
+# status line the deploy itself reads.
+env HOME="$HOME" WASM_AGENT_HOME="$HOME" WASM_AGENT_DATA="${DATA:-$HOME/.wasm-agent}"   WA_PORT="$PORT" WA_CLIENT_PORT="${CLIENT_PORT:-$((PORT + 1))}" WA_SENTINEL_SUPERVISOR=none   WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl" "$INSTALL/wa-sentinel" start > "$W/sentinel-start.log" 2>&1
+SENT=""
+SENT_STATUS=""
+for _wait in $(seq 1 120); do
+  SENT_STATUS="$("$INSTALL/wa-sentinel" status 2>&1)"
+  if printf '%s\n' "$SENT_STATUS" | grep -q 'sentinel:.*watching'; then SENT=1; break; fi
   sleep 0.5
 done
 if [ -z "$SENT" ]; then
-  skip_all "the installed sentinel will not report itself watching in a scratch home, so the clean case cannot be measured here: $(tail -2 "$W/sentinel-start.log" 2>/dev/null | tr '\n' ' ')$("$INSTALL/wa-sentinel" status 2>&1 | head -2 | tr '\n' ' ')"
+  skip_all "the installed sentinel will not report itself watching in a scratch home, so the clean case cannot be measured here: $(printf '%s' "$SENT_STATUS" | tr '\n' ' ') $(tail -2 "$W/sentinel-start.log" 2>/dev/null | tr '\n' ' ')"
 fi
 echo "watcher: the installed sentinel answers watching - the second deploy pass starts from here"
 wa_installer_run --root "$W" --cd "$TREE" --port "$PORT" --install-dir "$INSTALL"   --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_TREE_WAIT=60   --set WA_DEPLOY_ROOT="$TREE"   --set WA_SERVICE_UNIT_FILE="$W/no-such.unit" --set WA_SENTINEL_SUPERVISOR=none   --set WA_NODE_BINARIES_URL="file://$CHANNEL" --set WA_RELEASE_KEYS="$KEYS"   --set WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl"   -- bash scripts/deploy.sh --reason "test-deploy-covering-release: second pass, watcher answering"   > "$OUT" 2>&1
