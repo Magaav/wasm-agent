@@ -74,23 +74,29 @@ end
 -- anything is enqueued, so the comparison cannot depend on this node's state. The tool door is compared
 -- too: it is the path the model takes (`M.invoke`), and after a repoint it goes through the generic row.
 local OPS = {
-  { op = "contacts", args = { q = "1555" } },
-  { op = "read", args = {} },
   { op = "search", args = {} },
+  { op = "read", args = {} },
+  { op = "contacts", args = { q = "1555" } },
+  -- `message` is the one read the model is not offered: the component points at it inside a long message
+  -- (`rust/components/wa-whatsapp/src/view.rs`), no catalogue row names it, and the capability answers a
+  -- script. It has no tool door to compare, so its entry says so.
+  { op = "message", args = {}, tool = false },
 }
 
 for _, case in ipairs(OPS) do
-  local tool = whatsapp.tool("mcp_whatsapp_" .. case.op)
-  ok(tool ~= nil, "the " .. case.op .. " tool is this surface")
   local payload = { op = case.op }
   for key, value in pairs(case.args) do payload[key] = value end
   local named = tostring(host["whatsapp_" .. case.op](json.encode(case.args)))
   local generic = tostring(host.whatsapp_index(json.encode(payload)))
   ok(named == generic, case.op .. ": the generic door answers the named row's bytes")
-  local via_tool = whatsapp.invoke(tool, case.args)
-  local fine, why = same(json.decode(named), via_tool)
-  ok(fine, case.op .. ": the tool door answers the named row's document (" .. tostring(why) .. ")")
-  ok(tool.capability == "whatsapp_index", case.op .. ": the tool row points at the generic door")
+  if case.tool ~= false then
+    local tool = whatsapp.tool("mcp_whatsapp_" .. case.op)
+    ok(tool ~= nil, "the " .. case.op .. " tool is this surface")
+    local via_tool = whatsapp.invoke(tool, case.args)
+    local fine, why = same(json.decode(named), via_tool)
+    ok(fine, case.op .. ": the tool door answers the named row's document (" .. tostring(why) .. ")")
+    ok(tool.capability == "whatsapp_index", case.op .. ": the tool row points at the generic door")
+  end
 end
 
 -- The generic door refuses to guess which question it is, and queues nothing.
