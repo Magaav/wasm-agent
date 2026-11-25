@@ -23,9 +23,10 @@
 --
 -- A page is:
 --
---   { title = "...", lines = { "..." },
+--   { title = "...", lines = { "..." }, numbered = false,
 --     options = { { label = "...", hint = "...", page = n, back = true,
---                   run = "/mcp whatsapp off", act = function(choice) ... end } },
+--                   run = "/mcp whatsapp off", act = function(choice) ... end,
+--                   heading = "a group's name, drawn above the row it starts" } },
 --     input = "text" | "secret", placeholder = "...", hint = "...", selected = 1 }
 --
 -- `page` opens another page of the same stack (`views[i]`, 1-based, root is 1), `back` returns,
@@ -160,6 +161,9 @@ function M.page(spec)
     placeholder = spec.placeholder or "",
     hint = spec.hint,
     selected = spec.selected or 1,
+    -- A page of groups is not a numbered menu: /mcp lists connectors under their group's name, and a
+    -- number in front of a row is one thing the operator asked to be rid of (Victor, 24/11).
+    numbered = spec.numbered ~= false,
     -- A field's own handler: what to do with the text, returning the page that says so. Only the
     -- interpreter can run one, which is why a published page never carries it.
     act = spec.act,
@@ -171,6 +175,15 @@ end
 -- One page as the panel would show it, without colour: the title, the body, the list with the selection
 -- marked the way `Panel::render` marks it, and the hint row. This is the pipe's view and the snapshot's
 -- view; the host draws the same fields with colour in a terminal.
+-- Pad a label to a column measured in CHARACTERS. `string.format("%-27s", ...)` pads by BYTES, so a label
+-- whose glyph is three bytes and one cell (the check mark) came out two cells short and its right column
+-- started two cells to the left of every other row's - measured on /mcp's own 80-column capture, 24/11. The
+-- host panel pads by characters (`{:<width$}`), which is why the capture disagreed with the terminal.
+local function pad_label(label, width)
+  label = M.fit(label or "", width)
+  return label .. string.rep(" ", math.max(0, width - #chars(label)))
+end
+
 function M.page_text(page, width, opts)
   opts = opts or {}
   width = math.max(20, tonumber(width) or M.WIDTH)
@@ -189,13 +202,23 @@ function M.page_text(page, width, opts)
     for _, option in ipairs(page.options) do label_width = math.max(label_width, #chars(tostring(option.label or ""))) end
     label_width = math.min(label_width + 2, math.max(8, width - 12))
     local shown = math.min(#page.options, M.OPTIONS)
+    local numbered = page.numbered ~= false
     for index = 1, shown do
       local option = page.options[index]
+      -- A group's heading is a row of its own, above the first row of the group, and it is never a
+      -- choice: no mark, no key, no hint. A blank row separates one group from the one above it.
+      -- An EMPTY heading is just that blank row - the gap that keeps a block of rows from reading as part of
+      -- the group above it (the two folded rows, 24/11).
+      if option.heading ~= nil then
+        if index > 1 then rows[#rows + 1] = "" end
+        if tostring(option.heading) ~= "" then rows[#rows + 1] = M.fit(tostring(option.heading), width) end
+      end
       local mark = index == selected and "\u{276f}" or " "
       -- A fixed column for the labels, the way the panel renders a list: a hint that started at a
       -- different column on every row is what made the old printed table hard to scan.
-      local pad = "%-" .. label_width .. "s"
-      local head = string.format("%s %2d. ", mark, index) .. pad:format(M.fit(option.label or "", label_width))
+      local head = numbered
+        and (string.format("%s %2d. ", mark, index) .. pad_label(option.label, label_width))
+        or (mark .. " " .. pad_label(option.label, label_width))
       local hint = tostring(option.hint or "")
       local room = width - #chars(head) - 1
       local tail = hint ~= "" and room > 2 and (" " .. M.fit(hint, room)) or ""
@@ -297,10 +320,15 @@ function M.panel_spec(page, selected, opts)
   page = M.page(page)
   local options = {}
   for _, option in ipairs(page.options) do
-    options[#options + 1] = { label = tostring(option.label or ""), hint = tostring(option.hint or "") }
+    options[#options + 1] = { label = tostring(option.label or ""), hint = tostring(option.hint or ""),
+      -- The group a row starts, drawn by the renderer above it: `wa_term`'s panel takes it as a row of its
+      -- own that no key selects (`Panel::from_spec`, `heading`), the same way the plain rendering does.
+      heading = option.heading ~= nil and tostring(option.heading) or nil }
   end
   local spec = {
     title = page.title, lines = page.lines, options = options, selected = selected or page.selected or 1,
+    -- A numbered menu is the panel's default and stays it: only a page of groups turns it off.
+    numbered = page.numbered ~= false,
   }
   if page.input then
     spec.input = page.input
@@ -506,6 +534,7 @@ function M.spec(name, pages, captured_at)
       -- (`view`): the two renderers read the same links, spelled the way each already reads them.
       options[#options + 1] = {
         label = M.fit(tostring(option.label or ""), 200),
+        heading = option.heading ~= nil and M.fit(tostring(option.heading), 120) or nil,
         hint = tostring(option.hint or (not option.page and not option.back and not option.pop and not option.run
           and "a change: run this between turns" or "")),
         -- A link is 1-based in a page (`page`, or the older `view` spelling nodes_cli publishes) and
@@ -522,7 +551,7 @@ function M.spec(name, pages, captured_at)
       -- view, and the reader lost a panel that was correct except for its last row (Victor, 21/11).
       -- `view_lines` counts characters - what the client counts - and never splits one.
       title = M.fit(page.title, 120), lines = view_lines.wrap(page.lines),
-      options = options, selected = page.selected,
+      options = options, selected = page.selected, numbered = page.numbered ~= false,
     }
   end
   -- `captured_at` is whole seconds: `host.now()` is a float in this build, and the client's spec is an

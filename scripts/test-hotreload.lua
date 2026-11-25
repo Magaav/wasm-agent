@@ -385,7 +385,7 @@ do
   local pages = (type(set) == "table" and type(set.views) == "table") and set.views or {}
   ok(#pages > 0, "/mcp answers pages before any edit")
   local first_title = pages[1] and pages[1].title or ""
-  has(first_title, "Services", "/mcp's first page is the list of services")
+  has(first_title, "MCP servers", "/mcp's first page is the list of MCP servers")
   ok(reload.source_of("lua/core/mcp_command.lua") == "node", "and its data module came from the node")
 
   -- A run is streaming while the save happens: three real frames before, three after.
@@ -396,8 +396,11 @@ do
   view:event({ type = "delta", text = "working " })
 
   local data = source_of_module("lua/core/mcp_command.lua")
-  local marked = data:gsub("title = 'Services'", "title = 'Services (dev)'", 1)
-  ok(marked ~= data, "the planted copy renames the page")
+  -- The planted edit renames something the reader SEES on the first page. It used to be the page's title;
+  -- the title now comes from lua/core/mcp_list.lua, and the page's own hint is the string this module still
+  -- owns, so the swap is measured on that instead of on a string that moved house.
+  local marked = data:gsub("hint = 'Enter opens a connector", "hint = 'Enter opens a connector (dev)", 1)
+  ok(marked ~= data, "the planted copy marks the page")
   write(DEV .. "/lua/core/mcp_command.lua", marked)
   local notices = tick()
   local applied = false
@@ -411,7 +414,7 @@ do
 
   local after = mcp_cli.views(ctx, {})
   local after_pages = (type(after) == "table" and type(after.views) == "table") and after.views or {}
-  has(after_pages[1] and after_pages[1].title or "", "Services (dev)",
+  has(after_pages[1] and after_pages[1].hint or "", "(dev)",
     "the NEXT /mcp shows the changed page")
   ok(reload.source_of("lua/core/mcp_command.lua") == "reload", "and it came from the reload tree")
   view:run_finished()

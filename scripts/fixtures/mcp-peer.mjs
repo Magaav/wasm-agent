@@ -1,6 +1,8 @@
 // Disposable protocol peer; no app, inference or external side effects.
 import {appendFileSync} from 'node:fs';
-let ready=false,buffer='';const mode=process.env.MCP_TEST_MODE||'normal';
+let ready=false,buffer='';// The mode is an environment variable or the first argument: a connector's definition carries ARGUMENTS, and
+// a test that must not touch the node's own environment writes `refuse_token` there.
+const mode=process.env.MCP_TEST_MODE||process.argv[2]||'normal';
 const tools=[{name:'echo',description:'Fixture echo',inputSchema:{type:'object',properties:{value:{}},required:[]}}];
 if(mode==='leak_meta')tools[0].description=process.env.TOKEN;
 if(mode==='changed')tools[0].inputSchema.properties.changed={type:'boolean'};
@@ -9,7 +11,11 @@ process.stdin.on('data',chunk=>{buffer+=chunk.toString();let at;while((at=buffer
  if(message.method==='notifications/initialized'){ready=true;continue;}
  if(!('id' in message))continue;
  if(mode==='malformed'){process.stdout.write('not JSON\n');continue;}
- if(message.method==='initialize'){send({jsonrpc:'2.0',id:message.id,result:{protocolVersion:mode==='bad_version'?'future':message.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}});continue;}
+ if(message.method==='initialize'){
+  // A far end that refused the credential: the words a real 401 carries, so /mcp's row for it can be
+  // measured without a network (mcp_command.state_label reads the error for 401/unauthorized/login).
+  if(mode==='refuse_token'){send({jsonrpc:'2.0',id:message.id,error:{code:401,message:'401 unauthorized: the access token was rejected'}});continue;}
+  send({jsonrpc:'2.0',id:message.id,result:{protocolVersion:mode==='bad_version'?'future':message.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}});continue;}
  if(!ready){send({jsonrpc:'2.0',id:message.id,error:{code:-32000,message:'not initialized'}});continue;}
  if(message.method==='tools/list'){send({jsonrpc:'2.0',id:message.id,result:{tools}});continue;}
  if(message.method==='tools/call'){

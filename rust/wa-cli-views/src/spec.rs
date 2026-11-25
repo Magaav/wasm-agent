@@ -79,6 +79,10 @@ pub struct ViewOption {
     /// keeps a mid-run action honest: the panel says it is queued, and it runs at the next turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// The name of the group this option STARTS, drawn as a row of its own above it and never selectable
+    /// (`/mcp`'s two groups, 24/11). Absent on every panel that has no groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -96,6 +100,10 @@ pub struct View {
     /// 1-based, as `host.panel` and `wa_term`'s panel both read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<usize>,
+    /// Whether the rows are numbered. A menu is; a page of groups (`/mcp`'s list) is not, and a client that
+    /// does not know the field draws the numbers it always drew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numbered: Option<bool>,
 }
 
 impl View {
@@ -109,10 +117,19 @@ impl View {
         let options: Vec<Value> = self
             .options
             .iter()
-            .map(|option| json!({"label": option.label, "hint": option.hint.clone().unwrap_or_default()}))
+            .map(|option| {
+                let mut row = json!({"label": option.label, "hint": option.hint.clone().unwrap_or_default()});
+                // A group's name travels to the panel as a row of its own, above the row it starts, and
+                // only when this page has one: a panel that is a plain menu sends nothing extra.
+                if let Some(heading) = option.heading.clone() {
+                    row["heading"] = Value::String(heading);
+                }
+                row
+            })
             .collect();
         let selected = self.selected.unwrap_or(1).max(1);
-        json!({"title": self.title, "lines": lines, "options": options, "selected": selected})
+        json!({"title": self.title, "lines": lines, "options": options, "selected": selected,
+            "numbered": self.numbered.unwrap_or(true)})
     }
 
     fn options_len(&self) -> usize {
@@ -169,6 +186,19 @@ impl View {
                         entry.label.chars().count()
                     ),
                 ));
+            }
+            // A group heading is drawn as a row of its own, so it is bounded like a label: one long heading
+            // would be the row that pushes a panel off its own screen.
+            if let Some(heading) = entry.heading.as_deref() {
+                if heading.chars().count() > MAX_LABEL_CHARS {
+                    return Some(Refusal::new(
+                        "heading_too_long",
+                        format!(
+                            "views[{index}].options[{option}].heading: {} characters",
+                            heading.chars().count()
+                        ),
+                    ));
+                }
             }
             if entry.view.is_some() && entry.pop {
                 return Some(Refusal::new(
@@ -464,8 +494,10 @@ mod tests {
                 view: Some(1),
                 pop: false,
                 run: None,
+                heading: None,
             }],
             selected: Some(1),
+            numbered: None,
         };
         let spec = view.panel_spec(Some("snapshot 2m ago".into()));
         assert_eq!(spec["title"], "Nodes");
@@ -486,6 +518,46 @@ mod tests {
         assert_eq!(
             quiet.panel_spec(None)["options"],
             json!([{"label": "back", "hint": ""}])
+        );
+    }
+
+    /// `/mcp`'s list is a page of groups, not a numbered menu (Victor, 24/11): the heading of a group
+    /// travels with the row it starts, and `numbered: false` travels with the page. A panel that does not
+    /// know the field draws the numbers it always drew, which is what an older client does - so the page
+    /// must stay readable either way, and the fields must never turn into a refusal.
+    #[test]
+    fn a_page_of_groups_carries_its_headings_and_its_unnumbered_flag() {
+        let text = set(json!([root(json!({
+            "title": "MCP servers",
+            "numbered": false,
+            "options": [
+                {"label": "\u{2714} WhatsApp", "hint": "8 tools", "heading": "wasm-agent built-in MCPs"},
+                {"label": "\u{2714} Colmeio bills", "hint": "25 tools"},
+            ],
+        }))]));
+        // `set` files a spec under /nodes; `/mcp`'s own republish is asserted in the balloon row.
+        let parsed = ViewSet::parse(&text, "/nodes").unwrap();
+        let view = &parsed.views[0];
+        assert_eq!(view.numbered, Some(false), "the page is marked unnumbered");
+        assert_eq!(view.options[0].heading.as_deref(), Some("wasm-agent built-in MCPs"));
+        assert_eq!(view.options[1].heading, None, "only the row that starts a group carries it");
+        let spec = view.panel_spec(None);
+        assert_eq!(spec["numbered"], false);
+        assert_eq!(spec["options"][0]["heading"], "wasm-agent built-in MCPs");
+        assert!(spec["options"][1].get("heading").is_none(), "no heading on a row that starts none: {spec:?}");
+        // A menu that says nothing is numbered: the panel's default, unchanged.
+        let menu = View {
+            options: vec![ViewOption { label: "one".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        assert_eq!(menu.panel_spec(None)["numbered"], true);
+        // A heading is bounded like a label: one long one would be the row that pushes a panel off screen.
+        let long = set(json!([root(json!({
+            "options": [{"label": "a", "heading": "h".repeat(MAX_LABEL_CHARS + 1)}],
+        }))]));
+        assert_eq!(
+            ViewSet::parse(&long, "/nodes").unwrap_err().code,
+            "heading_too_long"
         );
     }
 }

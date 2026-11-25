@@ -165,8 +165,27 @@ published = {}
 local set = mcp.views(fixture.mcp_view())
 ok(set.command == "/mcp", "the /mcp pages are filed under the command that opens them")
 ok(#set.views >= 6, "the /mcp balloon has the list, a page per connector and their tools: " .. #set.views)
-ok(set.views[1].title == "Services", "the root is the list of services")
-ok(#set.views[1].options == 4, "one row per connector")
+ok(set.views[1].title == "MCP servers", "the root is the list of MCP servers")
+-- THE LIST IS TWO GROUPS (24/11): a heading, then one row per connector on this node, then the folded rows
+-- for what is not a row here (the same connector on another node, a retired entry).
+local root_opts = set.views[1].options
+local headings, gaps = {}, 0
+for _, option in ipairs(root_opts) do
+  -- An EMPTY heading is the blank row that sets the folded rows apart from the group above them (24/11);
+  -- a heading with words is a group's name.
+  if option.heading == '' then gaps = gaps + 1
+  elseif option.heading then headings[#headings + 1] = option.heading end
+end
+ok(gaps == 1, "the folded rows are set apart by one blank row: " .. gaps)
+ok(#headings == 2 and headings[1] == "wasm-agent built-in MCPs" and headings[2] == "User MCPs",
+  "the list has the two headings, in that order: " .. table.concat(headings, " | "))
+ok(set.views[1].lines[1] == "5 servers", "the title line counts the servers it lists: " .. tostring(set.views[1].lines[1]))
+local folded_rows = {}
+for _, option in ipairs(root_opts) do
+  if option.label == "On other nodes - 2 hidden" or option.label == "1 retired" then folded_rows[#folded_rows + 1] = option end
+end
+ok(#folded_rows == 2, "one folded row for the peer connectors and one for the retired entry")
+ok(#root_opts == 7, "five server rows and two folded rows, no sixth row for a repeat: " .. #root_opts)
 
 -- The links a client has to understand: a page link is 0-based in the spec, and the run options are the
 -- only actions it may take.
@@ -175,7 +194,19 @@ ok(done, "the /mcp stack is published")
 local sent = published[#published]
 ok(sent and sent.name == "/mcp" and sent.spec.captured_at == clock, "published under /mcp, with its age")
 local root = sent.spec.views[1]
-ok(root.options[1].view == 1, "the first connector's page is the 0-based index 1: " .. tostring(root.options[1].view))
+ok(root.numbered == false, "the list is not a numbered menu: " .. tostring(root.numbered))
+ok(root.options[1].heading == "wasm-agent built-in MCPs",
+  "the group heading travels with the row that starts it: " .. tostring(root.options[1].heading))
+-- Every row that opens a page opens the page of ITS connector: the title of that page starts with the
+-- connector's key, which is what a reader learns to type.
+local wrong_link = nil
+for _, option in ipairs(root.options) do
+  if option.view then
+    local target = sent.spec.views[(option.view or 0) + 1]
+    if not target then wrong_link = option.label .. " -> no page" end
+  end
+end
+ok(wrong_link == nil, "every row's link points inside the published stack: " .. tostring(wrong_link))
 local runs, saw_act = {}, false
 for _, view in ipairs(sent.spec.views) do
   for _, option in ipairs(view.options or {}) do
@@ -208,7 +239,10 @@ local function read_file(path)
   handle:close()
   return text
 end
-local function snapshot(name, text)
+-- `columns` is the width the snapshot was taken at: 80 for every screen a person reads at 80x24, and 120
+-- for the one capture that proves a wide window needs no second layout.
+local function snapshot(name, text, columns)
+  columns = tonumber(columns) or 80
   local stored = read_file("tests/snapshots/balloon/" .. name)
   if not stored then
     ok(false, "snapshot " .. name .. " is missing (run scripts/gen-balloon-snapshots.lua)")
@@ -216,12 +250,15 @@ local function snapshot(name, text)
   end
   local want = (tostring(text):gsub("%s+$", "")) .. "\n"
   ok(stored == want, "the snapshot " .. name .. " matches what the balloon draws now")
-  ok(widest(stored) <= 80, "the snapshot " .. name .. " is 80 columns wide or less: " .. widest(stored))
+  ok(widest(stored) <= columns, "the snapshot " .. name .. " is " .. columns .. " columns wide or less: " .. widest(stored))
 end
 
 snapshot("mcp-list-80x24.txt", balloon.text({ set.views[1] }, 80))
 snapshot("mcp-detail-80x24.txt", balloon.text({ set.views[2] }, 80))
 snapshot("mcp-tools-80x24.txt", balloon.text({ set.views[3] }, 80))
+-- The same list at 120 columns: a window that wide must not need a second layout, and nothing on it may be
+-- cut. `widest` is bounded by the snapshot of the width it was taken at, below.
+snapshot("mcp-list-120x24.txt", balloon.text({ set.views[1] }, 120), 120)
 for _, page in ipairs(set.views) do
   if page.title:sub(1, 5) == "gated" then snapshot("mcp-needs-login-80x24.txt", balloon.text({ page }, 80)) end
 end
@@ -229,10 +266,28 @@ snapshot("login-list-80x24.txt", balloon.text({ login[1] }, 80))
 snapshot("login-provider-80x24.txt", balloon.text({ login[2] }, 80))
 
 -- What the snapshots say, in assertions a person reads: the words the operator asked for.
+-- WHAT THE LIST SAYS, in assertions a person reads (Victor, 24/11: "list wasm-agent built-in MCPs and User
+-- MCPs and simplificate just list how many tools it has").
 local list_text = balloon.text({ set.views[1] }, 80)
-for _, word in ipairs({ "connected", "failed", "needs login", "1 tool", "built-in", "36 chats" }) do
-  ok(has(list_text, word), "the list names the state/tool count: " .. word)
+for _, word in ipairs({ "MCP servers", "5 servers", "wasm-agent built-in MCPs", "User MCPs",
+  "2 tools", "needs token", "not reachable", "On other nodes - 2 hidden", "1 retired" }) do
+  ok(has(list_text, word), "the list says it: " .. word)
 end
+-- WhatsApp is ONCE, under the built-in heading: not once per node that carries the same connector.
+local whatsapp_rows, seen_marks = 0, 0
+for _, row in ipairs(lines_of(list_text)) do
+  local _, count = row:gsub("WhatsApp", "")
+  whatsapp_rows = whatsapp_rows + count
+  if has(row, "\u{2714}") or has(row, "! ") then seen_marks = seen_marks + 1 end
+end
+ok(whatsapp_rows == 1, "WhatsApp is listed once: " .. whatsapp_rows)
+ok(seen_marks >= 5, "every row carries a mark: " .. seen_marks)
+-- Nothing of the old row is left in the list: no type column, no node column, no "callable now", no number.
+for _, gone in ipairs({ "built-in \u{b7} ", "MCP \u{b7} ", "callable now", "on this node", "on openclaw",
+  "\u{276f}  1.", "services \u{b7} " }) do
+  ok(not has(list_text, gone), "the list no longer says: " .. gone)
+end
+ok(widest(list_text) <= 80, "the list fits 80 columns: " .. widest(list_text))
 local needs = nil
 for _, page in ipairs(set.views) do if page.title:sub(1, 5) == "gated" then needs = balloon.text({ page }, 80) end end
 ok(has(needs, "401 unauthorized: the access token was rejected"), "the detail carries the error in full")

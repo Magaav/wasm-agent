@@ -10,7 +10,9 @@ local M = {}
 function M.mcp_view()
   return {
     ok = true, read_only = false, role = 'master', revision = 42, peers_at = 1762700000,
-    counts = { connectors = 4, services = 4, built_in = 1, mcp = 3, here = 3, from_peers = 1, enabled = 2, tools = 5 },
+    -- Eight connectors: two built-in (the WhatsApp service and the shipped Gmail connector), four added on
+    -- this node, two on peer nodes, one of them the retired row. Counted the way `mcp_command.list` counts.
+    counts = { connectors = 8, services = 8, built_in = 2, mcp = 6, here = 6, from_peers = 2, enabled = 5, tools = 10 },
     note = 'A change applies to new sessions at once; sessions already running are told on their next turn '
       .. 'by the existing [session update] note, because the callable tool list is part of the frozen prefix.',
     connectors = {
@@ -47,6 +49,9 @@ function M.mcp_view()
       },
       {
         key = 'native_reads', id = 'native_reads', name = 'Filesystem reads', where = 'this node', scope = 'local',
+        -- `origin` is `mcp_command.origin_of`'s answer, carried on every row the registry produces: it runs a
+        -- script this agent does not ship, so it was added on this node.
+        origin = 'custom',
         type = 'MCP', node = 'this node', node_phrase = 'on this node',
         transport = 'stdio', state = 'failing', enabled = false, tool_count = 0, approved = 1, discovered = 0,
         revision = 42, error = 'probe failed: connect to /run/wasm-agent/mcp/native_reads.sock: connection refused '
@@ -60,10 +65,61 @@ function M.mcp_view()
       },
       {
         key = 'gated', id = 'gated', name = 'Gated reports', where = 'this node', scope = 'local', transport = 'http',
+        origin = 'custom',
         type = 'MCP', node = 'this node', node_phrase = 'on this node',
         state = 'disabled', enabled = false, tool_count = 0, approved = 0, discovered = 0, revision = 42,
         error = '401 unauthorized: the access token was rejected by the reports service', secret_env = { 'GATED_MCP_TOKEN' },
         policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write' }, tools = {},
+      },
+      {
+        -- A connector this agent SHIPS (origin_of finds a runtime script in its arguments): it belongs
+        -- under "wasm-agent built-in MCPs", next to the built-in WhatsApp service.
+        key = 'mcp-mail', id = 'mcp-mail', name = 'Gmail', where = 'this node', scope = 'local', origin = 'built-in',
+        type = 'built-in MCP', node = 'this node', node_phrase = 'on this node', transport = 'stdio',
+        state = 'enabled', enabled = true, tool_count = 2, approved = 2, discovered = 2, revision = 42,
+        policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write' },
+        tools = {
+          { name = 'mcp_mcp-mail_search_4d2a1b90', tool = 'search', approval = 'read', published = true,
+            description = 'MCP mcp-mail / search: search one mailbox', schema = '{"type":"object","properties":{"q":{}}}' },
+          { name = 'mcp_mcp-mail_send_7c9e0f11', tool = 'send', approval = 'write', published = true,
+            description = 'MCP mcp-mail / send: send one message', schema = '{"type":"object","properties":{"to":{}}}' },
+        },
+      },
+      {
+        -- A row whose NAME is a whole sentence: the list keeps a name and cuts it (24/11).
+        key = 'reports', id = 'reports', name = 'Quarterly reports from the accounting service on the intranet',
+        where = 'this node', scope = 'local', origin = 'custom',
+        type = 'MCP', node = 'this node', node_phrase = 'on this node', transport = 'stdio',
+        state = 'enabled', enabled = true, tool_count = 3, approved = 3, discovered = 3, revision = 42,
+        policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write' },
+        tools = {
+          { name = 'mcp_reports_list_00000001', tool = 'list', approval = 'read', published = true,
+            description = 'MCP reports / list: list one quarter', schema = '{"type":"object","properties":{}}' },
+        },
+      },
+      {
+        key = 'mail:whatsapp_native', id = 'whatsapp_native', name = 'whatsapp_native', peer = 'mail',
+        type = 'MCP', node = 'mail', node_phrase = 'on mail', where = 'mail', scope = 'peer', transport = 'native',
+        state = 'enabled', enabled = true, tool_count = 1, approved = 1, discovered = 1, revision = 3,
+        policy = { tier = 'mcp', approval = 'approved on mail as read or write' },
+        tools = {
+          { name = 'peer_mail__read_newest', approval = 'read', published = true,
+            description = 'MCP whatsapp_native / read_newest: read one chat', schema = '{}' },
+        },
+      },
+      {
+        -- A registry row whose program went (state 'retired' is what mcp_command computes for the
+        -- WhatsApp family): folded under "1 retired", never one of the two groups.
+        key = 'whatsapp_go:retired', id = 'whatsapp_go', name = 'WhatsApp Go connector (retired)', where = 'this node',
+        scope = 'local', origin = 'custom', type = 'custom MCP', node = 'this node', node_phrase = 'on this node',
+        transport = 'stdio', state = 'retired', enabled = false, tool_count = 0, approved = 1, discovered = 1,
+        revision = 42, note = 'retired: the WhatsApp Go connector was removed on 11/11 and this row is what is left of it.',
+        policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write' },
+        tools = {
+          { name = 'mcp_whatsapp_go_read_11223344', tool = 'read', approval = 'read', published = false,
+            description = '(approved, but the last probe did not list this tool)', schema = '{}',
+            note = 'superseded_by_mcp_whatsapp' },
+        },
       },
     },
   }

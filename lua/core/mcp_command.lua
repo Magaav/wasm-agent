@@ -466,6 +466,10 @@ end
 -- callback: the client cannot run one (it has no registry), so an option the client can draw has to be a
 -- line the interpreter executes. Mid-run that line is queued for the next turn, and the balloon says so.
 local balloon = dofile('lua/core/balloon.lua')
+-- The list itself (two groups, a mark, a short name, a tool count) lives in its own module, because it is
+-- rows and nothing else: "we should list wasm-agent built-in MCPs and User MCPs and simplificate just list
+-- how many tools it has" (Victor, 24/11). This file keeps owning the connectors and the pages.
+local mcp_list = dofile('lua/core/mcp_list.lua')
 -- A page line that carries data (a list of input fields, a note, a peer list) is wrapped to the
 -- client's 400-character limit before it is a line: `rust/wa-cli-views/src/spec.rs` refuses the WHOLE
 -- view for one long line, and a refused `/mcp` page is one the reader never sees (Victor, 21/11).
@@ -504,25 +508,9 @@ function M.state_label(entry)
   return STATE_LABELS[tostring(entry.state)] or tostring(entry.state or 'unknown')
 end
 
--- "6 tools", "1 tool", "no tool".
-local function tools_phrase(count)
-  count = tonumber(count) or 0
-  if count == 0 then return 'no tool' end
-  return string.format('%d tool%s', count, count == 1 and '' or 's')
-end
-
--- What one row's second column says: the type, where it runs, how it stands, and how much it carries.
---
--- One function for every service, because that is the whole point of the list: WhatsApp (built in) and
--- Gmail (an MCP connector on another node) are read the same way, and the node is a column rather than a
--- heading that only some rows live under.
-local function row_hint(entry)
-  local count = entry.count_phrase
-  if count == nil then count = tools_phrase(entry.tool_count) end
-  return string.format('%s \u{b7} %s \u{b7} %s \u{b7} %s',
-    tostring(entry.type or 'MCP'), tostring(entry.node_phrase or ('on ' .. tostring(entry.where or '?'))),
-    M.state_label(entry), tostring(count))
-end
+-- "6 tools", "1 tool", "no tool": the list's own wording, so a row and a Tools page cannot count the same
+-- connector two ways.
+local function tools_phrase(count) return mcp_list.tools_phrase(count) end
 
 -- The vault keys this connector's definition names (`secret_env`), by name. Only the NAMES: a value never
 -- leaves the vault, and this page is the only place a reader learns which name to store.
@@ -583,7 +571,9 @@ function M.tools_page(entry, links, back)
   options[#options + 1] = { label = 'Back', hint = 'the connector', back = true }
   local lines = {
     string.format('%s \u{b7} %s', tostring(entry.key),
-      #(entry.tools or {}) == 0 and 'no tool' or tools_phrase(#(entry.tools or {}))),
+      -- The count phrase of the row above, so the two pages cannot say "no tools" and "no tool" about
+      -- the same connector (Fable 24/11).
+      tools_phrase(#(entry.tools or {}))),
   }
   if #(entry.tools or {}) == 0 then
     lines[#lines + 1] = 'This connector gives the model no tool: it has not been probed, or it exposes none.'
@@ -665,28 +655,13 @@ end
 function M.views(view, opts)
   opts = opts or {}
   view = view or { connectors = {}, counts = {} }
-  local counts = view.counts or {}
   local pages = {}
-  local lines = {
-    string.format('%d services \u{b7} %d built-in, %d MCP \u{b7} %d connected \u{b7} %d tools callable now',
-      counts.services or counts.connectors or 0, counts.built_in or 0,
-      counts.mcp or ((counts.connectors or 0) - (counts.built_in or 0)), counts.enabled or 0, counts.tools or 0),
-  }
-  if view.read_only then
-    lines[#lines + 1] = 'read-only: ' .. tostring(view.note)
-  end
-  local list = balloon.page({ title = 'Services', lines = lines, options = {}, selected = 1,
-    hint = 'Enter opens a service \u{b7} Esc or \u{2190} closes' })
-  pages[1] = list
-  if #(view.connectors or {}) == 0 then
-    list.lines[#list.lines + 1] = 'none: no service is registered on this node, and no peer exports one.'
-  end
-  -- Peers that did not answer the last refresh: one line, not rows posing as connectors.
-  if type(view.peers_silent) == 'table' and #view.peers_silent > 0 then
-    local age = tonumber(view.peers_at) and math.max(0, math.floor(((tonumber(host.now()) or 0) - view.peers_at) / 60)) or nil
-    push(list.lines, 'peers not answering: ' .. table.concat(view.peers_silent, ', ')
-      .. (age and string.format(' (last refresh %d min ago)', age) or ''))
-  end
+  -- THE LIST IS TWO GROUPS OF ROWS (24/11): "wasm-agent built-in MCPs", then "User MCPs", a mark and a tool
+  -- count per connector, and one folded row for the connectors that live on other nodes and one for the retired
+  -- entries. `mcp_list` composes the rows - it decides nothing about a connector's state or origin, it reads
+  -- what this file already worked out - and this function is what turns a row into a page link.
+  local plan = mcp_list.plan(view, { state_label = M.state_label })
+  local link_of = {}
   -- A panel stack has a cap (`max_pages`, the client's MAX_VIEWS = 64 for the mid-run snapshot): over it,
   -- the per-tool pages go and each Tools page still names every tool (17/11, work: 72 panels were refused
   -- whole, so mid-run /mcp never showed and was rebuilt at every round).
@@ -710,13 +685,73 @@ function M.views(view, opts)
     for tool_number, tool in ipairs(entry.tools or {}) do
       if tool_pages[tool_number] then pages[tool_pages[tool_number]] = M.tool_page(tool, entry, detail_index) end
     end
-    local hint = row_hint(entry)
-    if entry.error and tostring(entry.error) ~= '' then
-      hint = hint .. ' \u{b7} ' .. balloon.fit(tostring(entry.error), 28)
+    -- A connector opens the page it always opened: the detail, with its tools, its state and its actions.
+    link_of[entry.key] = detail_index
+  end
+  -- The folded rows: one page per fold, each a row per connector that would otherwise repeat a name in the
+  -- list above. A row here links to the SAME detail page, so the two spellings of one connector are one
+  -- connector.
+  local fold_page = {}
+  for _, fold in ipairs(plan.folded) do
+    index = index + 1
+    local options = {}
+    for _, row in ipairs(fold.rows) do
+      options[#options + 1] = { label = row.label, hint = row.hint, page = link_of[row.key] }
     end
-    list.options[#list.options + 1] = {
-      label = tostring(entry.name or entry.key), hint = hint, page = detail_index,
-    }
+    options[#options + 1] = { label = 'Back', hint = 'the list', back = true }
+    -- The fold's own sentence, wrapped: a line that is cut by the renderer ("the same connector on another
+    -- node is not a second...") is the same defect this change removes from the rows.
+    local fold_lines = {}
+    for _, line in ipairs(fold.lines) do push(fold_lines, line) end
+    pages[index] = balloon.page({ title = fold.title, lines = fold_lines, options = options, selected = 1 })
+    fold_page[fold.kind] = index
+  end
+  local lines = { plan.lines[1] }
+  if view.read_only then
+    -- The reason, in one row that fits: the guest's own note is a paragraph, and a list is not the place
+    -- for it (it is on the connector's page, in full).
+    lines[#lines + 1] = 'read-only: a master turns a connector on or off'
+  end
+  local list = balloon.page({ title = plan.title, lines = lines, options = {}, selected = 1, numbered = false,
+    hint = 'Enter opens a connector \u{b7} Esc or \u{2190} closes' })
+  pages[1] = list
+  if #(view.connectors or {}) == 0 then
+    list.lines[#list.lines + 1] = 'no MCP servers: none on this node and none shared by another node.'
+  end
+  -- Peers that did not answer the last refresh: one line, not rows posing as connectors.
+  if type(view.peers_silent) == 'table' and #view.peers_silent > 0 then
+    local age = tonumber(view.peers_at) and math.max(0, math.floor(((tonumber(host.now()) or 0) - view.peers_at) / 60)) or nil
+    push(list.lines, 'peers not answering: ' .. table.concat(view.peers_silent, ', ')
+      .. (age and string.format(' (last refresh %d min ago)', age) or ''))
+  end
+  -- One heading per group, in the order `mcp_list` gives them, and the heading row is the first row's:
+  -- an empty group keeps its heading and says why it is empty there, because a heading with nothing under
+  -- it reads as a rendering bug.
+  for _, section in ipairs(plan.sections) do
+    -- An empty group has no row to carry its heading, and a heading with nothing under it reads as a
+    -- rendering bug. So the list says it once, under the count, and the groups that DO have rows keep
+    -- their heading: "1 server" alone would leave a reader wondering whether nothing was added or the
+    -- list simply did not look.
+    if #section.rows == 0 then
+      lines[#lines + 1] = section.group == 'built_in'
+        and 'no built-in MCPs on this node'
+        or 'no user MCPs on this node'
+    end
+    for position, row in ipairs(section.rows) do
+      list.options[#list.options + 1] = {
+        heading = position == 1 and section.heading or nil,
+        label = row.label, hint = row.hint, page = link_of[row.key],
+      }
+    end
+  end
+  for position, fold in ipairs(plan.folded) do
+    -- The row is the words the brief asks for and nothing else: the count of what it hides is IN the label
+    -- ("On other nodes - 2 hidden"), so a hint here would only be a second sentence on a list row.
+    -- The FIRST folded row carries an empty heading: that is the blank row that sets the folds apart from
+    -- the group above them, so "1 retired" and "On other nodes" do not read as connectors of this node
+    -- (Fable, 24/11).
+    list.options[#list.options + 1] = { label = fold.label, page = fold_page[fold.kind],
+      heading = position == 1 and '' or nil }
   end
   return { command = '/mcp', captured_at = host.now and host.now() or os.time(), views = pages, view = view }
 end

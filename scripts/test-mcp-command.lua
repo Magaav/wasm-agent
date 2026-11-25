@@ -103,34 +103,89 @@ check(seen_whatsapp and type(seen_whatsapp.count_phrase) == 'string',
 check(view.counts.built_in == 1, 'the header counts the built-in service: ' .. tostring(view.counts.built_in))
 check(view.counts.mcp == view.counts.connectors - 1,
   'and the MCP ones separately: ' .. tostring(view.counts.mcp) .. ' of ' .. tostring(view.counts.connectors))
--- One shape for every row: type, node, state, count - the same four columns for the built-in service and
--- for a peer's connector, whichever node they run on.
--- The rendered rows, in the order the view lists them: one option per service (labels may repeat - two
--- nodes can both export a connector called "Native reads" - so the row is found by position, the same way
--- the client draws it).
-local rendered_options = command.views(view).views[1].options or {}
-check(#rendered_options == #view.connectors, 'the list draws one row per service: '
-  .. #rendered_options .. ' row(s), ' .. #view.connectors .. ' service(s)')
-for index, entry in ipairs(view.connectors) do
-  local hint = (rendered_options[index] or {}).hint or ''
-  local kind = entry.type or 'MCP'
-  check(hint:sub(1, #(kind .. ' \u{b7} ')) == kind .. ' \u{b7} ',
-    'every row names its type first (' .. tostring(entry.key) .. '): ' .. hint)
-  check(hint:find(entry.node_phrase or '?', 1, true) ~= nil,
-    'and where it runs (' .. tostring(entry.key) .. '): ' .. hint)
-  check(hint:find(command.state_label(entry), 1, true) ~= nil,
-    'and its state (' .. tostring(entry.key) .. '): ' .. hint)
-  local count = entry.count_phrase
-  if count == nil then
-    local n = tonumber(entry.tool_count) or 0
-    count = n == 0 and 'no tool' or (tostring(n) .. (n == 1 and ' tool' or ' tools'))
+-- THE LIST IS TWO GROUPS OF ROWS (24/11): a mark, a short name and a tool count - or the state in at most
+-- two words when the connector is not healthy. The type, the node and the transport are on the connector's
+-- own page, not in a row; what a row does NOT carry is asserted below, because leaving them out is the point.
+local set = command.views(view)
+local root = set.views[1]
+check(root.title == 'MCP servers', 'the list is titled MCP servers: ' .. tostring(root.title))
+check(root.numbered == false, 'the list is not a numbered menu')
+check(tostring(root.lines[1]):match('^%d+ servers?$') ~= nil,
+  'the line under the title counts servers: ' .. tostring(root.lines[1]))
+local headings, rows = {}, {}
+-- The folded rows open a page of their own ('On other nodes', 'Retired'); a server row opens a connector.
+-- The two are told apart by what they open, so this test does not depend on a row's words to sort them.
+local folded_page_index = {}
+for index, page in ipairs(set.views) do
+  if page.title == 'On other nodes' or page.title == 'Retired' or page.title == 'Not classified' then
+    folded_page_index[index] = true
   end
-  check(hint:find(count, 1, true) ~= nil, 'and a count (' .. tostring(entry.key) .. '): ' .. hint)
 end
--- The node is a column, not a header: no row's label is a node name, and no hint is empty.
+for _, option in ipairs(root.options) do
+  if option.heading then headings[#headings + 1] = option.heading end
+  -- A row that STARTS a group carries the group's heading and is still a row of it.
+  if option.page and not folded_page_index[option.page] then rows[#rows + 1] = option end
+end
+check(headings[1] == 'wasm-agent built-in MCPs' and headings[2] == 'User MCPs',
+  'the two headings, in this order: ' .. table.concat(headings, ' | '))
+-- One row per connector ON THIS NODE, and one folded row per thing that is not: the peer's connector is
+-- behind the fold, never a second row beside the local one of the same name.
+local here = 0
 for _, entry in ipairs(view.connectors) do
-  check(entry.name ~= 'openclaw' and entry.name ~= 'this node', 'no row is a node heading: ' .. tostring(entry.name))
+  if entry.scope ~= 'peer' and entry.state ~= 'retired' then here = here + 1 end
 end
+check(#rows == here, 'one row per connector on this node: ' .. #rows .. ' row(s), ' .. here .. ' connector(s)')
+local page_of_key = {}
+for index, page in ipairs(set.views) do
+  for _, entry in ipairs(view.connectors) do
+    if page.title and page.title:sub(1, #entry.key + 3) == entry.key .. ' \u{b7}' then page_of_key[entry.key] = index end
+  end
+end
+local opened = {}
+for _, row in ipairs(rows) do opened[row.page] = true end
+for _, entry in ipairs(view.connectors) do
+  if entry.scope ~= 'peer' and entry.state ~= 'retired' then
+    check(opened[page_of_key[entry.key]], 'the row of ' .. tostring(entry.key) .. ' opens its own page')
+  end
+end
+-- The mark, the name and the count-or-state: the three things a row is allowed to say.
+local function row_of(key)
+  for _, row in ipairs(rows) do if row.page == page_of_key[key] then return row end end
+  return nil
+end
+local whatsapp_row = row_of('whatsapp')
+check(whatsapp_row ~= nil, 'WhatsApp has a row of its own')
+check(whatsapp_row and whatsapp_row.label:sub(1, 2) == (command.state_label(seen_whatsapp) == 'connected'
+  and '\u{2714} ' or '! '), 'the row carries the mark of its state: ' .. tostring(whatsapp_row and whatsapp_row.label))
+check(whatsapp_row and (whatsapp_row.hint == 'no account' or whatsapp_row.hint:match('tool') ~= nil
+  or whatsapp_row.hint == 'not reachable'), 'and the count or the state, never both: ' .. tostring(whatsapp_row and whatsapp_row.hint))
+-- A word that says what is MISSING, not that something is unknown (Fable, 24/11): the built-in surface with no
+-- node in the fleet holding the account says `no account` (the unit half - a registry connector never borrows
+-- that word - is scripts/test-mcp-list.lua).
+if tostring(command.state_label(seen_whatsapp)) == 'unknown' then
+  check(whatsapp_row and whatsapp_row.hint == 'no account',
+    'the built-in surface with no account node says what is missing: ' .. tostring(whatsapp_row and whatsapp_row.hint))
+end
+local broken_row = row_of('broken')
+check(broken_row ~= nil and broken_row.hint == 'not reachable',
+  'a failing connector says it in two words: ' .. tostring(broken_row and broken_row.hint))
+local native_row = row_of('native_reads')
+check(native_row ~= nil and native_row.hint == 'disabled',
+  'a disabled connector says so: ' .. tostring(native_row and native_row.hint))
+-- What a row must NOT carry: the description, the transport, the whole sentence the old right column cut.
+for _, row in ipairs(rows) do
+  check(row.hint ~= nil and #row.hint <= 16, 'a row hints at most 16 characters: ' .. tostring(row.hint))
+  check(not row.hint:find('\u{b7}', 1, true), 'no row is a chain of columns: ' .. row.hint)
+end
+-- The peer's connector is behind the fold, named "<connector> on <node>" on the page it opens.
+local peer_fold = nil
+for _, option in ipairs(root.options) do
+  if option.label == 'On other nodes - 1 hidden' then peer_fold = option end
+end
+check(peer_fold ~= nil, 'the peer connector is one folded row, not a row beside the local one')
+local peer_page = peer_fold and set.views[peer_fold.page]
+check(peer_page ~= nil and peer_page.options[1] and peer_page.options[1].label:find(' on openclaw', 1, true) ~= nil,
+  'the folded page names the connector and the node: ' .. tostring(peer_page and peer_page.options[1] and peer_page.options[1].label))
 -- Turning a built-in on or off is refused by name, with the reason - it has no registry row at all.
 local refused = command.toggle(ctx, 'whatsapp', false)
 check(refused.ok == false and refused.error == 'built_in_service', 'turning WhatsApp off from /mcp is refused by name')
@@ -167,9 +222,16 @@ check(located_row and located_row.node_phrase == 'account on openclaw',
 check(located_row and located_row.state_label == 'connected', 'and that it answered the fleet catalog')
 check(located_row and located_row.count_phrase == '36 chats',
   'and the account node\'s own chat count: ' .. tostring(located_row and located_row.count_phrase))
+-- The rendered list: WhatsApp is ONE row under the built-in heading, and the count it carries is the
+-- account node's own chat count - not a column chain (the node, the transport and the type are on the
+-- connector's page, where a reader goes for them).
 local located_text = command.text(located, 80)
-check(located_text:find('built-in \u{b7} account on openclaw \u{b7} connected \u{b7} 36 chats', 1, true) ~= nil,
-  'the rendered row is one line of four columns: ' .. tostring(located_text:match('[^\n]*built%-in[^\n]*')))
+local seen_whatsapp_rows = select(2, located_text:gsub('WhatsApp', ''))
+check(seen_whatsapp_rows == 1, 'WhatsApp is one row in the list: ' .. seen_whatsapp_rows)
+local located_detail = command.detail_text(command.find(located, 'whatsapp'), 80)
+check(contains(located_detail, 'account on openclaw'),
+  'and its page still says where the account lives: ' .. tostring(located_detail:match('[^\n]*account on[^\n]*')))
+check(contains(located_detail, '36 chats'), 'and carries the account node\'s own count')
 
 -- Over the client's 64-panel cap (17/11, work: 72 panels, refused whole): the per-tool pages go, every
 -- Tools page still names its tools, and every link points inside the stack.
@@ -178,7 +240,8 @@ do
   for c = 1, 6 do
     local tools = {}
     for t = 1, 12 do tools[t] = { name = 'c' .. c .. '_t' .. t, approval = 'read', published = true } end
-    many.connectors[c] = { key = 'c' .. c, id = 'c' .. c, name = 'c' .. c, tools = tools, tool_count = 12, scope = 'local', where = 'this node', state = 'connected' }
+    many.connectors[c] = { key = 'c' .. c, id = 'c' .. c, name = 'c' .. c, tools = tools, tool_count = 12,
+      scope = 'local', origin = 'custom', where = 'this node', state = 'connected' }
   end
   local full = command.views(many)
   local capped = command.views(many, { max_pages = 64 })
@@ -192,12 +255,13 @@ do
   check(#command.views(view, { max_pages = 64 }).views == #command.views(view).views, 'a stack under the cap is unchanged')
 end
 
--- The rendered list, at 80 columns: one line per service, and the header counts services, not connectors.
+-- The rendered list, at 80 columns: two groups, one row per connector, and a count that is what the two
+-- groups show (what is folded is counted on the folded row itself).
 local rendered = command.text(view, 80)
-check(rendered:find(string.format('%d services \u{b7} 1 built-in, %d MCP', view.counts.services, view.counts.mcp), 1, true) ~= nil,
-  'the header counts services by kind: ' .. tostring(rendered:match('^[^\n]*\n\n([^\n]*)')))
-check(rendered:find('built-in \u{b7} ', 1, true) ~= nil, 'and the built-in row is in it')
-check(rendered:find('36 chats', 1, true) == nil or seen_whatsapp.chats == 36, 'the count is the index\'s own')
+check(root.lines[1] == string.format('%d servers', #rows),
+  'the header counts the rows the two groups show: ' .. tostring(root.lines[1]) .. ' for ' .. #rows .. ' row(s)')
+check(rendered:find('wasm-agent built-in MCPs', 1, true) ~= nil, 'and the built-in group is in it')
+check(rendered:find('User MCPs', 1, true) ~= nil, 'and the group the operator added')
 
 local native = command.find(view, 'native_reads')
 check(native and native.where == 'this node' and native.scope == 'local', 'the local connector says where it runs')
@@ -236,9 +300,12 @@ check(peer_detail.connector.tools[1].published == true, 'a published peer tool i
 
 -- The text the terminal prints: the list and the detail carry the same names.
 local text = command.text(view)
-check(contains(text, tostring(view.counts.services) .. ' services'),
-  'the list counts services, not one transport: ' .. tostring(text:match('^[^\n]*\n\n([^\n]*)')))
-check(contains(text, 'connected'), 'the list names the state in one word a reader scans for')
+check(contains(text, 'MCP servers') and contains(text, 'servers'),
+  'the list is titled and counts what it lists: ' .. tostring(text:match('^[^\n]*\n\n([^\n]*)')))
+check(contains(text, 'wasm-agent built-in MCPs') and contains(text, 'User MCPs'),
+  'the two groups are named, in that order')
+check(contains(text, 'not reachable') or contains(text, 'disabled'),
+  'an unhealthy row says its state in two words a reader scans for')
 -- The key moved off the row (the row is the operator's four columns) and onto the page it opens, which is
 -- where a reader learns what to type: `/mcp <key>` still resolves, and a bare id does too (`M.find`).
 check(contains(command.detail_text(command.find(view, 'openclaw:native_reads')), 'openclaw:native_reads'),

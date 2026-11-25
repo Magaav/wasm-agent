@@ -1009,6 +1009,18 @@ pub fn carries_secret(line: &str) -> bool {
 const QUEUED_MAX: usize = 3;
 const PLACEHOLDER: &str = "Type a message, or / for commands";
 
+/// One row of a panel's list.
+///
+/// `heading` is the name of the group this row STARTS (`/mcp`'s "wasm-agent built-in MCPs", "User MCPs"):
+/// the renderer draws it as a row of its own, above this one, and no key ever selects it - the letters and
+/// digits a page offers index OPTIONS, and a heading is not one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PanelOption {
+    pub label: String,
+    pub hint: String,
+    pub heading: Option<String>,
+}
+
 /// A panel over the bottom of the screen, the way Claude Code shows `/model` or `/usage`: a title, a
 /// few lines, then a list to pick from or a field to type in, and Esc closes it. Lua describes it
 /// (`host.panel`) and gets back what the reader chose; while it is open every keystroke is its own.
@@ -1017,7 +1029,10 @@ const PLACEHOLDER: &str = "Type a message, or / for commands";
 /// reaches the transcript: its text goes only into the result handed to the caller.
 #[derive(Default)]
 pub struct Panel {
-    pub title: String, pub lines: Vec<String>, pub options: Vec<(String, String)>, pub selected: usize,
+    pub title: String, pub lines: Vec<String>, pub options: Vec<PanelOption>, pub selected: usize,
+    /// Whether the rows are numbered. A menu is numbered; a page of groups is not (`/mcp`'s list, 24/11:
+    /// "no numbering" - the number in front of a row is one thing the operator asked to be rid of).
+    pub numbered: bool,
     pub input: Option<bool>, pub placeholder: String, pub hint: String,
     /// A field that keeps its spaces: what an `input: "line"` page types into. A `text` field drops
     /// whitespace (it has always been a name, a key or a path); a message draft is a sentence, and a
@@ -1036,9 +1051,19 @@ impl Panel {
         let text = |key: &str| spec.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let lines = spec.get("lines").and_then(|v| v.as_array()).map(|a| a.iter()
             .map(|l| l.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
-        let options: Vec<(String, String)> = spec.get("options").and_then(|v| v.as_array()).map(|a| a.iter().map(|o| (
-            o.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            o.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string())).collect()).unwrap_or_default();
+        // One row, with the group it may START (`heading`): the renderer draws that name as a row of its
+        // own above this one, and no key selects it. The field is absent on every page that has groups of
+        // one, which is every page but `/mcp`'s list.
+        let options: Vec<PanelOption> = spec.get("options").and_then(|v| v.as_array()).map(|a| a.iter().map(|o|
+            PanelOption {
+                label: o.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                hint: o.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                // An EMPTY heading is kept: it is the blank row that sets a block of rows apart from the group
+                // above it, and dropping it here would put the folded rows back among the connectors.
+                heading: o.get("heading").and_then(|v| v.as_str()).map(str::to_string),
+            }).collect()).unwrap_or_default();
+        // A page that does not say is numbered: every panel that existed before this field was one.
+        let numbered = spec.get("numbered").and_then(|v| v.as_bool()).unwrap_or(true);
         let input = match spec.get("input").and_then(|v| v.as_str()) {
             Some("secret") => Some(true),
             Some("text") => Some(false),
@@ -1072,18 +1097,26 @@ impl Panel {
             _ if !options.is_empty() => "\u{2191}\u{2193} to move \u{b7} Enter to select \u{b7} Esc or \u{2190} to go back".into(),
             _ => "Esc or \u{2190} to go back".into(),
         };
-        Panel { title: text("title"), lines, options, selected, input, placeholder: text("placeholder"), hint,
+        Panel { title: text("title"), lines, options, selected, numbered, input, placeholder: text("placeholder"), hint,
             spaces, keys, text: value, width, rows, ..Default::default() }
     }
 
+    /// The rows a page's group headings take: one each, and only on a page that has them (`/mcp`'s list).
+    /// Counted over every option rather than only the visible ones - an upper bound, so the window never
+    /// grows past the screen because a heading appeared in it.
+    fn heading_rows(&self) -> usize {
+        self.options.iter().filter(|option| option.heading.is_some()).count()
+    }
     /// How many options are on screen at once; the window follows the selection.
     fn visible_options(&self) -> usize {
         let fixed = 2 + 2 + self.lines.len() + 1 + 2; // dividers, title + gap, lines, gap, gap + hint
-        self.options.len().min(PANEL_OPTIONS).min(self.rows.saturating_sub(fixed + 2).max(1))
+        let headings = self.heading_rows();
+        self.options.len().min(PANEL_OPTIONS).min(self.rows.saturating_sub(fixed + 2 + headings).max(1))
     }
     fn body(&self) -> usize {
         let choice = if self.input.is_some() { 2 } else if self.options.is_empty() { 0 } else { 1 + self.visible_options() };
-        2 + self.lines.len() + choice + 2
+        let headings = if self.input.is_some() || self.options.is_empty() { 0 } else { self.heading_rows() };
+        2 + self.lines.len() + choice + headings + 2
     }
     pub fn pasting(&self) -> bool { self.paste }
     /// Rows the panel takes, borders included.
@@ -1210,15 +1243,25 @@ impl Panel {
             rows.push(body);
         } else if !self.options.is_empty() {
             rows.push(String::new());
-            let label_width = self.options.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0) + 2;
+            let label_width = self.options.iter().map(|option| option.label.chars().count()).max().unwrap_or(0) + 2;
             let shown = self.visible_options();
             let start = self.selected.saturating_sub(shown - 1).min(self.options.len() - shown);
-            for (index, (label, hint)) in self.options.iter().enumerate().skip(start).take(shown) {
+            for (index, option) in self.options.iter().enumerate().skip(start).take(shown) {
+                // A group's name, drawn as a row of its own above the row it starts: never a choice, never
+                // marked, and a blank row keeps it apart from the group above it.
+                if let Some(heading) = option.heading.as_deref() {
+                    if index > 0 { rows.push(String::new()); }
+                    if !heading.is_empty() { rows.push(fit(heading)); }
+                }
                 let mark = if index == self.selected { "\u{276f}" } else { " " };
                 let digits = self.options.len().to_string().len();
-                let head = fit(&format!("{mark} {:>digits$}. {:<label_width$}", index + 1, label));
+                let head = if self.numbered {
+                    fit(&format!("{mark} {:>digits$}. {:<label_width$}", index + 1, option.label))
+                } else {
+                    fit(&format!("{mark} {:<label_width$}", option.label))
+                };
                 let room = w.saturating_sub(head.chars().map(cell_width).sum());
-                let tail: String = clip_cells(hint, room);
+                let tail: String = clip_cells(&option.hint, room);
                 rows.push(if index == self.selected { format!("{SELECTED}{head}{tail}{RESET}") }
                     else { format!("{head}{HINT}{tail}{RESET}") });
             }
@@ -1403,6 +1446,72 @@ mod tests {
         panel.feed(0x1b);
         panel.escape();
         assert_eq!(panel.result, Some(serde_json::json!({"action": "cancel"})));
+    }
+
+    /// A page of groups (`/mcp`'s list, 24/11): a heading is a row of its own above the row it starts, and
+    /// it is never a choice; `numbered: false` is a list a reader scans rather than a menu to count.
+    #[test]
+    fn a_group_heading_is_a_row_of_its_own_and_never_a_choice() {
+        let spec = serde_json::json!({
+            "title": "MCP servers",
+            "lines": ["3 servers"],
+            "numbered": false,
+            "options": [
+                {"label": "\u{2714} WhatsApp", "hint": "8 tools", "heading": "wasm-agent built-in MCPs"},
+                {"label": "\u{2714} Colmeio bills", "hint": "25 tools", "heading": "User MCPs"},
+                {"label": "! Reports", "hint": "needs token"},
+                {"label": "On other nodes - 2 hidden", "heading": ""},
+                {"label": "1 retired"},
+            ],
+            "selected": 1,
+        });
+        let mut panel = Panel::from_spec(&spec, 80, 24);
+        let frame = panel.render();
+        let rows = drawn_rows(&frame);
+        let at = |needle: &str| rows.iter().position(|row| row.contains(needle));
+        let built_in = at("wasm-agent built-in MCPs").expect("the first heading is drawn");
+        let whatsapp = at("WhatsApp").expect("its row is drawn");
+        let user = at("User MCPs").expect("the second heading is drawn");
+        let bills = at("Colmeio bills").expect("its row is drawn");
+        assert!(built_in < whatsapp && whatsapp < user && user < bills, "each heading is above its group: {rows:?}");
+        // The second heading gets a blank row of its own above it, so the groups read as two.
+        assert_eq!(rows[user - 1], "", "a blank row separates the groups: {rows:?}");
+        assert_eq!(rows[built_in - 1], "", "and the first heading sits under the title's own gap: {rows:?}");
+        // THE RIGHT COLUMN IS ONE COLUMN, whatever glyph starts the row. The check mark is three bytes and one
+        // cell; a renderer that pads by BYTES puts its hint two cells to the left of every other row's, which is
+        // exactly what /mcp's 80-column text capture did before 24/11 (measured: head chars 28 vs 30). Cells
+        // here, because a cell is what a terminal draws.
+        let column_of = |needle: &str, hint: &str| -> usize {
+            let row = rows.iter().find(|row| row.contains(needle)).unwrap_or_else(|| panic!("no row {needle}"));
+            let at = row.find(hint).unwrap_or_else(|| panic!("no hint {hint} in {row:?}"));
+            visible_cells(&row[..at]) + 1
+        };
+        assert_eq!(column_of("WhatsApp", "8 tools"), column_of("Reports", "needs token"),
+            "the check row and the warning row start their hint in the same column: {rows:?}");
+        assert_eq!(column_of("Colmeio bills", "25 tools"), column_of("Reports", "needs token"),
+            "and so does every row between them: {rows:?}");
+        // An EMPTY heading is a gap and nothing else: the folded rows sit under it, apart from the group
+        // above, and no row of text is drawn for it.
+        let folded = at("On other nodes").expect("the folded row is drawn");
+        assert_eq!(rows[folded - 1], "", "a blank row sets the folded rows apart: {rows:?}");
+        let above = rows[folded - 2].trim_end().to_string();
+        assert!(above.contains("! Reports") && above.trim_end().ends_with("needs token"),
+            "and nothing but the gap is drawn above them: {rows:?}");
+        // Not numbered: the rows are a list, not a menu.
+        assert!(!frame.contains("1. "), "nothing is numbered: {frame:?}");
+        assert!(frame.contains("\u{276f}"), "the reader's row is still marked");
+        // The keys index OPTIONS, so a heading never shifts them: Down from the first row lands on the
+        // second, and Enter returns 2 - not 3, which is where a heading-as-option would have put it.
+        panel.feed(b'\x1b');
+        panel.feed(b'[');
+        panel.feed(b'B');
+        assert_eq!(panel.selected, 1, "the second option is selected, headings do not count");
+        panel.feed(b'\r');
+        assert_eq!(panel.result, Some(serde_json::json!({"action": "select", "index": 2})));
+        // A page that says nothing about numbering keeps the numbers it always drew.
+        let numbered = serde_json::json!({"title": "Menu", "options": [{"label": "one"}, {"label": "two"}]});
+        let plain = Panel::from_spec(&numbered, 80, 24);
+        assert!(plain.render().contains("1. one"), "a menu is still numbered");
     }
 
     #[test]
