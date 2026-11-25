@@ -458,8 +458,12 @@ ok "$([ -z "$unexpected" ] && echo 1)" "verify-install's only FAIL lines are the
 # verify-install reports the sentinel as not watching - the state of a scratch home before the second pass starts one.
 # With a real sentinel answering, the honest assertion is the opposite one: verify-install must not be FAILING on the
 # sentinel at all, because here it is running.
-ok "$(grep -qE '^  (ok|skip) +the sentinel is watching' "$VERIFY" 2>/dev/null && echo 1)" \
-  "and it reports the sentinel as watching, because in this pass one is" "$(grep -E 'sentinel' "$VERIFY" 2>/dev/null | head -2 | tr '\n' ';')"
+# CLEAN PASS ONLY (25/11, rows/20261125T063529Z): the inject pass starts no sentinel - its premise is one blocked
+# file, not a watcher - so asking verify-install to report one watching there is asking the wrong pass the question.
+if [ "$MODE" = clean ]; then
+  ok "$(grep -qE '^  (ok|skip) +the sentinel is watching' "$VERIFY" 2>/dev/null && echo 1)" \
+    "and it reports the sentinel as watching, because in this pass one is" "$(grep -E 'sentinel' "$VERIFY" 2>/dev/null | head -2 | tr '\n' ';')"
+fi
 
 printf 'deploy covering release ok (%d checks, %d failed)\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
