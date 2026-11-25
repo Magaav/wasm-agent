@@ -29,15 +29,15 @@ ISOLATION="$(wa_scratch_env_check "$W" 2>&1)" || { printf '%s\n' "$ISOLATION" >&
 ID=aaaaaaaaaaaa
 COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
-in_place_install() { # <dir> [<stub-version-exit>]
-  local dir="$1" rc="${2:-0}"
+in_place_install() { # <dir> [<stub-version-exit>] [<commit>]
+  local dir="$1" rc="${2:-0}" commit="${3:-$COMMIT}"
   mkdir -p "$dir/lua-core/lua/core" "$dir/scripts"
   printf '#!/bin/sh\n[ "%s" = 0 ] || exit %s\nprintf "wa-stub\\n"\nexit 0\n' "$rc" "$rc" > "$dir/wa"
   chmod +x "$dir/wa"
   printf 'sentinel' > "$dir/wa-sentinel"
   printf 'init' > "$dir/lua-core/lua/core/init.lua"
   printf 'deploy' > "$dir/scripts/deploy.sh"
-  printf 'commit=%s\nbranch=main\nbuild_pin=%s\n' "$COMMIT" "$COMMIT" > "$dir/installed.txt"
+  printf 'commit=%s\nbranch=main\nbuild_pin=%s\n' "$commit" "$commit" > "$dir/installed.txt"
 }
 
 run_adopt() { # <install> [extra args...]
@@ -82,11 +82,16 @@ grep -q 'adopt_already_adopted' "$W/again.log" || fail "a second run does not sa
 ok
 
 # --- 4. a failed verification leaves the in-place install EXACTLY as it was -------------------------------------
-I2="$W/install2"; in_place_install "$I2" 3    # the stub program answers --version with exit 3
+# A DIFFERENT commit from the first fixture: a version folder is keyed by the commit, so reusing the same id would
+# (correctly) reuse the first, good folder and the failing program would never be verified. The runner caught that
+# too: "a conversion whose verification fails must exit non-zero" with the adopt succeeding off the first folder.
+COMMIT_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+I2="$W/install2"; in_place_install "$I2" 3 "$COMMIT_B"   # the stub program answers --version with exit 3
 if run_adopt "$I2" > "$W/rollback.log" 2>&1; then
   fail "a conversion whose verification fails must exit non-zero"
 fi
 grep -q 'adopt_failed' "$W/rollback.log" || { sed -n '1,8p' "$W/rollback.log" >&2; fail "the failure is not named adopt_failed"; }
+grep -q "commit=$COMMIT_B" "$I2/installed.txt" || { sed -n '1,4p' "$W/rollback.log" >&2; fail "the rollback did not leave the second install's own record in place"; }
 grep -q 'adopt_verify_failed' "$W/rollback.log" || fail "the failed check is not named"
 ok
 [ -f "$I2/wa" ] && [ ! -L "$I2/wa" ] || fail "the rollback did not put the real program back"
