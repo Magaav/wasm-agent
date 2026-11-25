@@ -295,8 +295,22 @@ tree peer remote update ok (7 checks)
 rc=0 ... leftovers=0 canary_before=green canary_after=skip
 ```
 
-canary_after=skip is the runner's own field: it could not READ the canary after this row, which is not a
-claim that the canary stayed green - it is reported as it is. The discrimination for D7's decision is the unit
+canary_after=skip on that first run is the runner's own field: it could not READ the canary afterwards, which is
+not a claim that it stayed green. Fable asked for one rerun when no landing is active, so it was re-run at
+dcbd80be AFTER the live node reported build=82f57859 (the RC installed):
+
+```
+rc=0 row=scripts/test-tree-peer-remote-update.sh commit=dcbd80bed448941ffb85481477c2c9dd76aa3fb4
+leftovers=0 canary_before=skip canary_after=green
+  (the product's own row: 39 checks)  accept two process ok (39 checks): 6 s of relay hold, one deploy, the peer on 6fe7d083
+  ok   the request settled INSTALLED (the follow ends installed)
+  ok   and the peer never answered update_coordinator_only (the D7 refusal)
+tree peer remote update ok (7 checks)
+```
+
+canary_before was skip on the rerun (the node had just come back from its install and the runner could not read
+the canary before the row). Across the two runs every direction has been seen green once - first before=green /
+after=skip, then before=skip / after=green - and neither run saw a red. The discrimination for D7's decision is the unit
 row of section 6 (red on the base with update_coordinator_only, green here); this row is the end-to-end proof
 on the release commit.
 
