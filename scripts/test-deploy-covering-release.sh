@@ -188,6 +188,9 @@ git -C "$TREE" update-ref refs/remotes/origin/main "$C2"
   || skip_all "the fixture tree is not exactly its origin/main, so a deploy would (rightly) refuse it"
 
 # THE COVERING RELEASE for C2, resolved by the same library call the deploy makes.
+# MEASURED in the runner (rows/20261125T043846Z): line 191 died on an unset $CACHE, so the row skipped before it
+# ever asked its own stub channel anything.
+CACHE="$W/cache"; mkdir -p "$CACHE"
 PLAN="$(wa_node_release_digest_search "$TREE" "$C2" "$TRIPLE" "$CACHE" 2>&1)" \
   || skip_all "no published release covers $C2 (its compiled inputs): $(printf '%s' "$PLAN" | tail -1)"
 C1="$(printf '%s\n' "$PLAN" | sed -n 's/^release_commit=//p' | head -1)"
