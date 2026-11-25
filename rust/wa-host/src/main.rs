@@ -252,7 +252,44 @@ fn load_env_file() -> Vec<(String, String)> {
     loaded
 }
 
+/// A READER THAT WALKED AWAY IS NOT A CRASH (Fable, 25/11).
+///
+/// MEASURED on this node: `wa --version | (a reader that closes its end)`, `wa --build-info | …` and
+/// `wa features | …` printed
+/// `thread 'main' panicked at library/std/src/io/stdio.rs:…: failed printing to stdout: Broken pipe (os error 32)`
+/// and exited 101, and `wa call <node> … | head -1` did the same. Closing the pipe is what `head` is FOR; the print
+/// macros unwrap their write, so an ordinary pipeline reads to a person as a crash.
+///
+/// ONE HOOK, SO EVERY PRINTING COMMAND IS COVERED: the subcommands that print from Rust all go through those macros,
+/// and a rule at each `println!` would be one rule per call site, remembered or not. Only the stdout print path is
+/// quietened - `std` formats the payload as `failed printing to stdout: <io::Error>`, and an EPIPE there exits 141
+/// (128 + SIGPIPE, the shell's own convention for this) with NOTHING on stderr. Every other stdout write error, every
+/// panic anywhere else, keeps the default handler and its message: a reader that left is not the same fact as "the
+/// node went away", and `wa call`'s connection errors must keep saying so.
+///
+/// The words are matched because that is the shape `std` hands a hook: the payload of a print-macro panic is a
+/// formatted String, not the `io::Error`. `os error 32` is EPIPE on every platform this binary builds for, and
+/// "Broken pipe" is kept as a second witness for a build whose strerror is localised.
+fn quiet_when_the_reader_leaves() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let text = payload
+            .downcast_ref::<String>()
+            .map(|value| value.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if text.contains("failed printing to stdout")
+            && (text.contains("os error 32") || text.contains("Broken pipe"))
+        {
+            std::process::exit(141);
+        }
+        previous(info);
+    }));
+}
+
 fn main() {
+    quiet_when_the_reader_leaves();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // The binary answering for itself, before anything else can fail: `--build-info` is what every install
     // path writes its record from, and `--contains` is what a deploy asks the running binary before it
