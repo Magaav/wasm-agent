@@ -1874,14 +1874,30 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     }
     let top = scores.first().copied().unwrap_or(0);
     let top_count = scores.iter().filter(|score| **score == top).count();
+    // How many matching chats this answer NAMES: the candidates, plus each one folded into an earlier
+    // candidate as `same_person`. A folded chat is named, so it is not hidden; what is left of `matched`
+    // is a chat the answer could not show, and the only thing that can leave a chat out without naming
+    // it is the caller's limit (a fold never drops a chat it does not name). Measured 25/11: an answer
+    // of `matched: 3` with 2 candidates and `truncated: true` said the list did not add up and never
+    // said by how much or why - a reader had to count, and could not tell a limit from a lost row. The
+    // number and the sentence beside it are the fix: `hidden` is how many, `hidden_why` is what and how
+    // to see them.
+    let named = candidates.len() + folded.iter().filter(|folded| **folded).count();
+    let hidden = total.saturating_sub(named);
     let mut answer = serde_json::json!({
         "q": query,
         "candidates": candidates,
         "count": candidates.len(),
         "matched": total,
-        "truncated": total > candidates.len(),
+        "truncated": hidden > 0,
         "ambiguous": top_count > 1,
     });
+    if hidden > 0 {
+        answer["hidden"] = serde_json::Value::from(hidden);
+        answer["hidden_why"] = serde_json::Value::String(format!(
+            "this answer names {named} of the {total} chats whose name matches; ask again with limit:{total} to see all of them"
+        ));
+    }
     if top_count == 1 {
         if let Some(first) = answer["candidates"].as_array().and_then(|list| list.first()).cloned() {
             answer["chat"] = first["chat"].clone();
