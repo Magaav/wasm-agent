@@ -420,6 +420,28 @@ do
     { print = function(line) refused[#refused + 1] = line end, ctx = ctx })
   ok(bad.ok == false and bad.error == 'mcp_usage' and bad.exit == 2,
     'a flag nothing knows is refused by name: ' .. json.encode(bad))
+
+  -- NEVER READ IS NOT "NO PEER CONNECTORS" (25/11). A store with no catalogue at all is the state of a node
+  -- bound a minute ago: an empty cache and a node with nothing on its peers look the SAME, so the page says
+  -- which one it is. A guest's view carries no peer half at all (read_only), so only a master is told.
+  local deleted = json.decode(host.sql_exec("DELETE FROM meta WHERE key='federation.catalog.v2'", '[]'))
+  ok(deleted.ok == true or deleted.changes ~= nil, 'the catalogue is removed from this store: ' .. json.encode(deleted))
+  ok(tonumber(federation_now.cached().at) == nil or tonumber(federation_now.cached().at) == 0,
+    'and nothing is read back: ' .. tostring(federation_now.cached().at))
+  local never = {}
+  mcp_cli.run_cli({ 'list' }, { print = function(line) never[#never + 1] = line end, ctx = ctx })
+  local never_text = table.concat(never, '\n')
+  ok(has(never_text, 'other nodes: not read yet'), 'a node whose catalogue was never read says so: '
+    .. tostring(never_text:match('[^\n]*other nodes[^\n]*')))
+  ok(has(never_text, 'wa mcp list --refresh reads them'), 'and names the verb that reads it: '
+    .. tostring(never_text:match('[^\n]*not read yet[^\n]*')))
+  ok(not has(never_text, 'other nodes: read '), 'it does not pretend to an age it does not have')
+  local guest = {}
+  mcp_cli.run_cli({ 'list' }, { print = function(line) guest[#guest + 1] = line end,
+    ctx = { role = 'guest', user_id = 'guest' } })
+  ok(not has(table.concat(guest, '\n'), 'other nodes:'),
+    'a guest is not told about a peer half its view does not show: '
+      .. tostring(table.concat(guest, '\n'):match('[^\n]*other nodes[^\n]*')))
 end
 
 if failed > 0 then

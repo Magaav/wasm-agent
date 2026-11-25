@@ -426,11 +426,18 @@ function M.list(ctx, opts)
     and (#peer_list > 0 or (type(peers_meta.silent) == 'table' and #peers_meta.silent > 0)) then
     peers_age = M.age_phrase(peers_meta.at)
   end
+  -- NEVER READ IS NOT "NO PEER CONNECTORS" (25/11). A cache with no `at` means this node has not asked
+  -- anybody yet - a node bound a minute ago, or one whose first read is still ahead. Without a word on the
+  -- page that reads exactly like "there is nothing on the other nodes", which is the one thing this list
+  -- cannot know from an empty cache. Only a master's view carries peers at all (`read_only` is the guest's),
+  -- so only a master is told.
+  local peers_never = type(peers_meta) == 'table' and peers_meta.ok == true
+    and not (tonumber(peers_meta.at) and tonumber(peers_meta.at) > 0) and read_only == false
   return {
     ok = true, connectors = connectors, read_only = read_only, role = role,
     revision = registry and registry.revision, registry_error = registry and registry.error,
     peers_at = peers_meta and peers_meta.at, peers_silent = peers_meta and peers_meta.silent,
-    peers_age = peers_age,
+    peers_age = peers_age, peers_never = peers_never or nil,
     counts = { connectors = #connectors, services = #connectors, built_in = built_in,
       mcp = #connectors - built_in, here = #local_list, from_peers = #peer_list,
       enabled = enabled, tools = tools },
@@ -823,6 +830,10 @@ function M.views(view, opts)
   if view.peers_age then
     push(list.lines, string.format('other nodes: read %s ago · %s re-reads them',
       tostring(view.peers_age), tostring(opts.refresh_verb or '/mcp refresh')))
+  elseif view.peers_never then
+    -- The verb is the same one; it is "reads" here because there is nothing yet to re-read.
+    push(list.lines, string.format('other nodes: not read yet · %s reads them',
+      tostring(opts.refresh_verb or '/mcp refresh')))
   end
   -- Peers that did not answer the last refresh: one line, not rows posing as connectors.
   if type(view.peers_silent) == 'table' and #view.peers_silent > 0 then

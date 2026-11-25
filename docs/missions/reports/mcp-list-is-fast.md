@@ -82,6 +82,11 @@ what the budget can mean here.
 
 **63091926 `docs: the MCP list never asks another node to draw itself`** - `docs/MCP.md`.
 
+**`mcp list: never read is not "no peer connectors"`** - a store with no catalogue at all says
+`other nodes: not read yet · <verb> reads them` instead of showing no peer rows and nothing else, which read
+exactly like "there is nothing on the other nodes" (only a master is told: a guest's view has no peer half).
+Tests: `scripts/test-mcp-list.lua` 101 checks, the base tree failing **17 of 101**.
+
 **ab6ba43d `mcp list: --refresh reads the chat count too (cache_only forces counts off)`** - the
 `--refresh` verb sets `cache_only = false` for that one call, because `whatsapp.service_row` overrides
 `counts` with `false` under `cache_only`; without it `--refresh` re-read the peers and still printed `chats
@@ -107,7 +112,7 @@ same order, character for character - only the two lines that belong to a surfac
 verb in the age line, and the key hint a pipe must not print).
 
 **Discrimination**: with this file copied into a clean `origin/main` worktree and only my non-test changes
-reverted, it fails **15 of 95 checks** (`/tmp` base worktree, `WASM_AGENT_LUA_ROOT` = that tree, its own
+reverted, it fails **17 of 101 checks** (`/tmp` base worktree, `WASM_AGENT_LUA_ROOT` = that tree, its own
 scratch home).
 
 ## The suite
@@ -157,6 +162,8 @@ for.
 6. `catalogue re-read: this node has no online peer to ask` - the same line on a node with no peer.
 7. `the peer catalogue was not re-read: federation_refresh_failed - <detail>` - the failure line.
 8. Removed from `wa mcp list`: `Enter opens a connector · Esc or ← closes` (the chat panel keeps it).
+9. `other nodes: not read yet · wa mcp list --refresh reads them` - a master's list before its catalogue was
+   ever read (in a chat the verb is `/mcp refresh`, and the word is `reads`, not `re-reads`).
 
 ## Report of the earlier worker's hint
 
