@@ -73,7 +73,10 @@ trap stop_all EXIT
 
 # ---- 1. the bundle, built from this checkout ----------------------------------------------------
 BUILD="$R/build"
-if ! CARGO_TARGET_DIR="$R/target" bash scripts/release-linux.sh --local --out "$BUILD" > "$R/build.log" 2>&1; then
+# THE RUNNER'S TARGET DIR WHEN IT NAMES ONE: a cold release build inside this row's scratch root would spend the
+# row's whole timeout before the first install. By hand, the row keeps its own.
+BUILD_TARGET="${CARGO_TARGET_DIR:-$R/target}"
+if ! CARGO_TARGET_DIR="$BUILD_TARGET" bash scripts/release-linux.sh --local --out "$BUILD" > "$R/build.log" 2>&1; then
   tail -6 "$R/build.log" >&2; skip 'the bundle could not be built from this checkout (see the log above)'
 fi
 BUNDLE=$(ls -d "$BUILD"/wa-linux-* 2>/dev/null | grep -v '\.tar\.gz$' | head -1)
