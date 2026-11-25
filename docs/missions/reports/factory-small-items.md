@@ -155,6 +155,8 @@ away, because the orchestrator is running the v0.1.2 cut through it.
   ledger row says '[deploy] installed', naming the new tree commit bbbb5555eeee`). So the new installed line still
   carries the words and the tree that row reads.
 * `scripts/test-deploy-target.sh`: `deploy target ok (14 checks)` after fdd404be.
+* `scripts/test-deploy-wait.sh` (the pause / wait lines my change sits beside): `deploy wait ok` - the pause sentence and
+  the `did not happen` line it asserts are unchanged by 1dfd1d1d.
 * `scripts/test-deploy-covering-release.sh`: SKIP on this machine (exit 3, reason quoted above); its first pass built a
   `node-70eb209d0c5c` stub release here and its pre-swap assertions were green before the skip.
 * items 2 and 3 (operator files): the simulations quoted above, run against a scratch mission root.
