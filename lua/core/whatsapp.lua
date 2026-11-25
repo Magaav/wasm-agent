@@ -105,7 +105,7 @@ M.TOOLS = {
     returns = '{header:{chat,name,type},messages:[{id,at_local,from:{own,name},text,reply_to:{id,quote}}],has_more,next_before}',
   },
   {
-    verb = 'reactions', capability = 'whatsapp_reactions', effect = 'read',
+    verb = 'reactions', capability = 'whatsapp_index', effect = 'read',
     description = 'Who reacted to one WhatsApp message, with which emoji. A reaction that was taken back is not listed; by_emoji counts what is left.',
     parameters = { type = 'object', properties = { chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 } }, required = { 'chat', 'id' }, additionalProperties = false },
     request = function(args) return { chat = args.chat, id = args.id } end,
