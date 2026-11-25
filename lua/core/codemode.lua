@@ -1137,12 +1137,26 @@ local function settled_answers(calls)
       if evidence and type(evidence.path)=='string' then
         local raw=host.read_file(evidence.path)
         if type(raw)=='string' and raw~='' then
-          if #raw<=DONE_EACH and used+#raw<=DONE_TOTAL then
+          -- AN ANSWER THAT CARRIED A CONFIGURED SECRET IS A POINTER, NEVER AN INLINE COPY. Redaction of a
+          -- whole answer is the presentation's job (lua/core/redact.lua, lua/core/codemode_view.lua) and it
+          -- is not something this block can prove for a bag it decodes here: measured on
+          -- scripts/test-codemode-model-boundary.lua, an inline copy of a finished call put a configured
+          -- value back into the model's text. So the answer travels by reference, and `redacted` says why.
+          local clean,hits=dofile('lua/core/redact.lua').secrets(raw)
+          local redacted=next(hits or {})~=nil
+          local fits=not redacted and (#raw<=DONE_EACH and used+#raw<=DONE_TOTAL)
+          if fits then
             local decoded_ok,decoded=pcall(json.decode,raw)
             entry.result=decoded_ok and decoded or raw
             used=used+#raw
           else
             entry.unread={sha256=evidence.sha256,offset=1,bytes=evidence.bytes or #raw}
+            if redacted then
+              local names={}
+              for name in pairs(hits) do names[#names+1]=tostring(name) end
+              table.sort(names)
+              entry.redacted=names
+            end
           end
         end
       end

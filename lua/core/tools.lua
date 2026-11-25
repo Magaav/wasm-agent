@@ -657,7 +657,11 @@ M.admin = {
     path = { type = "string", description = "For read/ls/write/edit: the path on that node." },
     args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." },
     calls = { type = "array", minItems = 1, maxItems = 8, description = "With capability \"batch\": 1-8 read-only entries {capability, <its params>} run on the peer in ONE signed round trip, ordered results. Reads, history and read-only bash only.",
-      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } }
+      -- Each entry carries the CAPABILITY's own parameters beside `capability` (the description above), so
+      -- the entry is open by declaration for the same reason the tool is: a closed item would refuse the
+      -- `path` it exists to forward (25/11, measured on scripts/test-codemode-model-boundary.lua).
+      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" },
+        additionalProperties = true } }
     -- This schema does NOT declare the capability's own parameters and cannot: they are the other tool's
     -- (a bash `cwd`, an edit's `edits`, a read's `offset`). Saying so keeps the one argument validator from
     -- refusing a field `remote` is meant to forward - the open declaration is the honest one here, not a
