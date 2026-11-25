@@ -223,3 +223,47 @@ branch's side and loses nothing. The branch is also 59 commits behind `origin/ma
 13. `not_isolated`-style failure lines of the new sections, in the row's own words: `HOME=<x> is not under the scratch
     root <r>`, `XDG_CONFIG_HOME=<x> is not under the scratch root <r> (the unit dir follows it)`, `WASM_AGENT_DB=<x> is
     not under the scratch root <r> (this is the live ledger)`, `WASM_AGENT_PORT is unset, which is the live 8799`.
+
+## The runner, run by run (`<mission>/rows/`)
+
+Every installer row of this round ran through `_orch/row-runner.sh`, never from this session. Six runs, and three of
+them found defects in this round's OWN code:
+
+| run | commit | verdict |
+| --- | --- | --- |
+| `20261125T032147Z` | `e0e62df9` | SKIP - the fixture remote rejected C2 (non-fast-forward: `clone --bare --shared` inherits the source's `main`); fixed in `000e49f3` |
+| `20261125T032433Z` | `000e49f3` | rc=1, 14 failed - all behind `refused(real_node_home)` about the row's own scratch home; fixed in `efa34ce4` |
+| `20261125T032635Z` | `efa34ce4` | rc=1, 4 failed - the install itself was correct and complete; the failures were the row's own "exactly ONE watcher problem" and "verify-install with no FAIL line", neither possible in a scratch home |
+| `20261125T032951Z` | `a1be430c` | rc=1, 1 failed - the new allow-list read verify-install's summary line as a failure; fixed in `308f110e` |
+| `20261125T033226Z` | `308f110e` | rc=1, 14 failed - `refused(cargo_unavailable)`: the deploy's release lookup was ANONYMOUS (`env -i` handed the child no credential), so it fell back to BUILDING; fixed in `40ffd00d` |
+| `20261125T033529Z` | `40ffd00d` | **rc=0, 19 checks, 0 failed, leftovers=0, canary green before and after** |
+
+The green one, verbatim:
+
+```
+  ok   the record expects the RELEASE's source commit for a prebuilt install, not HEAD
+  ok   and the staged binary is proved against that commit BEFORE the swap
+  ok   and a post-swap failure is recorded (post_swap_problem=), not a refusal
+  ok   the deploy exits 3, and every recorded problem is the watcher a scratch home cannot start
+  ok   and it took C1's covering release, as the resolver chose it
+  ok   the install record is FINAL, not the interim one it started from
+  ok   commit= is the tree this deploy installed (C2)
+  ok   lua_tree= names C2 (6ab125b0)
+  ok   binary_commit= is the bytes' own build (C1), not the tree
+  ok   and binary_release= names the release
+  ok   record_expected= keeps the commit the staged binary was proved against
+  ok   every recorded post-swap problem, if any, is the watcher
+  ok   the install carries scripts/lib/download-asset.sh
+  ok   the install carries scripts/lib/health-wakes.sh
+  ok   wa --version names the OLD binary's release (node-82f5785944d6)
+  ok   and the NEW tree (tree 6ab125b0)
+  ok   the node the deploy started is running (pid 3404207)
+  ok   verify-install's only FAIL lines are the two a scratch home forces (its verdict, and the sentinel)
+  ok   and it does say the sentinel is not watching (the one thing this scratch install cannot have)
+ deploy covering release ok (19 checks, 0 failed)
+```
+
+AND THIS IS THE FIRST GREEN THAT DOES NOT NEED THE LIVE NODE. The earlier "16 checks, 0 failed" included `verify-install
+is green` with no FAIL line at all - which on a scratch home is impossible (the sentinel cannot start), so it could only
+have passed because the deploy had talked to the operator's user manager and the operator's sentinel answered. A row
+whose green depends on the live install is the defect that started this round.
