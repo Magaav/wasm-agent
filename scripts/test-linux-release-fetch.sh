@@ -8,6 +8,7 @@
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 BOOT="$ROOT/scripts/linux/bootstrap.sh"
+. "$ROOT/scripts/lib/install-isolation.sh" || { echo "test-linux-release-fetch: no scripts/lib/install-isolation.sh"; exit 2; }
 T=$(mktemp -d "${TMPDIR:-/tmp}/wa-linux-release-test.XXXXXX") || { printf 'FAIL tmpdir_unavailable: cannot create a temp dir under %s (set TMPDIR)\n' "${TMPDIR:-/tmp}" >&2; exit 1; }
 trap 'rm -rf "$T"' EXIT
 # A TMPDIR on a noexec mount makes every 'the candidate runs' check a false failure (31/10: a 256M noexec
@@ -55,6 +56,19 @@ entry() { # NAME SHA TARGET [size]
 }
 run() { # INDEX PREFIX [args...] -> output in $out, status in $rc
   local index=$1 prefix=$2; shift 2
+  # ISOLATED BY CONSTRUCTION (25/11, mission release-node-updates): the installer is a real one, so everything
+  # it could write - the install dir, the unit dir, the ledger, the ports - is scratch, and the guard below
+  # refuses the run if any of it is the operator's. XDG_CONFIG_HOME is the one that mattered on 25/11: an
+  # inherited desktop value is where the LIVE wa-sentinel.service lives.
+  mkdir -p "$T/units" "$T/bin" "$T/config"
+  printf '#!/bin/sh\nexit 1\n' > "$T/bin/systemctl-stub" && chmod +x "$T/bin/systemctl-stub"
+  # THE LIVE VARIABLES ARE DROPPED, NOT OVERRIDDEN: WASM_AGENT_DB and the vault URLs this shell inherited name
+  # the operator's ledger and secrets, and an installer that ran with them could reach both.
+  unset WASM_AGENT_DB WASM_AGENT_VAULT_URL WASM_AGENT_OPENCODE_GO_VAULT_URL WASM_AGENT_VAULT_DIR \
+        WASM_AGENT_VAULT_KEYSTORE WASM_AGENT_VAULT_PASSPHRASE WASM_AGENT_VAULT_OPERATOR_URL
+  WA_INSTALL_DIR="$prefix" WA_SENTINEL_UNIT_DIR="$T/units" WA_SENTINEL_UNIT_SYSTEMCTL="$T/bin/systemctl-stub" \
+    XDG_CONFIG_HOME="$T/config" WASM_AGENT_PORT=59997 WASM_AGENT_CLIENT_PORT=59998 \
+    wa_install_isolation_guard "$T" "$T/home" || { out="refused(isolation): this row would run an installer outside its scratch root"; rc=2; return; }
   out=$(HOME="$T/home" XDG_CACHE_HOME="$T/cache" WA_LINUX_RELEASE_ALLOW_LOCAL=1 \
         WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt" bash "$BOOT" --index "file://$index" \
         --prefix "$prefix" --no-service --rendezvous none --port 59997 --client-port 59998 "$@" 2>&1); rc=$?

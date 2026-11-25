@@ -587,6 +587,11 @@ gate_run bash scripts/test-component-build-wrapper.sh
 # signature, a missing manifest, a channel that does not answer (unknown, never complete), and that the tag
 # asked for is the one the COMMIT's lock names rather than the working tree's.
 gate_run bash scripts/test-release-completeness.sh
+# AN INSTALLER RUN IN A HARNESS IS ISOLATED OR IT DOES NOT RUN (25/11, mission release-node-updates, the G
+# condition). A scratch run that inherited the desktop's XDG_CONFIG_HOME rewrote the LIVE
+# wa-sentinel.service that night; this row proves the guard refuses a live-looking environment, that it passes
+# a scratch one, and that the installer-running harnesses in this tree call it.
+gate_run bash scripts/test-installer-data-isolation.sh
 # THE LANDING'S SECOND PUBLISH (24/11). Publishing covered the node binary only, so a landing that moved
 # components.lock published a binary whose components bundle was never made (components-df6f97708c72: HTTP
 # 404) and no node without a toolchain could update. The row proves the step in scripts/lib/landing-components-

@@ -20,6 +20,7 @@
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 CORE="$ROOT/scripts/linux/bootstrap.sh"
+. "$ROOT/scripts/lib/install-isolation.sh" || { printf "FAIL no scripts/lib/install-isolation.sh\n" >&2; exit 2; }
 checks=0; failed=0
 ok()   { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }
 bad()  { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$*"; }
@@ -108,6 +109,15 @@ entry() { # NAME TAG COMMIT SHA
 mkindex() { local file="$1"; shift; printf '{"schema":"wasm-agent-linux-release-index","schema_version":1,"releases":[%s]}\n' "$(IFS=,; printf '%s' "$*")" > "$file"; }
 
 rec() { sed -n "s/^$2=//p" "$1/installed.txt" 2>/dev/null | head -1; }
+# ISOLATED BY CONSTRUCTION: this row runs the real bootstrap core, so its install dir, unit dir, systemctl,
+# ledger and ports are scratch and the guard refuses the call otherwise.
+scratch_env() { # <prefix>
+  mkdir -p "$T/units" "$T/bin" "$T/config"
+  printf '#!/bin/sh\nexit 1\n' > "$T/bin/systemctl-stub" && chmod +x "$T/bin/systemctl-stub"
+  export WA_INSTALL_DIR="$1" WA_SENTINEL_UNIT_DIR="$T/units" WA_SENTINEL_UNIT_SYSTEMCTL="$T/bin/systemctl-stub"
+  export XDG_CONFIG_HOME="$T/config" WASM_AGENT_PORT=59991 WASM_AGENT_CLIENT_PORT=59992
+  wa_install_isolation_guard "$T" "$T/home"
+}
 
 run_core() { # <prefix> <index-url> [args...] -> sets OUT, RC
   local prefix="$1" index="$2"; shift 2
