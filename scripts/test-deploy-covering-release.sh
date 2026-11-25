@@ -313,10 +313,10 @@ while IFS= read -r line; do
   done
   [ "$known" = 1 ] || unexpected="${unexpected}${unexpected:+| }$line"
 done <<VERIFY_FAILS
-$(grep 'FAIL' "$VERIFY" 2>/dev/null)
+$(grep -E '^  FAIL ' "$VERIFY" 2>/dev/null)
 VERIFY_FAILS
 ok "$([ -z "$unexpected" ] && echo 1)" "verify-install's only FAIL lines are the two a scratch home forces (its verdict, and the sentinel)" "$unexpected"
-ok "$(grep -q 'the sentinel is watching' "$VERIFY" 2>/dev/null && echo 1)" "and it does say the sentinel is not watching (the one thing this scratch install cannot have)" "$(grep -c FAIL "$VERIFY") FAIL line(s)"
+ok "$(grep -qE '^  FAIL the sentinel is watching' "$VERIFY" 2>/dev/null && echo 1)" "and it does say the sentinel is not watching (the one thing this scratch install cannot have)" "$(grep -c FAIL "$VERIFY") FAIL line(s)"
 
 printf 'deploy covering release ok (%d checks, %d failed)\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
