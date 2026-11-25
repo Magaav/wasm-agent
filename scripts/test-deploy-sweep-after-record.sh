@@ -25,6 +25,19 @@ mkdir -p "$WORK" "$WORK/home" "$WORK/data" "$WORK/install"
 wa_scratch_home_guard "$WORK/home" || { echo 'sweep-after-record REFUSED: the scratch home is the operator node home' >&2; exit 2; }
 export HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home"
 export WASM_AGENT_DATA="$WORK/data"
+# NO SERVICE IS PROBED, because this scratch install has none (measured 25/11, row 20261125T115123Z-1461):
+# scripts/lib/service-target.sh asks the machine with plain `systemctl show ... ExecStart` (line 117), NOT
+# through WA_SENTINEL_UNIT_SYSTEMCTL, so inside the runner it read the LIVE unit - "/home/victor/.local/bin ...
+# they are different installs" - and the deploy refused before the record, which is the wrong refusal for this
+# row. The shim below is the same answer a scratch `systemctl --user` would give (no such unit), not a stub that
+# accepts something: it makes the probe find nothing, which is true here.
+SHIM="$WORK/bin"
+mkdir -p "$SHIM" || exit 1
+printf '#!/bin/sh
+exit 1
+' > "$SHIM/systemctl"
+chmod +x "$SHIM/systemctl"
+export PATH="$SHIM:$PATH"
 DATA="$WORK/data"
 INSTALL="$WORK/install"
 ALIVE="$(wa_deploy_alive_path "$DATA")"
