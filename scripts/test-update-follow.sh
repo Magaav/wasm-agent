@@ -158,6 +158,7 @@ cat > "$INST/wa-sentinel" <<'STUB'
 # it insists on), and `request deploy` writes the request file the real one writes and starts the stub
 # deploy detached - the real sentinel returns as soon as the installer is spawned, so this one does too.
 # `FIXTURE_NO_START=1` writes the request and starts nothing: a request the sentinel never performs.
+printf '%s\n' "$*" >> "$FIXTURE_SENTINEL_CALLS"
 if [ "$1" = "preflight" ]; then
   echo '{"schema":1,"watcher":"running","watcher_pid":4242,"ownership":"watcher_lifetime_lock","stop_file":false,"pending_deploys":[],"inventory_verified":true,"capabilities":{"health_free":true,"atomic_deploy_dedupe":true}}'
   exit 0
@@ -184,9 +185,11 @@ export WA_UPDATE_CHECK=0 WA_OFFLINE=1
 export FIXTURE_STATUS="$SANDBOX/build-status.json" FIXTURE_QUEUE="$SENTINEL/queue" \
   FIXTURE_RESULT="$INST/deploy-result.json" FIXTURE_INSTALLED="$INST/installed.txt" \
   FIXTURE_REQUESTS="$SENTINEL/requests" FIXTURE_DEPLOYOUT="$SENTINEL/deploy.out" \
-  FIXTURE_PIDS="$W/pids" FIXTURE_STUBDEPLOY="$STUBDEPLOY" FIXTURE_BUILD="$SANDBOX/build/target/deploy-$T12" \
+  FIXTURE_PIDS="$W/pids" FIXTURE_SENTINEL_CALLS="$W/sentinel-calls" FIXTURE_STUBDEPLOY="$STUBDEPLOY" FIXTURE_BUILD="$SANDBOX/build/target/deploy-$T12" \
   T12="$T12" FIXTURE_OUTCOME="ok"
 : > "$W/pids"
+: > "$W/sentinel-calls"
+: > "$W/git-calls"
 
 kill_stubs() {
   [ -s "$W/pids" ] || return 0
@@ -225,6 +228,31 @@ grep -q "behind by ($T12): no binary is published under $T12's own name; the ins
 grep -q 'release list: 1 entries, read ' "$W/out.txt" || fail '--check must date the list it answered from'
 [ -n "$(ls -A "$SENTINEL/requests" 2>/dev/null)" ] && fail '--check wrote a deploy request; it is a question'
 echo '  ok: --check answered for the installed commit and for the one behind it, from the local list'
+
+# ---- 1b. ALREADY UP TO DATE: one answer, no deploy, no sentinel, under a second (mission budget 8) -------
+# MEASURED before this change: the same fixture queued a full deploy - build, the whole test suite, the swap -
+# because a tree-node `wa update` never compared the tree with what the install record says it runs, and it paid
+# a git fetch and a sentinel `preflight` before it could say anything (1.2-1.6 s to the first line).
+printf 'commit=%s\nsource_commit_hint=%s\n' "$T12" "$T12" > "$INST/installed.txt"
+reset_fixture
+: > "$W/sentinel-calls"
+# The fast path's ONE request is a `git ls-remote` to this fixture's origin, which is a LOCAL bare repo:
+# WA_OFFLINE is rotated for this case only, because the flag is what makes the fast path answer "unknown"
+# on a real offline node (and an unknown falls back to the slow path, which is the correct behaviour).
+unset WA_OFFLINE
+QUICK_START=$(date +%s%N)
+run_update
+export WA_OFFLINE=1
+QUICK_MS=$(( ($(date +%s%N) - QUICK_START) / 1000000 ))
+[ "$CODE" = 0 ] || fail "an already current node must exit 0 (it exited $CODE)"
+QUICK_LINES=$(wc -l < "$W/out.txt")
+[ "$QUICK_LINES" = 2 ] || { cat "$W/out.txt" >&2; fail "an already current node must print TWO lines (the work starting and the answer), got $QUICK_LINES"; }
+EXPECTED="already up to date (${T12%????})"
+grep -qx "$EXPECTED" "$W/out.txt" || fail "the answer must be '$EXPECTED', got: $(cat "$W/out.txt")"
+[ -s "$W/sentinel-calls" ] && fail "an already current node asked the sentinel: $(cat "$W/sentinel-calls")"
+[ "$QUICK_MS" -lt 2000 ] || fail "already up to date took ${QUICK_MS}ms; the budget is under 1000ms and this row fails at 2000"
+echo "  ok: already up to date answered in ${QUICK_MS}ms with two lines, no git fetch and no sentinel call"
+printf 'commit=%s\nsource_commit_hint=%s\n' "$T12" "$T12" > "$INST/installed.txt"
 
 # ---- 2. a compile install: ONE moving line, ONE last line, and the installer's words in the log -------
 # WHAT THIS REPLACES, and why the change is not a loosening (mission update-is-one-line, 25/11). The row used to

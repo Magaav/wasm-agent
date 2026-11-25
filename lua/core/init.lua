@@ -219,6 +219,14 @@ if command == "update" or command == "--update" then
     report = { ok = true, request = request }
     notes[#notes + 1] = "following the newest deploy on this node: " .. tostring(request)
   else
+    -- THE FAST PATH FIRST (budget: "already up to date" under 1 s and ONE request, no git fetch, no
+    -- sentinel round trip). It is a local read plus ONE `git ls-remote`, and it answers only when the
+    -- install record, the tree's HEAD and origin's main AGREE; any unknown falls through to the slow path.
+    local quick = updater.up_to_date({})
+    if quick.known == true and quick.current == true then
+      ui:finish(screen.current(quick.commit))
+      return
+    end
     report = updater.run({ reason = "requested with `wa update`" })
     -- THE PLAN SAID WHAT THIS INSTALL IS: a download or a build (follow.plan). It is a note now: on the
     -- screen the phase itself says `downloading` or `compiling`, from the installer's own words.

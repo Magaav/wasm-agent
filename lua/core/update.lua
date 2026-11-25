@@ -207,6 +207,65 @@ function M.facts(options)
   return facts
 end
 
+-- Two short commits, either a prefix of the other. Anything shorter than seven hex is no evidence (the rule
+-- `lua/core/update_follow.lua` compares by, kept here so the fast path does not depend on the follower).
+local function same_commit(left, right)
+  local a, b = trim(left):lower(), trim(right):lower()
+  if #a < 7 or #b < 7 then return false end
+  return a:sub(1, #b) == b or b:sub(1, #a) == a
+end
+M.same_commit = same_commit
+
+-- IS THIS NODE ALREADY WHAT AN UPDATE WOULD INSTALL? (the mission's budget 8: "already up to date", the
+-- whole command under 1 s and ONE request - no git fetch, no sentinel round trip).
+--
+-- MEASURED 25/11 with the old path: `wa update` on a tree node queued a full deploy - build, the whole test
+-- suite, the swap - even when the tree WAS the installed commit, and it paid a git fetch and a sentinel
+-- `preflight` before it could say anything (1.2-1.6 s to the first line on a fixture with no network).
+--
+-- THREE FACTS HAVE TO AGREE, and anything less is UNKNOWN - never "already up to date":
+--   * the install record's commit, the tree's HEAD and origin's main are the same commit;
+--   * the tree has nothing uncommitted (the gate refuses a dirty tree anyway);
+--   * origin answered. `git ls-remote` is ONE request and fetches no objects; a fetch, the sentinel and the
+--     pre-update backup all belong to the slow path, which is what an unknown falls back to.
+function M.up_to_date(options)
+  local o = options or {}
+  local install = o.install or M.install_dir()
+  local tree = o.tree or M.runtime_tree(install)
+  if type(tree) ~= "string" or tree == "" then
+    return { known = false, reason = "this node has no runtime tree, so only the release updater can answer" }
+  end
+  local record = installed_record(install)
+  local installed = trim(record.source_commit_hint or record.commit or "")
+  local head = trim(git(slashes(tree), "rev-parse HEAD") or "")
+  if installed == "" or head == "" then
+    return { known = false, reason = "the installed commit or the tree's HEAD could not be read" }
+  end
+  if not same_commit(installed, head) then
+    return { known = false, reason = "the tree is not at the commit this node runs", installed = installed, head = head }
+  end
+  local dirty = lines(git(slashes(tree), "status --porcelain")) or 0
+  if dirty > 0 then
+    return { known = false, reason = "the tree has uncommitted changes", dirty = dirty }
+  end
+  if o.offline == true or (o.offline == nil and (host.getenv and (host.getenv("WA_OFFLINE") or "") ~= "")) then
+    return { known = false, reason = "this node is offline, so the newest main cannot be confirmed", commit = head }
+  end
+  local answered = shell("timeout 5 git -C " .. quote(slashes(tree)) .. " ls-remote --heads origin main 2>/dev/null")
+  if not answered or (answered.code or 1) ~= 0 then
+    return { known = false, reason = "origin did not answer, so the newest main is unknown", commit = head }
+  end
+  local newest = trim(tostring(answered.stdout or ""):match("^(%x+)") or "")
+  if newest == "" then
+    return { known = false, reason = "origin named no main branch", commit = head }
+  end
+  if not same_commit(newest, head) then
+    return { known = false, reason = "main has moved on origin", commit = head, origin = newest }
+  end
+  return { known = true, current = true, commit = head }
+end
+
+
 -- Bring the node-owned worktree to the source the deploy gate will build. `/update` used to queue
 -- a deploy from whichever branch happened to be checked out; the gate then refused it after the
 -- user had already been told it was queued. Only an explicit `/update` runs this, and only on a
