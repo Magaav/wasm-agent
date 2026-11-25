@@ -185,8 +185,10 @@ end
 --      A node BUILD can carry that badge (measured: node-39bbf2b69ea3 held it on 25/11), so its tag is
 --      judged by the same version rule as every other entry and never assumed to be a version;
 --   2. otherwise page the list - 100 per page, at most M.MAX_PAGES pages - until a version tag is found;
+--   1a. a node on the STABLE channel stops at that one request; a node on the PRE-RELEASE channel does
+--      not, because Latest is never a pre-release - it reads Latest and the first page and takes the newer;
 --   3. if none is found, the reason NAMES the count read (no_version_in_<n>_entries) and the verdict says
---      it: "could not find a version in <n> entries", never "nothing to do". `WA_RELEASE_FEED` (a mirror)
+--      it: "could not find a version in the newest <n> releases", never "nothing to do". `WA_RELEASE_FEED`
 --      is still taken exactly as given: one request, no paging behind an operator's explicit URL.
 M.PAGE_SIZE = 100
 M.MAX_PAGES = 5
@@ -259,24 +261,33 @@ function M.fetch(options)
   end
   local slug = options.repo or M.REPO
   local base = M.api_base()
-  -- 1. the release marked Latest, one request. Its tag is judged like any other: today that badge can be
-  -- on a node build, and a build is not a version this node installs.
-  local latest_body = get(base .. "/repos/" .. slug .. "/releases/latest")
-  if latest_body then
-    local release = M.parse_release(latest_body, options)
-    if release then return release end
-  end
-  -- 2. page until a version tag is found, bounded.
-  local scanned = 0
   local bound = tonumber(options.max_pages) or M.page_bound()
+  -- 1. The release marked Latest: one request, and for a STABLE node that is the whole search. A stable
+  -- channel follows releases only, and "the release marked Latest" is by definition the newest of those -
+  -- so a stable node asks once and stops, instead of fetching a hundred entries to learn what one said.
+  local latest_body = get(base .. "/repos/" .. slug .. "/releases/latest")
+  local latest = latest_body and M.parse_release(latest_body, options) or nil
+  if latest and not options.prerelease then return latest end
+  -- 2. A node on the PRE-RELEASE channel must not stop at Latest: Latest is never a pre-release, so the
+  -- newer rc that channel exists for always sits beside an older Latest. Read Latest and the first page and
+  -- take the newer of the two; page further only while neither names a version this channel can install.
+  local best = latest
+  local scanned = latest_body and entries_in(latest_body) or 0
   for page = 1, bound do
     local body, reason = get(base .. "/repos/" .. slug .. "/releases?per_page=" .. M.PAGE_SIZE ..
       "&page=" .. page)
-    if not body then return nil, reason end
+    if not body then
+      if best then return best end
+      return nil, reason
+    end
     local count = entries_in(body)
     scanned = scanned + count
     local release = M.parse_release(body, options)
-    if release then return release end
+    if release then
+      if not best then return release end
+      if M.compare(release.version, best.version) > 0 then best = release end
+      return best
+    end
     if count == 0 then break end
   end
   return nil, "no_version_in_" .. tostring(scanned) .. "_entries"
@@ -306,7 +317,7 @@ function M.verdict(installed, release, reason)
     if count then
       -- The count is the answer: how many entries were read and none of them was a version. Never
       -- "nothing to do" - a node that heard every entry and found no version is not up to date.
-      verdict.message = "could not find a version in " .. count .. " entries"
+      verdict.message = "could not find a version in the newest " .. count .. " releases"
     else
       verdict.message = "cannot tell whether this node is behind the latest release: " .. reason_text
     end

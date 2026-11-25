@@ -478,39 +478,39 @@ function M.fetch(options, repo)
   end
   local slug = repo or M.repo(nil)
   local base = M.api_base()
+  local pages = tonumber(o.max_pages) or M.page_bound()
+  -- THE FIRST REQUEST IS TODAY'S, ONE PAGE AT M.per_page(): a node build is what this reader looks for and
+  -- builds are the newest entries, so the normal answer costs one small request. Only when that page holds
+  -- no build does the search widen - and then it widens to 100-entry pages, re-read from page 1 because an
+  -- API page number belongs to its own per_page (page 2 of 20 is not page 2 of 100).
   local function entries(body)
     local ok, decoded = pcall(json.decode, tostring(body or ""))
     if not ok or type(decoded) ~= "table" then return 0 end
     if decoded[1] ~= nil then return #decoded end
-    -- an empty page is `[]`; anything else object-shaped is one release, unless it has NO keys at all
     local keys = 0
     for _ in pairs(decoded) do keys = keys + 1 end
     return keys == 0 and 0 or 1
   end
+
+  local function page_of(size, number)
+    local query = "/repos/" .. tostring(slug) .. "/releases?per_page=" .. size .. "&page=" .. number
+    return { url = base .. query, path = query }
+  end
   local scanned = 0
-  local pages = tonumber(o.max_pages) or M.page_bound()
-  for page = 0, pages do
-    local what
-    if page == 0 then
-      what = { url = base .. "/repos/" .. tostring(slug) .. "/releases/latest",
-        path = "repos/" .. tostring(slug) .. "/releases/latest" }
-    else
-      what = { url = base .. "/repos/" .. tostring(slug) .. "/releases?per_page=" .. M.PAGE_SIZE ..
-          "&page=" .. page,
-        path = "repos/" .. tostring(slug) .. "/releases?per_page=" .. M.PAGE_SIZE .. "&page=" .. page }
-    end
-    local body, reason, name = ask(what)
-    if body then
-      local count = entries(body)
-      scanned = scanned + count
-      local list, parse_reason = M.parse_feed(body)
-      if list then return list, parse_reason, name end
-      if count == 0 then break end
-    elseif page > 0 then
-      -- The Latest probe may simply have no answer (404 when nothing is marked Latest): that is not a
-      -- failure to report, it is a reason to page. A page that cannot be read IS the answer.
-      return nil, reason, name
-    end
+  local body, reason, name = ask(page_of(M.per_page(), 1))
+  if not body then return nil, reason, name end
+  scanned = scanned + entries(body)
+  local list, parse_reason = M.parse_feed(body)
+  if list then return list, parse_reason, name end
+  scanned = 0
+  for page = 1, pages do
+    local page_body, page_reason, transport = ask(page_of(M.PAGE_SIZE, page))
+    if not page_body then return nil, page_reason, transport end
+    local count = entries(page_body)
+    scanned = scanned + count
+    local found, found_reason = M.parse_feed(page_body)
+    if found then return found, found_reason, transport end
+    if count == 0 then break end
   end
   return nil, "no_build_in_" .. tostring(scanned) .. "_entries", nil
 end
