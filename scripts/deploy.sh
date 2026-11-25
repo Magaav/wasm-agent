@@ -423,10 +423,8 @@ if [ ! -d "$INSTALL_DIR" ]; then
   fail "refused(install_dir_missing): the install directory does not exist and carries no install record: $INSTALL_DIR (installed.txt: absent, serve.pid: absent, source: ${WA_SERVICE_CLAIM:-no service and no node on :$PORT named one}). A deploy writes installed.txt, the scripts and the binary into this directory, so every write would fail one at a time and none of them would say why. Either this is a first install - create the directory first (mkdir -p) or run scripts/install.sh, which does - or the machine's own answer is being read in the wrong vocabulary: state it explicitly (WA_INSTALL_DIR=<where the node lives>) after checking it yourself with scripts/lib/service-target.sh. Nothing was written."
 fi
 
-# Before this deploy builds anything: collect what a killed earlier deploy left staged (see the rule above).
-# It runs this early on purpose - a 248 MB leftover should not sit through a build, and the bound means the
-# sweep's own cost cannot grow with the junk.
-sweep_stale_staging
+# (The sweep of what a killed earlier deploy left staged runs below, right after the deploy-running record is
+# written: see there.)
 
 # 0. The machine's own answer to "where does the node live" is the service that runs it, and a deploy that
 #    disagrees with that must refuse instead of installing quietly beside the running node. Two installs on
@@ -516,6 +514,13 @@ if command -v wa_deploy_alive_write >/dev/null 2>&1; then
   fi
 fi
 command -v wa_deploy_alive_clear >/dev/null 2>&1 && trap 'command -v wa_deploy_alive_clear >/dev/null 2>&1 && wa_deploy_alive_clear "$DEPLOY_ALIVE_DIR"' EXIT
+
+# Before this deploy builds anything: collect what a killed earlier deploy left staged (see the rule above
+# sweep_stale_staging). Early on purpose - a 248 MB leftover should not sit through a build, and the bound means the
+# sweep's own cost cannot grow with the junk. AFTER THE RECORD on purpose (25/11, the orchestrator's read of this
+# hunk): a second deploy started while a live one installs is refused above (deploy_alive_held) BEFORE it can sweep,
+# so it never deletes the staged files of the install that is still running.
+sweep_stale_staging
 
 # 0e. THE COMPONENTS, ASKED BEFORE ANYTHING IS TOUCHED (24/11, work at 20:56Z). The update downloaded and
 #     verified node-9a0c589adfa0, then found no bundle for its lock (components-df6f97708c72: HTTP 404),
