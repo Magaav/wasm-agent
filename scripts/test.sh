@@ -531,6 +531,10 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$D
 # install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
 # the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.
 gate_run bash scripts/test-publish-named-release.sh                          # a release named node-<sha12> for the cut, byte-identical to its cover
+# THE CUT BUILDS ITS OWN RELEASE (25/11, nextcloud-b): a tree-less node runs the binary EMBEDDED Lua, so a
+# release renamed from a cover gives it the cover Lua while --build-info names the release commit. A commit
+# whose compiled inputs a published release already covers must still be BUILT by the cut.
+gate_run bash scripts/test-cut-builds-own.sh                                # the cut builds node-<sha12> even when a signed cover already covers the commit
 gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
 
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
