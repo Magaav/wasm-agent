@@ -359,7 +359,10 @@ function M.refresh_peers()
     -- The same rule `peer_connectors` draws its rows by: a peer that answered with no tool and an error did
     -- not answer, and is named rather than counted.
     if #(peer.tools or {}) == 0 and peer.error then
-      silent[#silent + 1] = name .. ' (' .. tostring(peer.error) .. ')'
+      -- The NAME only: the registry's error code (`refresh_budget_spent`, `no_answer`) is not a word to put in
+      -- a sentence a person reads (Fable, 25/11) - the catalogue's own page names it where a reader is
+      -- diagnosing, and this line says the one thing the reader needs: who did not answer in time.
+      silent[#silent + 1] = name
     else
       answered[#answered + 1] = name
       tools = tools + #(peer.tools or {})
@@ -376,8 +379,10 @@ end
 function M.refresh_text(answer)
   answer = type(answer) == 'table' and answer or {}
   if answer.ok ~= true then
-    return 'the peer catalogue was not re-read: ' .. tostring(answer.error or 'unknown')
-      .. (answer.detail and (' - ' .. tostring(answer.detail)) or '')
+    -- The reason first, the code in brackets after it (Fable, 25/11): a reader gets the sentence, and a
+    -- person diagnosing gets the exact code without it being the sentence.
+    return 'the other nodes were not asked again: ' .. tostring(answer.detail or 'no reason given')
+      .. ' (' .. tostring(answer.error or 'unknown') .. ')'
   end
   if (tonumber(answer.total) or 0) == 0 then
     return 'catalogue re-read: this node has no online peer to ask'
@@ -387,7 +392,7 @@ function M.refresh_text(answer)
     tonumber(answer.connectors) or 0, (tonumber(answer.connectors) or 0) == 1 and '' or 's',
     tonumber(answer.tools) or 0, (tonumber(answer.tools) or 0) == 1 and '' or 's')
   if type(answer.silent) == 'table' and #answer.silent > 0 then
-    text = text .. ' · no answer: ' .. table.concat(answer.silent, ', ')
+    text = text .. ' · no answer in time: ' .. table.concat(answer.silent, ', ')
   end
   return text
 end

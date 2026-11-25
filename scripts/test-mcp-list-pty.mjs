@@ -45,14 +45,20 @@ for (const _ of PEERS) {
   await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve));
   blackholes.push(socket);
 }
-const roster = PEERS.map((n, i) => ({node_id: 'quiet-' + n, name: 'quiet-' + n, public_key: 'test-only',
-  online: true, last_seen: Math.floor(Date.now() / 1000),
+// The fields a real rendezvous sends, not only the two this row needs: a roster row missing them is filtered
+// before the catalogue call, and then the fixture measures a path that never ran (measured: 0 peers asked).
+const roster = PEERS.map((n, i) => ({node_id: 'quiet-' + n, id: 'quiet-' + n, name: 'quiet-' + n,
+  public_key: 'test-only', online: true, visible: true, relay_attached: true,
+  last_seen: Math.floor(Date.now() / 1000), last_heartbeat: Math.floor(Date.now() / 1000),
+  capabilities: {federation: true, mcp: true},
   endpoints: ['127.0.0.1:' + blackholes[i].address().port]}));
 
+const arrivals = [];
 const server = http.createServer((req, res) => {
   req.on('data', () => {});
   req.on('end', () => {
     const url = String(req.url || '');
+    arrivals.push(url.split('?')[0]);
     if (url.startsWith('/nodes')) {
       res.writeHead(200, {'content-type': 'application/json'});
       res.end(JSON.stringify({nodes: roster}));
@@ -127,13 +133,11 @@ async function waitFor(predicate, label, timeout) {
   }
 }
 
-// The list's own words, whichever version draws it: a version that finds nothing, one that has rows, or the
-// line that says where the peer half came from.
-const MARKERS = ['no MCP servers', 'connector', 'other nodes:', 'peers not answering'];
-const listOn = lines => {
-  const row = lines.find(line => MARKERS.some(marker => line.includes(marker)));
-  return row || null;
-};
+// THE ANSWER'S FIRST LINE, and only a NEW one: `mcp list` opens with 'MCP servers' (measured: the panel and
+// the plain list both do), while the idle screen already carries a hint row saying 'Enter opens a connector'.
+// A marker that matches the hint measures nothing (the first run of this row reported 59 ms that way).
+const MARKER = 'MCP servers';
+const listOn = (lines, before) => lines.find(line => line.includes(MARKER) && !before.has(line)) || null;
 
 let started = false;
 try {
@@ -143,15 +147,23 @@ try {
   const launch = tmux(['new-session', '-d', '-s', SESSION, '-x', '100', '-y', '30', command]);
   if (launch.status !== 0) throw new Error('tmux could not start the session: ' + launch.stderr);
   started = true;
+  const launchedAt = now();
+  let promptMs = 0;
   await waitFor(() => capture().some(row => row.includes('Type a message')), 'the prompt', 60000);
+  // THE START IS PART OF WHAT A READER WAITS FOR: a catalogue read at launch is paid before the prompt, and a
+  // row that only times the command would report a fast /mcp on a slow start.
+  promptMs = now() - launchedAt;
   await sleep(1500);   // let the idle prompt settle: the measurement is the command, not the start
 
+  const before = new Set(capture());
   const typedAt = now();
   tmux(['send-keys', '-t', SESSION, '/mcp', 'Enter']);
-  const marker = await waitFor(() => listOn(capture()), 'the /mcp list', 90000);
+  const marker = await waitFor(() => listOn(capture(), before), 'the /mcp list', 120000);
   const ms = now() - typedAt;
   console.log('mcp list pty: ' + ms + ' ms (waited for: "' + marker.trim().slice(0, 60) + '")');
+  console.log('mcp list pty: prompt drawn after ' + promptMs + ' ms from launch');
   console.log('mcp list pty: peers asked during /mcp = ' + peerConnections.count + ' of ' + PEERS.length);
+  console.log('mcp list pty: fixture arrivals = ' + JSON.stringify([...new Set(arrivals)]));
   console.log('mcp list pty ok (1 measurement)');
   tmux(['send-keys', '-t', SESSION, 'C-c']);
   finish(0);
