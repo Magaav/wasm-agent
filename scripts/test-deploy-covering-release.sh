@@ -121,6 +121,12 @@ REMOTE="$W/remote.git"
 git clone -q --bare --shared "$ROOT" "$REMOTE" 2>/dev/null || skip_all "cannot create the fixture remote"
 # The fixture commit lives only in the clone (the shared objects are origin/main's), so it is PUSHED into the
 # fixture remote: update-ref would name an object that remote cannot see.
+# THE FIXTURE REMOTE INHERITS `main` FROM THE SOURCE CHECKOUT (`clone --bare --shared` copies its refs), and this
+# row's C2 sits on a BASE that can be OLDER than that main - so a plain push is a non-fast-forward and the row
+# SKIPPED with "cannot push the fixture C2 into the fixture remote" (measured in the orchestrator's runner, 25/11
+# 03:21Z, rows/20261125T032147Z). The remote is this row's own scratch clone, so the inherited ref is dropped first;
+# nothing outside the row is touched, and the push below is the ordinary one.
+git -C "$REMOTE" update-ref -d refs/heads/main 2>/dev/null || true
 git -C "$TREE" push -q "$REMOTE" "main:refs/heads/main" || skip_all "cannot push the fixture C2 into the fixture remote"
 git -C "$TREE" remote set-url origin "$REMOTE"
 git -C "$TREE" fetch -q origin 2>/dev/null

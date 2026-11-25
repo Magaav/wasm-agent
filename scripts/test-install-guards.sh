@@ -331,5 +331,26 @@ else
   ok "no installer message runs a command"
 fi
 
+echo "test-install-guards: no orphaned message line (a comment block that lost its #)"
+# MEASURED 24/11 (work's 2d7ac300 deploy, during proving): "scripts/deploy.sh: line 1529: deploy: command not found".
+# A wrapped COMMENT block ended one line early, so its last line - "deploy must never refuse because another session
+# landed while it ran." - was at column 0 and bash ran `deploy` as a command. Non-fatal, and invisible: the deploy
+# went on. The shape is one word, a space, and a sentence that ends in a full stop, directly under a comment.
+FIXTURE2="$WORK/orphan-fixture.sh"
+printf '%s\n' '# a comment block that ends one line early,' '# and its last line is no longer a comment.' 'deploy must never refuse because another session landed while it ran.' > "$FIXTURE2"
+orphans() { # <files...> -> prints file:line for each orphaned message line
+  awk '
+    line ~ /^[A-Za-z]/ && line ~ / / && line !~ /[;|&()$`\"'"'"'=<>{}\[\]\\]/ && line ~ /[.):]$/ && prev ~ /^#/ { print FILENAME ":" NR ": " line }
+    { prev=line }
+  ' "$@" 2>/dev/null
+}
+if [ -n "$(orphans "$FIXTURE2")" ]; then ok "the check catches the orphaned line that was shipped"; else bad "the check does not catch a comment block that lost its #"; fi
+if out="$(orphans "$ROOT"/scripts/deploy.sh "$ROOT"/scripts/upgrade.sh "$ROOT"/scripts/fleet-install.sh \
+      "$ROOT"/scripts/linux/bootstrap.sh "$ROOT"/scripts/rollback-node.sh "$ROOT"/scripts/lib/*.sh 2>/dev/null)" && [ -n "$out" ]; then
+  bad "an installer still executes a line of a message: $(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+else
+  ok "no installer executes a line of a message"
+fi
+
 printf 'test-install-guards: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1

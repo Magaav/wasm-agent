@@ -1589,7 +1589,7 @@ SCRATCH_HOME="$(mktemp -d)"
 # The binary is checked against the bytes it is about to install, not against the checkout they were
 # copied from: that checkout can move between the staging and this line (the race named above), and the
 # staged tree's own manifest already pins every file's sha256 and the binary's capability digest. A
-deploy must never refuse because another session landed while it ran.
+# deploy must never refuse because another session landed while it ran.
 EMBEDDED_ROOT="$LUA_STAGE"; EMBEDDED_SCRIPT="$ROOT/scripts/check-embedded-runtime.lua"; EMBEDDED_HOME="$SCRATCH_HOME"
 if command -v cygpath >/dev/null 2>&1; then
   EMBEDDED_ROOT="$(cygpath -w "$EMBEDDED_ROOT")"; EMBEDDED_SCRIPT="$(cygpath -w "$EMBEDDED_SCRIPT")"
