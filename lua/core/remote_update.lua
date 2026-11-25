@@ -1949,4 +1949,11 @@ function M.cli(argv)
   return 0
 end
 
+
+
+-- THE DECISION IS REACHABLE FROM A TEST (25/11, Fable fix 3): `outcome_of` is the function that decides whether a
+-- settled request reads as installed, and it was local to this file, so the one-line condition change that makes an
+-- install-with-problems on the WRONG commit report `unknown` could only be proved by reading it. The seam names
+-- it for scripts/test-remote-update.lua, which drives it against a real fixture install and sentinel dir.
+M._outcome_of = outcome_of
 return M
