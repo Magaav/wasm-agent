@@ -622,6 +622,15 @@ gate_run bash scripts/test-component-lock-rebuild.sh
 # side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
+# A COVERING RELEASE ON A NODE THAT MUST CHANGE ITS BINARY (24/11, work 22:17Z). deploy.sh took node-39e862d60bad
+# for a scripts-only tree, installed it, swapped, restarted the node - and then refused build_commit_mismatch
+# because it expected the bytes to report HEAD instead of the release's own commit, leaving the INTERIM record
+# and the scripts unshipped. The row runs the REAL deploy end to end on a scratch node seeded with that interim
+# record: exit 0, commit=/lua_tree= the tree, binary_commit= the bytes, scripts shipped, `wa --version` naming
+# both, verify-install green. It needs the network (the covering release is a published one) and cannot start a
+# sentinel in a scratch HOME on a machine with a systemd user session, so it says SKIP by name when it cannot
+# run - never a pass by absence.
+gate_run bash scripts/test-deploy-covering-release.sh
 # IS THIS COMMIT INSTALLABLE BY DOWNLOAD? The row that was missing (24/11): work's update downloaded and
 # verified node-9a0c589adfa0 and then had no components bundle to install - components-df6f97708c72 is
 # HTTP 404, because publishing is per landing and covers the node binary only - so a node without a

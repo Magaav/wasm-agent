@@ -52,6 +52,16 @@ cleanup() {
 }
 trap cleanup EXIT
 REAL_HOME="${HOME:-}"
+# GH AUTHENTICATION TRAVELS WITH THE ROW (24/11). This test replaces HOME with a scratch one, and gh reads its
+# token from $HOME/.config/gh - so every release request would be ANONYMOUS, at 60 an hour, and the deploy's
+# release walk spends those in a few runs (measured: HTTP 401/403 mid-row, the resolver found nothing, and the
+# deploy fell back to a build it could not do - a RED that had nothing to do with the code). The machine's own
+# gh config is named explicitly instead; it is read, never written.
+if [ -z "${GH_CONFIG_DIR:-}" ]; then
+  for candidate in "${XDG_CONFIG_HOME:-$REAL_HOME/.config}/gh" "$REAL_HOME/.config/gh"; do
+    [ -d "$candidate" ] && { GH_CONFIG_DIR="$candidate"; export GH_CONFIG_DIR; break; }
+  done
+fi
 export HOME="$W/home"
 mkdir -p "$HOME"
 HOME="$REAL_HOME" wa_scratch_home_guard "$W/home" || exit 2
@@ -141,6 +151,24 @@ OLD_SHA="$(wa_node_sha256 "$INSTALL/wa")"
 printf 'commit=%s\nbranch=main\ndirty=unknown\nsha256=%s\ninstall_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=interim\nvia=deploy.sh\nat=%s\nreason=interrupted by refused(build_commit_mismatch) after the swap\n' \
   "$C1" "$OLD_SHA" "$INSTALL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$INSTALL/installed.txt"
 
+# ---- the two facts the code must carry, BEFORE any network (these are the rows that fail on main) ------
+# THE END-TO-END HALF BELOW IS THE PROOF; these two are its CUT CONDITION, and they are the part that can be
+# measured without a release channel. On the code before this branch (main 2d7ac300/ebf6d2ec):
+#   * the prebuilt path set BINARY_COMMIT=HEAD and record_expected followed it, so a covering release was
+#     refused AFTER the swap (work, 22:17Z);
+#   * the only build-info check lived in record_installed, i.e. on the far side of upgrade.sh.
+# Both are greps on the deployed script, and both must hold in the tree this row runs.
+DEPLOY_SRC="$TREE/scripts/deploy.sh"
+ok "$(grep -q 'record_expected="${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}"' "$DEPLOY_SRC" && echo 1)" \
+  "the record expects the RELEASE's source commit for a prebuilt install, not HEAD" \
+  "deploy.sh does not compute record_expected from BINARY_SOURCE_COMMIT (main expected HEAD and refused a covering install)"
+ok "$(grep -q 'BINARY_EXPECT_COMMIT="${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}"' "$DEPLOY_SRC" && echo 1)" \
+  "and the staged binary is proved against that commit BEFORE the swap" \
+  "deploy.sh has no pre-swap build-info proof of the staged binary (main checked only after upgrade.sh)"
+ok "$(grep -q 'SWAPPED=1' "$DEPLOY_SRC" && grep -q 'post_swap_problem' "$DEPLOY_SRC" && echo 1)" \
+  "and a post-swap failure is recorded (post_swap_problem=), not a refusal" \
+  "deploy.sh has no post-swap problem record: every fail() on the far side of the swap still exits"
+
 # ---- run the real deploy --------------------------------------------------------------------------
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 [ -n "$PORT" ] || skip_all "no free port for the scratch node"
@@ -225,8 +253,11 @@ done
 # with it unset the label reads ~/.local/bin, where a scratch home has no installed.txt, and the tree
 # half is silently absent (measured while writing this row).
 VERSION="$(WA_INSTALL_DIR="$INSTALL" "$INSTALL/wa" --version 2>/dev/null | head -1)"
-ok "$(printf '%s' "$VERSION" | grep -q "v${C1:0:7}" && echo 1)" "wa --version names the OLD binary's build (${C1:0:7})" "$VERSION"
-ok "$(printf '%s' "$VERSION" | grep -q "tree ${C2:0:12}" && echo 1)" "and the NEW tree (tree ${C2:0:12})" "$VERSION"
+# The label names the RELEASE TAG the record carries (binary_release=, which the record now writes for a
+# covering install) and then the tree: `wasm-agent v0.1.2 node-<sha12> tree <tree>` - the bytes first,
+# because they are what is executing, and the tree because it is not them (rust/wa-host/src/build_info.rs).
+ok "$(printf '%s' "$VERSION" | grep -q "node-${C1:0:12}" && echo 1)" "wa --version names the OLD binary's release (node-${C1:0:12})" "$VERSION"
+ok "$(printf '%s' "$VERSION" | grep -q "tree ${lua_tree}" && echo 1)" "and the NEW tree (tree ${lua_tree})" "$VERSION"
 
 # IT IS RUNNING, and the record says which pid.
 NODE_PID="$(tr -d '[:space:]' < "$INSTALL/serve.pid" 2>/dev/null)"
