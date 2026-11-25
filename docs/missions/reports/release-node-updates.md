@@ -292,6 +292,24 @@ claim that the canary stayed green - it is reported as it is. The discrimination
 row of section 6 (red on the base with update_coordinator_only, green here); this row is the end-to-end proof
 on the release commit.
 
+## 7d. The release channel a row uses, said in its first output line (Fable 25/11)
+
+The unauthenticated GitHub API allowance is 60 requests/hour per address and every row on this laptop shares
+it, so a scratch row that does not test the public channel must use a local stub, and a row that does test the
+public channel says so first. Both of this mission's rows comply and now say which they are:
+
+```
+release door update: channel LOCAL SIGNED STUB (file:// index + SHA256SUMS/.sig, committed TEST key,
+  WA_LINUX_RELEASE_ALLOW_LOCAL=1) - the public channel is NOT tested and no GitHub API request is made
+tree peer remote update: channel NONE (the binary is built from this checkout; no release channel is read,
+  no GitHub API request is made)
+```
+
+audited before writing those lines: neither row names github.com or gh anywhere, scripts/release-linux.sh
+--local's build path (scripts/lib/build-requirements.sh, scripts/codemode-build.mjs) makes no GitHub API
+request, and the only github.com in scripts/linux/bootstrap.sh is the launcher comment at its head - the code
+fetches the index, the sums and the assets from the URL the index names, which in these rows is file://.
+
 ## 8. The guard, pasted (every install row of this mission was run under it)
 
 ```
