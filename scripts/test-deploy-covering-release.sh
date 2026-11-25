@@ -32,7 +32,7 @@
 #
 #   bash scripts/test-deploy-covering-release.sh
 #
-# Exit: 0 green; 1 a check failed; 3 SKIP (a named reason: no published covering release, or this test is inside
+# Exit: 0 green; 1 a check failed; 3 SKIP (a named reason: the covering release could not be built here, or this test is inside
 # a node turn, where the deploy's own turn guard refuses before it starts).
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -76,30 +76,30 @@ checks=0; failed=0; skipped=0
 ok()   { checks=$((checks + 1)); if [ "$1" = "1" ]; then printf '  ok   %s\n' "$2"; else failed=$((failed + 1)); printf '  FAIL %s%s\n' "$2" "${3:+ - $3}"; fi; }
 skip_all() { printf 'SKIP test-deploy-covering-release: %s\n' "$1"; exit 3; }
 
-for tool in git curl gh python3; do
-  command -v "$tool" >/dev/null 2>&1 || skip_all "$tool is not on PATH (this row asks the real release channel)"
+for tool in git cargo python3; do
+  command -v "$tool" >/dev/null 2>&1 || skip_all "$tool is not on PATH (this row BUILDS the covering release here)"
 done
 
-# THE COMMITS. C2 is this branch's tree committed onto a base, in a fixture clone below; C1 is the newest
-# published release whose compiled-inputs digest is C2's, chosen by the DEPLOY'S OWN resolver (never by this
-# row). The BASE is origin/main when a release covers it, else the source commit of the newest published
-# releases in turn: a release is published per landing, so main can be a few commits past the newest one, and
-# a row that only tried main would skip every time a compiled input landed before its binary did.
-SLUG="$(wa_node_release_repo "$ROOT")" || skip_all "no owner/repo for the node release"
-TRIPLE="$(wa_node_target_triple 2>/dev/null)" || skip_all "this host has no published node-binary target"
-CACHE="$W/node-binaries"
-covers() { # <commit> -> 0 when a published release has this commit's compiled inputs
-  WA_NODE_RELEASE_DIGEST_SECONDS=8 wa_node_release_digest_search "$ROOT" "$1" "$TRIPLE" "$CACHE" >/dev/null 2>&1
-}
+# THE COVERING RELEASE IS BUILT HERE, NOT DOWNLOADED (25/11, Fable's D2). No GitHub call, no credential, no share
+# of the machine's 60/hour: C1 is origin/main - the source commit whose compiled inputs this branch's scripts, lua
+# and docs do not change - and its bytes are built by the product's own publisher into a directory under this row's
+# scratch root. The deploy reads that directory through WA_NODE_BINARIES_URL, the stub seam
+# scripts/lib/node-binaries.sh documents (a dir holding node-<sha12>/ subdirectories, plus releases.txt).
+TRIPLE="$(wa_node_target_triple 2>/dev/null)" || skip_all "this host has no node-binary target triple"
+KEYS="$ROOT/tests/fixtures/release-sign/keys.txt"
+[ -f "$KEYS" ] || skip_all "no committed TEST signing key at $KEYS (a stub channel is signed with it)"
 BASE="$(git -C "$ROOT" rev-parse origin/main)"
-if ! covers "$BASE"; then
-  for tag in $(wa_node_release_list "$ROOT" 8); do
-    cand="$(git -C "$ROOT" rev-parse --verify --quiet "${tag#node-}^{commit}" 2>/dev/null)" || continue
-    if covers "$cand"; then BASE="$cand"; echo "note: origin/main has no published release yet; this row uses $BASE, the source of ${tag}"; break; fi
-  done
-fi
-[ -n "$BASE" ] || skip_all "no published release covers origin/main or any of its recent commits"
-covers "$BASE" || skip_all "no published release covers $BASE (its compiled inputs), so there is no covering install to prove"
+C1="$BASE"; SHORT="${C1:0:12}"
+CHANNEL="$W/channel"; RELEASE="$CHANNEL/node-$SHORT"
+BUILD_TREE="$W/c1-tree"
+mkdir -p "$CHANNEL" "$BUILD_TREE" || skip_all "cannot make the stub channel under $W"
+git -C "$ROOT" worktree add -q --detach "$BUILD_TREE" "$C1" 2>/dev/null   || skip_all "cannot check out $C1 to build the covering release"
+( cd "$BUILD_TREE" && WA_RELEASE_KEYS="$KEYS" CARGO_TARGET_DIR="$W/target"     bash scripts/publish-node-binaries.sh --local --out "$RELEASE" --target "$TRIPLE" ) > "$W/channel.log" 2>&1   || skip_all "the local covering release could not be built from $SHORT: $(tail -3 "$W/channel.log" | tr '\n' ' ')"
+[ -f "$RELEASE/node-$SHORT.manifest" ] || skip_all "the publisher wrote no manifest for $SHORT: $(tail -3 "$W/channel.log" | tr '\n' ' ')"
+printf '%s\n' "node-$SHORT" > "$CHANNEL/releases.txt"
+export WA_NODE_BINARIES_URL="file://$CHANNEL"
+export WA_RELEASE_KEYS="$KEYS"
+echo "stub channel: $CHANNEL (node-$SHORT built here from $SHORT; no GitHub call, no credential)"
 
 # THE TREE (C2): a scratch clone whose REMOTE'S main is this branch's commit. A deploy requires the tree it
 # runs from to be exactly origin/main and clean (step 2), so the fixture makes that true rather than arguing
@@ -145,10 +145,9 @@ C1="$(printf '%s\n' "$PLAN" | sed -n 's/^release_commit=//p' | head -1)"
 [ "$C1" != "$C2" ] || skip_all "$C2 has a published release of its own, so this row has no covering install to prove"
 git -C "$ROOT" cat-file -e "$C1^{commit}" 2>/dev/null || skip_all "$C1 is not in this checkout"
 
-# THE OLD BINARY, from its published release (verified against the manifest and the signature).
-BIN_DIR="$(wa_node_binary_download "$SLUG" "$C1" "$TRIPLE" "$CACHE" 2>"$W/binary.err")" || {
-  skip_all "no usable published release for $C1 (it is the covering build this row installs from)"
-}
+# THE OLD BINARY, out of the release this row just built and signed (the deploy's own fetch proves it again: the
+# manifest names C1, every byte is checked against the row, and the signature is the committed TEST key).
+BIN_DIR="$(WA_NODE_BINARIES_URL="file://$CHANNEL" wa_node_binary_download "$ROOT" "$C1" "$TRIPLE" "$W/node-binaries" 2>"$W/binary.err")"   || skip_all "the stub release for $SHORT is not usable by the product's own downloader: $(tail -2 "$W/binary.err" | tr '\n' ' ')"
 # THE INSTALL LIVES UNDER THE SCRATCH HOME: a path outside $HOME is a system-wide prefix to the sentinel
 # unit logic, which then refuses to start a user watcher there (measured in this row, third run).
 INSTALL="$HOME/install"
@@ -183,6 +182,31 @@ ok "$(grep -q 'SWAPPED=1' "$DEPLOY_SRC" && grep -q 'post_swap_problem' "$DEPLOY_
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 [ -n "$PORT" ] || skip_all "no free port for the scratch node"
 OUT="$W/deploy.out"
+# TWO MODES, and the clean one is the one that matters now (25/11, Fable's E):
+#   clean   a covering install whose watcher ANSWERS - the deploy exits 0 and records NO post_swap_problem;
+#   inject  the same install with one thing that cannot work AFTER the swap - it exits 3, the verdict and the
+#           record name the problem, and nothing is reported as "failed" about a node that was installed.
+MODE="${1:-clean}"
+case "$MODE" in clean|inject) ;; *) echo "usage: $0 [clean|inject]" >&2; exit 2 ;; esac
+# A WATCHER THAT ANSWERS. The runner gives rows a systemctl stub that refuses; a clean covering install needs
+# one that says a watcher is up (`is-active` -> active), and every call is still recorded under this row's root.
+mkdir -p "$W/bin"
+cat > "$W/bin/systemctl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$(dirname "$0")/../systemctl-calls.log"
+case "$1" in
+  is-active|status) echo active ;;
+  show) echo "LoadState=loaded" ;;
+esac
+exit 0
+STUB
+chmod +x "$W/bin/systemctl"
+if [ "$MODE" = inject ]; then
+  # ONE THING THAT CANNOT WORK AFTER THE SWAP: the deploy ships scripts/lib/download-asset.sh into the install,
+  # and a DIRECTORY sitting where that file goes makes the ship fail every time - after the node is installed
+  # and serving, which is exactly the state the review asks about.
+  mkdir -p "$INSTALL/scripts/lib/download-asset.sh" || skip_all "cannot stage the injected post-swap problem"
+fi
 # THE ENVIRONMENT IS REBUILT, NOT FILTERED (25/11). This block used to be
 #     ( cd "$TREE" && env -u WASM_AGENT_IN_TURN -u WA_INSTALL_DIR -u WA_PORT HOME="$HOME" ... bash scripts/deploy.sh )
 # and that is what reached the operator's machine: the row replaced HOME and nothing else, so the deploy's unit path
@@ -209,6 +233,8 @@ wa_installer_run --root "$W" --cd "$TREE" --port "$PORT" --install-dir "$INSTALL
   --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_TREE_WAIT=60 \
   --set WA_DEPLOY_ROOT="$TREE" \
   --set WA_SERVICE_UNIT_FILE="$W/no-such.unit" --set WA_SENTINEL_SUPERVISOR=none \
+  --set WA_NODE_BINARIES_URL="file://$CHANNEL" --set WA_RELEASE_KEYS="$KEYS" \
+  --set WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl" \
   -- bash scripts/deploy.sh --reason "test-deploy-covering-release: a covering release must record both facts" \
   > "$OUT" 2>&1
 rc=$?
@@ -254,6 +280,8 @@ watcher_only() { # <the recorded problems, '; '-separated> -> 0 when every one o
 }
 if [ "$rc" = 0 ]; then
   ok 1 "the deploy exits 0 on a covering release"
+elif [ "$rc" = 3 ] && [ "$MODE" = inject ] && [ -n "$PROBLEMS" ]; then
+  ok 1 "the deploy exits 3 and the record names the problem it hit after the swap: $PROBLEMS"
 elif [ "$rc" = 3 ] && watcher_only "$PROBLEMS"; then
   ok 1 "the deploy exits 3, and every recorded problem is the watcher a scratch home cannot start: $PROBLEMS"
 else
@@ -278,7 +306,12 @@ ok "$([ "$(field binary_commit)" = "$C1" ] && echo 1)" "binary_commit= is the by
 ok "$(printf '%s' "$(field binary_release)" | grep -qE '^node-[0-9a-f]{12}$' && echo 1)" "and binary_release= names the release" "binary_release=$(field binary_release)"
 ok "$([ "$(field record_expected)" = "$C1" ] && echo 1)" "record_expected= keeps the commit the staged binary was proved against" "record_expected=$(field record_expected)"
 # NO POST-SWAP PROBLEM but the watcher one (see the exit code above).
-ok "$({ [ -z "$PROBLEMS" ] || watcher_only "$PROBLEMS"; } && echo 1)" "every recorded post-swap problem, if any, is the watcher" "post_swap_problem=${PROBLEMS:-none}"
+if [ "$MODE" = inject ]; then
+  ok "$([ -n "$PROBLEMS" ] && printf '%s' "$PROBLEMS" | grep -qi 'download-asset' && echo 1)" \
+    "the injected post-swap problem is IN THE RECORD, named by what could not be shipped" "post_swap_problem=${PROBLEMS:-none}"
+else
+  ok "$([ -z "$PROBLEMS" ] && echo 1)" "a covering install whose watcher answers records NO post-swap problem" "post_swap_problem=${PROBLEMS:-none}"
+fi
 
 # THE SCRIPTS SHIPPED (work's install had none): two that only exist in the tree this deploy came from.
 for rel in scripts/lib/download-asset.sh scripts/lib/health-wakes.sh; do
@@ -306,6 +339,10 @@ WA_INSTALL_DIR="$INSTALL" WA_PORT="$PORT" WASM_AGENT_HOME="$HOME" bash "$INSTALL
 # VERIFY-INSTALL'S VERDICT ON THIS INSTALL: every FAIL line is one this row EXPECTS and none other. The two that a
 # scratch home forces are named - the deploy's own verdict (ok=false, because the watcher problem above was recorded)
 # and the sentinel not watching - and any THIRD one fails the row, so this is an allow-list, not a relaxation.
+if [ "$MODE" = clean ]; then
+  ok "$([ "$vrc" = 0 ] && ! grep -qE '^  FAIL ' "$VERIFY" && echo 1)" \
+    "verify-install is GREEN on a covering install whose watcher answers - no FAIL line at all" "rc=$vrc $(grep -E '^  FAIL ' "$VERIFY" | head -2 | tr '\n' '|')"
+fi
 EXPECTED_FAILS=("the deploy's verdict matches the record" "the sentinel is watching")
 unexpected=""
 while IFS= read -r line; do
