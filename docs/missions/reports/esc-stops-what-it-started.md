@@ -32,6 +32,11 @@ stop (a shell that left descendants behind; this process going away). The operat
 "grace_ms":250,"needed_kill":false,"survivors":false}`). On Windows the job object has no polite signal,
 so the record says `JOB` rather than claiming a TERM it never sent - see "not proven".
 
+A deadline goes through the same path, and that half has its own row - 0ae44a3c
+(`rust/wa-operation/src/tests.rs`): `sleep 30` with a 300 ms deadline settles as `deadline_exceeded` with
+`stop: {signal:"TERM", grace_ms:250, needed_kill:false, survivors:false}`, read from the record and not
+from a sentence. It cannot pass on the base: that `stop` key is introduced by 1ef3865a.
+
 **2. The wait wakes on the cancel** - 3e7211f7, corrected by 61230875
 (`rust/wa-capabilities/src/operations.rs`, `rust/wa-capabilities/src/serve.rs`). The `wait` action sat in
 one condvar timeout for the whole `wait_ms` the caller asked for - a second, from the code-mode layer - so
@@ -140,6 +145,11 @@ Full row: **32 ok, 0 failed** (six legs). The bash leg's own record:
 * **Windows**: `Process::stop()` in `rust/wa-operation/src/windows.rs` is compiled only under
   `cfg(windows)`; it was not built or run on this node. Its contract is stated in the code (a job object
   ends every process at once, so the record says `JOB` and gives no grace).
+* **A supervised child has no process group of its own** (measured this session, in the pty fixture):
+  the child's OWN provider request arrives with `tools=[]`, so a child cannot run a shell and there is no
+  child process group for a stop to end. A `subagent-bash` leg was written, measured exactly that fact, and
+  removed: a check that cannot see a shell proves nothing (QUALITY RULE 1). What a stop does to a child -
+  ending the run that awaits it - is unchanged by this branch.
 * **The peer leg's relay is a stand-in**: `scripts/test-remote-pending.lua` runs the real peer half
   (`wa_peer_dispatch` → real operations → a real process group) and the real caller half, but the relay
   between them is an in-process stand-in, as that row has always said. The real relay's stamped deadline is
@@ -158,6 +168,12 @@ Full row: **32 ok, 0 failed** (six legs). The bash leg's own record:
   (`:375-390`). Measured: the Lua slice is only the outermost bound - the wait beneath it was ONE condvar
   timeout in the Rust `wait` action, which is where the 395-907 ms came from. `M.SLICE_MS` is unchanged at
   1000 and the stop no longer waits for it (3e7211f7).
+* The brief names `/stop` as one of the stops. **Measured: there is no `/stop` command in this tree**
+  (`lua/core/commands.lua`'s own table has `/wake cancel`, `/new`, `/undo`, ... and no `stop`), and steering
+  does not cancel: it FENCES pending effectful calls (`steering_admit`, `lua/core/agent.lua`). The run-cancel
+  sources that do exist - Esc and Ctrl+C in the CLI reader, a served run's cancel, a subagent's cancel, and
+  a deadline - all reach `cancelled()` / `run_cancel_requested()`, so all of them now stop the work. If
+  `/stop` is meant to exist, it is a MISSING COMMAND, not a missing stop.
 * The brief says "the stop never signals the process group". The machinery existed and the *foreground*
   path already used it (`change/esc-stops-now`, 23/11); the turn's `bash` runs inside the code-mode pending
   executor, which returned `run_cancelled` to the script and never dispatched a cancel. That is what
