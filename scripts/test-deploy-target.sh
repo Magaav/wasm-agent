@@ -137,8 +137,12 @@ says "$PAUSE" "${MAIN:0:12}" "the pause line's (target commit ...) names it"
 never "$PAUSE" "${STALE:0:12}" "and not the bundle's main"
 says "$NOPE" "${MAIN:0:12}" "the 'did not happen' line names it"
 never "$NOPE" "${STALE:0:12}" "and not the bundle's main"
-says "$RESUME" "now runs ${MAIN:0:12}" "the release line says the node now runs the commit installed.txt holds"
-says "$RESUME" "(was 111111111111)" "and names the build it replaced as the OLD one"
+# THE LINE NOW NAMES THE PROGRAM AND THE TREE (factory-small-items item 1, 25/11): the record written above is a
+# FULL build's, so its `commit=` is the bytes as well as the tree, the program is printed with the `wa --version`
+# `v`, and the record named no separate `lua_tree=` before the swap - which the line says as `not recorded`.
+# Both assertions got NARROWER (they name more), not looser: the same commit, plus the tree, plus the OLD side.
+says "$RESUME" "now runs program v${MAIN:0:12}, tree ${MAIN:0:12}" "the release line says the node now runs the commit installed.txt holds, program and tree"
+says "$RESUME" "(was program not recorded, tree 111111111111)" "and names the build it replaced as the OLD one"
 
 # ---- and the sentinel's own status, which reads the record -------------------------------------------
 status="$("$SENTINEL" status 2>&1 || true)"
