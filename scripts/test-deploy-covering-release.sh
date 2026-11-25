@@ -45,9 +45,12 @@ cd "$ROOT" || exit 2
 root="$(wa_scratch_root wa-deploy-covering)" || exit 2
 W="$(wa_test_workdir "$root" run)" || exit 2
 NODE_PID=""
+# TREE IS DECLARED EMPTY HERE because cleanup runs from a SKIP too, and a skip before the fixture exists (no published
+# release covers this base, measured rows/20261125T034256Z) printed "line 50: TREE: unbound variable" under the skip.
+TREE=""
 cleanup() {
   [ -n "$NODE_PID" ] && kill "$NODE_PID" 2>/dev/null
-  git -C "$ROOT" worktree remove --force "$TREE" >/dev/null 2>&1 || true
+  [ -n "$TREE" ] && git -C "$ROOT" worktree remove --force "$TREE" >/dev/null 2>&1 || true
   chmod -R u+w "$W" 2>/dev/null
   rm -rf "$W"
 }
