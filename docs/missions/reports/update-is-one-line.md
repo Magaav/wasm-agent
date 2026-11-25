@@ -5,9 +5,9 @@ Branch `change/update-is-one-line` (worktree `/home/victor/Work/missions/update-
 claude ux which is just like 1 line seeker showing progress and eventually error. wa update is thousands of
 lines and many errors".
 
-**Status: steps 1-4 and 6 are in the branch; steps 7-8 are measured; step 5 is answered below; step 9 (every
-wait on an event) is NOT done and is listed as open with the exact list of sleeps. The remote case (d) is NOT
-measured yet.**
+**Status: steps 1-9 are in the branch except the remote measurement (d); steps 7-8 are measured and the one
+budget that is not met (first line under 100 ms) is named with its cost. The outstanding items are listed at
+the end.**
 
 | commit | what |
 | --- | --- |
@@ -117,7 +117,18 @@ what should confirm it, and it has not been run.
 
 ### Step 9 - every sleep and poll interval on the path
 
-**NOT done: no wait on this path is event-driven yet.** The list, as the brief asks:
+**Done** (`update_follow.M.wait`): the follower no longer sleeps between reads. It waits on `inotifywait`
+over every directory a deploy writes to - the sentinel's lanes (`queue`, `requests`, `claimed`, `done`,
+`failed`), the sentinel directory itself (`deploy.out`), the data directory (`build-status.json`,
+`deploy-pending.json`) and the install directory (`installed.txt`, `deploy-result.json`, `deploy-state.json`) -
+bounded by `timeout M.HEARTBEAT`, with no monitor flag so ONE event ends the wait. The bound is a bound, not a
+poll: a deploy that writes nothing for 30 s still returns and the heartbeat can speak.
+
+Measured: the same fixture run now prints its first phase **~0.2 s** after the stub deploy writes it (the
+fixture pauses 1.2 s between phases), where the 1 s poll could hold a finished step back by a second; and an
+`already up to date` answer came back in **237 ms**.
+
+What is still on the path, and what each is:
 
 * `lua/core/update_follow.lua`: `M.POLL = 1` s - the follower re-reads the deploy's files once a second
   (`host.sleep`); `M.HEARTBEAT = 30` s - an unchanged phase is repeated at that interval and only then;
@@ -128,8 +139,13 @@ what should confirm it, and it has not been run.
 * `lua/core/update.lua` `check`: `CHECK_COMPONENTS_SECONDS = 10` on the components question, and the release
   list's own refresh bound (`update_banner.REFRESH_SECONDS`).
 
-The replacement is an `inotifywait` on the sentinel's directory and on `build-status.json` (inotify-tools is
-installed here: `inotifywait 4.26.270`), with the 1 s poll kept only where inotify is absent, and said so.
+* `M.wait_tool` answers whether `inotifywait` exists (4.26.270 here) and caches the answer; where it does not,
+  the loop falls back to the 1 s poll **and says `tool = false`**, so a host without the tool is visible rather
+  than silently slow. The row `scripts/test-update-wait.lua` asserts all of it: the command is an
+  `inotifywait` on all eight lanes with `timeout <seconds>` and no `-m`; a real inotifywait fires on a real
+  write in the row's own scratch directory; a quiet wait returns at its bound instead of hanging; a host
+  without the tool answers `tool = false`; and a follow that ends on its first snapshot neither waits nor
+  sleeps. Wired at `scripts/test.sh` (`update wait ok`, 24 checks).
 
 ## Texts to approve (every one is a line a person reads)
 
@@ -166,7 +182,9 @@ characters of the commit, whether the install came from a release (`node-1857d15
    `lua/core/init.lua`'s modules). Nothing of the update runs before the line. To get under 100 ms the binary
    would have to print it from Rust before the interpreter boots (`rust/wa-host`), which needs its own review:
    it must not print for `--check`, `--all`, `--follow`, `<node>` or a child shell that will refuse anyway.
-2. **Step 9 (event-driven waits) is not implemented** - see the list above; `inotifywait` is the plan.
+2. **A host without `inotify-tools` still polls once a second**, and says so by name (`tool = false`) rather
+   than hiding it. Whether the product should carry the tool, or read the files from Rust instead, is a
+   decision for the release owner.
 3. **Case (d) `wa update <node>` from another node is NOT measured.** Its row is
    `scripts/test-tree-peer-remote-update.sh`, which builds a release binary from its own checkout: it belongs
    to the orchestrator's row runner (installer rows go through it) and was not run in this session.

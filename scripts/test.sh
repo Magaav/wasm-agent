@@ -1100,6 +1100,12 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # `--check` answers for the installed commit and the one behind it from the local release list. It refuses a
 # home inside the operator's store (scripts/lib/scratch-home.sh) and touches no node but its own.
 WA_BIN="$BIN" gate_run bash scripts/test-update-follow.sh | grep 'update follow ok'
+# THE WAIT BETWEEN SNAPSHOTS IS AN EVENT, NOT A 1 s POLL (mission update-is-one-line, step 9): a phase the
+# deploy already wrote must not wait for a tick, and a command that finished in 200 ms must not pay a sleep.
+# The row proves `inotifywait` fires on a real file write, that the wait is bounded so it cannot hang the
+# command, and that the follower uses it (and that a caller handing a sleep seam still gets its sleep).
+WA_SCRATCH_HOME="$DB.update-wait-home" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-wait.lua" "$BIN" --db "$DB.update-wait" | grep "update wait ok"
+
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 # No test may run the installer with the operator's real data dir: one run pauses every session here.

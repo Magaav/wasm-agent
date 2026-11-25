@@ -455,6 +455,65 @@ function M.text(snapshot, now)
   return body .. " \194\183 " .. elapsed((tonumber(now) or tonumber(snapshot.at) or from) - from)
 end
 
+-- ---- the wait between snapshots is an EVENT, not a poll (brief item 9) -------------------------
+--
+-- MEASURED before this: the follower slept one second between reads (`M.POLL`), so a phase the deploy had
+-- already written could be up to a second late on the screen, and a command that finished in 200 ms still
+-- paid a 1 s sleep before saying so. A deploy only ever CHANGES FILES, so the wait is on a file change:
+-- `inotifywait` on the directories a deploy writes to, bounded by `M.HEARTBEAT` so an install that goes
+-- quiet still gets its clock redrawn and never looks dead.
+--
+-- The tool is not assumed: `inotify-tools` is present on this machine (4.26.270) and absent on a minimal
+-- host, and where it is absent the loop falls back to the 1 s poll - and SAYS SO, because a fixed poll on
+-- the path is exactly what this item forbids and a silent fallback would hide it.
+M.WAIT_TOOL = "inotifywait"
+local wait_tool_answer = nil
+function M.wait_tool(options)
+  local o = options or {}
+  if o.tool ~= nil then return o.tool == true end
+  if wait_tool_answer ~= nil then return wait_tool_answer end
+  local found = shell("command -v " .. M.WAIT_TOOL .. " >/dev/null 2>&1")
+  wait_tool_answer = found ~= nil and (found.code or 1) == 0
+  return wait_tool_answer
+end
+
+-- The directories a deploy writes into, in one list. Each is watched NON-recursively: the request lanes, the
+-- data directory (build-status.json, deploy-pending.json), the sentinel directory (deploy.out) and the
+-- install directory (installed.txt, deploy-result.json, deploy-state.json). A path that does not exist yet
+-- is skipped by the command's own error (2>/dev/null) and the others still fire: a deploy that has not made a
+-- lane yet is not a deploy nothing can be learned from.
+function M.watch_paths(options)
+  local p = (options and options.paths) or M.paths(options)
+  local list = { p.data, p.sentinel, p.queue, p.requests, p.claimed, p.done, p.failed, p.install }
+  local seen, out = {}, {}
+  for _, dir in ipairs(list) do
+    local value = trim(dir)
+    if value ~= "" and not seen[value] then seen[value] = true; out[#out + 1] = value end
+  end
+  return out
+end
+
+-- One wait: returns `{ event = bool, tool = bool, seconds = n }`. `o.run` is the seam a test drives (the
+-- command string is handed to it); `o.seconds` is the bound. Never blocks longer than the bound.
+function M.wait(options)
+  local o = options or {}
+  local bound = math.max(1, math.floor(tonumber(o.seconds) or M.HEARTBEAT))
+  if not M.wait_tool(o) then return { event = false, tool = false, seconds = bound } end
+  local paths = o.paths and M.watch_paths({ paths = o.paths }) or M.watch_paths(o)
+  if #paths == 0 then return { event = false, tool = true, seconds = bound } end
+  local quoted = {}
+  for _, dir in ipairs(paths) do quoted[#quoted + 1] = "'" .. dir .. "'" end
+  -- No -m: ONE event ends the wait (the loop takes a snapshot and waits again). The bound is `timeout`, so a
+  -- deploy that writes nothing for a while still returns and the heartbeat can speak.
+  local command = "timeout " .. bound .. " " .. M.WAIT_TOOL ..
+    " -q -e modify,close_write,create,moved_to,delete,attrib --format %w%f " .. table.concat(quoted, " ") .. " 2>/dev/null"
+  local run = o.run or shell
+  local ok, result = pcall(run, command)
+  if not ok or type(result) ~= "table" then return { event = false, tool = true, seconds = bound } end
+  local fired = trim(result.stdout or "") ~= ""
+  return { event = fired, tool = true, seconds = bound, exit = tonumber(result.code) }
+end
+
 -- The line after a failure: what this node still runs, and where the deploy's own output is. Empty when
 -- there is nothing true to say.
 function M.next_line(options, snapshot)
@@ -515,6 +574,14 @@ function M.follow(options)
   local clock = o.clock or clock_default
   local pause = o.sleep or function(seconds)
     if host.sleep then host.sleep(math.max(1, math.floor(seconds * 1000))) end
+  end
+  -- THE WAIT IS AN EVENT WHEN THE HOST CAN WATCH FILES (see M.wait). `o.sleep` is the seam the deterministic
+  -- tests drive: a caller that hands one gets it, unchanged. `o.wait` is the same seam one level down.
+  local function settle()
+    if o.sleep then return pause(poll) end
+    local waited = o.wait and o.wait({ seconds = M.HEARTBEAT, next = false }) or M.wait({ paths = o.paths, seconds = M.HEARTBEAT })
+    if waited and waited.tool == false then return pause(poll) end
+    return waited
   end
   local poll = tonumber(o.poll) or M.POLL
   local bound = tonumber(o.bound)
@@ -589,7 +656,7 @@ function M.follow(options)
       return { ok = false, state = snapshot.key, body = body, unknown = true, timed_out = true,
         seconds = now - started, rounds = rounds, printed = printed }
     end
-    pause(poll)
+    settle()
   end
 end
 
