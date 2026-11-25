@@ -170,7 +170,15 @@ own and a peer call is judged by the peer's schema.
    > accept is the list, and no arguments is every entry.
    > the filtered answer's `filter.note` — Only the entries the filter names are listed; capabilities() with no
    > arguments is the whole catalogue.
-6. The unknown-argument refusal, both doors:
+6. The failed block's `done` entry when the finished answer carried a configured secret - it is a pointer,
+   never an inline copy:
+   > `unread {sha256, offset, bytes}` + `redacted: [<the configured names>]`
+   (the same `done` entry otherwise carries `result`).
+7. The two schema declarations that keep forwarding tools open (no new words a model reads, but they change
+   what is accepted, so they are listed): `tool_call` declares `additionalProperties: true` ("a parameter
+   written beside the name is moved into the target's arguments"), and `remote`'s `calls` ITEMS declare it
+   too ("each entry carries the capability's own parameters beside `capability`").
+8. The unknown-argument refusal, both doors:
    > code: `unknown_argument:q - did you mean query?` (the suggestion only when the name is close)
    > message: `<tool>` does not take the argument `<name>` - its own schema never declares that name, so
    > nothing was dispatched (json_contract.lua).
@@ -196,13 +204,33 @@ Rust rows: `wa-term` and `wa-whatsapp` were not re-run against the base by me �
 (`PIN_MARK`) and fields (`hidden`) that the base does not have, so they cannot pass there; `scripts/test-discriminates.sh`
 at the land gate is the authority.
 
+## 7a. The full fast path, run twice on this branch
+
+`flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh --jobs 6`, the tree's own binary, the whole
+suite (497 checks):
+
+* run 1 (`f3e6dd…` era, 11 files): **12 failed** — the row-by-row messages named the shapes the one rule had
+  to learn (a free-form `arguments` bag, `tool_call`'s beside-the-name form, `remote`'s `calls` items, a
+  fixture schema narrower than the calls it makes, a retired argument in a row about a retired action) and
+  the boundary the `done` block must not cross (a finished answer that carried a configured secret). Each
+  is fixed in `c8ddd4cb` and `49bb414e`, and each row was re-run on its own afterwards;
+* run 2, on `49bb414e`: **497 checks, 1 failed, 0 skipped** in 1009 s. The one failure is
+  `rust wa-term (exit 101)`, `wa-term/tests/icons.rs:202` ("the unknown-font line is said ONCE at start: 0") -
+  which fails IDENTICALLY on the base commit with `WA_BIN` set (measured: base tree, base binary, same
+  assertion, same `0`). It is not this branch; it only runs when `WA_BIN` is set, which is why a bare
+  `cargo test -p wa-term` passes it 5/5.
+
 ## 7b. Failures that are NOT this branch (run on the base too)
 
-Under the single-row runner I used (its own scratch home, the tree's binary, `cwd` = the repo root), three
-rows fail the same way on the BASE commit, so they are this node/runner and not this change:
+Under the single-row runner I used (its own scratch home, the tree's binary, `cwd` = the repo root), these
+rows fail the same way on the BASE commit, so they are this node or the runner and not this change:
 `test-done-gate.lua` (30 failed / 89 checks on the base and on this branch), `test-resource-claims.lua`
-("unknown fixture mode"), `test-native-target-resource.lua` (a nil root). `test-remote-refusals.lua` and
-`test-mcp.lua` fail in the runner for a missing `policy.json` / MCP config in the scratch home.
+("unknown fixture mode"), `test-native-target-resource.lua` (a nil root), `test-remote-refusals.lua` and
+`test-mcp.lua` (no `policy.json` / MCP config in the scratch home), `test-subagent-selection.lua`
+(`no such table: orchestration_policy`), `test-subagents-profiles.lua`
+(`policy_fixture_requires_isolated_wrapper`), `test-completion-deploy-wait.lua` (the runner refuses its home:
+it must live outside `~/.wasm-agent`; in the fast path it failed once on a tick count, and it passed in run 2),
+and `rust wa-term --test icons` with `WA_BIN` set, which fails on the base as measured in 7a.
 
 ## 8. What I could not verify (and did not do)
 
@@ -220,4 +248,14 @@ rows fail the same way on the BASE commit, so they are this node/runner and not 
 * **The TUI row by eye.** Item 5 is proved by `cargo test`, not by looking at a terminal: the three dots on a
   real multi-line message followed by scrolling it out of view.
 * `scripts/test-discriminates.sh` (base discrimination for the whole branch) was not run by me; the land
-  gate runs it.
+  gate runs it (the per-row base runs in section 7 are the same experiment, done by hand).
+* **The wa-whatsapp release bundle for the new pin.** `components.lock` now pins `f6975b5d…` (built from this
+  tree, verified by `scripts/test-component-pins.sh` 11/11 and by the 8 seam ops). A deploy installs bytes
+  from the release bundle `components-<lock sha12>`, so that bundle has to be published (the orchestrator's
+  step) before the component can be deployed; the local copy was put in `build/components-pinned/` only so the
+  pin check can judge it here.
+* **A side effect I caused and undid.** `scripts/build-components.sh` installs into the LIVE
+  `~/.wasm-agent/components`; running it from this worktree replaced this node's `wa-whatsapp.wasm` with a
+  build of the branch. Undone by rebuilding the same component from the base tree (`/tmp/tt-base`) and
+  verified byte-for-byte: `3ab893733cd6…`, 8865574 bytes, the pinned main artifact. Later builds used
+  `WA_COMPONENTS_DIR=<scratch>`. Any mission that builds a component must pass that variable.
