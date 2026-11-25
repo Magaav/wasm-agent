@@ -9,6 +9,9 @@ SIGNER=release-signing-9356608c52260ed9
 PREFIX=${WA_PREFIX:-$HOME/.local/bin}
 UI=${WA_UI:-$HOME/.local/share/wasm-agent/ui}
 check=0; [ "${1:-}" = --check ] && check=1
+# --resolve prints the release this host would install and stops: no download, no install. It exists so the
+# choice this script makes can be measured on a machine with no assets to download (rows do exactly that).
+resolve=0; [ "${1:-}" = --resolve ] && resolve=1
 
 say() { printf 'install: %s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -31,11 +34,49 @@ say "channel: signed node binaries (releases tagged node-<commit>)"
 # scan stays as the fallback for a host that serves no pointer.
 tag=$(curl -fsSL "${WA_RELEASE_POINTER:-https://wa.colmeio.com/latest-node.txt}" 2>/dev/null | tr -d '[:space:]') || true
 case $tag in node-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;; *) tag= ;; esac
-[ -n "$tag" ] || tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=60" \
-      | sed -n 's/^ *"tag_name": "\(node-[0-9a-f]\{12\}\)".*/\1/p' | head -1) || true
-[ -n "$tag" ] || die "no_release: no node-<commit> release found"
+# The listing fallback: the FIRST page is the one this script always asked (60). A node build is a release
+# like any other and the newest entries are where it lives, so that is the one request a normal host pays.
+# Only when that page names no build does the search widen - to 100-entry pages, re-read from page 1, because
+# an API page number belongs to its own per_page (page 2 of 60 is not page 2 of 100). When nothing is found the
+# count that was read is named, never "no node-<commit> release found".
+API=${WA_RELEASE_API:-https://api.github.com}
+PAGE_MAX=${WA_RELEASE_MAX_PAGES:-5}
+# The twelve classes are spelled out rather than written as an interval: this node's GNU sed 4.10
+# rejects the interval form with 'sed: -e expression #1, char 50: Unmatched {' (measured), and
+# [0-9a-f][0-9a-f]... matches exactly the same twelve characters.
+node_tag() { sed -n 's/^.*"tag_name": *"\(node-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\)".*$/\1/p' | head -1; }
+if [ -z "$tag" ]; then
+  entries=0
+  body=$(curl -fsSL "$API/repos/$REPO/releases?per_page=60&page=1" 2>/dev/null) || body=
+  if [ -n "$body" ]; then
+    entries=$(printf '%s\n' "$body" | grep -o '"tag_name"' | wc -l | tr -d ' ')
+    tag=$(printf '%s\n' "$body" | node_tag)
+  fi
+fi
+if [ -z "$tag" ]; then
+  entries=0
+  page=1
+  while [ "$page" -le "$PAGE_MAX" ]; do
+    body=$(curl -fsSL "$API/repos/$REPO/releases?per_page=100&page=$page" 2>/dev/null) || break
+    count=$(printf '%s\n' "$body" | grep -o '"tag_name"' | wc -l | tr -d ' ')
+    entries=$((entries + count))
+    tag=$(printf '%s\n' "$body" | node_tag)
+    [ -z "$tag" ] || break
+    [ "$count" -gt 0 ] || break
+    page=$((page + 1))
+  done
+fi
+[ -n "$tag" ] || die "no_release: could not find a build in the newest $entries releases"
 sha=${tag#node-}
 say "release: $tag"
+if [ "$resolve" = 1 ]; then
+  # the tag on its own line (so a row can compare it exactly, not through a prefix) and the URL the download
+  # step would build from it - the two facts a row needs to prove the selection is right.
+  say "resolve: $tag"
+  say "download: https://github.com/$REPO/releases/download/$tag"
+  say "nothing downloaded"
+  exit 0
+fi
 
 d=${TMPDIR:-/tmp}/wa-install-$$; mkdir -p "$d"; trap 'rm -rf "$d"' EXIT INT TERM
 base="https://github.com/$REPO/releases/download/$tag"
