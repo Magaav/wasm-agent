@@ -132,6 +132,53 @@ own and a peer call is judged by the peer's schema.
   renderer, that a schema that declares arguments is CLOSED by default, and that an explicitly open schema
   still accepts what it does not name. 71 checks (was 69).
 
+## MODEL-AGNOSTIC before/after (item 2, and item 3/4's model-read bytes)
+
+Fixed task set, scripted model, identical call bytes on both trees: `measure/model-agnostic/task-set.lua`,
+driver `measure/model-agnostic/run.sh <base-tree> <base-bin> <branch-tree> <branch-bin>` (this node: base
+`/tmp/tt-base` @70eb209d with its own build, branch `change/tools-tell-the-truth` @3ec3656e). Refusals are
+`unknown_argument` occurrences in the request text (one refusal appears twice on the wire: in the tool result
+and in the next request's copy); `body tokens` is the product's own estimate, ceil(bytes/4)
+(`lua/core/agent.lua estimate_tokens`).
+
+```
+task                | rounds | convo bytes identical | system bytes   | tool-result bytes | tool-result tokens | body tokens   | wall ms   | unknown_argument
+healthy_time        | 2->2   | True                  | 29556->30392  | 189->189          | 48->48             | 7836->8045    | 1.3->1.3  | 0->0
+healthy_read        | 2->2   | True                  | 29556->30392  | 916->916          | 229->229           | 8041->8250    | 0.3->0.3  | 0->0
+healthy_bash        | 2->2   | True                  | 29556->30392  | 437->437          | 110->110           | 7911->8120    | 0.4->0.4  | 0->0
+typo_read           | 3->3   | True                  | 29556->30392  | 1832->1422        | 458->356           | 8351->8455    | 0.5->0.4  | 0->4
+typo_grep           | 3->3   | True                  | 29556->30392  | 20957->19908      | 5240->4977         | 13566->13498  | 0.5->0.4  | 0->4
+capabilities_one    | 2->2   | True                  | 29556->30392  | 8238->599         | 2060->150          | 10123->8165   | 0.4->0.4  | 0->0
+forward_remote      | 2->2   | True                  | 29556->30392  | 1601->1596        | 401->399           | 8237->8445    | 0.5->0.5  | 0->0
+codemode_healthy    | 2->2   | True                  | 29556->30392  | 186->186          | 47->47             | 7845->8054    | 0.4->0.4  | 0->0
+sum                 |        |                       |               | 34356->25253      |                    |               |           | 0->8
+```
+
+Read it this way:
+
+* **healthy request bytes are identical.** For every task the request WITHOUT the system prompt (the user turn
+  and the tool round trip) hashes the same on both trees, and the tool-result bytes are equal on the three
+  healthy tasks (189, 916, 437) and on the healthy script (186): a call that names only declared arguments
+  answers exactly what it answered before.
+* **the catalogue the model reads every turn grew by 836 bytes (+2.8%, +209 body tokens)**: 29556 -> 30392.
+  That is the only cost a healthy turn pays, and it is the item-4 description plus the two schemas that now say
+  they are open (`capabilities` names/status, `tool_call`). It buys the two typo turns and the 7.6 KB
+  capabilities turn below.
+* **a typo now costs ONE refusal and fewer bytes, not a wrong answer**: `typo_read` answers 1832 -> 1422 bytes
+  (-410) - base silently ignored `ofset` and returned a page the model never asked for; `typo_grep` 20957 ->
+  19908 (-1049) - base ran a literal repo-wide grep and answered 100 matches for an option it does not have.
+  Each carries 1 refusal (4 wire occurrences = 2 per task: the result and its copy in the next request).
+* **capabilities for one fact: 8238 -> 599 bytes (-92.7%), 2060 -> 150 tokens (-92.7%)** on that turn.
+* **a forwarding tool is unchanged**: `remote` with a capability's own argument answers 1601 -> 1596 bytes
+  (the 5-byte difference is the refusal sentence's own wording, not the argument handling).
+* **no round regression and no wall-time regression**: rounds are equal because the script is fixed; a real
+  model would spend ONE extra round on a typo task (refusal, then the corrected call) - that reaction is not
+  measurable without a model, which is why this set measures bytes and refusals, not judgement.
+* `tokens_est` (whole body) rises by the +209 system-prompt tokens on every turn and falls by 1958 on
+  `capabilities_one`; the sum of tool-result bytes falls 34356 -> 25253 (-26.5%) over the set.
+
+Reproduce: `bash measure/model-agnostic/run.sh /tmp/tt-base /home/victor/wasm-agent/target/m-tt-base/release/wa $PWD /home/victor/wasm-agent/target/m-tools-tell-the-truth/release/wa`.
+
 ### 5.4 Rows
 
 * `scripts/test-unknown-argument.lua` (new) — **18 checks, 0 failed**: a script's call is refused by name
