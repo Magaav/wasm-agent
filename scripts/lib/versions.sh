@@ -194,11 +194,27 @@ wa_version_link_record() {
 
 # 3 + 5. TODAY'S PATHS THROUGH THE POINTER, and the order that keeps a cut survivable.
 #
-# Per path, a legacy REAL file/dir is renamed aside first (one rename, atomic) and the link is then put in
-# place through a temp name and mv -T (one rename). Between the two renames the legacy path is absent: a
-# process starting then gets the binary's compiled-in Lua (rust/wa-host/src/main.rs:130 falls back and says
-# so once), which is a working node - the cut order the requirement asks for. Nothing here deletes; the
-# aside names are lua-core.stale.<ts> / scripts.stale.<ts>, listed by wa clean and removed only on command.
+# FIX 4 (Fable 25/11): THE PROGRAM MUST NEVER BE ABSENT. The first version of this function moved each real path
+# aside and then linked, so between the two renames there was no wa on PATH and no ExecStart - a node that could
+# not start. Now:
+#   - for a FILE (wa, wa-sentinel): the old copy is kept with a HARD LINK (no bytes, no copy), and the link through
+#     the pointer is renamed OVER the file - one rename, the path always resolves;
+#   - for a DIRECTORY (lua-core, scripts, ui): an atomic EXCHANGE where the system has it (coreutils mv --exchange,
+#     i.e. renameat2 RENAME_EXCHANGE), and only when it does not, the two renames - and the function SAYS which one
+#     it used, so the report can name it per machine.
+# Nothing is deleted: the kept copies are <name>.stale.<ts>, listed by wa clean and removed only on command.
+
+wa_version_has_exchange() { # 0 when this mv can exchange two paths atomically
+  case "${WA_VERSION_EXCHANGE:-}" in
+    1) return 0 ;; 0) return 1 ;;
+  esac
+  local probe
+  probe="$(mktemp -d 2>/dev/null)" || return 1
+  : > "$probe/a"; : > "$probe/b"
+  if mv --exchange "$probe/a" "$probe/b" 2>/dev/null; then rm -rf "$probe"; WA_VERSION_EXCHANGE=1; return 0; fi
+  rm -rf "$probe"; WA_VERSION_EXCHANGE=0; return 1
+}
+
 wa_version_link_legacy() { # <install-dir>
   local install="${1:?install dir}" share ts name target aside tmp
   share="$(wa_share_root)"; ts="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -206,28 +222,50 @@ wa_version_link_legacy() { # <install-dir>
     target="$share/current/$name"; tmp="$install/$name.tmp.$$"
     [ -f "$target" ] || continue
     if [ -f "$install/$name" ] && [ ! -L "$install/$name" ]; then
-      cmp -s "$install/$name" "$target" || mv "$install/$name" "$install/$name.stale.$ts" || {
-        printf 'version_legacy_busy: %s\n' "$install/$name" >&2; return 4; }
+      # The old bytes are kept by a HARD LINK (no copy), and the file itself is never moved away.
+      [ -e "$install/$name.stale.$ts" ] || ln "$install/$name" "$install/$name.stale.$ts" 2>/dev/null ||         cp -p "$install/$name" "$install/$name.stale.$ts" 2>/dev/null || true
     fi
-    ln -sfn "$share/current/$name" "$tmp" && mv -T "$tmp" "$install/$name" || {
-      printf 'version_legacy_unwritable: %s\n' "$install/$name" >&2; return 4; }
+    ln -sfn "$target" "$tmp" && mv -T "$tmp" "$install/$name" || {
+      rm -f "$tmp"; printf 'version_legacy_unwritable: %s
+' "$install/$name" >&2; return 4; }
   done
   for name in lua-core scripts; do
     target="$share/current/$name"; tmp="$install/$name.tmp.$$"
     [ -d "$target" ] || continue
+    ln -sfn "$target" "$tmp" || { printf 'version_legacy_unwritable: %s
+' "$tmp" >&2; return 4; }
     if [ -d "$install/$name" ] && [ ! -L "$install/$name" ]; then
-      aside="$install/$name.stale.$ts"
-      mv "$install/$name" "$aside" || { printf 'version_legacy_busy: %s\n' "$install/$name" >&2; return 4; }
-      printf 'version_legacy_kept %s\n' "$aside"
+      if wa_version_has_exchange && mv --exchange "$tmp" "$install/$name" 2>/dev/null; then
+        : # the link is in place and the old tree is now at $tmp: keep it under its own name
+        mv -T "$tmp" "$install/$name.stale.$ts" 2>/dev/null && printf 'version_legacy_exchanged %s
+' "$name"
+      else
+        aside="$install/$name.stale.$ts"
+        mv "$install/$name" "$aside" || { rm -f "$tmp"; printf 'version_legacy_busy: %s
+' "$install/$name" >&2; return 4; }
+        mv -T "$tmp" "$install/$name" || { mv "$aside" "$install/$name"; printf 'version_legacy_unwritable: %s
+' "$install/$name" >&2; return 4; }
+        printf 'version_legacy_two_renames %s (this mv cannot exchange)
+' "$name"
+      fi
+    else
+      mv -T "$tmp" "$install/$name" || { rm -f "$tmp"; printf 'version_legacy_unwritable: %s
+' "$install/$name" >&2; return 4; }
     fi
-    ln -sfn "$share/current/$name" "$tmp" && mv -T "$tmp" "$install/$name" || {
-      printf 'version_legacy_unwritable: %s\n' "$install/$name" >&2; return 4; }
   done
   if [ -d "$share/ui" ] && [ ! -L "$share/ui" ] && [ -d "$share/current/ui" ]; then
-    mv "$share/ui" "$share/ui.stale.$ts" 2>/dev/null && ln -sfn "current/ui" "$share/ui.tmp.$$" \
-      && mv -T "$share/ui.tmp.$$" "$share/ui" || printf 'version_legacy_kept %s/ui\n' "$share" >&2
+    ln -sfn "current/ui" "$share/ui.tmp.$$" || return 4
+    if wa_version_has_exchange && mv --exchange "$share/ui.tmp.$$" "$share/ui" 2>/dev/null; then
+      mv -T "$share/ui.tmp.$$" "$share/ui.stale.$ts" 2>/dev/null && printf 'version_legacy_exchanged ui
+'
+    else
+      mv "$share/ui" "$share/ui.stale.$ts" 2>/dev/null && mv -T "$share/ui.tmp.$$" "$share/ui" 2>/dev/null || true
+      printf 'version_legacy_two_renames ui
+'
+    fi
   fi
-  printf 'version_legacy_linked %s\n' "$install"
+  printf 'version_legacy_linked %s
+' "$install"
 }
 
 # 7. RETENTION. [<keep=3>]

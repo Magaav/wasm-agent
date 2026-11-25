@@ -192,13 +192,16 @@ if [ -z "${WA_BIN:-}" ]; then
 else
   cut="$W/cut"
   mkdir -p "$cut/share/versions/aaaaaaaaaaaa/lua-core" "$cut/share/versions/aaaaaaaaaaaa/scripts" "$cut/install" "$W/home2"
-  printf 'id=aaaaaaaaaaaa\ncommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$cut/share/versions/aaaaaaaaaaaa/version.txt"
+  printf 'id=aaaaaaaaaaaa\ncommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ninstall_dir=%s\n' "$cut/install" > "$cut/share/versions/aaaaaaaaaaaa/version.txt"
   printf 'init' > "$cut/share/versions/aaaaaaaaaaaa/lua-core/init.lua"
   printf 'deploy' > "$cut/share/versions/aaaaaaaaaaaa/scripts/deploy.sh"
   ln -sfn versions/aaaaaaaaaaaa "$cut/share/current"
+  # THE PROGRAM MUST BE THAT INSTALL'S OWN (fix 1): a `wa` run from anywhere else now refuses to repair, on purpose,
+  # so the row puts the suite's binary into the install it is about and runs THAT.
+  cp "$WA_BIN" "$cut/install/wa" || fail "R5: cannot place the program in the scratch install"
   # The cut: the legacy path the pointer names is ABSENT (that is what the two-rename order leaves behind).
   if WA_SHARE_ROOT="$cut/share" WA_INSTALL_DIR="$cut/install" WASM_AGENT_HOME="$W/home2" \
-     WASM_AGENT_LUA_ROOT="$(pwd)" timeout 60 "$WA_BIN" --db "$W/db-cut.sqlite" > "$W/cut.log" 2>&1; then
+     WASM_AGENT_LUA_ROOT="$(pwd)" timeout 60 "$cut/install/wa" --db "$W/db-cut.sqlite" > "$W/cut.log" 2>&1; then
     ok
   else
     sed -n '1,5p' "$W/cut.log" >&2; fail "R5: wa did not start after the cut"
@@ -215,11 +218,48 @@ else
   rm -f "$cut/install/scripts"
   mkdir -p "$cut/install/scripts"; printf 'mine' > "$cut/install/scripts/deploy.sh"
   WA_SHARE_ROOT="$cut/share" WA_INSTALL_DIR="$cut/install" WASM_AGENT_HOME="$W/home2" \
-     WASM_AGENT_LUA_ROOT="$(pwd)" timeout 60 "$WA_BIN" --db "$W/db-cut2.sqlite" > "$W/cut2.log" 2>&1 || fail "R5: wa did not start with a real scripts dir present"
+     WASM_AGENT_LUA_ROOT="$(pwd)" timeout 60 "$cut/install/wa" --db "$W/db-cut2.sqlite" > "$W/cut2.log" 2>&1 || fail "R5: wa did not start with a real scripts dir present"
   [ ! -L "$cut/install/scripts" ] || fail "R5: a REAL directory was replaced by a link"
   [ "$(cat "$cut/install/scripts/deploy.sh")" = "mine" ] || fail "R5: the real directory's content was touched"
   ok
 fi
+
+# --- FIX 4: THE PROGRAM IS NEVER ABSENT (Fable 25/11) --------------------------------------------------------
+# A node must be able to start itself at every point of a conversion: `wa --version` runs in a loop while 50
+# conversions replace the program and the trees, and not one run may fail. The loop is killed by the trap, so it
+# leaves no process behind.
+conv="$W/conv"; mkdir -p "$conv/share/versions/aaaaaaaaaaaa/lua-core" "$conv/share/versions/aaaaaaaaaaaa/scripts" "$conv/install"
+printf 'id=aaaaaaaaaaaa\ncommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ninstall_dir=%s/install\n' "$conv" \
+  > "$conv/share/versions/aaaaaaaaaaaa/version.txt"
+printf 'init' > "$conv/share/versions/aaaaaaaaaaaa/lua-core/init.lua"
+printf 'deploy' > "$conv/share/versions/aaaaaaaaaaaa/scripts/deploy.sh"
+ln -sfn versions/aaaaaaaaaaaa "$conv/share/current"
+# the install starts in TODAY's shape: a real program and real directories
+printf '#!/bin/sh\nprintf "wa-stub\\n"\n' > "$conv/install/wa"; chmod +x "$conv/install/wa"
+mkdir -p "$conv/install/lua-core" "$conv/install/scripts"
+printf 'old' > "$conv/install/lua-core/init.lua"; printf 'old' > "$conv/install/scripts/deploy.sh"
+: > "$conv/failures"
+WA_SHARE_ROOT="$conv/share" bash -c '
+  while [ ! -f "$1/stop" ]; do
+    "$1/install/wa" --version >/dev/null 2>&1 || echo "absent" >> "$1/failures"
+  done' _ "$conv" &
+loop=$!
+trap 'rm -f "$conv/stop"; kill "$loop" 2>/dev/null; chmod -R u+w "$W" 2>/dev/null; rm -rf "$W"' EXIT
+i=0
+while [ "$i" -lt 50 ]; do
+  WA_SHARE_ROOT="$conv/share" wa_version_link_legacy "$conv/install" >/dev/null 2>&1 || { touch "$conv/stop"; fail "fix 4: a conversion failed at run $i"; }
+  i=$((i + 1))
+done
+touch "$conv/stop"; wait "$loop" 2>/dev/null; trap - EXIT
+[ ! -s "$conv/failures" ] || fail "fix 4: the program was ABSENT during a conversion ($(wc -l < "$conv/failures") runs failed)"
+ok
+# and the structural half: a FILE is kept by a hard link and replaced by ONE rename, never moved away.
+grep -q 'ln "$install/$name" "$install/$name.stale' scripts/lib/versions.sh || fail "fix 4: the program is not kept by a hard link"
+# Scoped to the FILE loop: a directory may still be moved aside where the system cannot exchange, and the function
+# says so. A file may never be.
+file_loop="$(sed -n '/for name in wa wa-sentinel/,/for name in lua-core scripts/p' scripts/lib/versions.sh)"
+case "$file_loop" in *'mv "$install/$name" '*) fail "fix 4: the program is still MOVED AWAY before the link";; esac
+ok
 
 # --- the report's number: REAL disk, not apparent ------------------------------------------------------------
 wa_version_disk eeeeeeeeeeee | grep -q '^version_disk eeeeeeeeeeee real=[0-9]* apparent=' || fail "report: wa_version_disk names real blocks and apparent bytes"
