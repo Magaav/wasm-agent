@@ -30,10 +30,30 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
-# THE SCRATCH TREE IS NOT UNDER TMPDIR. A node session runs with TMPDIR inside its own store
-# (~/.wasm-agent/tmp), and a scratch home under it is INSIDE the operator store - the guard below refused it
-# (measured: refused(real_node_home)). /tmp is outside every node home, which is the point of this row.
-WORK="$(mktemp -d /tmp/wa-node-download.XXXXXX)" || { echo 'no scratch directory' >&2; exit 1; }
+# THE SCRATCH TREE COMES FROM THE RUNNER WHEN IT GAVE ONE (25/11). TMPDIR and GATE_ROOT are what the runner
+# creates and deletes; a row rooted at a literal /tmp writes where the runner cannot clean, which is what
+# scripts/test-tmp-cleanliness.mjs exists to stop (measured 23/11: the tmpfs filled three times in one day and
+# this row was RED on main since 8652daf1 for exactly this line).
+#
+# AND IT IS NEVER INSIDE THE OPERATOR STORE. A node session runs with TMPDIR inside its own store
+# (~/.wasm-agent/tmp), and a scratch home under it IS the operator home - the guard below refuses it
+# (measured on this row's first run: refused(real_node_home)). So a candidate root is taken only when it is a
+# writable directory OUTSIDE ~/.wasm-agent, and the last fallback is /tmp. Either way the trap below removes
+# what this run minted, which is the other half of the rule.
+NODE_DOWNLOAD_ROOT=""
+for candidate in "${WA_TEST_ROOT:-}" "${GATE_ROOT:-}" "${TMPDIR:-}"; do
+  [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
+  case "$(cd "$candidate" && pwd -P)" in
+    */.wasm-agent|*/.wasm-agent/*) continue ;;
+  esac
+  NODE_DOWNLOAD_ROOT="$candidate"
+  break
+done
+# A root REJECTED above falls back here, in ONE place: /tmp is outside every node home. (Measured
+# 25/11: leaving TMPDIR as this fallback put the scratch tree straight back inside the store the loop
+# had just refused - the plain run answered refused(real_node_home) on an otherwise patched row.)
+NODE_DOWNLOAD_ROOT="${NODE_DOWNLOAD_ROOT:-/tmp}"
+WORK="$(mktemp -d "$NODE_DOWNLOAD_ROOT/wa-node-download.XXXXXX")" || { echo 'no scratch directory' >&2; exit 1; }
 STUB_PID=""
 cleanup() {
   [ -z "$STUB_PID" ] || kill "$STUB_PID" 2>/dev/null
