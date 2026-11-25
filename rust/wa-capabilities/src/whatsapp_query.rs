@@ -222,7 +222,17 @@ pub extern "C-unwind" fn index(l: *mut wa_host_support::lua::LuaState) -> std::o
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(args) => match index_op(&args) {
-            Some(op) => answer_with(op, &args),
+            Some(op) => match seam::Op::parse(op) {
+                // This row declares ReadOnly, and `backfill` asks the phone and `download` writes a file:
+                // a sandbox that joined this door as a read would be causing either. The class is the
+                // op's (`seam::Op::effect`), and the refusal names the door that declares it.
+                Some(asked) if asked.effect() != seam::Effect::ReadOnly => seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is not a read: ask whatsapp_{op}, the row that declares its effect"),
+                ),
+                _ => answer_with(op, &args),
+            },
             None => seam::refusal_text("index", "op_required", OP_REQUIRED),
         },
         Err(_) => seam::refusal_text("index", "invalid_request", "the arguments are not a JSON object"),
@@ -323,7 +333,14 @@ fn ask_text(op: &str, args: &Value, wait_ms: u64) -> Value {
 /// [`ask_text_in`] for a request that carries its own op (the generic row's path, driven by the tests).
 fn ask_index_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
     match index_op(args) {
-        Some(op) => ask_text_in(q, op, args, wait_ms, build),
+        Some(op) => match seam::Op::parse(op) {
+            Some(asked) if asked.effect() != seam::Effect::ReadOnly => seam::refusal_text(
+                op,
+                "use_its_own_door",
+                format!("{op} is not a read: ask whatsapp_{op}, the row that declares its effect"),
+            ),
+            _ => ask_text_in(q, op, args, wait_ms, build),
+        },
         None => seam::refusal_text("index", "op_required", OP_REQUIRED),
     }
 }

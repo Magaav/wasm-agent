@@ -101,6 +101,16 @@ for _, case in ipairs(OPS) do
   end
 end
 
+-- The generic door is a READ door: an op that asks the phone or writes a file is refused by name and
+-- queues nothing, so a sandbox that joined it as a read cannot be made to cause an effect through it.
+for _, case in ipairs({ { op = "backfill", detail = "count" }, { op = "download" } }) do
+  local refused = json.decode(tostring(host.whatsapp_index(json.encode({ op = case.op, chat = "15550000001@lid", id = "3EB0C0FFEE11" }))))
+  ok(refused.error == "whatsapp_" .. case.op .. "_use_its_own_door",
+    case.op .. " is not a read and this door says so")
+  ok(refused.ok == false and refused.effect == "none", case.op .. " through the read door changes nothing")
+  ok(tostring(refused.detail):find("whatsapp_" .. case.op, 1, true) ~= nil, "the refusal names the row to use")
+end
+
 -- The generic door refuses to guess which question it is, and queues nothing.
 local no_op = json.decode(tostring(host.whatsapp_index(json.encode({ q = "boleto" }))))
 ok(no_op.error == "whatsapp_index_op_required" and no_op.ok == false, "no op is a named refusal")

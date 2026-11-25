@@ -137,6 +137,16 @@ pub const BACKFILL_MAX: u32 = 500;
 /// the phone, and a caller that names no chat is asking for "the ones I talk in", not for all of them.
 pub const BACKFILL_MAX_CHATS: usize = 20;
 
+/// What a question can do to the world outside this process, in the three classes the host's capability
+/// inventory promises ([`Op::effect`]). `ReadOnly` asks the index; `Network` asks the primary phone;
+/// `WritesFiles` writes a decrypted file into the node's bounded directory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Effect {
+    ReadOnly,
+    Network,
+    WritesFiles,
+}
+
 /// The seven questions the agent may ask about the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -184,6 +194,18 @@ impl Op {
         Op::Backfill,
         Op::Contacts,
     ];
+
+    /// What this question does to the world outside the process - the class the host's capability row
+    /// declares. It is a property of the QUESTION, not of the door that carries it: `whatsapp_index` is
+    /// one ReadOnly row, and a sandbox that joined it as a read must not be able to reach `backfill` and
+    /// ask the primary phone (measured 25/11 on avell: it could, and did).
+    pub fn effect(self) -> Effect {
+        match self {
+            Op::Search | Op::Read | Op::Message | Op::Reactions | Op::Media | Op::Contacts => Effect::ReadOnly,
+            Op::Backfill => Effect::Network,
+            Op::Download => Effect::WritesFiles,
+        }
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {

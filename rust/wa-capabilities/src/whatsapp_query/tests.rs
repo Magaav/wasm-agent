@@ -551,3 +551,27 @@ fn the_generic_row_refuses_a_request_that_names_no_op() {
     assert_eq!(answer["ok"], false);
     assert_eq!(q.stats(seam::QUEUE).unwrap().ready, ready_before, "nothing is queued without an op");
 }
+
+/// The generic door carries the READS and nothing else: an op that asks the phone or writes a file is
+/// refused by name and queues nothing, because this row declares `read-only` and a sandbox joins it as
+/// one. Measured 25/11 before the fix: `whatsapp_index({op:"backfill"})` queued the phone request and
+/// `{op:"download"}` queued a file write, both through a capability the inventory calls ReadOnly.
+#[test]
+fn the_generic_door_carries_only_the_reads_and_refuses_a_network_or_file_op() {
+    let (_host, q) = queue("generic-effect");
+    for op in seam::Op::ALL {
+        let mut args = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11", "q": "boleto", "count": 5});
+        args["op"] = serde_json::json!(op.as_str());
+        let ready_before = q.stats(seam::QUEUE).unwrap().ready;
+        let answer = ask_index_in(&q, &args, 1, BUILD);
+        let own_door = format!("whatsapp_{}_use_its_own_door", op.as_str());
+        match op.effect() {
+            seam::Effect::ReadOnly => assert_ne!(answer["error"], own_door, "{} is a read and this door carries it", op.as_str()),
+            seam::Effect::Network | seam::Effect::WritesFiles => {
+                assert_eq!(answer["error"], own_door, "{} has an effect: this door must send it to its own row", op.as_str());
+                assert_eq!(answer["ok"], false);
+                assert_eq!(q.stats(seam::QUEUE).unwrap().ready, ready_before, "{} queued nothing through the read door", op.as_str());
+            }
+        }
+    }
+}
