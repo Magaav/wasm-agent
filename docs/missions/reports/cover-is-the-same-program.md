@@ -169,6 +169,8 @@ Both reproduce on a worktree of `origin/main` (`/tmp/base-cover`), so neither is
    `not_on_main:`. Everything after that row (including the `--from` section) never runs.
 2. `scripts/test-deploy-node-binaries.sh` fails at "the record step for a prebuilt install: expected status
    0, got 1".
+3. `scripts/test-update-treeless.lua` ends `26 checks, 14 FAILED` on the product's interpreter, with the
+   same first failure on a base worktree (`a check on a tree-less node still refuses, by name`).
 
 ## Texts to approve (verbatim)
 
