@@ -92,22 +92,13 @@ run_deploy() { # <label> <expected sentence> <env...>
 run_deploy 'node turn' 'cannot deploy from a turn running on the node it would replace' \
   WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$WORK/install" WA_DEPLOY_ROOT="$ROOT"
 
-# 2. A CLI turn with no sentinel: `turn_owner` reads argv, so the row gives it the argv a CLI turn really has --
-#    an ancestor whose basename is `wa` with the subcommand `chat`. Measured 25/11 (row 20261125T113919Z-18166):
-#    `wa chat -c cmd` exits 127 (bash reads `chat` as a script name) and an `exec` stand-in would replace the very
-#    process whose argv the guard walks. So it is a two-line script that runs the deploy as its CHILD and stays
-#    alive, invoked as `wa chat`.
-{
-  echo '#!/bin/bash'
-  echo "bash '$DEPLOY'"
-  echo 'exit $?'
-} > "$WORK/wa" || fail 'could not place the argv stand-in'
-chmod +x "$WORK/wa" || fail 'could not make the argv stand-in executable'
-watch_start
-OUT="$(env WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$WORK/install" WA_DEPLOY_ROOT="$ROOT" "$WORK/wa" chat 2>&1)"; RC=$?
-watch_stop
-[ "$RC" = 1 ] || fail "cli turn: a pre-swap refusal exits 1, got $RC"
-has "$OUT" 'deploying from a CLI turn needs a sentinel supervising the node (wa-sentinel start); none is watching' 'cli turn names its refusal'
+# 2. A CLI turn with no sentinel - DECLARED LIMITATION, measured three ways in the runner. `turn_owner` reads
+#    /proc/<pid>/cmdline of the ancestors and takes the FIRST token's basename: a shebang stand-in shows
+#    `/bin/bash /…/wa` (row 20261125T114123Z-9077), `bash -c … wa chat` shows `bash -c …` (measured directly),
+#    and `wa chat -c …` exits 127 because bash reads `chat` as a script name (row 20261125T113919Z-18166). The
+#    only process that reads as `wa chat` is a real `wa chat`, which needs a provider this row does not have.
+#    So the case is NOT judged here and says so, rather than passing on a stand-in that proves nothing:
+printf 'guards-before-alive: SKIP(named) CLI-turn-without-sentinel - turn_owner reads the first token of an ancestor cmdline; only a real wa chat produces it (three attempts measured: 127, shebang argv, bash -c argv). The other two refusals and the order ARE judged.\n'
 
 # 3. No install directory and no record: nothing may be written, and no session may be paused.
 run_deploy 'install dir missing' 'refused(install_dir_missing)' \
