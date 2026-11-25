@@ -370,7 +370,10 @@ const [file,commit,short,sha,url,size,triple,arch,tag,built,node,installer,doors
 const doc=JSON.parse(fs.readFileSync(file,'utf8'));
 const entry={tag,commit,commit_short:short,target:triple,arch,manifest_sha256:sha,url,size:Number(size),node_version:node,built_utc:built};
 if(installer) entry.installer_sha256=installer;
-// the install-side script count: what the cut gate reads instead of downloading the tarball
+// the install-side script count: what the cut gate reads instead of downloading the tarball. entry_version
+// names the SHAPE of this entry, so the gate can refuse a new entry that does not state a count while still
+// answering unknown for one published before the field existed - the shape is read from the entry, not a flag.
+entry.entry_version=1;
 if(doors!==undefined) entry.install_doors=Number(doors);
 doc.releases=[entry,...(doc.releases||[]).filter(r=>!(r.commit===commit&&r.target===triple))];
 doc.generated_utc=built;

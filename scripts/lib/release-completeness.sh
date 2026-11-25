@@ -181,13 +181,26 @@ wa_release_bundle_doors() { # <repo> <commit>
   # parsed is unknown (exit 2).
   index="$(git -C "$repo" show "$commit:releases/index-linux.json" 2>/dev/null)" || return 0
   [ -n "$index" ] || return 0
+  # THE ENTRY SAYS WHICH SHAPE IT IS, AND THAT IS WHAT DECIDES. An entry written by this code carries
+  # entry_version (release-linux.sh writes it next to install_doors), so a NEW entry that does not state a
+  # non-negative count is broken and must be refused exactly like a zero. An entry with no entry_version was
+  # written by a packer that predated the field (v0.1.1 and earlier), and there the honest answer is unknown,
+  # which decides nothing. The shape is read FROM THE ENTRY, not from a flag something else has to set.
   printf '%s' "$index" | python3 -c '
 import json,sys
 try: doc=json.load(sys.stdin)
 except Exception: sys.exit(2)
 for r in doc.get("releases") or []:
-    count=r.get("install_doors")
-    print("%s %s %s" % (r.get("tag") or "?", count if isinstance(count,int) else "unknown", r.get("url") or ""))
+    v=r.get("entry_version")
+    c=r.get("install_doors")
+    if isinstance(v,int) and not isinstance(v,bool):
+        if isinstance(c,int) and not isinstance(c,bool) and c>=0:
+            state = "zero" if c==0 else "n=%d" % c
+        else:
+            state = "missing"
+    else:
+        state = "unknown"
+    print("%s %s %s" % (r.get("tag") or "?", state, r.get("url") or ""))
 ' 
 }
 
@@ -253,11 +266,16 @@ wa_release_completeness() { # <repo> <commit> <workdir>
     while read -r doors_tag doors_count doors_url; do
       [ -n "$doors_tag" ] || continue
       case "$doors_count" in
-        0) printf '0 install_doors %s %s\n' "$doors_tag" "$doors_url"
-           [ -n "$missing" ] || missing="install_doors=0@$doors_tag"
-           rc=1 ;;
-        unknown) printf 'unknown install_doors %s %s\n' "$doors_tag" "$doors_url" ;;
-        *) printf '200 install_doors %s %s %s\n' "$doors_count" "$doors_tag" "$doors_url" ;;
+        zero) printf '0 install_doors %s %s\n' "$doors_tag" "$doors_url"
+              [ -n "$missing" ] || missing="install_doors=0@$doors_tag"
+              rc=1 ;;
+        missing) # a NEW entry that does not state its count is broken, not old: refuse it like a zero
+              printf 'missing install_doors %s %s\n' "$doors_tag" "$doors_url"
+              [ -n "$missing" ] || missing="install_doors=missing@$doors_tag"
+              rc=1 ;;
+        unknown) # written by a packer that predated the field: nothing to judge, and nothing claimed
+              printf 'unknown install_doors %s %s\n' "$doors_tag" "$doors_url" ;;
+        n=*) printf '200 install_doors %s %s %s\n' "${doors_count#n=}" "$doors_tag" "$doors_url" ;;
       esac
     done <<< "$doors_lines"
   fi
