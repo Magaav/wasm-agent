@@ -111,7 +111,7 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, id = args.id } end,
   },
   {
-    verb = 'media', capability = 'whatsapp_media', effect = 'read',
+    verb = 'media', capability = 'whatsapp_index', effect = 'read',
     description = 'The media metadata of one indexed WhatsApp message: kind, mime, filename, size, sha256, duration, page count - or the location, contact card or poll it carries. No bytes and no media key; use whatsapp_download for the file.',
     parameters = { type = 'object', properties = { chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 } }, required = { 'chat', 'id' }, additionalProperties = false },
     request = function(args) return { chat = args.chat, id = args.id } end,
