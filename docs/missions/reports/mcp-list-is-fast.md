@@ -127,9 +127,10 @@ exit 0**.
 `scripts/test-graph-quarantine-evidence.lua` hung** (watchdog killed it at 120 s; its log shows the graph
 component's `graph.db` quarantined as `database_disk_image_is_malformed`, rebuilt, quarantined again). It is
 **flaky, not mine and not this tree**: that row passed in both earlier full runs of the same tree (382/382
-Lua rows), it passed twice when run again through the runner's own narrowing
-(`WA_FAST_ROWS=scripts/test-graph-quarantine-evidence.lua`, 30/30), and it passed on a clean `origin/main`
-worktree (30/30). Nothing in this diff touches `lua/`, `rust/` or the component set that row exercises.
+Lua rows), and it passed on a clean `origin/main` worktree (30/30). The clearest evidence is the pair I
+ran back to back through the runner's own narrowing, with no change to the tree between them:
+`WA_FAST_ROWS=scripts/test-graph-quarantine-evidence.lua` **passed once (`lua 30/30 passed`) and hung the
+next time** (same worktree, same commit, `a473e9cc`). Today's count for that row: 4 passes, 3 hangs. Nothing in this diff touches `lua/`, `rust/` or the component set that row exercises.
 Two other rows failed the same way and passed in the full runs of both trees: `check-deploy-bound` and
 `check-deploy-alive-hold` on the BASE tree in a narrowed run, and `check-deploy-wait` on mine in a narrowed
 run - timing rows under a narrowed run, on either side. None of the three is attributable to this branch.
