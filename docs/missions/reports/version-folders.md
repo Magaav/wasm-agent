@@ -15,6 +15,9 @@ Branch: `change/version-folders` (based on origin/main `ebf6d2ec`). Requirements
                the next start                     scripts/test-version-repair.lua + 5 more in
                                                   scripts/test-versions.sh through the real start path:
                                                   the absent link is back and the command answered
+    ae4288fd   S6 + R8: the sentinel moves AFTER   scripts/lib/sentinel-move.sh,
+               the node, and a failed start        scripts/test-sentinel-version-move.sh (5 checks, runner:
+               leaves the previous supervising   rc=0 leftovers=0).
     78960a31   S3 + R3: the installer, and a cut   scripts/version-install.sh (9 steps, resumable),
                at EVERY step boundary             scripts/test-version-install.sh (10 checks: end to end,
                                                   rerun continues, no-room refused before staging, and a
@@ -43,7 +46,10 @@ Rows that do NOT exist yet and are the next commits (named, not implied):
            install's own wa answers and the same install runs again to the end. The cut INSIDE a step (between
            "rename the real path aside" and "rename the link onto it") is not reachable from that hook; that
            window is covered by lua/core/version_repair.lua and scripts/test-version-repair.lua.
-    R8     the sentinel's order and the old-supervisor fallback. Needs S6, which is NOT built yet.
+    R8     GREEN (ae4288fd) through the row runner: the sentinel refuses to move before the node is healthy
+           (sentinel_move_before_node), a failed new start leaves the PREVIOUS version supervising through a
+           drop-in naming its absolute path, and nothing supervising is named. 5 checks,
+           rows/20261125T004434Z, rc=0 leftovers=0 canary green before and after.
 
 ## The measured ground this is built on (24/11, read-only)
 
