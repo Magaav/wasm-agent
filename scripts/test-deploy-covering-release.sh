@@ -101,14 +101,17 @@ git -C "$ROOT" worktree add -q --detach "$BUILD_TREE" "$C1" 2>/dev/null   || ski
 # and signs the sums with the committed TEST key (scripts/lib/release-fixture-sign.py), which is the signature the
 # verifier accepts. Nothing here is published and nothing asks for a secret.
 BUILT="$W/built"; mkdir -p "$BUILT" "$RELEASE"
-# THE ASSETS ARE READ WHERE THEY ALREADY ARE (measured: copying the directory lost quickjs.wasm, and build.rs then
-# panics by name). build.rs only READS them; the row writes nothing outside its own root.
+# THE CODE-MODE ASSETS ARE BUILT IN THE ROW'S OWN TREE, by the product's own tool. Measured twice in the runner
+# (rows/20261125T043209Z at 027d10a0, rows/20261125T043521Z at 63b6d036): a copied asset directory and the checkout's
+# own directory both left build.rs without quickjs.wasm, and it panics by name. scripts/codemode-build.mjs is what the
+# product prepares them with - action build takes an absolute root, action assets-path names the directory build.rs
+# wants - so the row calls it against its own build tree and refuses by name when that fails.
 CODEMODE_ENV=""
-for cand in "$ROOT"/.git/codemode-assets/* "$BUILD_TREE"/.git/codemode-assets/*; do
-  [ -d "$cand" ] && [ -f "$cand/quickjs.wasm" ] && CODEMODE_ENV="$cand" && break
-done
-if [ -z "$CODEMODE_ENV" ]; then
-  for cand in "$ROOT"/.git/codemode-assets/* "$BUILD_TREE"/.git/codemode-assets/*; do [ -d "$cand" ] && CODEMODE_ENV="$cand" && break; done
+if node "$ROOT/scripts/codemode-build.mjs" build "$BUILD_TREE" > "$W/codemode.log" 2>&1; then
+  CODEMODE_ENV="$(node "$ROOT/scripts/codemode-build.mjs" assets-path "$BUILD_TREE" 2>/dev/null)"
+fi
+if [ -z "$CODEMODE_ENV" ] || [ ! -f "$CODEMODE_ENV/quickjs.wasm" ]; then
+  skip_all "the code-mode assets could not be prepared for $SHORT: $(tail -2 "$W/codemode.log" | tr '\n' ' ')"
 fi
 ( cd "$BUILD_TREE/rust" && WA_CODEMODE_BUILD_ASSETS="$CODEMODE_ENV" CARGO_TARGET_DIR="$W/target" \
     cargo build --release --offline -q -p wa-host ) > "$W/build-wa.log" 2>&1 \
