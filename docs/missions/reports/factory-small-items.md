@@ -102,12 +102,15 @@ Verification, and its limit, said plainly:
   sourced into a harness, with a decoy process running that carries `WA_SOMETHING=$W` in its environment: before the
   change the decoy survived and `rm -rf` reported "Directory not empty"; after it, `cleanup exit=0; W exists: no;
   decoy alive: no`;
-* the row itself SKIPs on this machine - `SKIP test-deploy-covering-release: the installed sentinel will not report
-  itself watching in a scratch home ...: <W>/home/install/wa-sentinel: No such file or directory`, exit 3 - so the
-  end-to-end deploy -> sentinel -> teardown path was NOT measured here. The skip's own cleanup ran (root removed, no
-  message, stderr empty); what was not exercised on this machine is the shape where a REAL sentinel and its node are
-  still writing into `$W` at teardown. The extraction harness above is what stands in for it, and it is the same
-  bytes.
+* the row itself, END TO END, through the orchestrator's runner (row 20261125T223749Z-497, `rc=0 ... leftovers=0
+  canary_before=green canary_after=green`): `deploy covering release ok (20 checks, 0 failed)`, including `ok and it
+  reports the sentinel as watching, because in this pass one is` - so the real deploy -> sentinel -> teardown shape IS
+  measured, with a real sentinel and its node writing into `$W` until cleanup stops them.
+* one HAND-STARTED run before that SKIPPED the same row by name (`SKIP test-deploy-covering-release: the installed
+  sentinel will not report itself watching in a scratch home ... <W>/home/install/wa-sentinel: No such file or
+  directory`, exit 3). That was the environment the row was started in, not the code: in the runner - the sanctioned
+  path, with the row contract's ports, home and unit directory - it passes. Recorded because it is the inverse of the
+  usual direction: here the runner was the honest measurement and the hand-started run was not.
 * the transient-pid noise the first version printed (`/proc/<pid>/environ: No such file or directory`) is silenced by
   redirecting the group, not each command - a pid that exits between `ps` and the read makes the shell's own
   redirection fail, which `2>/dev/null` on the command does not cover (measured while writing this).
@@ -156,7 +159,7 @@ is a commit of its own:
 | test-deploy-target.sh | 57aaf2b4 | rc=0 - deploy target ok (14 checks); 20261125T223603Z-3364 |
 | test-deploy-release-node.sh | 57aaf2b4 | rc=0 - deploy-release-node ok (...); 20261125T223625Z-22586 |
 | test-home-guard.lua (new) | 57aaf2b4 | rc=0 - home guard ok (9 checks); 20261125T223727Z-22277 |
-| test-deploy-covering-release.sh | 57aaf2b4 | queued for item 5; see below |
+| test-deploy-covering-release.sh | 57aaf2b4 | rc=0 - `deploy covering release ok (20 checks, 0 failed)`; 20261125T223749Z-497 |
 
 What the runner exposed, in the order it found it:
 
