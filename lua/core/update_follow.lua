@@ -236,6 +236,16 @@ function M.state(options)
   if type(result) == "table" and agent_record_mine(result, id, since_iso) then
     local detail = trim(result.detail)
     local commit = trim(result.commit)
+    -- INSTALLED, AND THE DEPLOY DID NOT FINISH (25/11, Fable's B). ok=false is what "failed" looks like, and after
+    -- the swap nothing failed: the node serves the new build and a problem is recorded for the operator. The verdict
+    -- field is the one that says which of the three happened; a result written by an older deploy has none.
+    if tostring(result.verdict or "") == "installed_with_problems" then
+      local problems = tonumber(result.problems or 0) or 0
+      return snap({ key = "installed_with_problems", terminal = true, ok = false, clock_from = origin,
+        body = "installed " .. (commit ~= "" and commit:sub(1, 12) or "(the installer named no commit)")
+          .. ", with " .. tostring(problems) .. " problem(s): " .. (detail ~= "" and detail or "(no detail recorded)"),
+        detail = detail, commit = commit, sources = { p.deploy_result } })
+    end
     if result.ok == true then
       return snap({ key = "installed", terminal = true, ok = true, clock_from = origin,
         body = "installed " .. (commit ~= "" and commit:sub(1, 12) or "(the installer named no commit)"),

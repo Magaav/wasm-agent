@@ -164,15 +164,21 @@ sentinel_restart() {
 # this says what the *deploy* did, so a woken run reads one small file instead of re-deriving the answer
 # from installed.txt, deploy.log, hashes and the sentinel status. `fail` writes it too, so a refusal is a
 # result and not only a log line.
-write_result() { # ok detail
+write_result() { # ok detail [verdict] [problems]
   case "$REQUEST_ID" in *[!a-zA-Z0-9-]*) REQUEST_ID="" ;; esac
   _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
   # `phases` is the same measurement the deploy's own output printed (`deploy: [phase] <name> <s>`), read
   # from `wa_phase`'s trace: a record that says what the deploy DID without saying where its minutes went
   # is the half a reader cannot act on. `[]` when the lib recorded none (an old deploy script, a refusal
   # before the first phase) - never a missing field, and never a number this script invented.
-  printf '{"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s","phases":%s}\n' \
-    "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
+  # THE VERDICT IS A THIRD THING, NOT A BOOLEAN (25/11, Fable's B). ok=false is what "failed" looks like to every
+  # reader there is, and after the swap nothing failed: the build installed and the deploy did not finish its job.
+  # So the field is named for that state (`installed_with_problems`) and every reader prefers it when it is there;
+  # a file written by an older deploy has no verdict, and then ok means what it always meant.
+  local verdict="${3:-}" problems="${4:-0}"
+  [ -n "$verdict" ] || { [ "$1" = true ] && verdict=installed || verdict=failed; }
+  printf '{"verdict":"%s","problems":%s,"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s","phases":%s}\n' \
+    "$verdict" "$problems" "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
     "${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-}}" "$(_esc "$2")" "$(_esc "$REASON")" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_esc "$REQUEST_ID")" "$(_esc "$EXPECTED_SHA")" "$(wa_phases_json)" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
   if [ -n "$REQUEST_ID" ]; then
@@ -195,10 +201,14 @@ write_result() { # ok detail
 SWAPPED=0
 POST_SWAP_PROBLEMS=0
 POST_SWAP_LOG=""
-post_swap_problem() { # <what>
+# ONE SENTENCE IN, ONE SENTENCE RECORDED. It took `$1` and two call sites passed two arguments
+# (`post_swap_problem "recording" "<what>"`), so the record kept the word "recording" and lost the message that
+# said what went wrong - measured by Fable in the review of 25/11. `$*` joins whatever it is given, so even an old
+# call site records the whole sentence, and every call site is one argument now regardless.
+post_swap_problem() { # <what - the whole sentence>
   POST_SWAP_PROBLEMS=$((POST_SWAP_PROBLEMS + 1))
-  POST_SWAP_LOG="${POST_SWAP_LOG}${POST_SWAP_LOG:+; }$1"
-  note "post-swap problem: $1"
+  POST_SWAP_LOG="${POST_SWAP_LOG}${POST_SWAP_LOG:+; }$*"
+  note "post-swap problem: $*"
 }
 # Append what went wrong to the record that already exists. The interim record is what a half state leaves;
 # a line appended to it is at least a fact a reader can see, and it is never written over a final record's
@@ -210,20 +220,47 @@ record_post_swap_problems() {
   } >> "$INSTALL_DIR/installed.txt" 2>/dev/null || true
 }
 
-# THE ONE fail() THE WHOLE SCRIPT USES. Before the swap it refuses (exit 2, nothing replaced). AFTER it, it
-# records and exits 3: the node is running the new build, so the record must exist and the problem must be
-# in it, not in a refusal that pretends nothing was installed.
+# THE ONE fail() THE WHOLE SCRIPT USES, IN TWO HALVES (25/11, Fable's A and B).
+#
+# BEFORE THE SWAP it IS main's fail, byte for byte. This branch had replaced it with a print-and-exit, which lost
+# four things a failed deploy owes its readers: the status file marked failed (wa_status_unfollow + wa_status failed,
+# so the row above the operator's input stops drawing a build that is gone), the deploy.log line (the evidence "did
+# this refuse anything?"), `write_result false` (deploy-result.json, which the sentinel's deploy_outcome, `wa update`'s
+# final line and the remote follow read), and the exit status 1 that all of them key on. It also read the SECOND WORD
+# of a message as an exit code (`local rc="${2:-2}"`). Nothing about that half is this branch's business.
+#
+# AFTER THE SWAP the node already serves the new bytes, so the four writes happen with a verdict OF ITS OWN -
+# "installed, with N problem(s)" - and exit 3. Never "failed" (nothing failed: the build installed) and never a
+# clean "installed" (the deploy did not finish its job): a reader that only knew ok=true/false would call this
+# either a clean install or a failure, and both are lies. The verdict travels in three places a reader can see: the
+# record's post_swap_problem= lines, the result's `verdict` field (write_result's third argument), and this text.
 fail() {
-  local message="$*" rc="${2:-2}"
+  local message="$*"
   if [ "${SWAPPED:-0}" = 1 ]; then
     post_swap_problem "$(printf '%s' "$message" | tr '\r\n' '  ' | cut -c1-600)"
     record_post_swap_problems
-    printf 'deploy: installed, but %s\n' "$message" >&2
-    printf 'deploy: the node is running the new build and this is recorded in installed.txt (post_swap_problem=); this is NOT a clean success (exit 3).\n' >&2
+    INSTALLED_VERDICT="installed, with ${POST_SWAP_PROBLEMS} problem(s): ${POST_SWAP_LOG}"
+    printf 'deploy: %s\n' "$INSTALLED_VERDICT" >&2
+    wa_status_unfollow
+    wa_status installed "installed, with ${POST_SWAP_PROBLEMS} problem(s)"
+    printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$INSTALLED_VERDICT" \
+      >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+    write_result false "$POST_SWAP_LOG" installed_with_problems "$POST_SWAP_PROBLEMS"
     exit 3
   fi
-  printf 'deploy: %s\n' "$message" >&2
-  exit "$rc"
+  echo "deploy: $*" >&2
+  wa_status_unfollow
+  wa_status failed "${WA_STATUS_PHASE:-preflight}: $(printf '%s' "$*" | cut -c1-90)"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
+    >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+  write_result false "$*"
+  # A requested deploy is answered, including when the answer is no - but not from here. The report belongs to
+  # the sentinel that spawned this script (`deploy_outcome`), which settles it from the `result.json` written
+  # just above, from this process's exit status, or from its own watchdog. It used to be queued here, and that
+  # is exactly the defect measured on 2026-11-10: this process is the one the swap kills, so a wake written
+  # only by its last lines is a wake that never arrives when it matters. A hand-run deploy passes no --session
+  # and has nobody to wake; a refusal at a shell is read by the person at the shell.
+  exit 1
 }
 
 # A deploy that INSTALLED the node and only failed to bring a watcher back is not a failed build.
@@ -1809,8 +1846,8 @@ fi
 
 # wa-deploy-upgrade-invocation: begin
 # Everything upgrade.sh is told goes on the command's own lines, and the COMMENTS LIVE ABOVE IT on purpose.
-# That is not style. bash drops a simple command's whole `VAR=value \` prefix when a comment line sits
-# inside the continuation, and MEASURED on 2026-10-02 (`FOO=1 \` / `# comment` / `bash -c 'echo "[$FOO]"'`
+# That is not style. bash drops a simple command's whole `VAR=value ` prefix when a comment line sits
+# inside the continuation, and MEASURED on 2026-10-02 (`FOO=1 ` / `# comment` / `bash -c 'echo "[$FOO]"'`
 # printed `[]`) it drops it silently while still running the command - so comment lines that were once
 # between the assignments and `bash "$UPGRADE"` here meant upgrade.sh never received WA_UPGRADE_VIA,
 # WA_UPGRADE_REASON or WA_INSTALL_DIR. The install record of a deploy then said `via=upgrade.sh` and
@@ -2053,14 +2090,16 @@ record_installed() {
   case "${BINARY_PROVENANCE:-}" in
     prebuilt-*)
       if [ "${#record_commit}" != 40 ] || [ -n "$(printf '%s' "$record_commit" | tr -d '0123456789abcdef')" ]; then
-        post_swap_problem recording "commit=$record_commit is not a 40-hex id, so the record names it as unknown with record_id_why="
+        # ONE ARGUMENT (25/11, Fable's C): the label and the sentence were two arguments, so the record kept
+        # the word "recording" and lost what went wrong. The label belongs in the sentence.
+        post_swap_problem "recording: commit=$record_commit is not a 40-hex id, so the record names it as unknown with record_id_why="
         record_id_why="commit=$record_commit is not a 40-hex commit id"
         record_commit=unknown
       fi
       # ...and the commit the BYTES are a build of, when that is another one (the digest fallback): it is
       # the id a later fast-path deploy reads back as binary_commit=, so it is held to the same rule.
       if [ -n "${BINARY_SOURCE_COMMIT:-}" ] && { [ "${#BINARY_SOURCE_COMMIT}" != 40 ] || [ -n "$(printf '%s' "$BINARY_SOURCE_COMMIT" | tr -d '0123456789abcdef')" ]; }; then
-        post_swap_problem recording "binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex id, so binary_commit= is recorded as unknown with binary_id_why="
+        post_swap_problem "recording: binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex id, so binary_commit= is recorded as unknown with binary_id_why="
         BINARY_ID_WHY="binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id"
         BINARY_SOURCE_COMMIT=""
       fi ;;

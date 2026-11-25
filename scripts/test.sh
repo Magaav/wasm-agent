@@ -514,6 +514,10 @@ else
   [ "$lease_order" = "0" ] || exit "$lease_order"
 fi
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
+# fail() IN TWO HALVES (25/11, Fable's A, B, C): main own body before the swap, and the same four writes with a
+# verdict of its own after it. This branch had replaced it with printf + exit, which lost the status file, the
+# deploy.log line, the result.json and the exit status every reader keys on.
+gate_run bash scripts/test-deploy-fail-verdict.sh                      # a refusal writes four things, and exit 1
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 # NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
 # HOME, ran the real deploy, reported "ok (16 checks, 0 failed)" - and left a wa-sentinel with HOME=/home/victor and

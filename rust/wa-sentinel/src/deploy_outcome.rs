@@ -127,13 +127,35 @@ fn installer_phase() -> Option<(String, Option<u64>)> {
     Some((state, bound))
 }
 
+/// WHAT THE INSTALLER SAID IT DID, as one of three things rather than a boolean.
+///
+/// The third state exists because the far side of the swap can record a problem and still leave a node serving the
+/// new build: `installed_with_problems` (exit 3). A reader that only knows ok=true/false calls that case either a
+/// clean install or a failure, and both are lies about a machine an operator has to act on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Verdict {
+    Installed,
+    InstalledWithProblems,
+    Failed,
+}
+
+impl Verdict {
+    fn outcome(self) -> &'static str {
+        match self {
+            Verdict::Installed => "success",
+            Verdict::InstalledWithProblems => "installed_with_problems",
+            Verdict::Failed => "failure",
+        }
+    }
+}
+
 /// The installer's own verdict for this deploy, if it got far enough to write one.
 ///
 /// Two places, both attributable to one id: the per-request copy `deploy.sh` makes when it is given
 /// `--request-id` (`deploy-protocol/<id>/result.json`), and the shared `<install>/deploy-result.json`, which
 /// is only this deploy's if its `request_id` field says so. Anything else is another deploy's result and is
 /// ignored - the failure mode of guessing here is reporting a previous deploy's success as this one's.
-fn installer_result(id: &str) -> Option<(bool, String, PathBuf)> {
+fn installer_result(id: &str) -> Option<(bool, String, PathBuf, Verdict)> {
     let mut candidates = vec![sentinel_dir().join("deploy-protocol").join(id).join("result.json")];
     candidates.push(install_dir().join("deploy-result.json"));
     for (index, path) in candidates.iter().enumerate() {
@@ -145,7 +167,16 @@ fn installer_result(id: &str) -> Option<(bool, String, PathBuf)> {
         }
         let ok = value["ok"].as_bool().unwrap_or(false);
         let detail = value["detail"].as_str().unwrap_or("(no detail recorded)").to_string();
-        return Some((ok, detail, path.clone()));
+        // THE VERDICT FIRST, ok ONLY AS A FALLBACK (25/11). After the swap a deploy that installed the node and
+        // could not finish writes ok=false and `verdict="installed_with_problems"`: ok alone would report it as a
+        // plain failure, which is false, and ok=true would report a clean install, which is also false.
+        let verdict = match value["verdict"].as_str() {
+            Some("installed_with_problems") => Verdict::InstalledWithProblems,
+            Some("installed") => Verdict::Installed,
+            Some("failed") => Verdict::Failed,
+            _ => if ok { Verdict::Installed } else { Verdict::Failed },
+        };
+        return Some((ok, detail, path.clone(), verdict));
     }
     None
 }
@@ -191,6 +222,15 @@ fn notice_text(record: &Value, outcome: &str, detail: &str) -> String {
              Evidence: {files}\n\
              This is the installer's own verdict for this request id; it is not a check of the running node. \
              Verify with scripts/verify-install.sh before saying what the node serves.{continuation}",
+            commit = installed_commit(),
+        ),
+        // INSTALLED, AND THE DEPLOY DID NOT FINISH. Not "failed" (the build installed and the node serves it) and
+        // not a clean success (a problem was recorded, and the operator has one step left).
+        "installed_with_problems" => format!(
+            "Deploy {id} installed {commit}, with problems: {detail}\n\
+             The node serves the new build; what did not finish is recorded in installed.txt as post_swap_problem=.\n\
+             Asked for: {reason}\n\
+             Evidence: {files}{continuation}",
             commit = installed_commit(),
         ),
         "failure" => format!(
@@ -371,8 +411,8 @@ pub(crate) fn settle(id: &str, outcome: &str, detail: &str) -> Result<bool> {
 /// refusal. Only when it recorded nothing does the exit status decide.
 pub(crate) fn settle_from_exit(id: &str, success: bool) {
     let outcome = match installer_result(id) {
-        Some((ok, detail, path)) => (
-            if ok { "success" } else { "failure" }.to_string(),
+        Some((_ok, detail, path, verdict)) => (
+            verdict.outcome().to_string(),
             format!("{detail} [{}]", path.display()),
         ),
         None if success => ("success".to_string(), "the installer exited successfully and recorded no result file".to_string()),
@@ -431,8 +471,8 @@ pub(crate) fn sweep(now: u64) -> u32 {
         let id = record["id"].as_str().unwrap_or("");
         // The installer wrote its verdict before it died: that *is* the outcome, and it is better than a
         // timeout. This is the case that survives the sentinel being replaced mid-deploy.
-        if let Some((ok, detail, path)) = installer_result(id) {
-            let outcome = if ok { "success" } else { "failure" };
+        if let Some((_ok, detail, path, verdict)) = installer_result(id) {
+            let outcome = verdict.outcome();
             match settle(id, outcome, &format!("{detail} [{}]", path.display())) {
                 Ok(true) => reports += 1,
                 Ok(false) => {}
