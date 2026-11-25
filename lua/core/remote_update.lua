@@ -1592,6 +1592,31 @@ end
 M.REMOTE_POLL = 10
 M.REMOTE_HEARTBEAT = 60
 M.REMOTE_DETACHED = "detached: the install continues on %s; re-attach with wa update %s --follow"
+-- THE BOUND THE FOLLOW KEEPS TO (mission release-node-updates, D3, 25/11). A follow with no bound is a
+-- command that can never come back: `wa update <node>` passed neither o.polls nor o.seconds, so a node that
+-- stopped answering left the terminal waiting for ever, and the only way out was Ctrl-C - which says nothing
+-- about what happened. One hour, because a deploy that BUILDS can legitimately run that long (measured: the
+-- 101 s backup alone, and a cold build of minutes to tens of minutes); past it the follow says so, names the
+-- re-attach command, and exits non-zero - unknown is not yes.
+M.REMOTE_FOLLOW_BOUND = 3600
+-- The duration in the answer's own words, one function for the follow line and the bound's sentence.
+function M.elapsed(seconds)
+  local s = math.max(0, math.floor(tonumber(seconds) or 0))
+  if s >= 3600 then return string.format('%dh%02dm', math.floor(s / 3600), math.floor(s / 60) % 60) end
+  if s >= 60 then return string.format('%dm%02ds', math.floor(s / 60), s % 60) end
+  return s .. 's'
+end
+-- NO ANSWER YET, AND STILL RUNNING: an answer that is not an answer. nodes.remote_call answers a relay
+-- deadline with {error="remote_error", detail=..., not_known_yet=true, state="unknown"} (lua/core/nodes.lua
+-- :1786-1800) and M.status passes that through unchanged - the request is still running on that node, which
+-- is the one thing the caller must not be told to stop watching. A refusal is the node's own word and still
+-- ends the follow.
+function M.not_an_answer(reply)
+  if type(reply) ~= 'table' then return true end
+  if reply.not_known_yet == true then return true end
+  if tostring(reply.error or '') == "remote_answer_unreadable" then return true end
+  return reply.error ~= nil and trim(reply.state) == "unknown"
+end
 
 -- `call` and the seams (`out`, `clock`, `sleep`, `poll`, `polls`, `seconds`) are parameters for the same
 -- reason as `event_ledger.follow`'s: a test drives the loop without a node, a port or a wall clock.
@@ -1615,10 +1640,16 @@ function M.follow_remote(call, selector, id, options)
     local now = clock()
     local reply = M.status(call, selector, { id = id, session = o.session })
     if type(reply) ~= 'table' then return { ok = false, state = 'unreadable', seconds = now - started, printed = printed } end
+    -- AN UNREADABLE ANSWER IS NOT A STATE (D3). This loop used to end on it, printing "unknown - node_no_answer"
+    -- at 0 s: the peer had accepted the request and was working on it, and the operator was told to stop
+    -- watching. It is "no answer yet", the poll continues, and the bound above is what ends it.
+    local unreadable = M.not_an_answer(reply)
     local state = trim(reply.state)
+    if unreadable then state = 'no_answer' end
     if state == '' then state = reply.error and 'refused' or 'queued' end
     local label = tostring(reply.node or selector)
     local detail = trim(reply.detail)
+    if detail == '' then detail = trim(reply.error) end
     if state ~= last_state or not last_at or (now - last_at) >= M.REMOTE_HEARTBEAT then
       local body
       if state == 'installed' then
@@ -1626,6 +1657,10 @@ function M.follow_remote(call, selector, id, options)
         body = 'installed ' .. commit .. ' on ' .. label
       elseif state == 'failed' then
         body = 'FAILED on ' .. label .. (detail ~= '' and (': ' .. detail) or '')
+      elseif state == 'no_answer' then
+        -- "NO ANSWER YET", never "refused": the relay's deadline is not the node's word, and the request it
+        -- carries is still running there.
+        body = label .. ': no answer yet' .. (detail ~= '' and (' \226\128\148 ' .. detail) or '')
       elseif state == 'silent' then
         -- "NO ANSWER", not "SILENT": the peer did not report, and the word has to say what is missing rather
         -- than describe a sound (Fable 24/11, D).
@@ -1641,11 +1676,13 @@ function M.follow_remote(call, selector, id, options)
       return { ok = state == 'installed', state = state, reply = reply, seconds = now - started,
         rounds = rounds, printed = printed }
     end
-    if reply.error then
+    if reply.error and not unreadable then
       return { ok = false, state = 'refused', reply = reply, seconds = now - started, rounds = rounds, printed = printed }
     end
     rounds = rounds + 1
-    if (o.polls and rounds >= o.polls) or (o.seconds and (now - started) >= o.seconds) then
+    local bound = tonumber(o.seconds)
+    if not bound and not o.polls then bound = M.REMOTE_FOLLOW_BOUND end
+    if (o.polls and rounds >= o.polls) or (bound and (now - started) >= bound) then
       return { ok = false, state = state, unknown = true, timed_out = true, reply = reply,
         seconds = now - started, rounds = rounds, printed = printed }
     end
@@ -1868,7 +1905,15 @@ function M.cli(argv)
       print(string.format(M.REMOTE_DETACHED, tostring(selector), tostring(selector)))
     end
     if attach ~= nil and not options.detach then
-      local result = M.follow_remote(nodes.remote_call, selector, attach, { session = options.session })
+      -- THE BOUND IS NAMED HERE, ONCE (D3, 25/11): a follow that can never come back is not a follow. The loop
+      -- polls through a relay deadline ("no answer yet") and stops at this bound, printing what to type to
+      -- re-attach instead of a state it does not have - and exits non-zero, because unknown is not yes.
+      local result = M.follow_remote(nodes.remote_call, selector, attach,
+        { session = options.session, seconds = M.REMOTE_FOLLOW_BOUND })
+      if result.timed_out then
+        print(string.format('%s: no answer yet after %s - the request is still that node\'s; re-attach with: wa update %s --follow',
+          tostring(selector), M.elapsed(M.REMOTE_FOLLOW_BOUND), tostring(selector)))
+      end
       return result.ok == true and 0 or 1
     end
   end

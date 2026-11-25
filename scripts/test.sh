@@ -1028,6 +1028,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-release.lua" "$BIN" --db "$D
 # runtime-worktree.txt, then a cwd holding rust/Cargo.toml), and nothing in the module is stubbed.
 gate_run bash -c 'd=$(mktemp -d); mkdir -p "$d/cwd" "$d/install"; cd "$d/cwd" || exit 1; WASM_AGENT_LUA_ROOT="$1" WASM_AGENT_HOME="$d" WA_INSTALL_DIR="$d/install" WA_SCRIPT="$1/scripts/test-update-treeless.lua" "$2" --db "$d/db"' _ "$WASM_AGENT_LUA_ROOT" "$BIN" > "$DB.treeless.log" 2>&1
 grep -q "update treeless ok" "$DB.treeless.log" || { tail -12 "$DB.treeless.log" >&2; exit 1; }
+# THE FOLLOW DOES NOT END ON AN UNREADABLE STATUS (25/11, mission release-node-updates D3). "wa update <node>"
+# printed "unknown - node_no_answer - 0s" and returned while the request was still running on that node, and the
+# loop had no bound at all. This row drives M.follow_remote through its own seams (call, clock, out, sleep) with
+# the relay deadline's REAL shape (nodes.remote_call:1786-1800): the deadline is "no answer yet", the follow
+# keeps polling to its bound, a refusal still ends it, and the module's own bound ends a follow nobody bounded.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-follow.lua" "$BIN" --db "$DB.remote-follow" | grep "remote follow ok"
 # The pre-update backup skips every lock file the Rust sources open (binding.transport.sqlite broke /update, 04/11).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.backup-locks" | grep "backup locks ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
