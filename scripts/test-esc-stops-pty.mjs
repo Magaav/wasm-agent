@@ -54,6 +54,10 @@ const MEASURE_ONLY = process.argv.includes('--measure');
 const LIMIT_MS = 300;
 const PER_LOAD_MS = 120;
 const HARD_MS = 2000;
+// THE FIRST CODE-MODE CALL OF A PROCESS IS SETUP, AND IT GETS ITS OWN LOOSE BOUND (Fable, 25/11).
+// The row warms that call before it measures a stop; this is the number the warm-up paid, printed beside
+// the measured ones so a real slowdown in first-use setup is still seen - never charged to the stop.
+const COLD_LIMIT_MS = 3000;
 function limitAt(load) {
   const value = Number.isFinite(load) && load > 0 ? load : 0;
   return Math.max(LIMIT_MS, Math.round(value * PER_LOAD_MS));
@@ -200,6 +204,27 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-cache'});
       sse(res, toolCallChunk('bash', {command: 'sleep 30'}));
       sse(res, {id: 'esc-1', choices: [{index: 0, delta: {}, finish_reason: 'tool_calls'}]});
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    if (opts.reply === 'warm-tool') {
+      // THE WARM-UP CALL (Fable, 25/11). The row measures a STOP, so the process's first-use costs must be
+      // paid before the measurement: the harness runs a tool call through its code-mode sandbox, and the
+      // first one in a process compiles the QuickJS module (rust/wa-capabilities/src/quickjs.rs:37-53,
+      // measured 1.1 s on this node). One cheap call does that; round 2 answers plainly so the warm turn
+      // ends like any turn, and the prompt comes back before the measured one starts.
+      res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-cache'});
+      if (round === 1) {
+        sse(res, toolCallChunk('bash', {command: 'echo warm'}));
+        sse(res, {id: 'esc-1', choices: [{index: 0, delta: {}, finish_reason: 'tool_calls'}]});
+      } else {
+        // The shape the stream leg already proves works: the text in one chunk with NO finish, then the
+        // finish on its own. A chunk carrying text AND finish_reason 'stop' was read as an empty reply
+        // (measured 25/11: answer_bytes 0, three model calls and two provider_retry rows for one warm turn).
+        sse(res, answerChunk('warm', false));
+        sse(res, answerChunk('', 'stop'));
+      }
       res.write('data: [DONE]\n\n');
       res.end();
       return;
@@ -351,6 +376,70 @@ function environment(home) {
   };
 }
 
+// THE WARM-UP: pay the process's first-use costs BEFORE the measurement (Fable, 25/11).
+//
+// The stop this row measures shares a process with everything the run did before it, and the first code-mode
+// call in a process compiles the QuickJS module (rust/wa-capabilities/src/quickjs.rs:37-53: the .cwasm cache
+// is written after the compile, and the compile is where an Esc that lands during it is charged). So the row
+// makes one cheap tool call first, waits for the module cache the product itself writes, and only then types
+// the line whose stop is measured. The cost is not hidden: warmUp answers the node's own `ms` for that call
+// and the check below prints it against a loose bound.
+//
+// It reads the LEDGER for the call's duration (the same store the stop's split comes from) and the .cwasm
+// file for "the guest is warm" - a fact the row can see, not an assumption it makes. Unknown is never a pass:
+// no tool|end row means the cold number is unknown and the check says so.
+async function warmUp(home, ledger) {
+  const cacheDir = path.join(home, '.wasm-agent', 'cache', 'codemode');
+  // AN EMPTY ANSWER IS ZERO, NOT UNKNOWN: a ledger that has written no such row yet is a fact (0), and a
+  // ledger that cannot be read is the null. Reading the two the same way skipped the warm-up on every first
+  // run, and the row then measured the cold compile it exists to keep out of the measurement.
+  const lastSeq = statement => {
+    const rows = ledgerRows(ledger, statement);
+    if (!Array.isArray(rows)) return null;
+    return rows.length && rows[0] ? Number(rows[0].seq) : 0;
+  };
+  const toolMark = lastSeq("SELECT seq FROM harness_events WHERE kind='tool' AND phase='start' ORDER BY seq DESC LIMIT 1");
+  const runMark = lastSeq("SELECT seq FROM harness_events WHERE kind='run' AND phase='end' ORDER BY seq DESC LIMIT 1");
+  if (toolMark === null || runMark === null) {
+    return {coldMs: null, cache: false, why: 'the ledger could not be read before the warm-up, so the cold number is unknown'};
+  }
+  resetScenario('warm', {reply: 'warm-tool'});
+  tmux(['send-keys', '-t', SESSION, 'warm', 'Enter']);
+  const typedAt = Date.now();
+  let coldMs = null;
+  const callDeadline = Date.now() + 30000;
+  while (Date.now() < callDeadline) {
+    const rows = ledgerRows(ledger, "SELECT (SELECT min(at) FROM harness_events WHERE kind='tool' AND phase='start' AND seq > " + toolMark + ') AS started,'
+      + " (SELECT max(at) FROM harness_events WHERE kind='tool' AND phase='end' AND seq > " + toolMark + ') AS ended');
+    if (Array.isArray(rows) && rows[0] && rows[0].started !== null && rows[0].ended !== null) {
+      // FROM THE ANNOUNCED CALL TO ITS FINAL RESULT, which is where the cold cost actually sits: the call is
+      // announced, the harness then builds its code-mode guest (the compile), and only then does the nested
+      // call run. The nested call's own ms is 33 ms and would hide the 900 - measured 25/11, the first shape
+      // of this number reported 33 ms for a 969 ms wait.
+      coldMs = Math.round((Number(rows[0].ended) - Number(rows[0].started)) * 1000);
+      break;
+    }
+    await sleep(20);
+  }
+  // THE PRODUCT'S OWN PROOF THAT THE GUEST IS WARM: the module cache it writes for the next process.
+  let cache = false;
+  const cacheDeadline = Date.now() + 20000;
+  while (Date.now() < cacheDeadline) {
+    try { if (fs.readdirSync(cacheDir).some(file => file.endsWith('.cwasm'))) { cache = true; break; } } catch { /* not yet */ }
+    await sleep(20);
+  }
+  // The warm turn must END before the measured one starts, or the two runs overlap.
+  const runDeadline = Date.now() + 30000;
+  while (Date.now() < runDeadline) {
+    const seen = lastSeq("SELECT seq FROM harness_events WHERE kind='run' AND phase='end' ORDER BY seq DESC LIMIT 1");
+    if (seen !== null && seen > runMark) break;
+    await sleep(20);
+  }
+  await sleep(Number(process.env.ESC_SETTLE_MS || 0) > 0 ? 100 : 120);
+  const why = coldMs === null ? 'no tool|end row carried an ms for the warm-up call' : '';
+  return {coldMs, cache, wallMs: Date.now() - typedAt, why};
+}
+
 // One scenario: a fresh chat against the fixture, its own scratch home and ledger, one Esc.
 //
 // The measurement is the reader's own: the moment tmux hands the Esc byte to the pty is the moment the
@@ -374,7 +463,13 @@ async function scenario(entry) {
   // (docs/PROMPT-CACHE.md), so a peer discovered after that freeze can never be called in this
   // session - measured here: "remote" was absent from the frozen envelope, the call was dropped and
   // the turn ended as an empty reply. Display-free waiting, and the assertions below prove it worked.
+  // THE ROSTER WAIT COMES FIRST, on purpose: the first request of a session freezes the declared tool list
+  // (docs/PROMPT-CACHE.md), and the warm-up call below IS the first request - a peer discovered after it
+  // could never be called in this session (the remote leg's own note, above).
   if (entry.opts.promptWaitMs) await sleep(entry.opts.promptWaitMs);
+  const warm = await warmUp(home, ledger);
+  // The warm turn's requests are not the measured leg's: the fixture's round counters start again here.
+  resetScenario(name, entry.opts);
   const typedAt = Date.now();
   state.typedAt = typedAt;
   const panePid = String(tmux(['display-message', '-p', '-t', SESSION, '#{pane_pid}']).stdout || '').trim();
@@ -386,7 +481,8 @@ async function scenario(entry) {
     const rows = screen();
     killServer();
     return {name, escMs: null, why: error.message, rows, requests: state.requests.length, typedAt,
-      ledger, home, requestsSeen: state.requests.map(entry => entry.path)};
+      ledger, home, requestsSeen: state.requests.map(entry => entry.path),
+      coldMs: warm.coldMs, warmCache: warm.cache, warmWhy: warm.why};
   }
   await sleep(Number(process.env.ESC_SETTLE_MS || entry.opts.settleMs || 250));
   if (process.env.ESC_DEBUG) console.log('screen at Esc:\n' + screen().join('\n'));
@@ -517,6 +613,8 @@ async function scenario(entry) {
     loadAtEsc, shellGoneMs, survivors: survivors.length,
     requests: state.requests.length, typedAt,
     requestsSeen: state.requests.map(entry => entry.path),
+    // What the warm-up paid, and whether the product wrote the module cache it promises (see warmUp).
+    coldMs: warm.coldMs, warmCache: warm.cache, warmWhy: warm.why,
     // The provider requests themselves, for the display-only probe below.
     bodies: state.requests.filter(entry => entry.path.endsWith('/chat/completions')).map(entry => entry.body)};
 }
@@ -657,6 +755,9 @@ try {
     } else {
       console.log('     Esc -> prompt in ' + result.escMs + ' ms');
     }
+    console.log('     warm-up: the first code-mode call took '
+      + (result.coldMs === null || result.coldMs === undefined ? 'unknown (' + (result.warmWhy || 'no ms in the tool row') + ')' : result.coldMs + ' ms')
+      + ', module cache ' + (result.warmCache ? 'written by the product' : 'MISSING') + ' - loose bound ' + COLD_LIMIT_MS + ' ms');
   }
 } catch (error) {
   crash = error;
@@ -721,6 +822,17 @@ if (crash) {
     check(result.name + ': Esc gives back a usable prompt at once (' + LIMIT_MS + ' ms idle, '
       + PER_LOAD_MS + ' ms per unit of load, never over ' + HARD_MS + ')', ok, detail);
   }
+  // THE FIRST CODE-MODE CALL IS ITS OWN ROW (Fable, 25/11): the warm-up paid it, this prints it, and a
+  // loose bound keeps a real slowdown in first-use setup visible - charged to setup, never to the stop.
+  for (const result of results) {
+    const cold = result.coldMs;
+    check(result.name + ': the first code-mode call of the process is setup, not the stop (' + COLD_LIMIT_MS + ' ms loose bound)',
+      cold !== null && cold !== undefined && Number(cold) <= COLD_LIMIT_MS,
+      (cold === null || cold === undefined)
+        ? 'unknown: ' + (result.warmWhy || 'the warm-up left no tool|end row to read, so the cold cost is not measured')
+        : cold + ' ms, module cache ' + (result.warmCache ? 'written' : 'MISSING') + ' (scratch home ' + result.home + ')');
+  }
+
   // ---- display only: the row's words never reach the provider --------------------------------
   // The status row now names the wait and the key that ends it (item 5). Nothing of that may travel:
   // the request is built from the conversation and the frozen prefix, never from the row, and this is
