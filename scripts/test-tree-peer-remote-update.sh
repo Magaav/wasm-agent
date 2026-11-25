@@ -51,6 +51,9 @@ if [ -z "${WA_ROW_SCRATCH_ROOT:-}" ]; then
   wa_install_isolation_guard "$R" "$R/home" || { echo 'tree peer remote update: this row is not isolated' >&2; exit 2; }
 fi
 printf 'tree peer remote update: root %s\n' "$R"
+# THE CHANNEL, SAID FIRST (Fable 25/11): this row reads no release channel at all - the binary it tests is
+# built from its own checkout - so it spends none of the shared unauthenticated GitHub API allowance.
+printf 'tree peer remote update: channel NONE (the binary is built from this checkout; no release channel is read, no GitHub API request is made)\n'
 
 # ---- 1. the binary this row tests: built from THIS checkout -------------------------------------------------
 BUILD="$R/build"

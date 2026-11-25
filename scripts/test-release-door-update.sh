@@ -68,6 +68,11 @@ export WASM_AGENT_PORT="$PORT" WASM_AGENT_CLIENT_PORT="$CPORT"
 export WA_SENTINEL_SCRIPTS="$WA_INSTALL_DIR/scripts"
 wa_install_isolation_guard "$R" "$R/home" || { echo 'release door update: this row is not isolated' >&2; exit 2; }
 printf 'release door update: root %s, peer port %s, rendezvous %s\n' "$R" "$PORT" "$RPORT"
+# THE CHANNEL, SAID FIRST (Fable 25/11): this row installs from a LOCAL signed stub - a file:// index with
+# SHA256SUMS and SHA256SUMS.sig made with the committed TEST key, WA_LINUX_RELEASE_ALLOW_LOCAL=1 - so it asks
+# GitHub's shared, unauthenticated API nothing at all. A row that DOES test the public channel must say the
+# opposite in this same first line.
+printf 'release door update: channel LOCAL SIGNED STUB (file:// index + SHA256SUMS/.sig, committed TEST key, WA_LINUX_RELEASE_ALLOW_LOCAL=1) - the public channel is NOT tested and no GitHub API request is made\n'
 
 PIDS=()
 stop_all() {
