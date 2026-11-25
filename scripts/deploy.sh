@@ -1802,7 +1802,56 @@ fi
 # by name instead - a fast refusal is better than an install that silently waits for the next reboot.
 case "${WA_VERSION_FOLDERS:-0}" in
   0) : ;;
-  1) fail "version_folders_incomplete: the conversion and the staging half are in this build, the seal+point+restart sequence is not - keep WA_VERSION_FOLDERS=0 until it lands" ;;
+  1)
+    # THE SEQUENCE, in the order Fable approved. Nothing here runs unless the switch is on, and every step fails
+    # the deploy by name rather than continuing.
+    . "$ROOT/scripts/lib/versions.sh"
+    . "$ROOT/scripts/lib/sentinel-move.sh"
+    VF_SHARE="$(wa_share_root)"
+    VF_ID="$(wa_version_id "$EXPECTED_SHA")" || fail "version_folders_id: cannot name the version for $EXPECTED_SHA"
+    VF_PREV="$(wa_version_current 2>/dev/null || true)"
+
+    # 1. THE CONVERSION, first and verified: convert an in-place node once, or say it is already on a folder.
+    #    If it fails, its own rollback has already put the in-place install back and the deploy stops here.
+    bash "$ROOT/scripts/versions-adopt.sh" --install "$INSTALL_DIR" --share "$VF_SHARE" \
+      || fail "version_folders_adopt_failed: the conversion step failed; the in-place install is untouched"
+
+    # 2. STAGE the new version: upgrade.sh writes the program, itself and the record into the staging tree and
+    #    stops (no swap, no restart). It is the same invocation the live path uses, with one variable more.
+    VF_STAGE="$VF_SHARE/versions/.stage-$VF_ID"
+    rm -rf "$VF_STAGE"; mkdir -p "$VF_STAGE" || fail "version_folders_stage_unwritable: $VF_STAGE"
+    WA_VERSION_STAGING="$VF_STAGE" \
+      WA_UPGRADE_FORCE_REASON="$([ "${FORCE:-0}" = 1 ] && printf '%s' "${REASON:-}")" \
+      WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+      WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
+      bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
+      || fail "version_folders_stage_failed: see $INSTALL_DIR/deploy-upgrade.log"
+    #    the trees the version also holds (the program and the record were staged by upgrade.sh)
+    [ -d "$LUA_STAGE" ] && cp -a "$LUA_STAGE" "$VF_STAGE/lua-core" 2>/dev/null || true
+    [ -d "$ROOT/scripts" ] && { mkdir -p "$VF_STAGE/scripts"; cp -a "$ROOT/scripts/." "$VF_STAGE/scripts/" 2>/dev/null || true; }
+    [ -d "$ROOT/ui" ] && cp -a "$ROOT/ui" "$VF_STAGE/ui" 2>/dev/null || true
+
+    # 3. SEAL it and MOVE THE POINTER - before any restart, so the restart runs a complete, immutable version.
+    bash "$ROOT/scripts/version-install.sh" --staging "$VF_STAGE" --commit "$EXPECTED_SHA" --install "$INSTALL_DIR" \
+      || fail "version_folders_seal_failed: the staged version could not be sealed or pointed at"
+
+    # 4. RESTART through the pointer. The installed program is now the new bytes, so upgrade.sh takes its own
+    #    "already the installed one" branch: it restarts and verifies, and its existing rollback is untouched - the
+    #    rollback BECOMING a pointer move is the next hunk, not a reason to change the swap today.
+    WA_UPGRADE_FORCE_REASON="$([ "${FORCE:-0}" = 1 ] && printf '%s' "${REASON:-}")" \
+      WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+      WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
+      bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
+      || fail "version_folders_restart_failed: see $INSTALL_DIR/deploy-upgrade.log (the pointer still names $VF_ID; roll back with wa_version_point $VF_PREV)"
+
+    # 5. THE SENTINEL moves last, only now that the node answered on the new version; a failed start leaves the
+    #    previous version supervising (scripts/lib/sentinel-move.sh).
+    if [ -n "$VF_PREV" ]; then
+      WA_SENTINEL_NODE_HEALTHY=1 wa_sentinel_move "$INSTALL_DIR" "$VF_SHARE/versions/$VF_PREV" || \
+        note "the sentinel did not move cleanly (see above); the node is on $VF_ID"
+    fi
+    note "version folders: current -> $VF_ID (previous ${VF_PREV:-none}); the deploy continues with its own checks"
+    ;;
   *) fail "version_folders_switch: WA_VERSION_FOLDERS must be 0 or 1, not $WA_VERSION_FOLDERS" ;;
 esac
 
