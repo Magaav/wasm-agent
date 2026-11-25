@@ -1034,6 +1034,12 @@ grep -q "update treeless ok" "$DB.treeless.log" || { tail -12 "$DB.treeless.log"
 # the relay deadline's REAL shape (nodes.remote_call:1786-1800): the deadline is "no answer yet", the follow
 # keeps polling to its bound, a refusal still ends it, and the module's own bound ends a follow nobody bounded.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-follow.lua" "$BIN" --db "$DB.remote-follow" | grep "remote follow ok"
+# A CHILD SHELL DOES NOT INSTALL, AND THE ACCEPTED TAIL IS NOT A CHILD (25/11, mission release-node-updates
+# D7). The fleet step was accepted and then refused by the peer's own detached child ("update_coordinator_only")
+# because the operation manager stamps every detached operation with the spawner's provenance. These rows drive
+# the real update.run and the real run_accepted: the child refusal is unchanged, the tail that continues a
+# verified master request is not stopped by it, and the accept verb runs only a record this node wrote.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-child-guard.lua" "$BIN" --db "$DB.update-child-guard" | grep "update child guard ok"
 # The pre-update backup skips every lock file the Rust sources open (binding.transport.sqlite broke /update, 04/11).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.backup-locks" | grep "backup locks ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
