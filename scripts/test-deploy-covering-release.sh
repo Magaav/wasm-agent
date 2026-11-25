@@ -99,7 +99,11 @@ git clone -q --shared "$ROOT" "$TREE" 2>/dev/null || skip_all "cannot clone this
 git -C "$TREE" switch -q -c main "$BASE" 2>/dev/null || skip_all "cannot branch the fixture at $BASE"
 git -C "$ROOT" diff "$BASE"..HEAD -- scripts lua docs 2>/dev/null | git -C "$TREE" apply - 2>/dev/null \
   || skip_all "cannot apply this branch's scripts/lua/docs onto $BASE in the fixture"
-git -C "$TREE" -c user.email=fixture@invalid -c user.name=fixture commit -q -am "fixture C2: this branch's scripts/lua/docs on $BASE" \
+# `-A`, not `-a`: the branch adds files (this row is one), and a file an apply creates is UNTRACKED - the
+# fixture would then be dirty, and a deploy rightly refuses a dirty tree (measured: 600 s of waiting and
+# canonical_busy with `1 uncommitted change(s)`).
+git -C "$TREE" add -A 2>/dev/null || skip_all "cannot stage the fixture diff"
+git -C "$TREE" -c user.email=fixture@invalid -c user.name=fixture commit -q -m "fixture C2: this branch's scripts/lua/docs on $BASE" \
   || skip_all "cannot commit the fixture C2"
 C2="$(git -C "$TREE" rev-parse HEAD)"
 REMOTE="$W/remote.git"
@@ -149,13 +153,21 @@ OUT="$W/deploy.out"
 # the newest published build of this tree's compiled inputs - which is the branch work's 22:17Z update ran,
 # and the branch whose record was wrong. The row names the knob rather than pretending the two are one path.
 ( cd "$TREE" && env -u WASM_AGENT_IN_TURN -u WA_INSTALL_DIR -u WA_PORT \
-    WA_DEPLOY_FULL=1 \
+    WA_DEPLOY_FULL=1 WA_DEPLOY_TREE_WAIT=60 \
     WA_DEPLOY_ROOT="$TREE" WA_INSTALL_DIR="$INSTALL" WA_PORT="$PORT" \
     WA_SERVICE_UNIT_FILE="$W/no-such.unit" WA_SENTINEL_SUPERVISOR=none \
+    # ^ and NO systemd user session for this scratch home: with one, the sentinel step finds the MACHINE's
+    #   unit and tries to restart that (measured: "systemctl --user restart wa-sentinel.service"), so the
+    #   watcher of THIS install never starts. A scratch XDG_RUNTIME_DIR makes `systemctl --user` unable to
+    #   answer, and the sentinel then starts as a plain child of this row.
+    XDG_RUNTIME_DIR="$W/xdg" DBUS_SESSION_BUS_ADDRESS="unix:path=$W/no-bus" \
     HOME="$HOME" WASM_AGENT_HOME="$HOME" \
     bash scripts/deploy.sh --reason "test-deploy-covering-release: a covering release must record both facts" \
     > "$OUT" 2>&1 ); rc=$?
 
+if grep -q 'refused(canonical_busy)' "$OUT" 2>/dev/null; then
+  skip_all "the fixture tree is not clean enough for a deploy to run from: $(git -C "$TREE" status --porcelain | head -3 | tr '\n' ';') "
+fi
 if grep -q 'cannot deploy from a turn running on the node\|needs a sentinel supervising the node' "$OUT" 2>/dev/null; then
   skip_all "the deploy's turn guard refused first (this test is running in a node turn): $(grep -m1 -oE 'cannot deploy from a turn[^.]*\.|needs a sentinel supervising the node[^)]*' "$OUT")"
 fi
@@ -179,7 +191,10 @@ elif [ "$rc" = 3 ] && printf '%s' "$PROBLEMS" | grep -q sentinel && ! printf '%s
 else
   ok 0 "the deploy exits 0 on a covering release" "rc=$rc problems=${PROBLEMS:-none} $(tail -3 "$OUT" | tr '\n' ' ')"
 fi
-ok "$(grep -qE "^deploy: binary_release: node-[0-9a-f]{12} ${C1}" "$OUT" && echo 1)" "and it took C1's covering release, as the resolver chose it" "$(grep -m1 'binary_release\|binary_source' "$OUT")"
+# The deploy prints the covering fact on its `binary_source:` line (`... verified against node-<sha12>, the
+# build of <commit>; this commit changes no compiled input`); the raw `binary_release:` line is consumed to
+# fill the variables and is not echoed.
+ok "$(grep -qE "verified against node-${C1:0:12}([,;]|$)" "$OUT" && echo 1)" "and it took C1's covering release, as the resolver chose it" "$(grep -m1 'binary_source' "$OUT")"
 
 REC="$INSTALL/installed.txt"
 field() { sed -n "s/^$1=//p" "$REC" 2>/dev/null | head -1; }
@@ -195,7 +210,7 @@ ok "$([ "$(field binary_commit)" = "$C1" ] && echo 1)" "binary_commit= is the by
 ok "$(printf '%s' "$(field binary_release)" | grep -qE '^node-[0-9a-f]{12}$' && echo 1)" "and binary_release= names the release" "binary_release=$(field binary_release)"
 ok "$([ "$(field record_expected)" = "$C1" ] && echo 1)" "record_expected= keeps the commit the staged binary was proved against" "record_expected=$(field record_expected)"
 # NO POST-SWAP PROBLEM but the watcher one (see the exit code above).
-ok "$([ -z "$PROBLEMS" ] || { printf '%s' "$PROBLEMS" | grep -q sentinel && ! printf '%s' "$PROBLEMS" | grep -q '; '; }) && echo 1" "the only recorded post-swap problem, if any, is the watcher" "post_swap_problem=${PROBLEMS:-none}"
+ok "$({ [ -z "$PROBLEMS" ] || { printf '%s' "$PROBLEMS" | grep -q sentinel && ! printf '%s' "$PROBLEMS" | grep -q '; '; }; } && echo 1)" "the only recorded post-swap problem, if any, is the watcher" "post_swap_problem=${PROBLEMS:-none}"
 
 # THE SCRIPTS SHIPPED (work's install had none): two that only exist in the tree this deploy came from.
 for rel in scripts/lib/download-asset.sh scripts/lib/health-wakes.sh; do

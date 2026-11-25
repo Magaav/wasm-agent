@@ -2376,6 +2376,12 @@ ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-bi
 # the sentinel runs: without this line a tree-less node refuses every asset by name
 # (node_download_lib_missing / component_download_lib_missing) - correct, and useless for installing.
 ship_file "$ROOT/scripts/lib/download-asset.sh" "$INSTALL_DIR/scripts/lib/download-asset.sh" "scripts/lib/download-asset.sh beside deploy.sh (the one asset transfer)"
+# ...AND THE LIB THE SHIPPED VERIFIER READS (24/11). scripts/verify-install.sh looks for
+# scripts/lib/health-wakes.sh BESIDE ITSELF to judge the self-wake loop, and a deploy shipped the verifier
+# without it - so on every installed node that check said `scripts/lib/health-wakes.sh is missing from this
+# tree` and the loop was never actually judged (measured in the covering-release row; it would have been
+# skipped on work the same way). One line, and the verifier can answer.
+ship_file "$ROOT/scripts/lib/health-wakes.sh" "$INSTALL_DIR/scripts/lib/health-wakes.sh" "scripts/lib/health-wakes.sh beside the verifier that reads it (the self-wake loop check)"
 # ...and the glibc floor, which both deploy.sh and upgrade.sh source (scripts/lib/glibc-floor.sh): an
 # installed copy that cannot measure the artifact's floor against this host's libc is the copy that would
 # install a binary the node cannot start.
