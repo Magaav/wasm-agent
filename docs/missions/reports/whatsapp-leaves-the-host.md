@@ -205,7 +205,18 @@ the number to measure on that branch, not here.
 
 ## 7. Texts to approve
 
-**None.** This slice adds, removes and rewords no model-facing and no operator-facing string: the
-capability rows, their descriptions and the tool catalogue are byte-identical (§3) — `wa capabilities
---json` has the same sha256 on both sides. The only new prose is in Rust doc comments and the two test
-files' headers, which no model and no operator reads.
+**One, from 72b37107** - a new capability row, which `wa capabilities` and `/health` print to an operator
+(the model never sees it: it is not in `M.schemas()`, and the tool catalogue's sha256 is unchanged):
+
+    whatsapp_index   read-only
+
+and its description, verbatim:
+
+    Ask the WhatsApp index one read-only question the wa-whatsapp component knows: {op, ...args}, op
+    being search, read, contacts, message, reactions or media; the answer is the one whatsapp_<op> gives
+
+**Nothing model-facing changed** in the whole of move 3: the tool catalogue (`whatsapp.schemas()`) has
+the same sha256, `2a17427d...65e8c111b`, at every commit from 1fc54f29 to f333068f, because `capability`
+is not a field `M.schemas()` emits - which is exactly why a tool row may be repointed without moving a
+request byte. The other new prose is Rust doc comments and test headers that no model and no operator
+reads.
