@@ -69,7 +69,11 @@ check(not extra:find('did you mean',1,true),'and suggests nothing when there is 
 local guessed_schema={type='object',additionalProperties=false,properties={
   q={type='string'}, ['from']={type='string'}, limit={type='integer'}}}
 local _, guessed = contract.validate(guessed_schema, '{"query":"laura"}')
-eq(guessed,'unknown_argument:query','the refusal names the argument that does not exist')
+-- `query` against a schema declaring `q`: the PREFIX rule answers with `q` (the brief's own example, the
+-- other way round from `q` -> `query`, which the next check pins).
+eq(guessed,'unknown_argument:query - did you mean q?','the refusal names the argument that does not exist, and the one meant')
+local _, brief = contract.validate({ type = 'object', properties = { query = { type = 'string' } } }, '{"q":"laura"}')
+eq(brief,'unknown_argument:q - did you mean query?','the approved example is real row output: q is a prefix of query')
 local rendered=dofile('lua/core/refusal.lua').build(guessed,{},{tool='probe',parameters=guessed_schema})
 check(rendered.fix:find('from',1,true) and rendered.fix:find('limit',1,true) and rendered.fix:find('q',1,true),
   'and the sentence names every argument the tool accepts: '..tostring(rendered.fix))

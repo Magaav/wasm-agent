@@ -129,13 +129,26 @@ local function edit_cost(a, b)
   return row[#b]
 end
 local function nearest(name, declared)
+  local sent = tostring(name)
+  -- A PREFIX WINS FIRST, exactly as in lua/core/json_contract.lua: `q` is four edits from `query`, and a
+  -- distance threshold alone would refuse the one suggestion a model was going to make.
+  local prefix
+  for candidate in pairs(declared or {}) do
+    local word = tostring(candidate)
+    local shorter, longer = sent, word
+    if #shorter > #longer then shorter, longer = longer, shorter end
+    if #shorter >= 1 and #longer > #shorter and longer:sub(1, #shorter) == shorter then
+      if not prefix or #word < #prefix or (#word == #prefix and word < prefix) then prefix = word end
+    end
+  end
+  if prefix then return prefix end
   local best, best_cost
   for candidate in pairs(declared or {}) do
     local word = tostring(candidate)
-    local cost = edit_cost(tostring(name), word)
+    local cost = edit_cost(sent, word)
     if best_cost == nil or cost < best_cost or (cost == best_cost and word < best) then best, best_cost = word, cost end
   end
-  if not best or best_cost > math.max(2, math.floor(#tostring(name) / 2)) then return nil end
+  if not best or best_cost > math.max(2, math.floor(#sent / 2)) then return nil end
   return best
 end
 
