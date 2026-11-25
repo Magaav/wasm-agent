@@ -21,7 +21,8 @@ function M.run()
     local queried, raw = pcall(host.whatsapp_contacts, '{}')
     local contacts = queried and (type(raw) == 'string' and json.decode(raw) or raw) or nil
     local list = type(contacts) == 'table' and (contacts.chats or contacts.contacts or {}) or {}
-    if #list == 0 then return false, 'index_empty', 'no chat is indexed, so no message could have arrived' end
+    -- RULING (c), 25/11: no chat indexed on a node that DOES serve the account is no_data, not a break.
+    if #list == 0 then return 'not_proven', 'no_data', 'no_data: no chat in the index' end
     local chat = list[1].chat or list[1].jid or list[1].name
     if not chat then return false, 'index_unreadable', 'the first chat carries no address' end
     local read, read_raw = pcall(host.whatsapp_read, json.encode({ chat = chat, limit = 1 }))

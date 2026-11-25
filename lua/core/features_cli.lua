@@ -63,6 +63,7 @@ function M.run(args)
       for _, result in ipairs(results) do
         rows[#rows + 1] = { feature = result.feature, ok = result.ok and true or false,
           off = result.off and true or false, skipped = result.skipped and true or false,
+          not_proven = result.not_proven and true or false,
           stage = tostring(result.stage or ''), detail = result.detail and tostring(result.detail) or nil }
       end
       print(json.encode({ ok = failed == 0, failed = failed, features = rows }))

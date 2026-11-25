@@ -4382,6 +4382,11 @@ impl.canaries = function(run, options)
     for _, answer in ipairs(peer_answers) do list[#list + 1] = answer end
     return list
   end)())
+  -- RULING (c): not_proven with no_account/cutting on every node blocks; no_data anywhere is listed here and
+  -- does not block - the account WAS answered about, it simply holds nothing of that kind.
+  for _, entry in ipairs(aggregated.not_proven_no_data or {}) do
+    evidence(string.format("## NOT PROVEN (not blocking): %s\n", entry))
+  end
   if #aggregated.proven_nowhere > 0 then
     local named = table.concat(aggregated.proven_nowhere, ", ")
     return false, { error = "canary_proven_nowhere",

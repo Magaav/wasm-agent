@@ -22,7 +22,8 @@ function M.run()
     local answer = type(raw) == 'string' and json.decode(raw) or raw
     if type(answer) ~= 'table' then return false, 'index_unreadable', 'the voice search answered nothing' end
     local hits = answer.hits or answer.messages or {}
-    if #hits == 0 then return false, 'no_voice_notes', 'the index holds no voice note to transcribe' end
+    -- RULING (c), 25/11: zero voice notes on the account node is nothing-to-test, not a broken feature.
+    if #hits == 0 then return 'not_proven', 'no_data', 'no_data: no voice note in the index' end
     for _, hit in ipairs(hits) do
       if type(hit.transcript) == 'string' and hit.transcript ~= '' then
         return true, 'transcript', 'a voice note answers with ' .. #hit.transcript .. ' characters of text'

@@ -30,7 +30,8 @@ function M.run()
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return false, 'index_unreadable', 'the search answered nothing' end
   local messages = answer.messages or answer.hits or {}
-  if #messages == 0 then return false, 'index_empty', 'the email index answers, but holds no message' end
+  -- RULING (c), 25/11: no chat indexed on a node that DOES serve the account is no_data, not a break.
+  if #messages == 0 then return 'not_proven', 'no_data', 'no_data: no message in the index' end
   return true, 'index', 'the email index answers with ' .. #messages .. ' message(s)'
 end
 return M

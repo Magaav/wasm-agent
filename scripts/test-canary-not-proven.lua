@@ -34,55 +34,67 @@ local root = paths.config()
 local empty = root .. '/not-proven-fixture'
 local present, why = account.present('wa-email', empty)
 eq(present, false, 'no component file: the account gate refuses to call it present')
-has(why, empty .. '/components/wa-email.json', 'and the reason names the file it looked for')
+has(why, 'the service registry answered nothing about wa-email', 'and the reason names the registry answer it got')
 
 local mail = dofile('lua/core/canaries/mail.lua')
 local ran, stage, detail = mail.run({})
 eq(ran, 'not_proven', 'the real mail canary answers not_proven where no account is configured')
 eq(stage, 'no_account', 'and its stage says which fact is missing')
-has(detail, 'no account of this kind is configured on this node', 'and the detail says so in words')
+has(detail, 'this node runs no wa-email component', 'and the detail says what the registry answered')
 
--- ---- 2. account present, empty index -> still FAIL ---------------------------------------------------
-local with_account = root .. '/account-present-fixture'
-local dir = with_account .. '/components'
-os.execute('mkdir -p ' .. dir)
-local f = assert(io.open(dir .. '/wa-email.json', 'w'))
-f:write(json.encode({ name = 'wa-email', kind = 'component', target = 'wasm32', description = 'fixture',
-  capabilities = { config = true }, limits = { memory_mb = 64 }, imap = { host = 'fixture.invalid' } }))
-f:close()
-eq(account.present('wa-email', with_account), true, 'a definition that carries an account block IS present')
-local bare = root .. '/manifest-only-fixture'
-os.execute('mkdir -p ' .. bare .. '/components')
-local g = assert(io.open(bare .. '/components/wa-email.json', 'w'))
-g:write(json.encode({ name = 'wa-email', kind = 'component', target = 'wasm32', description = 'fixture',
-  capabilities = { config = true }, limits = { memory_mb = 64 } }))
-g:close()
-eq(account.present('wa-email', bare), false, 'a definition holding only the manifest skeleton is NOT an account')
-local real_present = account.present('wa-email')
-if real_present then
-  local mail2 = dofile('lua/core/canaries/mail.lua')
-  local ran2, stage2 = mail2.run({})
-  ok(ran2 ~= 'not_proven', 'with a real account on this node the mail canary is not not_proven (it looks at the index)')
-  ok(stage2 ~= 'no_account', 'and its stage is about the index, not about the account')
-else
-  print('  ok   (this node has no mail account: the account-present arm is covered by the fixture above)')
-  checks = checks + 1
-end
+-- ---- 2. the registry answer IS the signal (wa services status, field `state`) -----------------------
+local running = account.present('wa-whatsapp', json.encode({ state = 'running', component = 'wa-whatsapp' }))
+eq(running, true, 'the registry saying running means the account is served here')
+local stopped, why_stopped = account.present('wa-whatsapp', json.encode({ state = 'stopped', name = 'wa-whatsapp' }))
+eq(stopped, false, 'a component that is installed but stopped does not serve the account')
+has(why_stopped, 'stopped', 'and the reason carries the registry own word')
+local absent, why_absent = account.present('wa-email', json.encode({ name = 'wa-email' }))
+eq(absent, false, 'no state at all: no such service in the registry')
+has(why_absent, 'no such service in the registry', 'and it says that, not "not installed"')
+local owned, why_owned = account.present('wa-whatsapp', json.encode({ state = 'stopped', owner = 'openclaw' }))
+has(why_owned, 'the account is served by openclaw', 'and names the node the registry says serves it')
 
--- ---- 3. proven nowhere -> red -------------------------------------------------------------------------
+-- ---- 2b. RULING (c): account present, nothing of the kind the canary needs -> no_data, not a failure ----
+local real_service = host.service
+host.service = function() return json.encode({ state = 'running' }) end
+local ran_t, stage_t, detail_t = dofile('lua/core/canaries/whatsapp-transcription.lua').run({})
+eq(ran_t, 'not_proven', 'with the account served here, an empty voice index is not_proven')
+eq(stage_t, 'no_data', 'and its stage is no_data')
+eq(detail_t, 'no_data: no voice note in the index', 'with the words Fable ruled')
+local ran_m, stage_m, detail_m = dofile('lua/core/canaries/mail.lua').run({})
+eq(ran_m, 'not_proven', 'the same for mail with an empty index')
+eq(stage_m, 'no_data', 'stage no_data')
+has(detail_m, 'no_data: no message in the index', 'and the message says which kind is missing')
+host.service = real_service
+
+-- ---- 3. proven nowhere is RED only for no_account / cutting ------------------------------------------
 local nowhere = canaries.aggregate({
   { node = 'this node', results = { { feature = 'mail', ok = false, not_proven = true, stage = 'no_account' } } },
   { node = 'peer-b', results = { { feature = 'mail', ok = false, not_proven = true, stage = 'no_account' } } },
 })
-eq(#nowhere.proven_nowhere, 1, 'a canary not_proven on every node asked is named once')
-has(nowhere.proven_nowhere[1], 'mail (not proven on 2 node(s) asked)', 'and the name says how many nodes were asked')
-eq(#nowhere.failed, 0, 'and it is not counted as a failure of any node')
+eq(#nowhere.proven_nowhere, 1, 'no_account on every node asked is proven nowhere')
+has(nowhere.proven_nowhere[1], 'mail (not proven on 2 node(s) asked)', 'named, with how many nodes were asked')
+eq(#nowhere.failed, 0, 'and it is not a failure of any node')
+local cuts = canaries.aggregate({ { node = 'this node', results = { { feature = 'release-update', ok = false, not_proven = true, stage = 'cutting' } } } })
+eq(#cuts.proven_nowhere, 1, 'cutting on the only node asked is proven nowhere too')
+local nodata = canaries.aggregate({
+  { node = 'openclaw', results = { { feature = 'whatsapp-transcription', ok = false, not_proven = true, stage = 'no_data' } } },
+})
+eq(#nodata.proven_nowhere, 0, 'no_data on the account node does NOT block')
+eq(#nodata.not_proven_no_data, 1, 'it is listed instead')
+has(nodata.not_proven_no_data[1], 'whatsapp-transcription (no_data)', 'by name and reason')
+local mixed = canaries.aggregate({
+  { node = 'this node', results = { { feature = 'mail', ok = false, not_proven = true, stage = 'no_account' } } },
+  { node = 'openclaw', results = { { feature = 'mail', ok = false, not_proven = true, stage = 'no_data' } } },
+})
+eq(#mixed.proven_nowhere, 0, 'no_account somewhere + no_data elsewhere is not proven nowhere')
+eq(#mixed.not_proven_no_data, 1, 'and the no_data node is listed')
 local proven_somewhere = canaries.aggregate({
   { node = 'this node', results = { { feature = 'mail', ok = false, not_proven = true, stage = 'no_account' } } },
   { node = 'peer-b', results = { { feature = 'mail', ok = true, stage = 'index' } } },
 })
 eq(#proven_somewhere.proven_nowhere, 0, 'proven on ONE node clears proven nowhere')
-eq(#proven_somewhere.failed, 0, 'and a not_proven on this node is not a failure either')
+eq(#proven_somewhere.failed, 0, 'and a pass is not a failure either')
 
 -- ---- 4. the line and the count ----------------------------------------------------------------------
 local lines = canaries.lines({
