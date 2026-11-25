@@ -354,9 +354,12 @@ local function run_wrapper(label, body, record)
   local text = table.concat(lines, '\n')
   local tried = {}
   for dir in scripts:gmatch('[^;]+') do
-    dir = trim(dir)
-    if dir ~= '' then
-      local path = slashes(dir) .. '/remote-' .. label .. '-' .. stamp .. '.sh'
+    -- A LOOP VARIABLE IS NOT REASSIGNED (25/11). Lua 5.5 makes the loop variable a const and refuses the file over
+    -- the reassignment below; the PRODUCT's interpreter (Lua 5.4, checked through the node's WA_SCRIPT seam) loads
+    -- it either way. This is the cleanup that keeps a newer host toolchain from turning that into a real refusal.
+    local d = trim(dir)
+    if d ~= '' then
+      local path = slashes(d) .. '/remote-' .. label .. '-' .. stamp .. '.sh'
       local ok, wrote = pcall(host.write_file, path, text)
       if ok and wrote == true then
         shell('chmod +x ' .. quote(path) .. ' 2>/dev/null')
