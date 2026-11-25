@@ -540,6 +540,24 @@ end
 
 -- The installed front door, when this node has one. Presence, not a version test: the bundle either
 -- shipped it (and files.sha256 verified it with every other member) or it did not.
+-- THE VERSION A COMMIT DECLARES, read from the tree that carries it (mission update-is-one-line):
+-- the last line of `wa update` says "updated to v0.1.2 . 82f57859", and v0.1.2 is the version the
+-- INSTALLED build declares - not this command's own (they differ exactly when an update installed a
+-- different version than the one running the command). `lua/core/build_identity.lua` is the one place the
+-- tree spells the product version; `git show` reads it at that commit, from objects already on disk (no
+-- fetch, no network). A commit the tree does not carry, or a file without the line, answers nil and the
+-- caller prints the commit alone - never an invented number.
+function M.version_at(tree, commit)
+  local sha = trim(commit)
+  if type(tree) ~= "string" or tree == "" or sha == "" then return nil end
+  if not sha:match("^%x+$") then return nil end
+  local result = shell("git -C " .. quote(tree) .. " show " .. quote(sha .. ":lua/core/build_identity.lua") .. " 2>/dev/null")
+  if not result or (result.code or 1) ~= 0 then return nil end
+  local version = tostring(result.stdout or ""):match('PRODUCT_VERSION%s*=%s*"([^"]+)"')
+  version = trim(version or "")
+  return version ~= "" and version or nil
+end
+
 function M.installed_updater(install)
   if type(install) ~= "string" or install == "" then return nil end
   local path = slashes(install) .. "/scripts/install.sh"

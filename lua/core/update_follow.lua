@@ -244,7 +244,7 @@ function M.state(options)
       return snap({ key = "installed_with_problems", terminal = true, ok = false, clock_from = origin,
         body = "installed " .. (commit ~= "" and commit:sub(1, 12) or "(the installer named no commit)")
           .. ", with " .. tostring(problems) .. " problem(s): " .. (detail ~= "" and detail or "(no detail recorded)"),
-        detail = detail, commit = commit, sources = { p.deploy_result } })
+        detail = detail, commit = commit, problems = problems, sources = { p.deploy_result } })
     end
     if result.ok == true then
       return snap({ key = "installed", terminal = true, ok = true, clock_from = origin,
@@ -424,6 +424,26 @@ function M.evidence_lines(options, limit)
   return kept
 end
 
+-- `--verbose`: the installer's own words, STREAMED as they arrive (mission update-is-one-line, item 4).
+-- Everything else goes to the deploy's log and is named in the last line; this is for the person who ASKED
+-- for the detail. It reads only what the deploy already wrote, from where the last read stopped: no second
+-- reader, no protocol, and nothing changes when nobody asks.
+function M.tail(options, p, from, sink)
+  local o = options or {}
+  local text = read((p or M.paths(o)).deploy_out)
+  if not text then return from or 0 end
+  local at = tonumber(from) or 0
+  if #text <= at then return #text end
+  local fresh = text:sub(at + 1)
+  for line in tostring(fresh):gmatch("[^\r\n]*[\r\n]+") do
+    at = at + #line
+    local value = trim(line)
+    -- the `--- deploy ... ---` header is the deploy's separator, not the installer's word
+    if value ~= "" and value:sub(1, 10) ~= "--- deploy" and type(sink) == "function" then sink(value) end
+  end
+  return at
+end
+
 -- The sentence with its clock. `now` defaults to the snapshot's own time, so a caller that already has
 -- a snapshot adds no second read of the clock.
 function M.text(snapshot, now)
@@ -450,6 +470,35 @@ function M.next_line(options, snapshot)
   return "next: " .. table.concat(parts, "; ")
 end
 
+-- ONE LOG FILE PER UPDATE (mission update-is-one-line, item 4). A deploy appends every install to one
+-- `deploy.out`, so "the log of the update I just ran" is a section of it. This writes THIS request's own
+-- section - the last `--- deploy ... ---` block - to its own file and returns its path, which is what the
+-- last line names. It never invents a log: no request id, no file, or a section with nothing in it answers
+-- nil and the caller names the deploy's own log instead.
+function M.request_log(options)
+  local o = options or {}
+  local request = trim(o.request)
+  local id = request:match("([^/\\]+)%.json$") or ""
+  if id == "" then return nil end
+  local p = o.paths or M.paths(o)
+  local text = read(p.deploy_out)
+  if not text then return nil end
+  -- THE LAST deploy's block: every deploy appends its own `--- deploy ... ---` header before it writes a
+  -- word, so the block that starts at the LAST header is this request's (the request wrote the newest one).
+  local at = nil
+  for start in text:gmatch("()%-%-%- deploy ") do at = start end
+  if not at then return nil end
+  local section = text:sub(at)
+  if trim(section) == "" then return nil end
+  local dir = slashes(p.config) .. "/update-log"
+  local path = dir .. "/" .. id .. ".log"
+  local made = shell("mkdir -p " .. "'" .. dir .. "' 2>/dev/null")
+  if not made or (made.code or 1) ~= 0 then return nil end
+  local ok = pcall(host.write_file, path, section)
+  if not ok then return nil end
+  return path
+end
+
 -- ---- the loop ----------------------------------------------------------------
 --
 -- Prints one line per change of body (and a heartbeat every M.HEARTBEAT seconds while nothing changes),
@@ -458,6 +507,11 @@ end
 function M.follow(options)
   local o = options or {}
   local out = o.out or function(line) print(line) end
+  -- THE ONE MOVING LINE (mission update-is-one-line, 25/11): when a screen is handed in, it owns what the
+  -- person sees and this loop prints no line of its own - it hands over a BODY (no clock: the screen draws
+  -- one clock for the whole command) and, at the end, nothing: the caller prints the last line.
+  local screen = o.screen
+  local verbose = o.verbose == true
   local clock = o.clock or clock_default
   local pause = o.sleep or function(seconds)
     if host.sleep then host.sleep(math.max(1, math.floor(seconds * 1000))) end
@@ -468,6 +522,9 @@ function M.follow(options)
     bound = tonumber(trim(host.getenv and host.getenv("WA_UPDATE_FOLLOW_BOUND") or "")) or M.UNPERFORMED_BOUND
   end
   local started = clock()
+  -- WHERE THE VERBOSE TAIL STARTS: at the end of the log as it is when this caller attaches, so --follow
+  -- does not replay a log that already exists.
+  local tail_at = verbose and #(read(M.paths(o).deploy_out) or "") or 0
   local rounds, printed = 0, 0
   local last_body, last_at = nil, nil
   local declared_printed = false
@@ -477,20 +534,33 @@ function M.follow(options)
       started_at = o.started_at, target = o.target, now = now })
     local body = trim(snapshot.body)
     -- THE INSTALLER SAID IT IS BUILDING: only now may the word "build" be printed (Fable 24/11, A). Once.
-    if not declared_printed and snapshot.declared == "build" then
+    -- WITH A SCREEN this is the phase body's own suffix ("(from source, on this machine)"): a second line
+    -- would be a second line on a screen that has one.
+    if not screen and not declared_printed and snapshot.declared == "build" then
       out(M.build_declared_line(o))
       printed = printed + 1
       declared_printed = true
       last_body, last_at = body, now
     end
-    if body ~= last_body or not last_at or (now - last_at) >= M.HEARTBEAT then
+    if screen then
+      -- the phase, not the clock: a body that did not change is not a change on a pipe, and on a terminal
+      -- it is the same line rewritten (the screen decides both). A TERMINAL snapshot draws nothing: the
+      -- last line says what happened (`update_screen.updated` / `not_updated`), and a phase that said
+      -- "installed" first would be the same fact twice.
+      if not snapshot.terminal then screen:phase(body, snapshot.clock_from) end
+      if verbose then
+        tail_at = M.tail(o, M.paths(o), tail_at, function(line) screen:line(line) end)
+      end
+      last_body, last_at = body, now
+    elseif body ~= last_body or not last_at or (now - last_at) >= M.HEARTBEAT then
       out(M.text(snapshot, now))
       printed = printed + 1
       last_body, last_at = body, now
     end
     if snapshot.terminal then
-      if snapshot.ok ~= true then
+      if snapshot.ok ~= true and not screen then
         -- THE INSTALLER'S OWN LAST LINES, above the advice: nobody should need a file path to read why.
+        -- With a screen they are NOT printed: the last line carries one reason and the log is named.
         for _, line in ipairs(M.evidence_lines(o, 8)) do
           out("  " .. line)
           printed = printed + 1
@@ -499,16 +569,19 @@ function M.follow(options)
         if advice then out(advice); printed = printed + 1 end
       end
       return { ok = snapshot.ok == true, state = snapshot.key, body = body, detail = snapshot.detail,
-        seconds = now - started, rounds = rounds, printed = printed }
+        problems = tonumber(snapshot.problems) or (snapshot.key == "installed_with_problems" and 1 or 0),
+        commit = snapshot.commit, seconds = now - started, rounds = rounds, printed = printed }
     end
     rounds = rounds + 1
     -- A REQUEST THE SENTINEL HAS NOT STARTED does not hold a terminal forever: past the installer's own
     -- idle bound, stop following and say so, with the one command that picks it up again.
     local idle = snapshot.key == "queued" or snapshot.key == "waiting" or snapshot.key == "unknown"
     if idle and bound > 0 and (now - (tonumber(o.started_at) or started)) >= bound then
-      out("stopped following after " .. elapsed(now - (tonumber(o.started_at) or started)) ..
-        ": the sentinel has not started this request (" .. body .. "); wa update --follow picks it up again")
-      printed = printed + 1
+      if not screen then
+        out("stopped following after " .. elapsed(now - (tonumber(o.started_at) or started)) ..
+          ": the sentinel has not started this request (" .. body .. "); wa update --follow picks it up again")
+        printed = printed + 1
+      end
       return { ok = false, state = snapshot.key, body = body, unknown = true, unperformed = true,
         seconds = now - started, rounds = rounds, printed = printed }
     end
