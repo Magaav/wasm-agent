@@ -59,23 +59,28 @@ fi
 [ -n "$COMMIT" ] || die "adopt_no_record: $INSTALL/installed.txt carries no commit="
 ID="$(wa_version_id "$COMMIT")" || exit 2
 
-# 2. Stage the CURRENT members. A member the install does not have is not invented.
+# 2. Which members would move. In --dry-run nothing is created or copied: the plan is computed from the paths
+# that exist, which is the whole point of a dry run (the runner caught the earlier version creating its staging
+# directory before it printed the plan).
 STAGE_DIR="$(wa_versions_dir)"
-mkdir -p "$STAGE_DIR" || die "adopt_staging_unwritable: $STAGE_DIR"
 STAGE="$STAGE_DIR/.adopt-$ID-$$"
-mkdir -p "$STAGE" || die "adopt_staging_unwritable: $STAGE"
-trap 'rm -rf "$STAGE" 2>/dev/null' EXIT
 MOVES=""
 for name in wa wa-sentinel lua-core scripts ui installed.txt; do
-  [ -e "$INSTALL/$name" ] || continue
-  if [ -d "$INSTALL/$name" ] && [ ! -L "$INSTALL/$name" ]; then
-    mkdir -p "$STAGE/$name" && cp -a "$INSTALL/$name/." "$STAGE/$name/" 2>/dev/null || true
-  else
-    cp -a "$INSTALL/$name" "$STAGE/$name" 2>/dev/null || true
-  fi
-  MOVES="$MOVES $name"
+  [ -e "$INSTALL/$name" ] && MOVES="$MOVES $name"
 done
 [ -n "$MOVES" ] || die "adopt_nothing_to_move: $INSTALL holds none of wa, wa-sentinel, lua-core, scripts, ui, installed.txt"
+
+if [ "$DRY" = 0 ]; then
+  mkdir -p "$STAGE" || die "adopt_staging_unwritable: $STAGE"
+  trap 'rm -rf "$STAGE" 2>/dev/null' EXIT
+  for name in $MOVES; do
+    if [ -d "$INSTALL/$name" ] && [ ! -L "$INSTALL/$name" ]; then
+      mkdir -p "$STAGE/$name" && cp -a "$INSTALL/$name/." "$STAGE/$name/" 2>/dev/null || true
+    else
+      cp -a "$INSTALL/$name" "$STAGE/$name" 2>/dev/null || true
+    fi
+  done
+fi
 
 # 3. Say what it would do, and stop if asked.
 say "adopt_plan id=$ID commit=$COMMIT install=$INSTALL share=$(wa_share_root)"
