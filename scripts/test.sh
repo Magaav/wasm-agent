@@ -1567,6 +1567,10 @@ WA_BIN="$BIN" gate_run bash scripts/test-version-install.sh
 # The shared scratch checker the version-folder rows use (scripts/lib/scratch-env.sh), judged on its own:
 # every live dimension refused by name, an IN-A-TURN run refused rather than stripped, ISOLATED when clean.
 gate_run bash scripts/test-scratch-env.sh
+# THE LUA CORE AS A PART (Fable 25/11): the lock line, the verifier and the declared interface - a good part
+# verifies, a truncated/flipped/tampered one is refused by name, an interface mismatch names BOTH digests, and a
+# tarball path that escapes is refused. Milliseconds; no install, no pointer, no network.
+gate_run bash scripts/test-lua-part.sh
 # THE G CONDITION ITSELF: the checker rejects every live dimension on its own (HOME, install dir, unit dir, the
 # real systemctl, the ledger path, XDG_CONFIG_HOME, a live port, a vault URL), the installer row asks it before
 # it runs anything, and neutralising a live-inheriting harness lands on ISOLATED with no live file changed.
