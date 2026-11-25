@@ -70,6 +70,13 @@ SERVICE_LIB="$ROOT/scripts/lib/service-target.sh"
 . "$SERVICE_LIB"
 HOME_DIR="$(wa_config_dir)"
 INSTALLED="$INSTALL_DIR/$EXE"
+# THE STAGING HALF (Fable 25/11, approved). With WA_VERSION_STAGING set, the install is WRITTEN INTO THAT
+# DIRECTORY and this script stops there: the deploy seals it with scripts/version-install.sh and moves the
+# pointer BEFORE the restart, so a restart always runs a complete version and a rollback is a pointer move.
+# With it UNSET, TARGET_DIR is INSTALL_DIR and every branch below behaves exactly as it did before - the only
+# difference in this file is the guarded block that follows, and this variable.
+TARGET_DIR="$INSTALL_DIR"
+[ -z "${WA_VERSION_STAGING:-}" ] || TARGET_DIR="$WA_VERSION_STAGING"
 # The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh): this script
 # places bytes it did not build, so the only honest source for "which commit is installed" is the binary
 # itself. A missing lib is a refusal, never a silent fallback to the caller's belief.
@@ -437,7 +444,7 @@ record_install() {
     if [ "${ANCESTRY:-0}" = 2 ]; then printf 'ancestry_unverified=yes\n'; fi
     true
   } >> "$record" \
-    && mv -f "$record" "$INSTALL_DIR/installed.txt"
+    && mv -f "$record" "${TARGET_DIR:-$INSTALL_DIR}/installed.txt"
 }
 
 health() { curl -s -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
@@ -1003,6 +1010,25 @@ wait_health() {
   done
   return 1
 }
+
+# STAGE ONLY (WA_VERSION_STAGING set): write the program, this very script and the install's record into the
+# staging tree, then stop. NOTHING of the live install is touched and the node is NOT restarted here: the deploy
+# seals the staging tree (scripts/version-install.sh: one folder, one pointer rename) and restarts the node after
+# the pointer already names the new version, which is what makes the rollback a pointer move instead of a copy.
+if [ "$TARGET_DIR" != "$INSTALL_DIR" ]; then
+  [ -d "$TARGET_DIR" ] || { say "WA_VERSION_STAGING=$TARGET_DIR is not a directory"; exit 1; }
+  mkdir -p "$TARGET_DIR/scripts" || { say "cannot write the staging tree $TARGET_DIR"; exit 1; }
+  { cp -f "$NEW" "$TARGET_DIR/$EXE.new" && mv -f "$TARGET_DIR/$EXE.new" "$TARGET_DIR/$EXE"; } \
+    || { rm -f "$TARGET_DIR/$EXE.new"; say "cannot stage the program in $TARGET_DIR"; exit 1; }
+  chmod 0755 "$TARGET_DIR/$EXE" 2>/dev/null || true
+  { cp -f "$0" "$TARGET_DIR/scripts/upgrade.sh.new.$$" \
+      && mv -f "$TARGET_DIR/scripts/upgrade.sh.new.$$" "$TARGET_DIR/scripts/upgrade.sh"; } 2>/dev/null || true
+  # THE RECORD is written by the SAME writer as the live path (record_installed), which targets TARGET_DIR: with
+  # staging it lands as a real file in the tree that will be sealed, and it is never written over a link (fix 6).
+  record_installed || { say "cannot stage the install record in $TARGET_DIR"; exit 1; }
+  say "staged in $TARGET_DIR (program, upgrade.sh, record); the deploy seals it and moves the pointer before the restart"
+  exit 0
+fi
 
 # Copy rather than move: the caller's build tree keeps its binary, and a failed swap has something to
 # roll back to. If they are already the same file - a hard link, which is how an installed binary and
