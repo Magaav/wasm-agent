@@ -15,7 +15,15 @@
 # (WA_SENTINEL_UNIT_DIR), WASM_AGENT_DB, XDG_CONFIG_HOME, WA_RUNTIME_WORKTREE, WA_SENTINEL_SCRIPTS, the systemctl
 # stub (never the real one), the ports (never 8799/8800/8801/8810) and the vault URLs (never set).
 #
-# It is a pure reader: it starts nothing, writes nothing, and reads only the environment and the filesystem.
+# WHAT IT NEVER DOES (Fable 25/11, binding rule 1). It never unsets, clears or overrides WASM_AGENT_IN_TURN,
+# WASM_AGENT_PROVENANCE, or any variable a guard reads, and it never detaches anything. The damage that rule was
+# written for was a scratch run started with "setsid --fork env -u WASM_AGENT_IN_TURN", which stripped the guard's
+# own variable and detached from the turn that should have stopped it. So: an environment that says IN A TURN is
+# REFUSED by name, never corrected - an installer row belongs to the orchestrator's row runner, not to a turn.
+# The variables this file clears are an ALLOW-LIST of paths it is about to set itself; everything else, and every
+# guard variable in particular, is left exactly as found.
+#
+# It is a pure reader: it starts nothing, writes nothing, and detaches nothing.
 
 wa_scratch_env_real() { realpath -m "${1:-}" 2>/dev/null || printf '%s' "${1:-}"; }
 
@@ -32,6 +40,15 @@ wa_scratch_env_check() { # <root>
   root="${1:?usage: wa_scratch_env_check <root>}"
   root="$(wa_scratch_env_real "$root")"
   printf 'scratch-env: root %s\n' "$root"
+  # RULE 1, first and before anything else: a run that says it is inside a turn is refused, not unset.
+  for name in WASM_AGENT_IN_TURN WASM_AGENT_PROVENANCE; do
+    value="${!name:-}"
+    [ -z "$value" ] && continue
+    printf '  FAIL %s is set (%s): an installer row belongs to the row runner, not to a turn - refusing, not stripping\n' "$name" "$value"
+    printf 'scratch-env: IN A TURN - do not run (use _orch/row-runner.sh)\n'
+    return 1
+  done
+  printf '  ok   WASM_AGENT_IN_TURN / WASM_AGENT_PROVENANCE unset (no guard variable is stripped by this file)\n'
   case "$root/" in
     /home/*/.local/*|/home/*/.wasm-agent/*|/home/*/.config/*|*/wasm-agent/checkout/*)
       printf '  FAIL the scratch root is inside a live path: %s\n' "$root"; bad=1 ;;
@@ -90,8 +107,12 @@ wa_scratch_env_check() { # <root>
 wa_scratch_env_apply() { # <root>
   local root name
   root="${1:?usage: wa_scratch_env_apply <root>}"
+  # AN ALLOW-LIST, never a catch-all (binding rule 1): these name live paths this function is about to set to
+  # scratch ones. WASM_AGENT_IN_TURN / WASM_AGENT_PROVENANCE and every other WASM_AGENT_* are NOT touched: if a
+  # guard variable is set, wa_scratch_env_check refuses the run, which is the answer the rule asks for.
   unset WASM_AGENT_DB XDG_CONFIG_HOME WASM_AGENT_VAULT_URL WASM_AGENT_OPENCODE_GO_VAULT_URL WASM_AGENT_VAULT_OPERATOR_URL
-  for name in $(compgen -e 2>/dev/null | grep -E '^(WASM_AGENT_|WA_INSTALL_DIR|WA_SENTINEL_)' || true); do unset "$name"; done
+  unset WA_INSTALL_DIR WA_SENTINEL_UNIT_DIR WA_SENTINEL_UNIT_SYSTEMCTL WA_SENTINEL_UNIT_NAME WA_SENTINEL_SCRIPTS
+  unset WA_RUNTIME_WORKTREE WASM_AGENT_PORT WASM_AGENT_CLIENT_PORT WA_SHARE_ROOT
   export HOME="$root/home"
   export WASM_AGENT_HOME="$root/home"
   export WA_INSTALL_DIR="$root/install"

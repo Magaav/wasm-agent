@@ -47,14 +47,19 @@ ISOLATION="$(wa_scratch_env_check "$W" 2>&1)" || { printf '%s\n' "$ISOLATION" >&
 
 ID=aaaaaaaaaaaa
 COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-BIN="${WA_BIN:-}"
-[ -n "$BIN" ] && [ -x "$BIN" ] || { echo "FAIL test-version-install: WA_BIN is not an executable (the suite sets it)" >&2; exit 2; }
+# A STUB PROGRAM, not the installed one: this row is about the INSTALLER's layout and its cut order, and it must
+# run from "env -i" under the orchestrator's row runner with no live path in reach. A real program's start path
+# is row R5's job (scripts/test-versions.sh), which runs the suite's own binary. The stub answers --version and
+# nothing else, so "an executable at this path that runs" is what gets proven here.
+BIN="$W/bin/wa-stub"
+printf '#!/bin/sh\nprintf "wa-stub\\n"\nexit 0\n' > "$BIN"; chmod +x "$BIN"
+[ -x "$BIN" ] || { echo "FAIL test-version-install: the stub program could not be written" >&2; exit 2; }
 
 # A staging tree shaped like what a deploy stages: program, sentinel, lua tree, scripts, ui, and the record.
 stage() { # <dir>
   local dir="$1"
   mkdir -p "$dir/lua-core/lua/core" "$dir/scripts" "$dir/ui"
-  ln "$BIN" "$dir/wa" 2>/dev/null || cp "$BIN" "$dir/wa"
+  cp "$BIN" "$dir/wa"
   printf 'sentinel' > "$dir/wa-sentinel"
   printf 'init' > "$dir/lua-core/lua/core/init.lua"
   printf 'big' > "$dir/lua-core/lua/core/big.lua"
@@ -65,7 +70,7 @@ stage() { # <dir>
 install_dir() { # <dir>: what today's install looks like before the switch - a real program and record
   local dir="$1"
   mkdir -p "$dir/lua-core/lua/core" "$dir/scripts"
-  ln "$BIN" "$dir/wa" 2>/dev/null || cp "$BIN" "$dir/wa"
+  cp "$BIN" "$dir/wa"
   printf 'old-init' > "$dir/lua-core/lua/core/init.lua"
   printf 'old-deploy' > "$dir/scripts/deploy.sh"
   printf 'commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' > "$dir/installed.txt"

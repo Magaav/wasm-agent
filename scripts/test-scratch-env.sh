@@ -90,5 +90,23 @@ ok
 [ ! -d "$LIVE_HOME/.local/share/wasm-agent/versions" ] || fail "a live versions directory exists: STOP"
 ok
 
-echo "installer data isolation ok ($n checks)"
+# 4. RULE 1 (Fable 25/11): the library never strips a guard variable, and a run that says it is INSIDE A TURN is
+# refused by name rather than corrected. Both are properties of the code, so they hold whether or not this row
+# happens to run inside a turn itself.
+grep -q 'WASM_AGENT_IN_TURN' scripts/lib/scratch-env.sh || fail "the library does not name WASM_AGENT_IN_TURN at all"
+ok
+if grep -q 'compgen' scripts/lib/scratch-env.sh; then fail "the library clears variables with a catch-all (compgen): it must use an allow-list"
+fi
+ok
+IN_TURN_OUT="$( env WASM_AGENT_IN_TURN=1 bash -c '. scripts/lib/scratch-env.sh; wa_scratch_env_apply "$1" >/dev/null; wa_scratch_env_check "$1"' _ "$R" 2>&1 )"   && { printf '%s\n' "$IN_TURN_OUT" >&2; fail "a run that says it is in a turn was ACCEPTED"; }
+printf '%s\n' "$IN_TURN_OUT" | grep -q 'IN A TURN' || { printf '%s\n' "$IN_TURN_OUT" >&2; fail "the in-a-turn refusal is not named"; }
+printf '%s\n' "$IN_TURN_OUT" | grep -qx 'scratch-env: ISOLATED' && fail "an in-a-turn run must never print ISOLATED"
+ok
+PROVENANCE_OUT="$( env WASM_AGENT_PROVENANCE=worker bash -c '. scripts/lib/scratch-env.sh; wa_scratch_env_apply "$1" >/dev/null; wa_scratch_env_check "$1"' _ "$R" 2>&1 )"   && { printf '%s\n' "$PROVENANCE_OUT" >&2; fail "a run carrying provenance was accepted"; }
+grep -q 'WASM_AGENT_PROVENANCE' <<<"$PROVENANCE_OUT" || fail "the provenance refusal is not named"
+ok
+
+
+
+echo "shared scratch checker ok ($n checks)"
 
