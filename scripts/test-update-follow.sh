@@ -217,8 +217,11 @@ run_update --check
 [ "$CODE" = 0 ] || fail "--check is a question and must exit 0 (it exited $CODE)"
 grep -q "this node ($P12): published binary for $P12 on x86_64-unknown-linux-gnu" "$W/out.txt" \
   || fail '--check must say what the commit this node RUNS is published as'
-grep -q "behind by ($T12): no published binary for $T12 on x86_64-unknown-linux-gnu" "$W/out.txt" \
-  || fail '--check must say what the commit it is BEHIND BY is published as'
+# The commit behind is NOT published under its own name, and `--check` now says what the INSTALLER does about
+# that (Fable, 24/11): this row keeps the feed off (WA_UPDATE_CHECK=0 / WA_OFFLINE=1), so the installer's
+# digest walk refuses by name and the answer is its own fallback sentence.
+grep -q "behind by ($T12): no binary is published under $T12's own name; the installer also accepts one built from the same inputs and looks for it at install time" "$W/out.txt" \
+  || fail '--check must say what the commit it is BEHIND BY is published as, in the installer own terms'
 grep -q 'release list: 1 entries, read ' "$W/out.txt" || fail '--check must date the list it answered from'
 [ -n "$(ls -A "$SENTINEL/requests" 2>/dev/null)" ] && fail '--check wrote a deploy request; it is a question'
 echo '  ok: --check answered for the installed commit and for the one behind it, from the local list'

@@ -323,19 +323,37 @@ Nothing here is a new protocol: the follower reads the files a deploy already wr
 previous deploy's result is never read as this one's. `wa update <node>` follows the peer's own
 `status` instead (`docs/REMOTE-UPDATE.md`).
 
-### Answering "is this published?" locally
+### Answering "is this published?" - `wa update --check`
 
-`wa update --check` also answers, from the release list this node already holds
-(`<config>/update-check.json`, schema 2 - asset names included) and with no request:
+`wa update --check` is the one place a person ASKS, so it **refreshes the release list first** (24/11):
 
-    release list: 5 entries, read 2026-11-24 12:49Z, newest node-<sha12>
-    this node (<sha12>): published binary for <sha12> on x86_64-unknown-linux-gnu (node-<sha12>)
-    behind by (<sha12>): no published binary for <sha12> on x86_64-unknown-linux-gnu
+    release list: 5 entries, read just now, newest node-<sha12>
+    this node (<sha12>): ...
+    behind by (<sha12>): ...
 
-Three answers and no fourth: `published`; `no published binary` (a release names the commit but carries
-no asset for this machine, or local ancestry proves the commit is newer than everything in the list, so
-nothing can name it yet); and `the release list cannot say` - an old commit outside the window, or a node
-whose list has never been read. The list's own date travels with the answer.
+The refresh is bounded (`M.REFRESH_SECONDS`, 10 s). A refresh that fails is said out loud and the old
+list's own date is shown instead - never silently skipped, never read as "this is current":
+
+    release list: 5 entries, read 2026-11-21 01:42Z, newest node-e4e40405d89b; the refresh just now
+                  failed (feed_unreachable), so this is the list as it stood
+
+And the per-commit answer names the release the **installer** would take, not just the exact tag. "no
+published binary for <sha>" was true by name and false in effect: `scripts/deploy.sh` then looks for a
+release built from the same compiled inputs (`wa_node_release_digest_search`) and downloads that one. The
+same library call runs here (`M.covering`), bounded, and its answer is printed:
+
+    no binary is published under <sha12>'s own name; the installer downloads node-<sha12>, built from the
+    same inputs
+
+When the lookup cannot run - no tree, no target, or a node told to stay offline (`WA_OFFLINE=1`,
+`WA_UPDATE_CHECK=0`) - the sentence says what the installer will still do at install time:
+
+    no binary is published under <sha12>'s own name; the installer also accepts one built from the same
+    inputs and looks for it at install time
+
+A commit the list does not name is **not** called unpublished: its answer keeps "the release list cannot
+say whether ...", and adds the covering release when the lookup found one. The list's own date travels with
+the answer, and `wa update --check` can now take up to ~20 s (10 s for the list, 10 s for the lookup).
 
 ## An update installs the whole component set, and enables none of it
 

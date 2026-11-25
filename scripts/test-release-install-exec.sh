@@ -36,6 +36,7 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP test-release-install-exec: py
 # The scratch-home rule: this test gives a node an install and a home, so both are proven not to be the
 # operator's before anything runs.
 . "$ROOT/scripts/lib/scratch-home.sh" || fail_hard "no scripts/lib/scratch-home.sh"
+. "$ROOT/scripts/lib/install-isolation.sh" || fail_hard "no scripts/lib/install-isolation.sh (the guard that keeps an installer inside this scratch tree)"
 SCRATCH_ROOT="${TMPDIR:-/tmp}"
 case "$SCRATCH_ROOT" in
   "${HOME:-/nonexistent}"|"${HOME:-/nonexistent}"/*) SCRATCH_ROOT=/tmp ;;
@@ -103,9 +104,27 @@ ok "$([ "$(wa_node_sha256 "$CAND")" = "$xsha" ] && echo 1 || echo 0)" \
 printf 'not a real node\n' > "$INSTALL/wa"
 chmod +x "$INSTALL/wa"
 printf '%s\n' "$$" > "$INSTALL/serve.pid"
+# THE UPGRADE RUNS ISOLATED OR IT DOES NOT RUN: its install dir, unit dir, systemctl and ledger are scratch.
+mkdir -p "$W/units" "$W/stub-bin" "$W/config"
+printf '#!/bin/sh\nprintf "systemctl-stub: refused: %s\\n" "$*" >&2; exit 1\n' > "$W/stub-bin/systemctl-stub"
+chmod +x "$W/stub-bin/systemctl-stub"
+# ...asked of the SAME environment the upgrade will get: `env -i` with the list below. Asking it of this
+# shell would answer about a different run - and on 25/11 it did: this row inherited the operator's
+# WASM_AGENT_DB and WASM_AGENT_VAULT_URL, so it sat one `env -i` away from an upgrade.sh that could reach the
+# live ledger and the live vault.
+env -i HOME="$HOME_DIR" PATH=/usr/local/bin:/usr/bin:/bin \
+    WA_INSTALL_DIR="$INSTALL" WA_SENTINEL_UNIT_DIR="$W/units" WA_SENTINEL_UNIT_SYSTEMCTL="$W/stub-bin/systemctl-stub" \
+    XDG_CONFIG_HOME="$W/config" WASM_AGENT_PORT=24555 WASM_AGENT_CLIENT_PORT=24556 \
+    bash -c '. "$1/scripts/lib/install-isolation.sh" || exit 2; wa_install_isolation_guard "$2" "$3"' _ "$ROOT" "$W" "$HOME_DIR" \
+  || fail_hard 'this row would run upgrade.sh outside its scratch tree'
 out="$(cd "$INSTALL" && env -i HOME="$HOME_DIR" PATH=/usr/local/bin:/usr/bin:/bin \
     WA_INSTALL_DIR="$INSTALL" WA_PORT=24555 WA_SERVICE_UNIT_FILE="$W/no-unit" WA_SERVICE_PID=0 \
-    WA_RELEASE_KEYS="$KEY" WA_SUPERVISED=1 WASM_AGENT_IN_TURN= \
+    WA_SENTINEL_UNIT_DIR="$W/units" WA_SENTINEL_UNIT_SYSTEMCTL="$W/stub-bin/systemctl-stub" \
+    XDG_CONFIG_HOME="$W/config" \
+    # THE GUARD MARKER IS NOT CLEARED HERE (25/11). This line used to say WASM_AGENT_IN_TURN= , which is the same
+    # strip a harness of this shape used on 24/11 to reach the live install; env -i above already gives the child
+    # only what is named in this list, and a refusal inside a turn is the answer, not an obstacle.
+    WA_RELEASE_KEYS="$KEY" WA_SUPERVISED=1 \
     timeout 120 bash "$UPGRADE" "$CAND" --release "$DIR" 2>&1)"
 case "$out" in
   *"no new binary to install"*)

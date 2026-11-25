@@ -84,6 +84,10 @@ NODE_VERSION="24.22.1"
 
 REPO_SLUG="Magaav/wasm-agent"
 BASE="${WA_INSTALL_BASE:-https://raw.githubusercontent.com/$REPO_SLUG}"
+# THE INDEX THIS UPDATER READ, AND THE ONE THE CORE MUST BE TOLD (mission release-node-updates, cut
+# condition 1). Empty means "the core own default" - the public index - which is what a plain install wants;
+# WA_INSTALL_INDEX names one explicitly, and the linux channel below fills it in with the index it just read.
+INSTALL_INDEX="${WA_INSTALL_INDEX:-}"
 REF="${WA_INSTALL_REF:-main}"
 PREFIX_DIR="${WA_INSTALL_DIR:-$HOME/.local/bin}"
 REPO_DIR="${WA_INSTALL_REPO:-}"
@@ -238,8 +242,14 @@ else
     # Ask the index which commit this machine's bundle was built from, and take the core from exactly
     # that commit: one extra request buys an installer that matches its release instead of one from an
     # unrelated day.
-    index_url="$BASE/$REF/releases/index-linux.json"
+    index_url="${INSTALL_INDEX:-$BASE/$REF/releases/index-linux.json}"
     fetch "$index_url" "$tmp/index.json" || die "index_unreachable: $index_url"
+    # ...AND IT TRAVELS TO THE CORE. bootstrap.sh defaults to the PUBLIC index, so an updater pointed at a
+    # self-hosted or test channel would fetch its core from that channel and then compare this node against
+    # GitHub - measured 25/11: a v0.1.1 node whose updater read a file:// index answered "already runs the
+    # newest published bundle" from the public one, and the local door could not be used (or tested) off the
+    # public channel at all. The core is told the same URL this process just read.
+    push "--index"; push "$index_url"
     row=$(python3 - "$tmp/index.json" "$arch" <<'PY'
 import json,sys,re
 try: doc=json.load(open(sys.argv[1]))

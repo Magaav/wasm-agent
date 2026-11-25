@@ -38,7 +38,14 @@ absent() { if printf '%s' "$1" | grep -qF -- "$2"; then fail "$3: '$2' should no
 
 # The production components this release ships. Named here as the EXPECTATION, so the lock growing a
 # test fixture or losing a component is a failure of this test rather than a silent change.
-SHIPPED="agent-core codemode graph hooks memory mesh model-gateway selfloop telemetry-sink wa-email"
+#
+# wa-whatsapp IS ONE OF THEM since 11/11 (components.lock, "WHY wa-whatsapp IS PINNED"): a component
+# that is built and tested but never shipped falls back to the native path, so pinning it is what makes
+# every node install it - inert, because a service runs only from an ENABLED definition and no deploy
+# creates one. This list was one behind the lock (24/11, found while landing
+# change/landing-is-installable-by-download: the row was red on main itself), which is exactly the
+# silent drift the row exists to catch - the lock is the truth and the expectation moves with it.
+SHIPPED="agent-core codemode graph hooks memory mesh model-gateway selfloop telemetry-sink wa-email wa-whatsapp"
 
 # ---------------------------------------------------------------------------------------------------
 # A. components.lock is the shipped set
@@ -56,8 +63,10 @@ ok
 for fixture in svc-echo svc-echo-v1 svc-echo-wasip1 svc-queue-echo svc-drain svc-wasi-env svc-wasi-fs svc-wasi-kv svc-wasi-net svc-wasi-stdin memory-crash memory-wedge mcp-echo; do
   absent "$names" "$fixture" "a test fixture is not shipped"
 done
-# Every pinned name is a component this tree can build (a manifest beside it), and the components that
-# are production but pinned elsewhere (wa-whatsapp, mcp-whatsapp) are not silently in the set.
+# Every pinned name is a component this tree can build (a manifest beside it). The one production
+# component that is NOT a core component is mcp-whatsapp: it is a registry DEFINITION an operator
+# enables with `mcp put`/`enable` (components.lock, "WHAT IS NOT PINNED"), so it must never appear in
+# this set - the loop below is what says so.
 for name in $names; do
   [ -f "$ROOT/rust/components/$name/manifest.json" ] || fail "pinned $name has no rust/components/$name/manifest.json"
 done
@@ -185,12 +194,26 @@ file_has "$deploy" 'wa_components_restore_set' "deploy rolls the set back"
 file_has "$deploy" 'component_set=' "deploy records the installed set in installed.txt"
 grep -qF -- 'wa_components_prepare "$ROOT" "$COMPONENT_STAGE" "$INSTALL_DIR" graph' "$deploy"   && fail "deploy still stages graph alone"
 ok
-# The proof the deploy runs is still about the graph component: it is the one every host.graph_* call
-# needs, and it must stay in the set (checked in A) and in that proof.
-file_has "$deploy" 'graph component ok' "the deploy still proves a graph call through the staged component"
+# THE PROOF THE DEPLOY RUNS, and why it is not the graph any more (Fable, 24/11): a deploy proof must not
+# depend on an OPTIONAL feature, and the graph is off by default (docs/GRAPH.md), so the deploy proves the
+# same seam through `memory` - on by default - and asserts that the DORMANT graph refuses by name
+# (scripts/check-component-proof.lua, whose header says exactly that). The graph's own answer check still
+# SHIPS for an operator to run, and the graph must stay in the set (checked in A). This row used to look for
+# `graph component ok` in deploy.sh, which stopped being true the day the proof moved - it was red on main
+# itself (24/11) and is re-pointed here at the contract that replaced it, with more checks than it had.
+file_has "$deploy" 'check-component-proof.lua' "the deploy proves the component seam through scripts/check-component-proof.lua"
+file_has "$deploy" 'component proof ok' "and the deploy asks for that proof's verdict"
+file_has "$deploy" 'ship_file "$ROOT/scripts/check-graph-component.lua"' "the graph's own answer check is still shipped for an operator"
 
 # The publisher builds exactly the lock's names, offline (`--check` reads, it never builds).
-publish_out="$(bash "$ROOT/scripts/publish-components.sh" --check 2>&1)"
+# THE PLAN, not pushability (24/11). publish-components.sh asks the REMOTE whether this commit is on a
+# branch it has, and that question comes BEFORE its --check answer - so this row would answer
+# `commit_not_on_pushed_branch` on any branch nobody has pushed yet (a mission tree, a branch under
+# review), which is a fact about the branch and not about the plan this row checks. The publisher´s own
+# named exception is what a development tree uses, and it is printed with its reason
+# (ALLOW_UNPUSHED_REASON is required). Pushability has its own rows
+# (scripts/test-publish-shared-commit.sh) and is not weakened here.
+publish_out="$(ALLOW_UNPUSHED_COMMIT=1 ALLOW_UNPUSHED_REASON="scripts/test-deploy-components-shipped.sh: the plan, not pushability" bash "$ROOT/scripts/publish-components.sh" --check 2>&1)"
 case "$?" in 0|2) ;; *) fail "publish-components.sh --check did not answer: $publish_out" ;; esac
 for name in $names; do
   contains "$publish_out" "$name" "publish-components plans $name"
@@ -251,8 +274,15 @@ if [ -n "$BIN" ]; then
   [ -n "$memory_obj" ] || fail "memory is not in the table: $out"
   contains "$memory_obj" '"enabled":true' "the policy switch turns memory on"
   contains "$memory_obj" '"source":"policy"' "the switch is attributed to the policy file"
-  contains "$memory_obj" '"active":"component"' "an enabled feature with its component installed is the active path"
-  contains "$memory_obj" '"reason":"active_component"' "the reason is the active component"
+  # THESE TWO NEED THE INSTALLED ARTIFACT, so they run only when there is one: the SKIP above says "no
+  # artifacts to install", and an assertion kept outside that guard is a row that asks a node with no
+  # component to report one as active (measured 24/11: it failed with "installed":null,
+  # "reason":"component_missing" - the true answer - while the skip above said it was skipped). Every other
+  # row in this section holds without artifacts and still runs.
+  if [ -z "$missing" ]; then
+    contains "$memory_obj" '"active":"component"' "an enabled feature with its component installed is the active path"
+    contains "$memory_obj" '"reason":"active_component"' "the reason is the active component"
+  fi
   hooks_obj="$(feature_object "$out" hooks)"
   [ -n "$hooks_obj" ] || fail "hooks is not in the table: $out"
   contains "$hooks_obj" '"enabled":true' "the policy turned hooks on too"

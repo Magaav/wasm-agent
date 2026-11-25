@@ -321,8 +321,14 @@ function M.fetch_line(label, opts)
   if opts.fonts ~= true then return nil, string.format(M.FONT_ABSENT, M.FONT_ASSET) end
   local tag = M.release_tag(label)
   if not tag then return nil, string.format(M.NO_RELEASE, tostring(label or ""), M.FONT_ASSET) end
+  -- THE TRANSFER IS NOT CAPPED AND DOES NOT DIE ON A SLOW MINUTE, for the same measured reason a release
+  -- asset is not (scripts/lib/download-asset.sh, 24/11): no -m / --max-time on the whole file, a bounded
+  -- CONNECT, a STALL window (under 50 kB/s for 30 s), -C - so a dropped transfer resumes what it had, and
+  -- --retry for the attempts a shell one-liner can make. curl's own message is printed on failure (-S), so a
+  -- person reads the HTTP status instead of a silent nothing.
   return string.format(
-    "curl -fsSL https://github.com/%s/releases/download/%s/%s -o ~/.local/share/fonts/%s && fc-cache -f ~/.local/share/fonts",
+    "curl -fsSL --connect-timeout 15 --speed-limit 51200 --speed-time 30 --retry 3 --retry-delay 2 -C - " ..
+      "https://github.com/%s/releases/download/%s/%s -o ~/.local/share/fonts/%s && fc-cache -f ~/.local/share/fonts",
     M.FONT_REPO, tag, M.FONT_ASSET, M.FONT_ASSET), nil
 end
 

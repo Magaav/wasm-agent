@@ -86,8 +86,13 @@ echo "test-deploy-ancestry: running $(printf '%s' "$LOST" | cut -c1-12) (not in 
 deploy() { # <install-dir> <args...> -> sets DEPLOY_OUT, DEPLOY_RC
   local dir="$1"; shift
   rm -f "$WORK/out" "$WORK/rc"
+  # THE ONE FIXTURE THAT KEEPS THE MARKER OUT, and it says so on the statement: setsid --fork re-roots the process
+  # tree on purpose (this row's SUBJECT is the guard's ancestry rule), so the marker is the only thing left that
+  # could answer, and it is removed so the ancestry is what is measured. Everything it can write is named here and
+  # is scratch: HOME and WASM_AGENT_HOME are the same scratch home, the install is the fixture's own directory, and
+  # the port is 18799. scripts/test-installer-data-isolation.sh allows exactly this shape and nothing looser.
   setsid --fork env -u WASM_AGENT_IN_TURN -u WA_SESSION_ID PATH="$SHIM:$PATH" \
-    WA_PORT=18799 WA_CLIENT_PORT=18800 WA_INSTALL_DIR="$dir" WA_DEPLOY_PREBUILT_ONLY=1 \
+    HOME="$AGENT_HOME" WA_PORT=18799 WA_CLIENT_PORT=18800 WA_INSTALL_DIR="$dir" WA_DEPLOY_PREBUILT_ONLY=1 \
     WASM_AGENT_HOME="$AGENT_HOME" \
     bash -c 'timeout 300 bash "$1" "${@:2}" >"'$WORK'/out" 2>&1; echo $? > "'$WORK'/rc"' runner \
       "$TREE/scripts/deploy.sh" "$@" >/dev/null 2>&1
@@ -238,8 +243,9 @@ if git clone -q --depth 1 "file://$ROOT" "$SHALLOWTREE" 2>/dev/null; then
   deploy_in() { # <tree> <install-dir> <args...>
     local tree="$1" dir="$2"; shift 2
     rm -f "$WORK/out" "$WORK/rc"
+    # the same statement as deploy() above, and the same reason it names its own scratch HOME.
     setsid --fork env -u WASM_AGENT_IN_TURN -u WA_SESSION_ID PATH="$SHIM:$PATH" \
-      WA_PORT=18799 WA_CLIENT_PORT=18800 WA_INSTALL_DIR="$dir" WA_DEPLOY_PREBUILT_ONLY=1 \
+      HOME="$AGENT_HOME" WA_PORT=18799 WA_CLIENT_PORT=18800 WA_INSTALL_DIR="$dir" WA_DEPLOY_PREBUILT_ONLY=1 \
       WASM_AGENT_HOME="$AGENT_HOME" \
       bash -c 'timeout 300 bash "$1" "${@:2}" >"'$WORK'/out" 2>&1; echo $? > "'$WORK'/rc"' runner \
         "$tree/scripts/deploy.sh" "$@" >/dev/null 2>&1

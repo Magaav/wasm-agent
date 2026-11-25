@@ -205,6 +205,41 @@ for file in install.sh; do
   install -m755 "$ROOT/scripts/$file" "$stage/scripts/$file"
 done
 install -m755 "$ROOT/scripts/linux/bootstrap.sh" "$stage/scripts/linux/bootstrap.sh"
+# ...AND EVERY SCRIPT THE NODE EXECS FROM ITS INSTALL (Fable 25/11; D2 of the mission release-node-updates).
+# Measured on a peer installed from the published v0.1.1 bundle: `wa update <node> --release` was accepted,
+# the request was queued, and it then died one layer down with
+#   bash: <install>/scripts/release-install.sh: No such file or directory    (code 127)
+# because this block shipped install.sh, linux/bootstrap.sh and the MCP runtime and nothing else, while
+# lua/core/remote_update.lua:449 execs <install>/scripts/release-install.sh - and the rollback door at :475
+# execs <install>/scripts/rollback-node.sh. The list is DERIVED from the code by
+# scripts/lib/install-script-doors.mjs (every "<install>/scripts/..." a Lua or Rust path execs, plus every
+# lib those scripts source, to a fixpoint), so a door the code grows is a red gate HERE - before the bundle
+# is tarred, let alone published - instead of a 127 on somebody's node.
+# AN EMPTY LIST IS ACCEPTED ONLY WHEN THE DERIVATION SAYS THIS IS NOT THE PRODUCT TREE (it names that on stderr:
+# door_list_fixture_tree, for a tree that carries no lua/core/update.lua and no lua/core/remote_update.lua - the
+# release-channel e2e's fixture repo, measured 25/11). A tree that carries them and names no door is refused.
+door_err="$out/door-list.err"
+door_list="$(node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --list 2> "$door_err")" \
+  || fail "door_list_refused: $(tail -3 "$door_err")"
+doors=()
+while IFS= read -r member; do [ -n "$member" ] && doors+=("$member"); done <<< "$door_list"
+# AN EMPTY LIST IS A FIXTURE ONLY. A tree with no Lua/Rust sources cannot name a door (the e2e's fixture repo:
+# measured 25/11), so it may pack a --local bundle and nothing else: a PUBLISHED bundle that ships no door is
+# the defect this block exists for, and it stays refused.
+if [ "${#doors[@]}" -eq 0 ]; then
+  grep -q 'door_list_fixture_tree' "$door_err" 2>/dev/null \
+    || fail 'door_list_empty: this tree says nothing about the scripts a node execs from its install, and the derivation did not name it as a fixture tree, so a published bundle could ship none of them'
+  say 'doors     0 install-side script(s): this tree is not the product tree (no lua/core/update.lua or remote_update.lua), so it names no door'
+fi
+for member in "${doors[@]}"; do
+  [ -f "$ROOT/$member" ] || fail "door_missing: $member (the code execs it from the install; this tree does not have it)"
+  mkdir -p "$stage/$(dirname "$member")"
+  case "$member" in
+    *.sh) install -m755 "$ROOT/$member" "$stage/$member" ;;
+    *)    install -m644 "$ROOT/$member" "$stage/$member" ;;
+  esac
+done
+say "doors     ${#doors[@]} install-side script(s) staged: $(printf '%s' "${doors[*]##*/}" | tr ' ' ' ')"
 # Nothing that could carry a secret or a machine's state belongs in a public bundle.
 if find "$stage" \( -name 'env' -o -name '*.env' -o -name '*.db' -o -name '*.db-*' -o -name '*.key' -o -name '*.pem' \
      -o -name 'node.key' -o -name '.git' \) | grep -q .; then
@@ -222,6 +257,10 @@ esac
 
 ( cd "$stage" && find . -type f ! -name bundle.manifest ! -name files.sha256 -printf '%P\n' | LC_ALL=C sort \
     | while IFS= read -r f; do sha256sum -- "$f"; done ) > "$stage/files.sha256"
+# THE BUNDLE IS COMPLETE OR IT IS NOT A RELEASE: every script the code execs from the install is a
+# member of files.sha256, not merely a file that happens to sit in the directory.
+node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --check "$stage" 2>> "$door_err" \
+  || fail "bundle_incomplete: a script a node execs from its install is missing from this bundle (named above); nothing was tarred"
 built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
   echo 'schema=wa-linux-bundle/1'
@@ -237,6 +276,13 @@ built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "local_only=$local_only"
   echo "built_utc=$built_utc"
   echo "files_sha256=$(sha256sum "$stage/files.sha256" | cut -d' ' -f1)"
+  # HOW MANY INSTALL-SIDE SCRIPTS THIS BUNDLE CARRIES (mission release-node-updates, Fable 25/11). A
+  # published bundle with ZERO of them cannot be updated from another node at all - the release door execs
+  # <install>/scripts/release-install.sh - so the count is written where the cut gate can read it without
+  # downloading the tarball. It is a count, not a promise: what it counts is derived from the tree code
+  # above, and scripts/check-release-complete.sh refuses a published entry whose count is 0 whatever this
+  # tree said about itself.
+  echo "install_doors=${#doors[@]}"
 } > "$stage/bundle.manifest"
 tar -C "$out" -czf "$out/$asset" "$name"
 manifest_sha=$(sha256sum "$stage/bundle.manifest" | cut -d' ' -f1)
@@ -318,12 +364,17 @@ done
 # Node, not python3: the index is also written from the Windows tree (--publish-bundle), where python3 is
 # not a given and Node is (the repository already needs it).
 index_file=$INDEX; command -v cygpath >/dev/null 2>&1 && index_file=$(cygpath -m "$INDEX")
-node - "$index_file" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" "$installer_sha" <<'JS' || fail 'index_update_failed'
+node - "$index_file" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" "$installer_sha" "${#doors[@]}" <<'JS' || fail 'index_update_failed'
 const fs=require('fs');
-const [file,commit,short,sha,url,size,triple,arch,tag,built,node,installer]=process.argv.slice(2);
+const [file,commit,short,sha,url,size,triple,arch,tag,built,node,installer,doors]=process.argv.slice(2);
 const doc=JSON.parse(fs.readFileSync(file,'utf8'));
 const entry={tag,commit,commit_short:short,target:triple,arch,manifest_sha256:sha,url,size:Number(size),node_version:node,built_utc:built};
 if(installer) entry.installer_sha256=installer;
+// the install-side script count: what the cut gate reads instead of downloading the tarball. entry_version
+// names the SHAPE of this entry, so the gate can refuse a new entry that does not state a count while still
+// answering unknown for one published before the field existed - the shape is read from the entry, not a flag.
+entry.entry_version=1;
+if(doors!==undefined) entry.install_doors=Number(doors);
 doc.releases=[entry,...(doc.releases||[]).filter(r=>!(r.commit===commit&&r.target===triple))];
 doc.generated_utc=built;
 fs.writeFileSync(file,JSON.stringify(doc,null,2)+'\n');

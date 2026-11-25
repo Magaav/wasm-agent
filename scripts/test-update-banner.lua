@@ -169,6 +169,80 @@ eq((compare(nil, { LATEST })), "unknown", "no identity is unknown")
 eq((select(2, compare(nil, { LATEST }))), "unknown_installed_commit", "and says which fact is missing")
 eq((select(2, compare(build, {}))), "feed_unavailable", "no feed is unknown, never current")
 
+-- ---- newest means newest by PUBLISH TIME, not by position ---------------------
+--
+-- THE DEFECT (24/11, Fable from the node's own output). `wa update --check` said "release list: 5 entries,
+-- read just now, newest node-d2fbd140934e" while node-9a0c589adfa0 (17:20Z) and node-525780e13623 (17:08Z)
+-- were newer, and node-4615449f4f02 (16:50Z) was not in the window at all. GitHub's release list orders by
+-- CREATION, so "the first entry" is not "the newest published release" - and the window was five entries, a
+-- bound nobody was told. The stub below is the same defect at twelve entries: the tags are in NAME order and
+-- the publish times are shuffled, so a reader that trusts the first entry, the last entry or the tag order
+-- names the wrong release. The newest published is entry 4 (11:00Z); the alphabetically last (12) is 05:00Z.
+local STUB_HOUR = { 3, 9, 1, 11, 6, 2, 10, 4, 7, 0, 8, 5 }
+local function stub_feed_body()
+  local parts = {}
+  for index = 1, 12 do
+    local sha = string.format("%012x", index)
+    parts[#parts + 1] = '{"tag_name":"node-' .. sha .. '","name":"node-' .. sha .. '",' ..
+      '"html_url":"https://example.invalid/' .. sha .. '",' ..
+      '"published_at":"2026-11-24T' .. string.format("%02d", STUB_HOUR[index]) .. ':00:00Z","draft":false,' ..
+      asset_json(sha) .. '}'
+  end
+  return "[" .. table.concat(parts, ",") .. "]"
+end
+local stub = banner.parse_feed(stub_feed_body())
+ok(stub ~= nil, "a twelve-entry stub parses")
+eq(stub and #stub, 12, "all twelve entries are kept: the window is a page, not a selection")
+eq(stub and stub[1].sha12, string.format("%012x", 4), "the newest by PUBLISH TIME is first, not the first entry the API returned")
+eq(stub and stub[2].sha12, string.format("%012x", 7), "and the second is the second-newest published (10:00Z)")
+eq(stub and stub[#stub].sha12, string.format("%012x", 10), "the oldest published entry is last, not the alphabetically smallest")
+local ordered = true
+for index = 2, #stub do
+  if (stub[index - 1].published_at or "") < (stub[index].published_at or "") then ordered = false end
+end
+ok(ordered, "the whole list is ordered by publish time, descending")
+eq((banner.newest_installable(stub, TARGET) or {}).sha12, string.format("%012x", 4),
+   "so the newest INSTALLABLE release is the newest published one that carries this machine's assets")
+-- An entry with no published_at cannot be called newest: it sorts last, and the one above it stays newest.
+local undated = banner.parse_feed('[{"tag_name":"node-aaaaaaaaaaaa","name":"a","assets":[]},' ..
+  '{"tag_name":"node-bbbbbbbbbbbb","name":"b","published_at":"2026-11-01T00:00:00Z","assets":[]}]')
+eq(undated and undated[1].sha12, "bbbbbbbbbbbb", "an entry with no publish time never sorts above a dated one")
+eq(undated and undated[2].sha12, "aaaaaaaaaaaa", "it keeps its place at the end")
+
+-- THE LINE ITSELF, from a cache written the way an older node wrote it (the API's order), which is the
+-- shape measured on this node: the answer must name the newest by publish time and must state the bound.
+local CACHE_DIR = os.tmpname()
+os.remove(CACHE_DIR)
+os.execute("mkdir -p '" .. CACHE_DIR .. "'")
+local CACHE = CACHE_DIR .. "/update-check.json"
+local window = {}
+for index = 1, 12 do
+  local sha = string.format("%012x", index)
+  window[#window + 1] = { tag = "node-" .. sha, name = "node-" .. sha,
+    url = "https://example.invalid/" .. sha,
+    published_at = "2026-11-24T" .. string.format("%02d", STUB_HOUR[index]) .. ":00:00Z",
+    assets = { ["node-" .. sha .. ".manifest"] = true, ["wa-" .. TARGET .. "-" .. sha] = true,
+      ["wa-sentinel-" .. TARGET .. "-" .. sha] = true } }
+end
+-- The API's order is not reversed on write: this fixture is deliberately the order a node caches.
+table.sort(window, function(left, right) return left.tag < right.tag end)
+local fh = assert(io.open(CACHE, "w"))
+fh:write(json.encode({ schema = 2, checked_at = 1795555816979, last_ok_at = 1795555816979,
+  repo = "Magaav/wasm-agent", transport = "http", latest = window[1],
+  order = { window[1].tag:sub(6) }, window = window }))
+fh:close()
+local listing = banner.listing({ cache_path = CACHE })
+local line = listing and listing.lines and listing.lines[1] or ""
+ok(line:find("newest node-" .. string.format("%012x", 4), 1, true) ~= nil,
+  "the line names the newest by publish time: " .. line)
+ok(line:find("published 2026-11-24T11:00:00Z", 1, true) ~= nil, "and dates it, so a reader can check it")
+ok(line:find("ordered by publish time", 1, true) ~= nil, "and says what the order is")
+ok(line:find("of at most 20 asked for", 1, true) ~= nil, "and states the bound the list was read to")
+ok(line:find("release list: 12 entries, read ", 1, true) ~= nil, "while keeping its own prefix (the follow row and the gate grep it)")
+ok(line:find("newest node-" .. string.format("%012x", 1)) == nil, "and never names the alphabetically first entry")
+os.remove(CACHE)
+os.remove(CACHE_DIR)
+
 -- ---- installability: the asset must be for this machine ----------------------
 -- The operator's feed (`work`, 10/11): the newest release is aarch64-only, the next one has an
 -- x86_64 asset. The banner may name the second or nothing; it may never name the first.
@@ -732,9 +806,12 @@ end
 if host.getenv("WA_NODE_RELEASE_REPO") == nil or host.getenv("WA_NODE_RELEASE_REPO") == "" then
   eq(banner.repo(""), "Magaav/wasm-agent", "with no tree and no override the canonical repo is the feed")
 end
-eq(banner.feed_url("o/r"), "https://api.github.com/repos/o/r/releases?per_page=5",
+-- THE BOUND IS STATED, NOT FIVE (24/11): five entries could miss the newest release, and the line `wa update
+-- --check` prints now names the bound. The row keeps its meaning - the URL carries the page size the
+-- window is read to - and moves with the number.
+eq(banner.feed_url("o/r"), "https://api.github.com/repos/o/r/releases?per_page=20",
    "the public API with the job's page size")
-eq(banner.per_page(), 5, "the published window is five releases unless the operator widens it")
+eq(banner.per_page(), 20, "the published window is the stated bound (20) unless the operator moves it")
 eq(banner.TOPIC, "kernel.update.available", "the topic constant")
 eq(banner.CACHE_MS, 15 * 60 * 1000, "fifteen minutes")
 

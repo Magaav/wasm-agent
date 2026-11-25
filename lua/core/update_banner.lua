@@ -55,7 +55,19 @@ M.CACHE_MS = 15 * 60 * 1000
 -- served node asks on its housekeeping tick, so the only cost of a shorter value is file reads.
 M.READ_MEMO_MS = 60 * 1000
 M.DEFAULT_REPO = "Magaav/wasm-agent"
-M.DEFAULT_PER_PAGE = 5
+-- THE WINDOW IS BOUNDED, AND THE BOUND IS STATED (24/11). It was 5, so a node read the five releases
+-- GitHub happened to return and called the first of them the newest - on this node that was
+-- node-d2fbd140934e (published 16:42Z) while node-9a0c589adfa0 (17:20Z) and node-525780e13623 (17:08Z)
+-- were newer and node-4615449f4f02 (16:50Z) was not in the window at all. 20 is the bound the line
+-- below names; every entry is ordered by publish time (`by_published`) before anything calls one of
+-- them "newest".
+M.DEFAULT_PER_PAGE = 20
+-- `wa update --check` REFRESHES before it answers (Fable, 24/11): it is the one place a person ASKS, and a
+-- check that decides from a three-day-old list is not a check. The refresh is bounded - this many seconds
+-- for the list, and the same again for the installer's digest walk - and a refresh that fails is said out
+-- loud with the old list's own date, never silently skipped.
+M.REFRESH_SECONDS = 10
+M.HTTP_SECONDS = 20
 -- The target triples the prebuilt channel names its assets with (`scripts/lib/node-binaries.sh`).
 -- `host.platform().arch` is Rust's `std::env::consts::ARCH`; the aliases are there because the
 -- kernel, a bootstrap and a test all spell the same machine differently. A platform this table does
@@ -189,6 +201,32 @@ end
 
 -- ---- the published side -----------------------------------------------------
 
+-- NEWEST MEANS NEWEST BY PUBLISH TIME (24/11). Measured on this node's own cache that evening: the
+-- five entries arrived as node-d2fbd140934e (published 16:42:32Z), node-9a0c589adfa0 (17:20:43Z),
+-- node-8844132aa843 (16:16:32Z), node-5bb28d8a1f51 (15:50:15Z), node-525780e13623 (17:08:58Z), and
+-- `wa update --check` said "newest node-d2fbd140934e" - three of the five were newer than the entry it
+-- named. GitHub's release list orders by CREATION, not by `published_at`, so "the first entry" is not
+-- "the newest published release", and a bounded page of it can miss the newest one entirely.
+-- Everything that asks "newest" sorts by `published_at` first: the parser, the cache reader (a cache
+-- written by an older node is in the API's order), and therefore `latest`, `newest_installable` and
+-- the line `wa update --check` prints. An entry with no `published_at` sorts LAST: a fact that is not
+-- there cannot be the newest, and guessing it is how the wrong tag got named.
+local function by_published(entries)
+  local decorated = {}
+  for index, entry in ipairs(type(entries) == "table" and entries or {}) do
+    decorated[#decorated + 1] = { entry = entry, at = trim(entry.published_at or ""), index = index }
+  end
+  table.sort(decorated, function(left, right)
+    if left.at == right.at then return left.index < right.index end
+    if left.at == "" then return false end
+    if right.at == "" then return true end
+    return left.at > right.at
+  end)
+  local sorted = {}
+  for _, item in ipairs(decorated) do sorted[#sorted + 1] = item.entry end
+  return sorted
+end
+
 -- The body of `GET /repos/<owner>/<repo>/releases?per_page=5`: a list, newest first. A single object
 -- is accepted too so a fixture can be one release. Drafts are skipped; pre-releases are not, because
 -- a node-<sha12> release is the binary of a commit whether GitHub calls it a pre-release or not.
@@ -221,7 +259,7 @@ function M.parse_feed(text)
     end
   end
   if #list == 0 then return nil, "no_node_release" end
-  return list
+  return by_published(list)
 end
 
 -- ---- what this machine can install ------------------------------------------
@@ -336,8 +374,9 @@ local function gh_get(repo)
   return result.stdout
 end
 
-local function curl_get(url)
-  local command = "curl -sS -f --max-time 20 -H " .. quote("Accept: application/vnd.github+json") ..
+local function curl_get(url, seconds)
+  local max = math.max(1, math.floor(tonumber(seconds) or M.HTTP_SECONDS))
+  local command = "curl -sS -f --max-time " .. tostring(max) .. " -H " .. quote("Accept: application/vnd.github+json") ..
     " -H " .. quote("User-Agent: wasm-agent update check") .. " " .. quote(url) .. " 2>/dev/null"
   local result = shell(command)
   if not result or tonumber(result.code) ~= 0 or type(result.stdout) ~= "string" or trim(result.stdout) == "" then
@@ -386,7 +425,7 @@ function M.fetch(options, repo)
       if present then body, reason = gh_get(repo) else reason = "gh_unavailable" end
     elseif name == "curl" then
       present = available("curl")
-      if present then body, reason = curl_get(url) else reason = "curl_unavailable" end
+      if present then body, reason = curl_get(url, o.seconds) else reason = "curl_unavailable" end
     end
     if body then
       local list, parse_reason = M.parse_feed(body)
@@ -567,7 +606,7 @@ local function feed_from_cache(cached)
         end
       end
     end
-    if #feed > 0 then return feed end
+    if #feed > 0 then return by_published(feed) end
   end
   -- A hand-written fixture from before schema 2. It carries no asset names, so no entry in it can be
   -- proven installable here; the shape survives only so an old fixture still parses.
@@ -582,7 +621,7 @@ local function feed_from_cache(cached)
       feed[#feed + 1] = { tag = "node-" .. other, sha12 = other }
     end
   end
-  return feed
+  return by_published(feed)
 end
 
 -- ---- what is published for ONE commit, from this node's own list -------------------------------
@@ -682,17 +721,132 @@ function M.published_line(answer)
     tostring(answer.reason or "no_release_list") .. ")"
 end
 
--- (b)(i), 24/11: "is there a published artifact for the commit I am on, and for the one I am behind by",
--- answered locally - the release list this node already has, no request. The list's own date travels with
--- it: a fact about a five-day-old list is not a fact about now.
+-- THE INSTALLER'S OWN LOOKUP, so `wa update --check` does not say something true by name and false in
+-- effect (Fable, 24/11). "no published binary for <sha>" is the TITLE's answer; `scripts/deploy.sh` then
+-- asks whether a release was built from the same COMPILED INPUTS (`wa_node_release_digest_search`,
+-- scripts/lib/node-binaries.sh) and usually finds one - for every scripts/Lua-only landing. This runs the
+-- SAME library call, from the same file the installer sources, bounded in seconds, and reports what it
+-- found. A lookup that cannot run says why: it is never read as "nothing is published".
+--
+-- `options.covering` is a seam (a test's own answer); `options.tree`, `options.target` (the triple) and
+-- `options.cache_root` (`<install>/node-binaries`, the installer's own cache) are the real inputs.
+function M.covering(commit, options)
+  local o = options or {}
+  local shorthand = trim(commit)
+  local answer = { commit = shorthand, state = "unknown" }
+  if type(o.covering) == "function" then
+    local called, reply = pcall(o.covering, shorthand, o)
+    if called and type(reply) == "table" then return reply end
+    answer.reason = "covering_lookup_failed"
+    return answer
+  end
+  -- A NODE TOLD TO STAY OFFLINE DOES NOT WALK THE RELEASE LIST: `WA_OFFLINE=1` / `WA_UPDATE_CHECK=0` mean the
+  -- same here as they mean to `M.check`, and the answer says which reason, never a silent "nothing found".
+  local disabled, disabled_reason = M.disabled(o)
+  if disabled then answer.reason = disabled_reason; return answer end
+  -- A NODE TOLD TO STAY OFFLINE DOES NOT WALK THE RELEASE LIST: `WA_OFFLINE=1` / `WA_UPDATE_CHECK=0` mean
+  -- the same here as they mean to `M.check`, and the answer says which reason - never a silent "nothing
+  -- found", which would read as "nothing is published".
+  local disabled, disabled_reason = M.disabled(o)
+  if disabled then answer.reason = disabled_reason; return answer end
+  local tree = trim(o.tree)
+  local triple = trim((o.target ~= nil and tostring(o.target)) or M.target(o) or "")
+  local cache = trim(o.cache_root)
+  if tree == "" then answer.reason = "no_tree"; return answer end
+  if triple == "" then answer.reason = "no_target"; return answer end
+  if cache == "" then answer.reason = "no_cache_root"; return answer end
+  local repo = o.repo or M.repo(tree)
+  local seconds = math.max(1, math.floor(tonumber(o.seconds) or M.REFRESH_SECONDS))
+  local lib = slashes(tree) .. "/scripts/lib/node-binaries.sh"
+  local inner = ". " .. quote(lib) .. " >/dev/null 2>&1 || exit 8; WA_NODE_RELEASE_DIGEST_SECONDS=" ..
+    tostring(seconds) .. " wa_node_release_digest_search " .. quote(repo) .. " " .. quote(shorthand) ..
+    " " .. quote(triple) .. " " .. quote(cache)
+  -- `timeout` keeps the BOUND even if the library's own clock is not reached (a hung transport); without
+  -- it the library's bound still applies, and the reason says which guard was used.
+  local guard = available("timeout") and ("timeout " .. tostring(seconds + 5) .. " ") or ""
+  local result = shell(guard .. "bash -c " .. quote(inner) .. " 2>&1")
+  if not result then
+    answer.state, answer.reason = "unavailable", "lookup_unavailable"
+    return answer
+  end
+  if tonumber(result.code) ~= 0 then
+    local detail = trim(result.stderr ~= "" and result.stderr or result.stdout)
+    answer.state = "unavailable"
+    answer.reason = detail ~= "" and detail:sub(1, 200) or ("lookup_exited_" .. tostring(result.code))
+    return answer
+  end
+  local output = tostring(result.stdout or "")
+  local tag = trim(output:match("release_tag=([^\r\n]+)") or "")
+  local source = trim(output:match("release_commit=([^\r\n]+)") or "")
+  if tag == "" then
+    answer.state, answer.reason = "none", "no_release_with_these_inputs"
+    return answer
+  end
+  return { commit = shorthand, state = "covering", tag = tag, source_commit = source,
+    entry = trim(output:match("^([^\r\n]+)") or "") }
+end
+
+-- (b)(i), 24/11: "is there a published artifact for the commit I am on, and for the one I am behind by".
+-- `wa update --check` refreshes the list first (M.refresh, bounded, the person asked) and says `read just
+-- now`; a refresh that failed is named with the old list's date. And "no published binary for <sha>" is
+-- true by name and false in effect - the installer then looks for a release built from the same compiled
+-- inputs and usually finds one - so the answer runs that lookup (M.covering) and NAMES the release it
+-- finds, with the installer's own fallback sentence when it cannot.
+function M.published_sentence(commit, options)
+  local o = options or {}
+  local shorthand = trim(commit):lower()
+  local answer = M.published(shorthand, o)
+  local result = { published = answer, state = trim(answer.state) }
+  if result.state == "none" then
+    local cover = M.covering(shorthand, o)
+    result.covering = cover
+    if trim(cover.tag) ~= "" then
+      result.line = "no binary is published under " .. shorthand:sub(1, 12) .. "'s own name; the installer downloads " ..
+        tostring(cover.tag) .. ", built from the same inputs"
+    else
+      result.line = "no binary is published under " .. shorthand:sub(1, 12) ..
+        "'s own name; the installer also accepts one built from the same inputs and looks for it at install time"
+    end
+  elseif result.state == "unknown" then
+    -- THE LIST DOES NOT NAME THIS COMMIT, which is not the same as "nothing is published for it": the
+    -- installer's digest lookup can still find a release built from the same inputs, and that is the fact a
+    -- person needs. The claim about the commit's OWN name is not made here - the list cannot say it.
+    result.line = tostring(M.published_line(answer))
+    local cover = M.covering(shorthand, o)
+    result.covering = cover
+    if trim(cover.tag) ~= "" then
+      result.line = result.line .. "; the installer accepts " .. tostring(cover.tag) .. ", built from the same inputs"
+    end
+  else
+    result.line = tostring(M.published_line(answer))
+  end
+  return result
+end
+
 function M.listing(options)
   local o = options or {}
   local list, reason, meta = M.release_list(o)
   local listing = { lines = {}, list = list, reason = reason, path = meta and meta.path or nil }
   if list then
-    local when = list.checked_at and os.date("!%Y-%m-%d %H:%MZ", math.floor(list.checked_at / 1000)) or "an unknown time"
-    listing.lines[#listing.lines + 1] = "release list: " .. #list.feed .. " entries, read " .. when ..
-      (list.feed[1] and (", newest " .. tostring(list.feed[1].tag or list.feed[1].sha12)) or "")
+    local read = trim(o.read)
+    local when = read ~= "" and read
+      or (list.checked_at and os.date("!%Y-%m-%d %H:%MZ", math.floor(list.checked_at / 1000)) or "an unknown time")
+    -- The prefix stays exactly "release list: N entries, read <when>" (the follow row and the gate grep it),
+    -- and the order and the bound are named AFTER it, so nobody reads N entries as "the N newest": they are
+    -- the newest page of a stated size, ordered by publish time (`by_published`), with the newest one dated.
+    local newest = list.feed[1]
+    local newest_at = newest and trim(newest.published_at or "") or ""
+    local bound = M.per_page()
+    local line = "release list: " .. #list.feed .. " entries, read " .. when ..
+      (newest and (", newest " .. tostring(newest.tag or newest.sha12) ..
+        (newest_at ~= "" and (" (published " .. newest_at .. ")") or " (published time unknown)")) or "") ..
+      ", ordered by publish time, out of at most " .. tostring(bound) .. " asked for" ..
+      (#list.feed >= bound and " (so anything older than the oldest entry here is not in it)" or "")
+    local failed = trim(o.refresh_failed)
+    if failed ~= "" then
+      line = line .. "; the refresh just now failed (" .. failed .. "), so this is the list as it stood"
+    end
+    listing.lines[#listing.lines + 1] = line
   else
     listing.lines[#listing.lines + 1] = "release list: not readable here (" .. tostring(reason) ..
       "), so nothing is claimed about what is published"
@@ -706,17 +860,17 @@ function M.listing(options)
   end
   local installed = trim(o.installed):lower()
   if #installed >= 7 then
-    local here = M.published(installed, per_commit)
+    local here = M.published_sentence(installed, per_commit)
     listing.installed = here
-    listing.lines[#listing.lines + 1] = "this node (" .. installed:sub(1, 12) .. "): " .. tostring(M.published_line(here))
+    listing.lines[#listing.lines + 1] = "this node (" .. installed:sub(1, 12) .. "): " .. tostring(here.line)
   else
     listing.lines[#listing.lines + 1] = "this node: its install record names no commit, so what it is published as cannot be asked"
   end
   local target = trim(o.target):lower()
   if #target >= 7 and not (#installed >= 7 and M.same_commit(installed, target)) then
-    local there = M.published(target, per_commit)
+    local there = M.published_sentence(target, per_commit)
     listing.target = there
-    listing.lines[#listing.lines + 1] = "behind by (" .. target:sub(1, 12) .. "): " .. tostring(M.published_line(there))
+    listing.lines[#listing.lines + 1] = "behind by (" .. target:sub(1, 12) .. "): " .. tostring(there.line)
   end
   return listing
 end
@@ -724,6 +878,36 @@ end
 local function write_cache(path, value)
   if not path then return end
   write(path, json.encode(value))
+end
+
+-- REFRESH THE LIST, because `wa update --check` is the one place a person ASKS (Fable, 24/11). It answered
+-- from a list read three days earlier. The refresh is bounded by M.REFRESH_SECONDS (the same bound the
+-- short command path uses), it keeps the last good feed when it fails, and it says why - a failed refresh
+-- must never read as "this is current".
+--
+-- `options.fetch` / `options.fixture` are the same seams `M.check` has, so a test (or an operator with a
+-- local feed) answers without a request.
+function M.refresh(options)
+  local o = options or {}
+  local now = tonumber(o.now) or math.floor((host.now and host.now() or os.time()) * 1000)
+  local repo = o.repo or M.repo(o.tree)
+  local path = o.cache_path or M.cache_path(o.state_dir)
+  local cached = read_cache(path)
+  if cached and cached.repo and cached.repo ~= repo then cached = nil end
+  local disabled, disabled_reason = M.disabled(o)
+  if disabled then
+    return { ok = false, reason = disabled_reason, path = path, entries = 0,
+      checked_at = cached and tonumber(cached.checked_at) }
+  end
+  local fetched, reason, used = M.fetch({ seconds = math.max(1, math.floor(tonumber(o.seconds) or M.REFRESH_SECONDS)),
+    fixture = o.fixture, fetch = o.fetch, url = o.url, transport = o.transport }, repo)
+  if not fetched then
+    return { ok = false, reason = reason or "feed_unreachable", path = path, entries = 0,
+      checked_at = cached and tonumber(cached.checked_at) }
+  end
+  write_cache(path, { schema = M.SCHEMA, checked_at = now, last_ok_at = now, repo = repo,
+    transport = used, latest = fetched[1], order = order_of(fetched), window = fetched })
+  return { ok = true, reason = used, path = path, entries = #fetched, checked_at = now }
 end
 
 -- The claim written before a request: `checked_at` now, and the last good feed kept. If this process

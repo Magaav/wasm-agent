@@ -514,7 +514,22 @@ else
   [ "$lease_order" = "0" ] || exit "$lease_order"
 fi
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
+# fail() IN TWO HALVES (25/11, Fable's A, B, C): main own body before the swap, and the same four writes with a
+# verdict of its own after it. This branch had replaced it with printf + exit, which lost the status file, the
+# deploy.log line, the result.json and the exit status every reader keys on.
+gate_run bash scripts/test-deploy-fail-verdict.sh                      # a refusal writes four things, and exit 1
+# ALIVE-FIRST (25/11, Fable's G): the deploy says it is running before the preflight, the fetches and the download,
+# and nobody else may take that record over or erase it. scripts/test-deploy-alive-first.sh reads the order off
+# deploy.sh and puts the record's ownership rules through the real functions.
+gate_run bash scripts/test-deploy-alive-first.sh                       # the record is written first, and it is ours
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
+# NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
+# HOME, ran the real deploy, reported "ok (16 checks, 0 failed)" - and left a wa-sentinel with HOME=/home/victor and
+# no WASM_AGENT_PORT behind, having rewritten the LIVE unit file, restarted the LIVE sentinel and run it on the LIVE
+# ledger. This row measures the six dimensions on a real child of scripts/lib/scratch-installer.sh, proves its
+# checker catches that harness and clears the wrapper's own leftover, and fails any row that strips the turn guard
+# or detaches an installer it cannot isolate. It runs nothing that installs.
+gate_run bash scripts/test-installer-data-isolation.sh
 gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards
 WA_BIN="$BIN" gate_run bash scripts/test-node-pins.sh                 # a rollback is a record, and it gates the next move
 # One name for the build, composed in Rust: the pin ledger is fleet-wide, so a record for ANOTHER node
@@ -569,6 +584,45 @@ command -v cygpath >/dev/null 2>&1 && export WA_COMPONENTS_DIR="$(cygpath -w "$G
 # sha256 and size check, the atomic swap and the rollback. No toolchain, no node: the component itself
 # is proved by the graph tests below and by scripts/check-graph-component.lua during a deploy.
 gate_run bash scripts/test-deploy-components.sh
+# THE FALLBACK BUILD'S RUSTC WRAPPER, AND THE REFUSAL A NODE WITHOUT A TOOLCHAIN OWES (24/11, work). The
+# wrapper install trusted a file it had not tested and a directory it had not tested at all, so on work the
+# deploy's fallback build died with "could not execute process wa-remap-rustc ... Permission denied (os error
+# 13)" after two minutes of toolchain fetch, naming none of it. This row proves the install repairs a copy
+# without its execute bit, refuses (by name) a directory this process cannot write or execute from, never
+# quietly replaces an explicit WA_REMAP_DIR, falls back from an unusable TMPDIR to the home cache saying why,
+# and that a PATH without cargo/rustup refuses the component stage AT ONCE with component_build_impossible
+# instead of starting a build. No network, no cargo, no node.
+gate_run bash scripts/test-component-build-wrapper.sh
+# IS A PUBLISHED COMMIT INSTALLABLE BY DOWNLOAD? (24/11). Publishing is per landing and covered the node
+# binary only, while a node also needs the components bundle named by the sha256 of components.lock - so a
+# landing that moved the lock published a binary whose bundle was never made (components-df6f97708c72: HTTP
+# 404) and every node without a toolchain refused the update, with nothing saying which asset was missing.
+# This row asks every URL the node release and that commit's lock name for a HEAD, against a LOCAL stand-in
+# of the channel (no network, no gh, no node): complete, the 24/11 shape (bundle absent), a missing
+# signature, a missing manifest, a channel that does not answer (unknown, never complete), and that the tag
+# asked for is the one the COMMIT's lock names rather than the working tree's.
+gate_run bash scripts/test-release-completeness.sh
+# AN INSTALLER RUN IN A HARNESS IS ISOLATED OR IT DOES NOT RUN (25/11, mission release-node-updates, the G
+# condition). A scratch run that inherited the desktop's XDG_CONFIG_HOME rewrote the LIVE
+# wa-sentinel.service that night; this row proves the guard refuses a live-looking environment, that it passes
+# a scratch one, and that the installer-running harnesses in this tree call it.
+gate_run bash scripts/test-installer-data-isolation.sh
+# THE LANDING'S SECOND PUBLISH (24/11). Publishing covered the node binary only, so a landing that moved
+# components.lock published a binary whose components bundle was never made (components-df6f97708c72: HTTP
+# 404) and no node without a toolchain could update. The row proves the step in scripts/lib/landing-components-
+# publish.sh: OFF by default (nothing uploaded, the log says this landing is not installable by download and
+# names the flag), unknown when the channel cannot answer (never "missing, so publish"), and with
+# WA_PUBLISH_COMPONENTS=1 the bundle verified by the REAL publish-components.sh and uploaded with every pinned
+# asset plus components.lock, --latest=false, under components-<sha12 of the lock>, over an existing tag rather
+# than recreating it, and refused when the bytes are not the pins. gh is a shim that only records its
+# arguments; no network, no cargo, no node.
+gate_run bash scripts/test-publish-components-at-landing.sh
+# THE COMPONENTS QUESTION, ASKED BEFORE A DEPLOY TOUCHES ANYTHING (24/11, work 20:56Z: "wa update" spent
+# 117 s - a binary download, then two minutes of toolchain fetch for a fallback build - and died inside cargo,
+# for an answer available in its first second: the bundle its lock names was not published and the node could
+# not build one). scripts/lib/deploy-components.sh's wa_components_preflight, and scripts/deploy.sh's own first
+# lines, are that question: local bytes first (no network), then the channel, then "can this node build it".
+gate_run bash scripts/test-components-preflight.sh
 # The shipped set: a component is shipped by being PINNED (`components.lock`), and a deploy installs,
 # records and rolls back that whole set (docs/FEATURES.md). Proves the lock (production set, no fixture),
 # the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built
@@ -588,6 +642,30 @@ gate_run bash scripts/test-component-lock-rebuild.sh
 # side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
+# A COVERING RELEASE ON A NODE THAT MUST CHANGE ITS BINARY (24/11, work 22:17Z). deploy.sh took node-39e862d60bad
+# for a scripts-only tree, installed it, swapped, restarted the node - and then refused build_commit_mismatch
+# because it expected the bytes to report HEAD instead of the release's own commit, leaving the INTERIM record
+# and the scripts unshipped. The row runs the REAL deploy end to end on a scratch node seeded with that interim
+# record: exit 0, commit=/lua_tree= the tree, binary_commit= the bytes, scripts shipped, `wa --version` naming
+# both, verify-install green. It needs the network (the covering release is a published one) and cannot start a
+# sentinel in a scratch HOME on a machine with a systemd user session, so it says SKIP by name when it cannot
+# run - never a pass by absence.
+gate_run bash scripts/test-deploy-covering-release.sh
+# IS THIS COMMIT INSTALLABLE BY DOWNLOAD? The row that was missing (24/11): work's update downloaded and
+# verified node-9a0c589adfa0 and then had no components bundle to install - components-df6f97708c72 is
+# HTTP 404, because publishing is per landing and covers the node binary only - so a node without a
+# toolchain could not install the landing at all, and nothing said so before the fleet step. The row asks
+# the node's own question on a scratch HOME with no cargo/rustup/rustc/zig on PATH and empty caches: the
+# binary from its release, every pinned component from components-<sha12 of the lock>, installed, and the
+# pair proves itself through scripts/check-component-proof.lua. It reads the real release channel and it is
+# RED until the assets it needs are published, so the gate does not spend a network round on it unless
+# asked: WA_INSTALLABLE_BY_DOWNLOAD=1 bash scripts/test-installable-by-download.sh [<commit>].
+if [ "${WA_INSTALLABLE_BY_DOWNLOAD:-0}" = 1 ]; then
+  gate_run bash scripts/test-installable-by-download.sh
+else
+  echo "SKIP: installable-by-download (needs the network and the published release channel; WA_INSTALLABLE_BY_DOWNLOAD=1 runs it, and it is the cut condition before the fleet step)"
+  SKIPPED=$((SKIPPED + 1))
+fi
 # THE VERIFIED BYTES MUST BE INSTALLABLE (21/11, hand fix 3 of the node-7ddbfa98036a rollout). A release asset
 # arrives 0644; wa_node_binary_download verified the signature, every sha256 and every size and left the bit off,
 # and scripts/upgrade.sh refuses a candidate without it ("no new binary to install") - so release-install.sh, the
@@ -598,6 +676,12 @@ gate_run bash scripts/test-deploy-node-binaries.sh
 # fetched again (and that a hand-edited entry is not).
 gate_run bash scripts/test-release-install-exec.sh
 gate_run bash scripts/test-node-binaries.sh
+# THE TRANSFER ITSELF (24/11, the `wa update` that refused on `work`): a release-asset download with NO
+# total-time cap, a STALL window instead, resume on a partial file, and a refusal that names curl's exit, the
+# HTTP status, the bytes and the attempts - plus the progress line a follower reads. Every row is against a
+# local stub HTTP server on 127.0.0.1 (tests/fixtures/http-stub/server.py): no network, no fleet. The 55 MB row
+# is a real >120 s transfer, which is why this is here and not in scripts/fast.sh.
+gate_run bash scripts/test-node-download.sh
 # The glibc floor at both ends: the bytes an artifact needs against the libc the installing host has
 # (18/11, mail: a published binary needed GLIBC_2.39 on a glibc 2.35 node and was down two days). Hermetic -
 # fixture ELFs, a stand-in host version, and the three installers' own refusals.
@@ -973,6 +1057,18 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-release.lua" "$BIN" --db "$D
 # runtime-worktree.txt, then a cwd holding rust/Cargo.toml), and nothing in the module is stubbed.
 gate_run bash -c 'd=$(mktemp -d); mkdir -p "$d/cwd" "$d/install"; cd "$d/cwd" || exit 1; WASM_AGENT_LUA_ROOT="$1" WASM_AGENT_HOME="$d" WA_INSTALL_DIR="$d/install" WA_SCRIPT="$1/scripts/test-update-treeless.lua" "$2" --db "$d/db"' _ "$WASM_AGENT_LUA_ROOT" "$BIN" > "$DB.treeless.log" 2>&1
 grep -q "update treeless ok" "$DB.treeless.log" || { tail -12 "$DB.treeless.log" >&2; exit 1; }
+# THE FOLLOW DOES NOT END ON AN UNREADABLE STATUS (25/11, mission release-node-updates D3). "wa update <node>"
+# printed "unknown - node_no_answer - 0s" and returned while the request was still running on that node, and the
+# loop had no bound at all. This row drives M.follow_remote through its own seams (call, clock, out, sleep) with
+# the relay deadline's REAL shape (nodes.remote_call:1786-1800): the deadline is "no answer yet", the follow
+# keeps polling to its bound, a refusal still ends it, and the module's own bound ends a follow nobody bounded.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-follow.lua" "$BIN" --db "$DB.remote-follow" | grep "remote follow ok"
+# A CHILD SHELL DOES NOT INSTALL, AND THE ACCEPTED TAIL IS NOT A CHILD (25/11, mission release-node-updates
+# D7). The fleet step was accepted and then refused by the peer's own detached child ("update_coordinator_only")
+# because the operation manager stamps every detached operation with the spawner's provenance. These rows drive
+# the real update.run and the real run_accepted: the child refusal is unchanged, the tail that continues a
+# verified master request is not stopped by it, and the accept verb runs only a record this node wrote.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-child-guard.lua" "$BIN" --db "$DB.update-child-guard" | grep "update child guard ok"
 # The pre-update backup skips every lock file the Rust sources open (binding.transport.sqlite broke /update, 04/11).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.backup-locks" | grep "backup locks ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
@@ -1006,6 +1102,14 @@ gate_run bash scripts/test-upgrade-ui-fonts.sh | grep 'ui fonts install: ok'
 # node-7ddbfa98036a while the bytes were node-bfad4f8fbe59). This asserts both the source shape and, on a real
 # scratch node, that /health follows a record written after it started - with no restart.
 WA_BIN="$BIN" gate_run bash scripts/test-health-build-label.sh | grep 'health build label: ok'
+# THE VERSION LINE NAMES WHAT THIS NODE RUNS (Fable, 24/11). MEASURED after a scripts-only landing
+# (fe108a8c): installed.txt said commit=fe108a8c - the Lua tree that fast-path deploy installed - while
+# `wa --version` and /health said v9a0c589a, the binary's compile-time commit. The one command an operator
+# is told to check named a commit that does not hold what the node runs. This row installs a fast-path
+# record in a scratch home and asserts that --version, /health (a real node) and `wa update --follow`'s
+# final line all name the tree, that a record naming the bytes adds no tree, and that an empty record
+# still answers a name.
+gate_run bash scripts/test-version-names-the-tree.sh | grep 'version names the tree: ok'
 # The watchdog (docs/KERNEL.md, "Watchdog"): its own tests plus the CLI contract the upgrade path depends on,
 # then a scratch install upgraded THROUGH the flag - including the assertion that the default path does not
 # touch the watchdog at all. The fake kernel is `wa-watchdog selftest-kernel`; no real node is involved.
@@ -1405,6 +1509,11 @@ gate_run bash scripts/test-session-park.sh
 # marker covering only the swap. A real node refuses new turns and holds due wakes while it waits; the real
 # sentinel binary names each holder and, past its bound, proceeds over the sessions that have PAUSED only.
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-wait.sh
+# WHAT A REQUEST RECORDS WHEN A NAMED MAIN IS BEHIND ORIGIN (24/11, G blocker): the real sentinel writes the
+# request in a fixture repository whose `wa.deployRemote` main is seven days behind origin/main, and the
+# node's own Lua reads the box and prints the pause, 'did not happen' and release lines. Every one of them
+# must name the commit a deploy would install, never the bundle's stale main.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-target.sh
 # A PAUSE'S RELEASE SAYS WHAT HAPPENED, DECIDED BY THE INSTALLED RECORD (r8c 1, mission one-resume-per-install):
 # the pause record names installed.txt's tree and bytes, a scripts-only install makes the release say
 # "[deploy] installed", a marker gone with nothing installed says "[deploy] the update did not happen", the resume
@@ -1419,6 +1528,16 @@ GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-kept-message
 # suspected "gap" is covered by the CLAIMED lane; a due resume held by a waiting deploy spends no resume turn; and a
 # session that paused three times inside one install is owed ONE paid resume turn, not three.
 GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-resume-window.lua" "$BIN" --db "$DB.resume-window" | grep 'resume window ok'
+# A DEPLOY THAT IS RUNNING HOLDS A PAUSED SESSION (r8c 21:15Z): the sentinel detaches the deploy and moves the request
+# to done/ in 8 s, so for the minutes a Rust install compiles there is no request, no claimed request and no marker -
+# the deploy's own running state is what says the install is still coming. Its reader's judgement (start time,
+# zombie, recycled pid, the record's own bound, no /proc), the wait every caller sees, and the release that must not
+# happen while it runs.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-alive.lua" "$BIN" --db "$DB.deploy-alive" | grep 'deploy alive ok'
+# THE SAME HOLD ON A REAL NODE (r8c G blocker): the deploy is claimed and moved to done/ at once, then compiles
+# for 60 s with no request, no claimed request and no marker; killed, scripts-only and back-to-back, every resume
+# counted at the loopback model.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-alive-hold.sh
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.
@@ -1723,6 +1842,16 @@ else
   [ "$stt_two_nodes" = "0" ] || exit "$stt_two_nodes"
 fi
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
+# A federated connector READ between two real nodes on one machine (24/11). The master runs a peer's
+# connector as `peer_<node>__<tool>`; the call crosses the signed peer call, arrives in the peer's outbound
+# relay lane, and there the node starts a persistent MCP read session as a supervised operation. Three
+# processes (a scratch rendezvous, the caller, an enrolled peer), two scratch homes, its own ports, no
+# model, no vault, no live fleet. It exists because the failure lives BETWEEN processes: the relay lane
+# makes the request the thread's runtime owner (`relay:<rid>`), Lua names an owner of its own, and the
+# operation manager compares them. Measured before 138f621d: every pair (main->main, main->v0.1.1,
+# v0.1.1->v0.1.1) answered `mcp_session_startup_failed` / `operation_not_yours` and left a 3600 s read
+# session parked on the peer, while the same read on the peer itself answered ok.
+gate_run node scripts/test-federated-connector-read.mjs "$BIN"
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh
 # Which conversation a turn lands in. The name a client sends is the only thing that
@@ -2834,6 +2963,18 @@ run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
+# THE NODE REPORTS ITS OWN WAKE STATE (Fable 24/11, from the live stall: 2.5 hours of zero dispatch while /health
+# answered and the loopback canary stayed green, because that canary runs a CHILD node with a fresh ledger). A
+# real scratch node - own HOME, WASM_AGENT_HOME/DATA/DB, own port, stub provider - must show a due wake
+# dispatched with last_tick ok, and must NAME selfloop_tick_failed, with the oldest dispatchable age growing,
+# when a column its tick reads is dropped from its own ledger. `wakes` is /health's, so nothing here costs a turn.
+gate_run node scripts/test-node-wake-facts.cjs "$BIN"
+# THE RULE EVERY READER OF THE FACTS RUNS (r8c item G, approved 24/11). Four reds by name - wakes_unknown,
+# selfloop_tick_failed, self_wake_stalled, wakes_not_publishing - each produced on a REAL scratch node and judged
+# by the SHIPPED judge (scripts/lib/health-wakes.sh for the shell readers, run end to end through
+# scripts/verify-install.sh, and the same rule in jq), plus the green case. Not a copy of the rule: a row that
+# re-implemented it would pass while the shipped judge was wrong.
+gate_run node scripts/test-health-wakes-rule.cjs "$BIN"
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
   run_proof_fixture sentinelInstall 30 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800

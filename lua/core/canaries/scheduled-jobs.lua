@@ -4,7 +4,7 @@
 -- scratch store (lua/core/canaries/tasks/scheduled-jobs.lua). No job of the operator's is listed, enabled
 -- or run; the store's own answer is the exercise.
 local feature_canary = dofile('lua/core/feature_canary.lua')
-local M = { mode = 'loopback' }
+local M = { mode = 'child-node' }
 function M.run(ctx)
   local child = feature_canary.child(ctx, {}, { env = { 'WA_SCRIPT=lua/core/canaries/tasks/scheduled-jobs.lua' } })
   if child.code == 0 and (child.out or ''):find('CANARY OK', 1, true) then

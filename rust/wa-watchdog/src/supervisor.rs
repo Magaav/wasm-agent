@@ -93,6 +93,11 @@ pub struct Supervisor {
     /// Set once `run` has decided to leave.
     pub exited: bool,
     last_status_write: Instant,
+    /// The node's own self-wake loop, as the last probe judged it (health::Wakes::line()). Recorded in the
+    /// status record and printed by `status`, and deliberately read by NO start, restart or swap decision:
+    /// a wake the node owes itself is a fact to report, not a reason to interrupt a turn or roll back an
+    /// install (health::Wakes carries the measurement and the reasoning).
+    last_wakes: String,
 }
 
 impl Supervisor {
@@ -113,6 +118,7 @@ impl Supervisor {
             stability: None,
             exited: false,
             last_status_write: Instant::now(),
+            last_wakes: String::new(),
         }
     }
 
@@ -148,6 +154,7 @@ impl Supervisor {
             last_exit: self.last_exit.clone(),
             last_swap: self.last_swap.clone(),
             supervisor_alive: true,
+            wakes: self.last_wakes.clone(),
         }
     }
 
@@ -206,8 +213,13 @@ impl Supervisor {
         pid
     }
 
-    fn probe(&self) -> health::Probe {
-        health::probe(self.config.port, Duration::from_millis(2_000))
+    fn probe(&mut self) -> health::Probe {
+        let probe = health::probe(self.config.port, Duration::from_millis(2_000));
+        // Kept even when the probe got no answer: "UNKNOWN wakes: no answer" is then the truth, and a
+        // status that quietly kept the last GREEN through a node that stopped answering would be the same
+        // blindness the field exists to end.
+        self.last_wakes = probe.wakes.line();
+        probe
     }
 
     /// One pass. Returns the events worth logging; an empty vec means "nothing changed".

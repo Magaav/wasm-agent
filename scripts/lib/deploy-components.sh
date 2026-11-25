@@ -28,6 +28,17 @@
 # Sourced by scripts/deploy.sh (and shipped beside it) and exercised by
 # scripts/test-deploy-components.sh.
 
+# THE TRANSFER ITSELF is the shared one (scripts/lib/download-asset.sh): no total-time cap, a stall window,
+# resume on a partial file, a refusal that names the HTTP status / byte count / curl exit, and progress into
+# the phase file a follower reads. Sourced here so a component bundle and a node binary cannot drift into two
+# different download behaviours (24/11: a `-m 60` cap refused a bundle on a slow minute and said only
+# "unreachable").
+if ! command -v wa_download_asset >/dev/null 2>&1; then
+  _wa_download_lib="$(dirname "${BASH_SOURCE[0]}")/download-asset.sh"
+  if [ -f "$_wa_download_lib" ]; then . "$_wa_download_lib"; fi
+  unset _wa_download_lib
+fi
+
 # Where this machine's node reads components from. Same expression as
 # `components::component_dir()` in rust/wa-kernel-runtime/src/components.rs: an explicit WA_COMPONENTS_DIR
 # wins, else the home directory's `.wasm-agent/components`.
@@ -72,6 +83,73 @@ wa_component_pin() {
 ' "$line"
 }
 
+# Can this machine build a component at all? -> 0 when it can (no output), 1 with the missing names on
+# stdout ("cargo rustup"). The build half of a component is scripts/build-components.sh, which needs cargo,
+# and rustup because components.lock pins the COMPILER the bytes were made with (scripts/lib/component-build-root.sh,
+# WA_COMPONENT_TOOLCHAIN=node is the documented "compile with whatever is here" exception and needs no
+# rustup). A wasi-sdk is needed only by a component with C inside, and the build says so by name in seconds,
+# so it is not a blocker here: the two-minute cost this refuses was the toolchain FETCH.
+wa_component_build_blockers() {
+  local missing=""
+  command -v cargo >/dev/null 2>&1 || missing="$missing cargo"
+  case "${WA_COMPONENT_TOOLCHAIN:-}" in
+    node) ;;
+    *) command -v rustup >/dev/null 2>&1 || missing="$missing rustup" ;;
+  esac
+  if [ -n "$missing" ]; then printf '%s' "${missing# }"; return 1; fi
+  return 0
+}
+
+# <repo> <install_dir> <name>...  -- CAN THIS DEPLOY SUPPLY THE PINNED COMPONENTS? Asked BEFORE anything is
+# fetched or built (24/11, work 20:56Z): the update downloaded and verified the node binary, then spent two
+# minutes fetching a toolchain, then failed on the components - and the whole run was doomed from its first
+# second, because the bundle its lock names was not published and the node had nothing to build with.
+#
+# Returns 0 when every pinned name is already here (installed or cached for this lock), or the bundle is
+# published, or this node can build it, or an operator named a directory (WA_DEPLOY_COMPONENT_SOURCE);
+# 1 with the one sentence a person needs on stdout when none of those is true; 2 when the question cannot be
+# answered at all (no network, no lib beside the deploy) - and 2 is NOT a refusal: the deploy goes on and
+# fails later where it can say more, which is exactly what it did before this function existed.
+#
+# The local half costs a sha256 per component and no network; the channel is asked only when something is
+# missing, so a repeat deploy on a node that has its components asks nobody.
+wa_components_preflight() {
+  local repo="$1" install="$2" name cdir cache lock_sha pin pin_sha missing="" tag slug state rc blockers
+  shift 2
+  lock_sha="$(wa_component_lock_sha "$repo")" || return 2
+  cdir="$(wa_components_dir)"
+  cache="$(wa_component_cache_root "$install")/$lock_sha"
+  for name in "$@"; do
+    pin="$(wa_component_pin "$repo" "$name")" || return 2
+    pin_sha="${pin%% *}"
+    [ "$(wa_component_sha256 "$cdir/$name.wasm" 2>/dev/null)" = "$pin_sha" ] && continue
+    if [ -f "$cache/.complete" ] && [ "$(wa_component_sha256 "$cache/$name.wasm" 2>/dev/null)" = "$pin_sha" ]; then continue; fi
+    missing="$missing $name"
+  done
+  [ -z "$missing" ] && return 0
+  [ -n "${WA_DEPLOY_COMPONENT_SOURCE:-}" ] && return 0
+  tag="$(wa_component_release_tag "$repo")" || return 2
+  if ! command -v wa_release_tag_state >/dev/null 2>&1 && [ -f "$repo/scripts/lib/release-completeness.sh" ]; then
+    . "$repo/scripts/lib/release-completeness.sh" 2>/dev/null || true
+  fi
+  if ! command -v wa_release_tag_state >/dev/null 2>&1; then
+    printf 'components_unknown: scripts/lib/release-completeness.sh is not beside this deploy, so whether %s is published could not be asked\n' "$tag"
+    return 2
+  fi
+  slug="$(wa_component_release_repo "$repo")"
+  state="$(wa_release_tag_state "$slug" "$tag")"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) printf 'components_unknown: %s could not be asked whether %s is published (%s); unknown is not published\n' "$slug" "$tag" "$state"; return 2 ;;
+  esac
+  # NOT PUBLISHED. Only a build can supply them now, and a build is what a node without a toolchain spends two
+  # minutes discovering it cannot do.
+  if blockers="$(wa_component_build_blockers)"; then return 0; fi
+  printf 'this commit needs %s, which is not published; this node cannot build it (%s missing on PATH), and %s %s not installed or cached here' \
+    "$tag" "$blockers" "${missing# }" "$([ "$(printf '%s' "$missing" | wc -w)" = 1 ] && echo is || echo are)"
+  return 1
+}
+
 # <repo> <name> <out_dir>
 #
 # Stage one component into <out_dir> and verify it against components.lock.
@@ -104,6 +182,16 @@ wa_component_stage() {
     cp -f "$source/$name.wasm" "$wasm" && cp -f "$source/$name.json" "$json" \
       || { echo "component_stage_unwritable: $out" >&2; return 3; }
   else
+    # A NODE WITHOUT A TOOLCHAIN REFUSES AT ONCE (24/11, work). The fallback used to start a build that
+    # first fetched rustc <the lock's pin> from the network - measured on work: two minutes - and then died
+    # inside cargo ("could not execute process wa-remap-rustc ... Permission denied (os error 13)"), so a
+    # deploy paid for a toolchain it could never use and reported the failure as a compiler accident. The
+    # question "can this machine build a component at all?" costs two `command -v` and is asked FIRST, and
+    # the refusal names the bundle that would have made the build unnecessary.
+    if ! blockers="$(wa_component_build_blockers)"; then
+      echo "component_build_impossible: $name has no pinned bytes here and this node cannot build it ($blockers missing from PATH), so the release $(wa_component_release_tag "$repo" 2>/dev/null || echo 'this lock names') is the only way to install it. Publish that bundle where the bytes were pinned (bash scripts/publish-components.sh, then the gh line it prints) or install them from a directory (WA_DEPLOY_COMPONENT_SOURCE=<dir>); nothing was built and nothing was installed." >&2
+      return 4
+    fi
     build_log="$out/.build-$name.log"
     WA_COMPONENTS_DIR="$out" bash "$repo/scripts/build-components.sh" "$name" >"$build_log" 2>&1
     if [ $? -ne 0 ] || [ ! -f "$wasm" ] || [ ! -f "$json" ]; then
@@ -240,7 +328,7 @@ wa_component_cache_root() {
 #   WA_COMPONENT_RELEASE_URL=https://...        the base URL of the assets
 #   unset                                       `gh release download`, then the public release URL
 wa_component_fetch_assets() {
-  local repo="$1" tag="$2" name="$3" dest="$4" base="${5:-}" asset local_base url_base
+  local repo="$1" tag="$2" name="$3" dest="$4" base="${5:-}" asset local_base url_base out rc reason
   [ -d "$repo" ] && repo="$(wa_component_release_repo "$repo")"
   local assets="$name.wasm $name.json components.lock"
   local_base=""
@@ -264,27 +352,43 @@ wa_component_fetch_assets() {
     return 0
   fi
   if [ -n "$url_base" ]; then
-    command -v curl >/dev/null 2>&1 || return 8
+    command -v wa_download_asset >/dev/null 2>&1 || {
+      echo "component_download_lib_missing: scripts/lib/download-asset.sh is not beside this tree, so the $name bundle cannot be fetched" >&2
+      return 8
+    }
     for asset in $assets; do
-      curl -fsSL -m 60 "$url_base/$asset" -o "$dest/$asset" 2>/dev/null \
-        || { echo "component_release_unreachable: $url_base/$asset" >&2; rm -f "$dest/$asset"; return 8; }
+      # THE SAME TRANSFER AS A NODE BINARY: the reason is the downloader's own, under this vocabulary.
+      if reason="$(wa_download_asset "$url_base/$asset" "$dest/$asset" "$asset")"; then continue; fi
+      echo "component_release_unreachable: ${reason#node_release_unreachable: }" >&2
+      rm -f "$dest/$asset" "$dest/$asset.part" "$dest/$asset.part.hdr" "$dest/$asset.part.code" "$dest/$asset.part.err"
+      return 8
     done
     return 0
   fi
   if command -v gh >/dev/null 2>&1; then
-    if gh release download "$tag" -R "$repo" -D "$dest" \
-      -p "$name.wasm" -p "$name.json" -p components.lock >/dev/null 2>&1 \
-      && [ -f "$dest/$name.wasm" ] && [ -f "$dest/$name.json" ] && [ -f "$dest/components.lock" ]; then
+    out="$(gh release download "$tag" -R "$repo" -D "$dest" \
+      -p "$name.wasm" -p "$name.json" -p components.lock 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$dest/$name.wasm" ] && [ -f "$dest/$name.json" ] && [ -f "$dest/components.lock" ]; then
       return 0
     fi
-    # gh without a token on the node, a release that is not there yet: the anonymous URL may still work.
-    echo "component_release_gh_failed: gh could not download $tag from $repo; trying the public asset URL" >&2
+    # gh without a token on the node, a release that is not there yet: the anonymous URL may still work. gh's
+    # OWN last line is kept - a missing token, a rate limit and a missing asset otherwise sound the same.
+    echo "component_release_gh_failed: gh could not download $tag from $repo (exit $rc: $(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)); trying the public asset URL" >&2
     rm -f "$dest/$name.wasm" "$dest/$name.json" "$dest/components.lock"
   fi
-  command -v curl >/dev/null 2>&1 || return 8
+  command -v curl >/dev/null 2>&1 || {
+    echo "component_release_unreachable: $name: no curl and no gh on this host, so nothing can be fetched" >&2
+    return 8
+  }
+  command -v wa_download_asset >/dev/null 2>&1 || {
+    echo "component_download_lib_missing: scripts/lib/download-asset.sh is not beside this tree, so the $name bundle cannot be fetched" >&2
+    return 8
+  }
   for asset in $assets; do
-    curl -fsSL -m 60 "https://github.com/$repo/releases/download/$tag/$asset" -o "$dest/$asset" 2>/dev/null \
-      || { echo "component_release_unreachable: https://github.com/$repo/releases/download/$tag/$asset" >&2; rm -f "$dest/$asset"; return 8; }
+    if reason="$(wa_download_asset "https://github.com/$repo/releases/download/$tag/$asset" "$dest/$asset" "$asset")"; then continue; fi
+    echo "component_release_unreachable: ${reason#node_release_unreachable: }" >&2
+    rm -f "$dest/$asset" "$dest/$asset.part" "$dest/$asset.part.hdr" "$dest/$asset.part.code" "$dest/$asset.part.err"
+    return 8
   done
   return 0
 }

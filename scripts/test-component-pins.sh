@@ -638,6 +638,9 @@ Components-Unchanged: fixture-comp"
   local race="$work/race"
   mkdir -p "$race/rust/wa-whatsapp-index/src" "$race/scripts/lib" "$race/components-pinned-src"
   cp -f "$ROOT/scripts/lib/deploy-components.sh" "$race/scripts/lib/deploy-components.sh"
+  # The shared transfer the component lib sources (scripts/lib/download-asset.sh): without it beside the copy,
+  # a download refuses by name instead of proving the row.
+  cp -f "$ROOT/scripts/lib/download-asset.sh" "$race/scripts/lib/download-asset.sh"
   cat > "$race/rust/wa-whatsapp-index/src/lib.rs" <<'SEAM'
 pub const ALL: [Op; 2] = [
     Op::Query,

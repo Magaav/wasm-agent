@@ -775,4 +775,22 @@ ok(remote.cli({ "update" }) == nil, "`wa update` is not the remote form")
 ok(remote.cli({ "update", "peer", "--bogus" }) == 1, "an unknown option is refused without asking anyone")
 ok(remote.cli({ "update", "peer", "--help" }) == 0, "and asking what the remote form does writes nothing")
 
+-- ---- 9. an install WITH PROBLEMS must still be the commit that was asked for ------------------
+-- The guard that "the installed commit is the target" ran only for outcome == 'success', so an install that finished
+-- with a problem on the WRONG commit was reported as a clean installed of the commit that was asked for. Both
+-- directions are checked here, through the module's own decision (`M._outcome_of`, the seam added for this) against
+-- a real fixture install and sentinel dir, under the PRODUCT's interpreter (WA_SCRIPT).
+put(sentinel_dir .. "/deploy-outcome/req-problems.json",
+  '{"state":"settled","outcome":"installed_with_problems","problems":1,"detail":"node installed, but the sentinel did not start watching","settled_at":"2026-11-25T00:00:00Z"}')
+put(install .. "/installed.txt", "commit=" .. TARGET .. "\nbranch=main\n")
+local asked = remote._outcome_of({ sentinel_request_id = "req-problems", target_commit = TARGET, kind = "deploy" })
+ok(asked.state == "installed",
+  "an install with problems on the ASKED commit reads as installed", tostring(asked.state))
+put(install .. "/installed.txt", "commit=" .. BASE .. "\nbranch=main\n")
+local other = remote._outcome_of({ sentinel_request_id = "req-problems", target_commit = TARGET, kind = "deploy" })
+ok(other.state ~= "installed",
+  "an install with problems on a DIFFERENT commit is NOT installed - it is a commit nobody asked for",
+  tostring(other.state) .. " " .. tostring(other.detail))
+put(install .. "/installed.txt", "commit=" .. TARGET .. "\nbranch=main\n")
+
 print(string.format("remote update ok (%d checks)", checks))

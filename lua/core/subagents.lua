@@ -1141,7 +1141,26 @@ function wa_orchestrator_tick()
   -- setup()'s own upgrade before the tick ever runs).
   local called, failure = pcall(dofile('lua/core/selfloop.lua').tick)
   M.record_tick(called, failure)
-  return "ok"
+  -- The tick's own result, handed to the facts: it is how the node says which due rows it is deliberately NOT
+  -- dispatching (a build waits or installs), so a landing node is not reported as a stalled one.
+  local tick_result = called and type(failure) == "table" and failure or nil
+  -- AND THE NODE SAYS WHAT ITS OWN WAKE STATE IS (Fable 24/11, from the live stall). This entry is what the
+  -- placement thread calls every two seconds; its answer is stored by the serving layer and published as
+  -- /health's `wakes` (rust/wa-capabilities/src/serve.rs), so a dead tick is visible from outside with no
+  -- interpreter and no paid turn. The facts are read AFTER M.record_tick has recorded the outcome, so the
+  -- raise that stops a dispatch is in the same answer that reports it - and a tick that raised still reports.
+  -- ONE instance of the scheduler serves both halves of this answer: the one that is handed this tick's
+  -- outcome is the one asked for the facts. (`dofile` runs the file again, so the table it answers from is
+  -- not the one a second load would return - handing the outcome to a DIFFERENT copy would report `unknown`.)
+  local scheduler = dofile('lua/core/selfloop.lua')
+  if type(scheduler.set_tick_state_source) == "function" then scheduler.set_tick_state_source(M.selfloop_tick_state) end
+  local facts_ok, facts = pcall(function() return scheduler.wake_facts({ tick_out = tick_result }) end)
+  if not facts_ok then
+    return json.encode({ wakes = { known = false, reason = "wake_facts_failed",
+      error = tostring(facts):sub(1, 200) } })
+  end
+  facts.known = true
+  return json.encode({ wakes = facts })
 end
 
 -- THE NODE'S ENTRY, ALSO BY NAME ON THE MODULE (r8c iii): the node calls the global, and a row that wants to
