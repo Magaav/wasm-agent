@@ -121,7 +121,10 @@ out="$(cd "$INSTALL" && env -i HOME="$HOME_DIR" PATH=/usr/local/bin:/usr/bin:/bi
     WA_INSTALL_DIR="$INSTALL" WA_PORT=24555 WA_SERVICE_UNIT_FILE="$W/no-unit" WA_SERVICE_PID=0 \
     WA_SENTINEL_UNIT_DIR="$W/units" WA_SENTINEL_UNIT_SYSTEMCTL="$W/stub-bin/systemctl-stub" \
     XDG_CONFIG_HOME="$W/config" \
-    WA_RELEASE_KEYS="$KEY" WA_SUPERVISED=1 WASM_AGENT_IN_TURN= \
+    # THE GUARD MARKER IS NOT CLEARED HERE (25/11). This line used to say WASM_AGENT_IN_TURN= , which is the same
+    # strip a harness of this shape used on 24/11 to reach the live install; env -i above already gives the child
+    # only what is named in this list, and a refusal inside a turn is the answer, not an obstacle.
+    WA_RELEASE_KEYS="$KEY" WA_SUPERVISED=1 \
     timeout 120 bash "$UPGRADE" "$CAND" --release "$DIR" 2>&1)"
 case "$out" in
   *"no new binary to install"*)

@@ -153,9 +153,18 @@ if [ -f "$INSTALL_DIR/installed.txt" ]; then
         "the record was written by a deploy (via=deploy.sh, record_role=final) and $RESULT_FILE does not exist: the deploy that wrote this record never wrote a verdict, so the record does not establish that it finished"
     else
       RESULT_OK="$(sed -n 's/.*"ok":\([a-z]*\).*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
+      # THE THIRD VERDICT (25/11, Fable's B): a deploy that installed the node and could not finish writes
+      # verdict=installed_with_problems with ok=false. Calling that "a deploy that did not succeed" is false - the
+      # node serves the new build - and calling it ok is false too. It is named, with its problems, and not counted
+      # as a clean check.
+      RESULT_VERDICT="$(sed -n 's/.*"verdict":"\([a-z_]*\)".*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
+      RESULT_PROBLEMS="$(sed -n 's/.*"problems":\([0-9]*\).*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
       RESULT_AT="$(sed -n 's/.*"at":"\([^"]*\)".*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
       RESULT_DETAIL="$(sed -n 's/.*"detail":"\([^"]*\)".*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
-      if [ "$RESULT_OK" != "true" ]; then
+      if [ "$RESULT_VERDICT" = "installed_with_problems" ]; then
+        record skip "the deploy's verdict matches the record" \
+          "installed ${RESULT_AT:+at $RESULT_AT}, with $RESULT_PROBLEMS problem(s): $RESULT_DETAIL - the node serves the new build and each problem is recorded in installed.txt as post_swap_problem="
+      elif [ "$RESULT_OK" != "true" ]; then
         record fail "the deploy's verdict matches the record" \
           "the deploy's last verdict is ok=$RESULT_OK (at=$RESULT_AT, \"$RESULT_DETAIL\"): the record names a deploy that did not succeed"
       elif [ -z "$RESULT_AT" ] || [ -z "$RECORD_AT" ]; then

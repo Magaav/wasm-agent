@@ -81,9 +81,11 @@ chmod +x "$STUB/curl"
 # Its own home, its own data dir, its own HOME: the three the installer resolves its state from.
 mkdir -p "$WORK/home" "$WORK/data"
 run() { # state idle_timeout idle_max
-  # The real turn guard belongs to the caller. This scratch upgrade is testing
-  # idle waiting, so it must not inherit that guard from an in-turn smoke run.
-  env -u WASM_AGENT_IN_TURN -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY \
+  # THE GUARD IS NOT STRIPPED HERE (25/11). This row used to clear WASM_AGENT_IN_TURN so an in-turn smoke run
+  # would not be refused - the same strip that let a harness of this shape reach the live install on 24/11. The
+  # guard's own question is answered by the process tree (scripts/lib/turn-guard.sh), and a refusal inside a turn
+  # is the answer: the row reports it instead of removing the marker.
+  env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY \
     HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home" WASM_AGENT_DATA="$WORK/data" \
     WA_TEST_HEALTH="$1" WA_TEST_DATA="$WORK/data" WA_INSTALL_DIR="$INST" WA_PORT=1 \
     WA_IDLE_TIMEOUT="$2" WA_IDLE_MAX_SECONDS="$3" \

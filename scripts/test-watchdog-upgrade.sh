@@ -70,7 +70,7 @@ chmod +x "$STUB/curl"
 
 echo "== 1. WA_WATCHDOG=1 without a watchdog is a refusal"
 rm -f "$INST/wa-watchdog.exe"
-out="$(env -u WASM_AGENT_IN_TURN WA_WATCHDOG=1 WA_INSTALL_DIR="$INST" WA_PORT="$PORT" PATH="$STUB:$PATH" \
+out="$(env WA_WATCHDOG=1 WA_INSTALL_DIR="$INST" WA_PORT="$PORT" PATH="$STUB:$PATH" \
   bash scripts/upgrade.sh "$WORK/candidate.exe" 2>&1)"
 code=$?
 case "$code:$out" in
@@ -92,7 +92,7 @@ for _ in $(seq 1 200); do
 done
 [ "$started" = 1 ] || fail "the scratch supervisor never became healthy: $(tail -3 "$WORK/supervisor.out")"
 
-out="$(env -u WASM_AGENT_IN_TURN WA_WATCHDOG=1 WA_INSTALL_DIR="$INST" WA_PORT="$PORT" \
+out="$(env WA_WATCHDOG=1 WA_INSTALL_DIR="$INST" WA_PORT="$PORT" \
   WA_WATCHDOG_HOME="$(native "$WD_HOME")" WA_UPGRADE_VIA=test-watchdog-upgrade \
   PATH="$STUB:$PATH" bash scripts/upgrade.sh "$WORK/candidate.exe" 2>&1)"
 code=$?
@@ -157,7 +157,7 @@ echo "== 3. without WA_WATCHDOG the watchdog is not touched"
 # instead of silently "working".
 rm -f "$INST/wa-watchdog.exe"
 rm -f "$INST/installed.txt"; printf 'commit=unknown\nsource_commit_hint=unknown\nsha256=%s\n' "$(sha256sum < "$INST/wa.exe" | awk '{print $1}')" > "$INST/installed.txt"
-out="$(env -u WASM_AGENT_IN_TURN -u WA_WATCHDOG WA_INSTALL_DIR="$INST" WA_PORT="$PORT" PATH="$STUB:$PATH" \
+out="$(env -u WA_WATCHDOG WA_INSTALL_DIR="$INST" WA_PORT="$PORT" PATH="$STUB:$PATH" \
   timeout 120 bash scripts/upgrade.sh "$WORK/candidate.exe" 2>&1)"
 case "$out" in
   *"owns the switch"*) fail "the default path used the watchdog" ;;

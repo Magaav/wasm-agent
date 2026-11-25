@@ -354,9 +354,12 @@ local function run_wrapper(label, body, record)
   local text = table.concat(lines, '\n')
   local tried = {}
   for dir in scripts:gmatch('[^;]+') do
-    dir = trim(dir)
-    if dir ~= '' then
-      local path = slashes(dir) .. '/remote-' .. label .. '-' .. stamp .. '.sh'
+    -- A LOOP VARIABLE IS NOT REASSIGNED (25/11). Lua 5.5 makes the loop variable a const and refuses the file over
+    -- the reassignment below; the PRODUCT's interpreter (Lua 5.4, checked through the node's WA_SCRIPT seam) loads
+    -- it either way. This is the cleanup that keeps a newer host toolchain from turning that into a real refusal.
+    local d = trim(dir)
+    if d ~= '' then
+      local path = slashes(d) .. '/remote-' .. label .. '-' .. stamp .. '.sh'
       local ok, wrote = pcall(host.write_file, path, text)
       if ok and wrote == true then
         shell('chmod +x ' .. quote(path) .. ' 2>/dev/null')
@@ -881,7 +884,12 @@ local function outcome_of(record)
   -- The installer's own verdict for this exact request id, in the install directory.
   local result = decode(read(facts.install .. '/deploy-result.json'))
   if result and tostring(result.request_id or '') == id and id ~= '' then
-    outcome.installer = { ok = result.ok == true, commit = result.commit, at = result.at, detail = result.detail }
+    -- THE VERDICT, NOT ONLY ok (25/11, Fable's B, this reader). After the swap a deploy that installed the node and
+    -- could not finish writes ok=false with verdict=installed_with_problems and problems=N: ok alone would tell a
+    -- fleet operator the request FAILED, which is false (the node serves the new build) and a clean 'installed'
+    -- would be false too.
+    outcome.installer = { ok = result.ok == true, commit = result.commit, at = result.at, detail = result.detail,
+      verdict = tostring(result.verdict or ''), problems = tonumber(result.problems or 0) or 0 }
   end
   if record.kind == 'rendezvous' or record.kind == 'rollback' then
     local what = record.kind == 'rollback' and 'the rollback' or 'the rendezvous deploy'
@@ -923,12 +931,25 @@ local function outcome_of(record)
   local ledger = decode(read(sentinel_dir .. '/deploy-outcome/' .. id .. '.json'))
   if ledger and ledger.state == 'settled' then
     local state = ledger.outcome == 'success' and 'installed' or (ledger.outcome == 'silent' and 'silent' or 'failed')
-    if state == 'installed' and ledger.outcome == 'success' and not same_commit(installed.commit, record.target_commit) then
+    -- installed_with_problems is TERMINAL AND INSTALLED (the node serves the new build): it keeps the state every
+    -- caller already handles, and carries the two fields that stop it reading as a clean success.
+    local problems_flag = false
+    local problems_n = 0
+    if ledger.outcome == 'installed_with_problems' then
+      state = 'installed'
+      problems_flag = true
+      problems_n = tonumber(ledger.problems or (outcome.installer and outcome.installer.problems) or 0) or 0
+    end
+    -- AN INSTALL WITH PROBLEMS IS STILL AN INSTALL (25/11, Fable's fix 3): this check used to run only for
+    -- outcome == 'success', so an install that finished with a problem on the WRONG commit was reported as a clean
+    -- installed of the commit that was asked for. Whoever is serving the build must be the commit that was asked.
+    if state == 'installed' and not same_commit(installed.commit, record.target_commit) then
       -- The installer said success for this request, but the install record does not name the commit
       -- that was asked for: report what is installed rather than repeat the claim.
       return settled('unknown', tostring(ledger.detail or '') .. '; installed.txt names ' .. tostring(installed.commit))
     end
-    return settled(state, tostring(ledger.detail or ledger.outcome), { settled_at = ledger.settled_at })
+    return settled(state, tostring(ledger.detail or ledger.outcome),
+      { settled_at = ledger.settled_at, installed_with_problems = problems_flag, problems = problems_n })
   end
   local done = decode(read(sentinel_dir .. '/done/' .. id .. '.json'))
   if done then
@@ -1654,7 +1675,15 @@ function M.follow_remote(call, selector, id, options)
       local body
       if state == 'installed' then
         local commit = tostring(reply.installed_commit or reply.commit or ''):sub(1, 12)
-        body = 'installed ' .. commit .. ' on ' .. label
+        if reply.installed_with_problems == true then
+          -- NEVER A CLEAN 'installed' FOR EXIT 3, and never 'FAILED' either: the node serves the new build and the
+          -- deploy did not finish its job.
+          local n = tonumber(reply.problems or 0) or 0
+          body = 'installed ' .. commit .. ', with ' .. tostring(n) .. ' problem(s): '
+            .. (detail ~= '' and detail or '(no detail recorded)') .. ' on ' .. label
+        else
+          body = 'installed ' .. commit .. ' on ' .. label
+        end
       elseif state == 'failed' then
         body = 'FAILED on ' .. label .. (detail ~= '' and (': ' .. detail) or '')
       elseif state == 'no_answer' then
@@ -1673,8 +1702,8 @@ function M.follow_remote(call, selector, id, options)
       last_state, last_at = state, now
     end
     if state == 'installed' or state == 'failed' or state == 'silent' then
-      return { ok = state == 'installed', state = state, reply = reply, seconds = now - started,
-        rounds = rounds, printed = printed }
+      return { ok = state == 'installed' and reply.installed_with_problems ~= true, state = state, reply = reply,
+        seconds = now - started, rounds = rounds, printed = printed }
     end
     if reply.error and not unreadable then
       return { ok = false, state = 'refused', reply = reply, seconds = now - started, rounds = rounds, printed = printed }
@@ -1920,4 +1949,11 @@ function M.cli(argv)
   return 0
 end
 
+
+
+-- THE DECISION IS REACHABLE FROM A TEST (25/11, Fable fix 3): `outcome_of` is the function that decides whether a
+-- settled request reads as installed, and it was local to this file, so the one-line condition change that makes an
+-- install-with-problems on the WRONG commit report `unknown` could only be proved by reading it. The seam names
+-- it for scripts/test-remote-update.lua, which drives it against a real fixture install and sentinel dir.
+M._outcome_of = outcome_of
 return M

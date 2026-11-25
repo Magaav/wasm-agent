@@ -438,6 +438,19 @@ wa_node_tag_base() {
 #      for the handful of releases a digest search looks at.
 # Anything that is not `node-<twelve hex>` is not this channel's release and is dropped here, once.
 wa_node_release_list() {
+  # A STUB CHANNEL IS A CHANNEL (25/11): when WA_NODE_BINARIES_URL names a local directory or a file:// URL, the
+  # tags are that directory's releases.txt, one tag per line. Without this the covering-release search could only be
+  # exercised against the real release list (gh, a token, the network), so no row could prove the covering install.
+  case "${WA_NODE_BINARIES_URL:-}" in
+    file://*|/*)
+      local _stub_base="${WA_NODE_BINARIES_URL#file://}"
+      _stub_base="${_stub_base%/}"
+      if [ -r "$_stub_base/releases.txt" ]; then
+        sed -n 's/[[:space:]]*$//;/^$/d;p' "$_stub_base/releases.txt" | head -n "${2:-200}"
+        return 0
+      fi
+      ;;
+  esac
   local repo="$1" limit="${2:-20}" base="${WA_NODE_BINARIES_URL:-}" dir tags
   local budget="${WA_NODE_RELEASE_LIST_SECONDS:-25}" started page=1 batch seen=0
   [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"

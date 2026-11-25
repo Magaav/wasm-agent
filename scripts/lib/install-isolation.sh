@@ -41,7 +41,15 @@ wa_install_isolation_guard() {
   fi
   local bad=0
   under() { # <what> <path>
+    # COMPARED PHYSICALLY ON BOTH SIDES (25/11, measured in rows/20261125T050751Z): the scratch root is resolved with
+    # pwd -P, and a caller's path that merely LOOKS different only because the scratch root is reached through a
+    # symlink (the mission rows live under one) was refused as not_isolated - a real path under the real root.
+    local phys
+    phys="$(CDPATH= cd -- "$(dirname -- "$2")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename -- "$2")")"
     case "$2" in
+      "$real"|"$real"/*) return 0 ;;
+    esac
+    case "$phys" in
       "$real"|"$real"/*) return 0 ;;
       *) printf 'not_isolated: %s = %s is not under the scratch root %s\n' "$1" "$2" "$real" >&2; return 1 ;;
     esac
@@ -61,12 +69,19 @@ wa_install_isolation_guard() {
   under "WA_SENTINEL_UNIT_DIR" "$units" || bad=1
   if [ -n "${XDG_CONFIG_HOME:-}" ]; then under XDG_CONFIG_HOME "$XDG_CONFIG_HOME" || bad=1; fi
   local sudo="${WA_SENTINEL_UNIT_SYSTEMCTL:-systemctl}"
-  case "$sudo" in
-    systemctl|*/systemctl)
-      printf 'not_isolated: WA_SENTINEL_UNIT_SYSTEMCTL is %s, the real systemctl: a scratch run may restart the operator service\n' "$sudo" >&2
-      bad=1 ;;
-    *) under WA_SENTINEL_UNIT_SYSTEMCTL "$sudo" || bad=1 ;;
-  esac
+  # A SYSTEMCTL-SHAPED STUB INSIDE THE SCRATCH ROOT IS NOT THE REAL ONE (25/11, measured twice in
+  # rows/20261125T050751Z and rows/20261125T051534Z): the name test ran first, so a row's own stub at
+  # <scratch>/bin/systemctl was refused as "the real systemctl" and the deploy never installed. The location decides
+  # first; only a systemctl that is outside the root - bare, or a system path - is refused by name.
+  if under WA_SENTINEL_UNIT_SYSTEMCTL "$sudo"; then
+    :
+  else
+    case "$sudo" in
+      systemctl|*/systemctl)
+        printf 'not_isolated: WA_SENTINEL_UNIT_SYSTEMCTL is %s, the real systemctl: a scratch run may restart the operator service\n' "$sudo" >&2 ;;
+    esac
+    bad=1
+  fi
   # 5. THE LEDGER.
   if [ -n "${WASM_AGENT_DB:-}" ]; then under WASM_AGENT_DB "$WASM_AGENT_DB" || bad=1; fi
   # 6. THE PORT. The live node's, and the ports one command away from it, are not a scratch node's.

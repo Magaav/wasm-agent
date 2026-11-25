@@ -514,7 +514,22 @@ else
   [ "$lease_order" = "0" ] || exit "$lease_order"
 fi
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
+# fail() IN TWO HALVES (25/11, Fable's A, B, C): main own body before the swap, and the same four writes with a
+# verdict of its own after it. This branch had replaced it with printf + exit, which lost the status file, the
+# deploy.log line, the result.json and the exit status every reader keys on.
+gate_run bash scripts/test-deploy-fail-verdict.sh                      # a refusal writes four things, and exit 1
+# ALIVE-FIRST (25/11, Fable's G): the deploy says it is running before the preflight, the fetches and the download,
+# and nobody else may take that record over or erase it. scripts/test-deploy-alive-first.sh reads the order off
+# deploy.sh and puts the record's ownership rules through the real functions.
+gate_run bash scripts/test-deploy-alive-first.sh                       # the record is written first, and it is ours
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
+# NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
+# HOME, ran the real deploy, reported "ok (16 checks, 0 failed)" - and left a wa-sentinel with HOME=/home/victor and
+# no WASM_AGENT_PORT behind, having rewritten the LIVE unit file, restarted the LIVE sentinel and run it on the LIVE
+# ledger. This row measures the six dimensions on a real child of scripts/lib/scratch-installer.sh, proves its
+# checker catches that harness and clears the wrapper's own leftover, and fails any row that strips the turn guard
+# or detaches an installer it cannot isolate. It runs nothing that installs.
+gate_run bash scripts/test-installer-data-isolation.sh
 gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards
 WA_BIN="$BIN" gate_run bash scripts/test-node-pins.sh                 # a rollback is a record, and it gates the next move
 # One name for the build, composed in Rust: the pin ledger is fleet-wide, so a record for ANOTHER node
@@ -627,6 +642,15 @@ gate_run bash scripts/test-component-lock-rebuild.sh
 # side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
+# A COVERING RELEASE ON A NODE THAT MUST CHANGE ITS BINARY (24/11, work 22:17Z). deploy.sh took node-39e862d60bad
+# for a scripts-only tree, installed it, swapped, restarted the node - and then refused build_commit_mismatch
+# because it expected the bytes to report HEAD instead of the release's own commit, leaving the INTERIM record
+# and the scripts unshipped. The row runs the REAL deploy end to end on a scratch node seeded with that interim
+# record: exit 0, commit=/lua_tree= the tree, binary_commit= the bytes, scripts shipped, `wa --version` naming
+# both, verify-install green. It needs the network (the covering release is a published one) and cannot start a
+# sentinel in a scratch HOME on a machine with a systemd user session, so it says SKIP by name when it cannot
+# run - never a pass by absence.
+gate_run bash scripts/test-deploy-covering-release.sh
 # IS THIS COMMIT INSTALLABLE BY DOWNLOAD? The row that was missing (24/11): work's update downloaded and
 # verified node-9a0c589adfa0 and then had no components bundle to install - components-df6f97708c72 is
 # HTTP 404, because publishing is per landing and covers the node binary only - so a node without a

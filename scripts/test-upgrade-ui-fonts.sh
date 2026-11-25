@@ -200,7 +200,7 @@ run_upgrade() { # install release-tree
     ss -ltn 2>/dev/null | grep -q ":$WA_TEST_PORT " && break
     sleep 0.1
   done
-  env -u WASM_AGENT_IN_TURN -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY \
+  env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY \
     WA_INSTALL_DIR="$1" WA_PORT="$WA_TEST_PORT" WA_SENTINEL_SCRIPTS="$WORK/no-sentinel" \
     WA_WATCHDOG=1 WA_TEST_PORT="$WA_TEST_PORT" WA_TEST_PIDS="$PIDS" \
     WA_IDLE_TIMEOUT=5 WA_UPGRADE_IDLE_POLL=1 \

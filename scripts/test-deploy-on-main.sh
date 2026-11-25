@@ -71,7 +71,7 @@ run_deploy() { # label head-sha -> status in RUN_STATUS, output in RUN_OUT
   git -C "$TREE" checkout -q --detach "$head" || fail "cannot check out $head"
   RUN_INSTALL="$install"
   RUN_OUT="$WORK/out-$label.txt"
-  env -u LOCALAPPDATA -u APPDATA -u USERPROFILE -u WA_PORT -u WA_INSTALL_DIR -u WASM_AGENT_IN_TURN \
+  env -u LOCALAPPDATA -u APPDATA -u USERPROFILE -u WA_PORT -u WA_INSTALL_DIR \
     HOME="$home" WASM_AGENT_HOME="$home" PATH="$TEST_PATH" \
     WA_DEPLOY_ROOT="$TREE" WA_INSTALL_DIR="$install" \
     WA_PORT=8977 WA_CLIENT_PORT=8978 TMPDIR="$home/tmp" \
