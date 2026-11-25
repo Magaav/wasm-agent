@@ -221,6 +221,20 @@ record_post_swap_problems() {
   } >> "$INSTALL_DIR/installed.txt" 2>/dev/null || true
 }
 
+# ONE HELPER FOR "INSTALLED, WITH PROBLEMS" (25/11, Fable's fix 1). This verdict used to be written in two places and
+# they drifted: fail()'s post-swap branch passed the verdict to write_result, and the NORMAL end of a deploy - the
+# watcher case, the most common one - called write_result without it, so result.json said verdict=failed for an
+# install that had SUCCEEDED with a problem. The sentinel's deploy_outcome and the remote follow both read that file,
+# so the common case was reported as a failure. Both ends call this, and cannot drift again.
+record_installed_with_problems() {
+  INSTALLED_VERDICT="installed, with ${POST_SWAP_PROBLEMS} problem(s): ${POST_SWAP_LOG}"
+  wa_status_unfollow
+  wa_status installed "installed, with ${POST_SWAP_PROBLEMS} problem(s)"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$INSTALLED_VERDICT" \
+    >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+  write_result false "$POST_SWAP_LOG" installed_with_problems "$POST_SWAP_PROBLEMS"
+}
+
 # THE ONE fail() THE WHOLE SCRIPT USES, IN TWO HALVES (25/11, Fable's A and B).
 #
 # BEFORE THE SWAP it IS main's fail, byte for byte. This branch had replaced it with a print-and-exit, which lost
@@ -240,13 +254,8 @@ fail() {
   if [ "${SWAPPED:-0}" = 1 ]; then
     post_swap_problem "$(printf '%s' "$message" | tr '\r\n' '  ' | cut -c1-600)"
     record_post_swap_problems
-    INSTALLED_VERDICT="installed, with ${POST_SWAP_PROBLEMS} problem(s): ${POST_SWAP_LOG}"
+    record_installed_with_problems
     printf 'deploy: %s\n' "$INSTALLED_VERDICT" >&2
-    wa_status_unfollow
-    wa_status installed "installed, with ${POST_SWAP_PROBLEMS} problem(s)"
-    printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$INSTALLED_VERDICT" \
-      >> "$INSTALL_DIR/deploy.log" 2>/dev/null
-    write_result false "$POST_SWAP_LOG" installed_with_problems "$POST_SWAP_PROBLEMS"
     exit 3
   fi
   echo "deploy: $*" >&2
@@ -329,9 +338,10 @@ if [ -r "$DEPLOY_ALIVE_LIB" ]; then
       rm -f "$_alive_err"
       case "$_alive_msg" in
         "refused(deploy_alive_held)"*)
-          echo "deploy: $_alive_msg" >&2
-          command -v write_result >/dev/null 2>&1 && write_result false "$_alive_msg" deploy_alive_held 1
-          exit "$_alive_rc"
+          # A REFUSAL BEFORE ANYTHING WAS TOUCHED IS A PRE-SWAP REFUSAL (25/11, Fable's fix 2): it used to exit 3
+          # with problems=1, and exit 3 now MEANS "installed, with problems" - a lie about a deploy that never
+          # touched the node. fail() is the pre-swap path: exit 1, problems 0, the same four writes as every other.
+          fail "$_alive_msg"
           ;;
       esac
       note "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
@@ -2739,7 +2749,7 @@ if [ "$POST_SWAP_PROBLEMS" -gt 0 ]; then
   # The install happened; the problems are named in the record and in this result, and the exit code says
   # the difference between "installed cleanly" and "installed, with N things wrong".
   record_post_swap_problems
-  write_result false "installed $COMMIT with $POST_SWAP_PROBLEMS post-swap problem(s): $POST_SWAP_LOG"
+  record_installed_with_problems
   echo "deploy: INSTALLED WITH $POST_SWAP_PROBLEMS PROBLEM(S) - the node runs $COMMIT and installed.txt records each one as post_swap_problem=: $POST_SWAP_LOG" >&2
   exit 3
 fi

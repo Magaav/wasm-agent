@@ -940,7 +940,10 @@ local function outcome_of(record)
       problems_flag = true
       problems_n = tonumber(ledger.problems or (outcome.installer and outcome.installer.problems) or 0) or 0
     end
-    if state == 'installed' and ledger.outcome == 'success' and not same_commit(installed.commit, record.target_commit) then
+    -- AN INSTALL WITH PROBLEMS IS STILL AN INSTALL (25/11, Fable's fix 3): this check used to run only for
+    -- outcome == 'success', so an install that finished with a problem on the WRONG commit was reported as a clean
+    -- installed of the commit that was asked for. Whoever is serving the build must be the commit that was asked.
+    if state == 'installed' and not same_commit(installed.commit, record.target_commit) then
       -- The installer said success for this request, but the install record does not name the commit
       -- that was asked for: report what is installed rather than repeat the claim.
       return settled('unknown', tostring(ledger.detail or '') .. '; installed.txt names ' .. tostring(installed.commit))

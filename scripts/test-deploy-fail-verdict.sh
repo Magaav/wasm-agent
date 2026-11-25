@@ -40,6 +40,7 @@ HARNESS="$W/deploy-fail.sh"
   printf 'SWAPPED="${SWAPPED:-0}"; POST_SWAP_PROBLEMS="${POST_SWAP_PROBLEMS:-0}"; POST_SWAP_LOG="${POST_SWAP_LOG:-}"\n' 
   sed -n '/^post_swap_problem() {/,/^}/p' scripts/deploy.sh
   sed -n '/^record_post_swap_problems() {/,/^}/p' scripts/deploy.sh
+  sed -n '/^record_installed_with_problems() {/,/^}/p' scripts/deploy.sh
   sed -n '/^fail() {/,/^}/p' scripts/deploy.sh
   printf 'SWAPPED_SENTINEL=1\n'
 } > "$HARNESS"
