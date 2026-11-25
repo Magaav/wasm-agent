@@ -407,7 +407,15 @@ M.shared = {
     limit = { type = "integer", minimum = 1, maximum = 8 },
     offset = { type = "integer", minimum = 0 },
     snapshot = { type = "string", description = "Carry the returned snapshot when continuing a metadata page." } }),
-  schema("capabilities", "List permitted tools and their current workspace execution limits; permission is not executability.", {}),
+  -- A FILTER, BECAUSE THE LIST IS LONG AND ONE FACT IS SHORT. Measured 25/11: an agent read all 90
+  -- entries to learn one tool's workspace status. With no arguments this answers exactly what it always
+  -- answered (byte for byte - the row that says so is scripts/test-capabilities-filter.lua); with
+  -- `names` or `status` it answers only the entries asked for.
+  schema("capabilities", "List permitted tools and their current workspace execution limits; permission is not executability. With no arguments: the whole catalogue. With names or status: only those entries, so one fact costs one entry instead of ninety.", {
+    names = { type = "array", maxItems = 200, items = { type = "string", maxLength = 128 },
+      description = "Only these tools, by exact name. A name this catalogue does not carry is refused by name, never dropped from the answer." },
+    status = { type = "string", description = "Only the entries whose workspace execution status is this exact word." },
+  }, nil, { additionalProperties = false }),
   -- Fleet knowledge and the fleet's own view (docs/FLEET-OPS.md). Both are looked up on purpose:
   -- nothing from `lessons` is injected into a session, and `fleetview` changes nothing.
   schema("lessons", "Recall or add what this fleet learned the hard way (symptom, cause, fix, rule). Look it up on purpose with action=recall before touching fleet control - the fleetops skill says when - and add one with action=add when a failure would otherwise repeat. Nothing here is injected automatically: an empty recall means these words are not in the store, not that no lesson exists.", {
@@ -2227,12 +2235,65 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       if not ok then error(value) end;return value
     end,execution)
   elseif name == "capabilities" then
-    local list,execution={},{}
+    -- THE WHOLE CATALOGUE, DESCRIBED ONCE. A filter selects from THESE entries; it never describes a
+    -- subset of its own, so a filtered answer and the unfiltered one cannot disagree about an entry.
+    local whole,execution={},{}
     local describe,workspace=M.discovery_execution(memory,ctx)
     for _,item in ipairs(routed_catalog() or M.all(role)) do
-      local tool=item['function'].name;list[#list+1]=tool;execution[tool]=describe(tool)
+      local tool=item['function'].name;whole[#whole+1]=tool;execution[tool]=describe(tool)
     end
-    return {role=role,capabilities=list,execution=execution,workspace=workspace,
+    -- ONE FACT SHOULD NOT COST NINETY ENTRIES (25/11: an agent read all 90 to learn one tool's workspace
+    -- status). `names` and `status` narrow the answer to the entries asked for, and neither of them
+    -- narrows it silently: a name this catalogue does not carry, a status word no entry carries, or an
+    -- empty names array is REFUSED by name rather than answered with a list that would read as "there
+    -- are no such tools". The order is the catalogue's own, and no arguments answers exactly what this
+    -- tool answered before the filter existed - same keys, same order, same bytes.
+    local asked_names,asked_status=args.names,args.status
+    local wanted
+    if asked_names~=nil then
+      if type(asked_names)~='table' or asked_names[1]==nil then
+        return {error='capabilities_names_required',received=type(asked_names),effect='none',
+          note='`names` is a non-empty array of exact tool names; omit it to ask for the whole catalogue.'}
+      end
+      local unknown={};wanted={}
+      for _,asked in ipairs(asked_names) do
+        local wanted_name=tostring(asked)
+        if execution[wanted_name]~=nil then wanted[wanted_name]=true else unknown[#unknown+1]=wanted_name end
+      end
+      if #unknown>0 then
+        table.sort(unknown)
+        return {error='unknown_capability',unknown=unknown,role=role,effect='none',
+          note='Nothing is listed: a name this catalogue does not carry is named here rather than dropped from an answer that would look complete. searchTools finds a tool by what it does.'}
+      end
+    end
+    if asked_status~=nil then
+      if type(asked_status)~='string' then
+        return {error='capabilities_status_required',received=type(asked_status),effect='none',
+          note='`status` is one workspace execution status word; omit it to ask for every entry.'}
+      end
+      local present={}
+      for _,tool in ipairs(whole) do present[execution[tool].status]=true end
+      if not present[asked_status] then
+        local accepted={}
+        for word in pairs(present) do accepted[#accepted+1]=word end
+        table.sort(accepted)
+        return {error='unknown_capability_status',requested=asked_status,accepted=accepted,effect='none',
+          note='`status` is one of the workspace execution statuses this catalogue carries; accept is the list, and no arguments is every entry.'}
+      end
+    end
+    if wanted==nil and asked_status==nil then
+      return {role=role,capabilities=whole,execution=execution,workspace=workspace,
+        note='Permitted catalogue, not an execution guarantee. Inspect workspace status before invocation; native permissions, arguments, profile and effect checks remain authoritative.'}
+    end
+    local list,kept={},{}
+    for _,tool in ipairs(whole) do
+      if (wanted==nil or wanted[tool]) and (asked_status==nil or execution[tool].status==asked_status) then
+        list[#list+1]=tool;kept[tool]=execution[tool]
+      end
+    end
+    return {role=role,capabilities=list,execution=kept,workspace=workspace,
+      filter={names=wanted~=nil and asked_names or nil,status=asked_status,matched=#list,total=#whole,
+        note='Only the entries the filter names are listed; capabilities() with no arguments is the whole catalogue.'},
       note='Permitted catalogue, not an execution guarantee. Inspect workspace status before invocation; native permissions, arguments, profile and effect checks remain authoritative.'}
   elseif name == "subagent" then
     -- One Lua facade for the model and for the HTTP control route; the owner is
