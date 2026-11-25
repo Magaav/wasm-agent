@@ -261,6 +261,37 @@ row-result.txt: `rc=0 row=scripts/test-release-door-update.sh commit=63a41de4d26
 leftovers=0 canary_before=green canary_after=green`. leftovers=0 and systemctl-calls.log is EMPTY: the row
 touched no unit and left no process.
 
+## 7c. The D7 row on the release commit: a coordinator updates a scratch TREE peer (51cb021e, GREEN)
+
+Fable: "the D7 row (new coordinator -> new tree peer, real install, follow ends installed) must be green ON
+that commit". scripts/test-tree-peer-remote-update.sh builds the binary from its own checkout (the row contract
+gives a row no `wa` on PATH), sets WASM_AGENT_LUA_ROOT so both processes run THIS commit's Lua, and runs the
+product's own two-process row through it - a real `wa serve` peer on its own ports, the real remote_update.serve,
+whose accept starts a real detached child (`wa update --accept <id>`) through the node's own operation manager,
+which runs the real update.run and fast-forwards the peer's TREE. The runner ran it at 51cb021e (which carries
+b30753b2) and it passed, leftovers=0:
+
+```
+  ok   the row built the binary it tests from 51cb021ef123d8dd918a85606e93627ab32dbea7
+  (the product's own row: 39 checks, printed verbatim in rows/20261125T011053Z/out.log)
+      ok: and it is INSTALLED, not accepted forever
+      ok: installed.txt names the commit that was asked for: b52c198febfb
+      ok: the peer's own tree is on the requested commit
+      ok: exactly ONE deploy request exists on the peer
+    accept two process ok (39 checks): 6 s of relay hold, one deploy, the peer on b52c198f
+  ok   the request settled INSTALLED (the follow ends installed)
+  ok   and the peer's installed.txt moved to the commit that was asked for
+  ok   one request, one deploy (the accept is claimed once)
+  ok   and the peer never answered update_coordinator_only (the D7 refusal)
+tree peer remote update ok (7 checks)
+rc=0 ... leftovers=0 canary_before=green canary_after=skip
+```
+
+canary_after=skip is the runner's own field: it could not READ the canary after this row, which is not a
+claim that the canary stayed green - it is reported as it is. The discrimination for D7's decision is the unit
+row of section 6 (red on the base with update_coordinator_only, green here); this row is the end-to-end proof
+on the release commit.
+
 ## 8. The guard, pasted (every install row of this mission was run under it)
 
 ```
