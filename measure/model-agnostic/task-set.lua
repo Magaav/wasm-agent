@@ -94,13 +94,28 @@ local function measure(task, script, question)
     end
   end
   local msgs = (first and first.messages) or {}
+  -- THE TREE'S OWN PATH IS NOT PART OF WHAT THE MODEL READS, and measuring it as if it were is how this
+  -- set first reported a catalogue growth that does not exist: the system prompt embeds skill/harness
+  -- `<location>` paths, and two trees at different paths differ by dozens of bytes per line (measured:
+  -- +836 `system bytes`, 23 occurrences of the path, of which ZERO were content). Every text compared here
+  -- is normalised first.
+  local tree = tostring(host.getenv('WASM_AGENT_LUA_ROOT') or '')
+  local function norm(text)
+    text = tostring(text or '')
+    if tree ~= '' then text = text:gsub(tree:gsub('[%p]', '%%%0'), '<TREE>') end
+    return text
+  end
+  for _, message in ipairs(msgs) do
+    if type(message) == 'table' and message.content ~= nil then message.content = norm(message.content) end
+  end
   local convo = {}
   for i = 2, #msgs do convo[#convo + 1] = msgs[i] end
   return { task = task, rounds = #requests,
     convo_sha = host.sha256(json.encode(convo)), convo_bytes = #json.encode(convo),
     system_bytes = #tostring((msgs[1] or {}).content or ''),
     tool_result_bytes = tool_result_bytes, tool_result_tokens = math.ceil(tool_result_bytes / 4),
-    tokens_est = math.ceil(#tostring(requests[#requests] or '') / 4),
+    tokens_est = math.ceil(#norm(requests[#requests] or '') / 4),
+    body_bytes_norm = #norm(requests[1] or ''),
     refusals = refusals, wall_ms = wall, last_result = last_result:sub(1, 400) }
 end
 

@@ -132,62 +132,62 @@ own and a peer call is judged by the peer's schema.
   renderer, that a schema that declares arguments is CLOSED by default, and that an explicitly open schema
   still accepts what it does not name. 71 checks (was 69).
 
-## MODEL-AGNOSTIC before/after (item 2, and item 3/4's model-read bytes)
+## MODEL-AGNOSTIC before/after (corrected: the tree path is normalized)
 
 Fixed task set, scripted model, identical call bytes on both trees: `measure/model-agnostic/task-set.lua`,
-driver `measure/model-agnostic/run.sh <base-tree> <base-bin> <branch-tree> <branch-bin>` (this node: base
-`/tmp/tt-base` @70eb209d with its own build, branch `change/tools-tell-the-truth` @3ec3656e). Refusals are
-`unknown_argument` occurrences in the request text (one refusal appears twice on the wire: in the tool result
-and in the next request's copy); `body tokens` is the product's own estimate, ceil(bytes/4)
-(`lua/core/agent.lua estimate_tokens`).
+driver `measure/model-agnostic/run.sh <base-tree> <base-bin> <branch-tree> <branch-bin>` (base `/tmp/tt-base`
+@70eb209d built here, branch @`0f587e15`). `unknown_argument` counts occurrences in the request text (one
+refusal appears twice on the wire: the tool result and the next request's copy); `body tokens` is the
+product's own estimate, ceil(bytes/4) (`lua/core/agent.lua estimate_tokens`).
+
+**A correction first.** The first run of this set reported `system bytes 29556 -> 30392 (+836, +2.8%)` and I
+wrote it down as prompt growth. It was an artifact of the measurement: the system prompt embeds skill/harness
+`<location>` paths, and the two trees were checked out at different paths (12 vs 48 characters, 23
+occurrences). Normalized, the system prompt and the whole request body are **byte-identical** on both trees
+(29424 B and 30773 B), and the tool catalogue's descriptions do not travel in a turn at all: this node sends a
+786-byte `"tools"` array and a tool's description is read only when the model LOADS that tool
+(`tool_search`/`searchTools`). The driver now normalizes the tree path before it counts anything.
 
 ```
-task                | rounds | convo bytes identical | system bytes   | tool-result bytes | tool-result tokens | body tokens   | wall ms   | unknown_argument
-healthy_time        | 2->2   | True                  | 29556->30392  | 189->189          | 48->48             | 7836->8045    | 1.3->1.3  | 0->0
-healthy_read        | 2->2   | True                  | 29556->30392  | 916->916          | 229->229           | 8041->8250    | 0.3->0.3  | 0->0
-healthy_bash        | 2->2   | True                  | 29556->30392  | 437->437          | 110->110           | 7911->8120    | 0.4->0.4  | 0->0
-typo_read           | 3->3   | True                  | 29556->30392  | 1832->1422        | 458->356           | 8351->8455    | 0.5->0.4  | 0->4
-typo_grep           | 3->3   | True                  | 29556->30392  | 20957->19908      | 5240->4977         | 13566->13498  | 0.5->0.4  | 0->4
-capabilities_one    | 2->2   | True                  | 29556->30392  | 8238->599         | 2060->150          | 10123->8165   | 0.4->0.4  | 0->0
-forward_remote      | 2->2   | True                  | 29556->30392  | 1601->1596        | 401->399           | 8237->8445    | 0.5->0.5  | 0->0
-codemode_healthy    | 2->2   | True                  | 29556->30392  | 186->186          | 47->47             | 7845->8054    | 0.4->0.4  | 0->0
-sum                 |        |                       |               | 34356->25253      |                    |               |           | 0->8
+task                | rounds | convo bytes identical | system bytes  | tool-result bytes | tool-result tokens | body tokens   | wall ms   | unknown_argument
+healthy_time        | 2->2   | True                  | 29424->29424  | 189->189          | 48->48             | 7803->7803    | 1.2->1.2  | 0->0
+healthy_read        | 2->2   | True                  | 29424->29424  | 916->916          | 229->229           | 8008->8008    | 0.3->0.3  | 0->0
+healthy_bash        | 2->2   | True                  | 29424->29424  | 438->438          | 110->110           | 7878->7878    | 0.4->0.4  | 0->0
+typo_read           | 3->3   | True                  | 29424->29424  | 1832->1422        | 458->356           | 8318->8213    | 0.5->0.4  | 0->4
+typo_grep           | 3->3   | True                  | 29424->29424  | 20957->19908      | 5240->4977         | 13533->13256  | 0.5->0.4  | 0->4
+capabilities_one    | 2->2   | True                  | 29424->29424  | 8238->599         | 2060->150          | 10090->7923   | 0.4->0.4  | 0->0
+forward_remote      | 2->2   | True                  | 29424->29424  | 1601->1596        | 401->399           | 8204->8203    | 0.5->0.5  | 0->0
+codemode_healthy    | 2->2   | True                  | 29424->29424  | 186->186          | 47->47             | 7812->7812    | 0.4->0.4  | 0->0
+sum                 |        |                       | 0 bytes       | 34357->25254      |                    |               |           | 0->8
 ```
 
 Read it this way:
 
-* **healthy request bytes are identical.** For every task the request WITHOUT the system prompt (the user turn
-  and the tool round trip) hashes the same on both trees, and the tool-result bytes are equal on the three
-  healthy tasks (189, 916, 437) and on the healthy script (186): a call that names only declared arguments
-  answers exactly what it answered before.
-* **the catalogue the model reads every turn grew by 836 bytes (+2.8%, +209 body tokens)**: 29556 -> 30392.
-  That is the only cost a healthy turn pays, and it is the item-4 description plus the two schemas that now say
-  they are open (`capabilities` names/status, `tool_call`). It buys the two typo turns and the 7.6 KB
-  capabilities turn below.
-* **a typo now costs ONE refusal and fewer bytes, not a wrong answer**: `typo_read` answers 1832 -> 1422 bytes
-  (-410) - base silently ignored `ofset` and returned a page the model never asked for; `typo_grep` 20957 ->
-  19908 (-1049) - base ran a literal repo-wide grep and answered 100 matches for an option it does not have.
-  Each carries 1 refusal (4 wire occurrences = 2 per task: the result and its copy in the next request).
-* **capabilities for one fact: 8238 -> 599 bytes (-92.7%), 2060 -> 150 tokens (-92.7%)** on that turn.
-* **a forwarding tool is unchanged**: `remote` with a capability's own argument answers 1601 -> 1596 bytes
-  (the 5-byte difference is the refusal sentence's own wording, not the argument handling).
+* **healthy request bytes are identical** (the request without the system prompt hashes the same on every
+  task) and the tool-result bytes are equal on all healthy tasks (189, 916, 438, 186) and on the healthy
+  script: a call that names only declared arguments answers exactly what it answered before.
+* **prompt growth is 0 bytes** (see the correction above); body tokens are identical on every healthy task.
+* **a typo now costs ONE refusal and fewer bytes, not a wrong answer**: `typo_read` 1832 -> 1422 (-410) -
+  base silently ignored `ofset` and returned a page the model never asked for; `typo_grep` 20957 -> 19908
+  (-1049) - base ran a literal repo-wide grep and answered 100 matches for an option it does not have. Body
+  tokens -105 and -277 on those turns; each carries 1 refusal (4 wire occurrences = 2 per task).
+* **capabilities for one fact: 8238 -> 599 bytes (-92.7%), 2060 -> 150 tokens**, body tokens 10090 -> 7923.
+* **a forwarding tool is unchanged**: `remote` with a capability's own argument answers 1601 -> 1596 bytes.
 * **no round regression and no wall-time regression**: rounds are equal because the script is fixed; a real
   model would spend ONE extra round on a typo task (refusal, then the corrected call) - that reaction is not
   measurable without a model, which is why this set measures bytes and refusals, not judgement.
-* `tokens_est` (whole body) rises by the +209 system-prompt tokens on every turn and falls by 1958 on
-  `capabilities_one`; the sum of tool-result bytes falls 34356 -> 25253 (-26.5%) over the set.
 
 Reproduce: `bash measure/model-agnostic/run.sh /tmp/tt-base /home/victor/wasm-agent/target/m-tt-base/release/wa $PWD /home/victor/wasm-agent/target/m-tools-tell-the-truth/release/wa`.
 
-## (i) Is `q -> query` real? It was NOT, and it is now: the prefix rule
+### (i) The approved example is REAL row output, and the threshold rule is quoted
 
-Edit distance alone would never make the approved example real: `q` is 4 edits from `query` and the threshold
-is `math.max(2, floor(#sent/2)) = 2`, so the committed code answered `unknown_argument:q` with NO suggestion.
-Fixed in `2f7f66e6` - a declared name that starts with the sent word (or the other way round) wins before
-distance does, shortest first:
+Edit distance alone did NOT produce it: `q` is 4 edits from `query`, and the threshold is
+`math.max(2, math.floor(#sent/2)) = 2`, so the committed code answered `unknown_argument:q` with no
+suggestion. Fixed in `2f7f66e6`: a declared name that STARTS WITH the sent word (or the other way round) wins
+before distance does, shortest first, alphabetical between equals:
 
 ```lua
--- lua/core/json_contract.lua (and the same rule in lua/core/tool_arguments.lua)
+-- lua/core/json_contract.lua, and the same rule in lua/core/tool_arguments.lua
 local prefix
 for candidate in pairs(declared or {}) do
   local word = tostring(candidate)
@@ -197,53 +197,55 @@ for candidate in pairs(declared or {}) do
     if not prefix or #word < #prefix or (#word == #prefix and word < prefix) then prefix = word end
   end
 end
-if prefix then return prefix end          -- a prefix beats distance
-... distance decides only among the rest (threshold unchanged: max(2, floor(#sent/2)))
+if prefix then return prefix end
+-- ... and only then: edit distance, with the threshold unchanged: max(2, floor(#sent/2))
+if not best or best_cost > math.max(2, math.floor(#sent / 2)) then return nil end
 ```
 
 REAL ROW OUTPUT (scratch home, branch tree, `tools.dispatch(memory,'search_messages',{q='laura'})`):
 
 ```
-error:    unknown_argument:q - did you mean query?
-message:  `search_messages` does not take the argument `q` - its own schema never declares that name, so
-          nothing ran. It declares: after, before, byte_limit, group_by, limit, match, node, offset, query,
-          roles, scope, session_id, sort, tool_name, view.
-fix:      drop `q`, did you mean `query`? `search_messages` takes: after, before, byte_limit, group_by,
-          limit, match, node, offset, query, roles, scope, session_id, sort, tool_name, view.
+error:   unknown_argument:q - did you mean query?
+message: `search_messages` does not take the argument `q` - its own schema never declares that name, so
+         nothing ran. It declares: after, before, byte_limit, group_by, limit, match, node, offset, query,
+         roles, scope, session_id, sort, tool_name, view.
+fix:     drop `q`, did you mean `query`? `search_messages` takes: after, before, byte_limit, group_by,
+         limit, match, node, offset, query, roles, scope, session_id, sort, tool_name, view.
 ```
 
-Two directions are pinned as rows (`test-json-contract.lua`, 18 checks): `{"q"}` against a schema declaring
-`query` -> `unknown_argument:q - did you mean query?`, and `{"query"}` against a schema declaring `q` ->
-`unknown_argument:query - did you mean q?`.
+Both directions are pinned as checks in `scripts/test-json-contract.lua` (18 checks): `{"q"}` against a schema
+declaring `query` -> `unknown_argument:q - did you mean query?`, and `{"query"}` against a schema declaring
+`q` -> `unknown_argument:query - did you mean q?`.
 
-## (ii) The old refusal vs the new one, same schema, same call
+### (ii) Old and new refusal, same schema, same call - the new one names the accepted arguments too
 
-Closed schema `{q, from, limit}`, the call `{"query":"laura"}`, base tree vs branch tree, both run here:
+Closed schema `{q, from, limit}`, the call `{"query":"laura"}`, base tree and branch tree, both run here:
 
 | | base (`schema_extra`) | branch (`unknown_argument`) |
 |---|---|---|
 | code | `schema_extra:arguments.query (accepted: from, limit, q)` | `unknown_argument:query - did you mean q?` |
-| message | `search does not take the argument \`query (accepted: from, limit, q)\`; the call carried a name that is not in its schema (json_contract.lua).` | `search does not take the argument \`query\` - its own schema never declares that name, so nothing was dispatched (lua/core/tool_arguments.lua).` |
-| fix | `drop \`query (accepted: from, limit, q)\`; search takes from (string), limit (integer), q (string)` | `drop \`query\`, did you mean \`q\`?; search takes from (string), limit (integer), q (string)` |
+| message | "search does not take the argument \`query (accepted: from, limit, q)\`; the call carried a name that is not in its schema (json_contract.lua)." | "search does not take the argument \`query\` - its own schema never declares that name, so nothing was dispatched (lua/core/tool_arguments.lua)." |
+| fix | "drop \`query (accepted: from, limit, q)\`; search takes from (string), limit (integer), q (string)" | "drop \`query\`, did you mean \`q\`?; search takes from (string), limit (integer), q (string)" |
 
-The new refusal says everything the old one did - the accepted names are in the fix, in the same
-`name (type)` form - and two things it did not: the name that was meant, and the argument name quoted on its
-own. The old sentence swallowed the accepted list INSIDE the quotation marks (`query (accepted: ...)`), so a
-reader parsing the quoted argument got a string that is not an argument name.
+Measured lengths: code **55 -> 40 bytes**, message **140 -> 141**, fix **96 -> 88**. The new refusal keeps every accepted name, in the same
+`name (type)` form, inside the fix; adds the name that was meant; and stops swallowing the accepted list
+INSIDE the quoted argument name (the old sentence read as if the argument were called
+`query (accepted: from, limit, q)`, which is not an argument name). The one thing it does not repeat is the
+`schema_extra:` path prefix - the key is named on its own, which is what a model has to change.
 
-## (iii) Ledger census: the 51 tools, 7 days, counts only
+### (iii) Ledger census, read-only, counts only
 
-Source: the node's ledger through the product's own seam (`host.sql_rows`, the surface `wa show` uses; the
-agent's bash/file tools are refused this store by `lua/core/secret_guard.lua`, and that refusal is why this is
-a SELECT-only script run on `WA_SCRIPT`, not `sqlite3`). Window: `created_at` of the last 7 days
-(`lo 1794995620 .. hi 1795650188`). Assistant tool calls whose target is a known host tool: **52063**.
-Undeclared argument names: **3 calls, 1 tool (`run`)**, fields `timeout`, `timeout_s`, `rows`, `ry` (0.006% of
-the calls). No argument text failed to parse (`undecodable_arguments: 0`).
+The agent's `bash`/`sqlite3` path to `~/.wasm-agent/memory.db` is REFUSED by `lua/core/secret_guard.lua`
+(`secret_path_denied`: "an agent tool neither reads nor writes it (wa show / wa vault are the surfaces)"), so
+the census reads the same table through the surface that guard names: SELECT-only `host.sql_rows` from a
+`WA_SCRIPT` (the product's own seam), counts only, no content.
 
-So the 51 tools that used to accept anything were, in the last week, hit with an undeclared name exactly
-three times - all on `run`, where the model reached for `timeout`/`timeout_s` (the schema says
-`timeout_ms`) and twice for names that are not arguments at all. Each of those three calls now costs one
-refusal and one round instead of running with the field silently dropped.
+* window: `created_at` in the last 7 days (`lo 1794995620 .. hi 1795650188`)
+* assistant tool calls whose target is a known host tool: **52 063**
+* calls carrying an undeclared argument name: **3 calls, 1 tool (`run`)** - fields `timeout`, `timeout_s`,
+  `rows`, `ry`; **0** argument texts failed to parse
+* so: **1 of the 51** tools was hit with an undeclared name in 7 days, in 3 calls (0.006% of the 52 063).
+
 
 ### 5.4 Rows
 
