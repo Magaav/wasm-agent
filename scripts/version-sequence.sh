@@ -59,12 +59,12 @@ ID="$(wa_version_id "$COMMIT")" || exit 2
 PREV="$(wa_version_current 2>/dev/null || true)"
 
 # 1. CONVERT (the conversion is its own step, and it verifies).
-say "step 1 convert"
+say "SEQSTEP 1 convert"
 bash "$(dirname "$0")/versions-adopt.sh" --install "$INSTALL" --share "$SHARE" \
   || die "version_folders_adopt_failed: the conversion failed; the in-place install is untouched"
 
 # 2. STAGE.
-say "step 2 stage"
+say "SEQSTEP 2 stage"
 [ -n "$SHARE" ] && [ -n "$ID" ] || die "version_folders_names: empty share root or version id"
 STAGE="$SHARE/versions/.stage-$ID"
 rm -rf "$STAGE"; mkdir -p "$STAGE" || die "version_folders_stage_unwritable: $STAGE"
@@ -80,12 +80,12 @@ mkdir -p "$STAGE/scripts" && cp -a "$ROOT/scripts/." "$STAGE/scripts/" || die "v
 cp -a "$ROOT/ui" "$STAGE/ui" || die "version_folders_member_failed: ui"
 
 # 3. SEAL AND POINT - before any restart.
-say "step 3 seal and point"
+say "SEQSTEP 3 seal and point"
 bash "$(dirname "$0")/version-install.sh" --staging "$STAGE" --commit "$COMMIT" --install "$INSTALL" \
   || die "version_folders_seal_failed: the staged version could not be sealed or pointed at"
 
 # 4. RESTART through the pointer; a failed restart moves the pointer BACK by one rename.
-say "step 4 restart through the pointer"
+say "SEQSTEP 4 restart through the pointer"
 if ! WA_UPGRADE_FORCE_REASON="$FORCE_REASON" WA_INSTALL_DIR="$INSTALL" WA_UPGRADE_REASON="$REASON" \
      WA_UPGRADE_VIA="$VIA" bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL/deploy-upgrade.log" 2>&1; then
   if [ -n "$PREV" ]; then
@@ -101,7 +101,7 @@ if ! WA_UPGRADE_FORCE_REASON="$FORCE_REASON" WA_INSTALL_DIR="$INSTALL" WA_UPGRAD
 fi
 
 # 5. THE SENTINEL MOVES LAST.
-say "step 5 sentinel move"
+say "SEQSTEP 5 sentinel move"
 if [ -n "$PREV" ]; then
   WA_SENTINEL_NODE_HEALTHY=1 wa_sentinel_move "$INSTALL" "$SHARE/versions/$PREV" || {
     rc=$?

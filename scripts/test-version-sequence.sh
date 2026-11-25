@@ -104,8 +104,10 @@ ok
 # the ORDER: convert before stage before seal before restart before sentinel
 # `grep -o`, not `grep -n | cut -d: -f2`: the line-number prefix became the second field, so the first version read
 # the program name five times (rows/20261125T233250Z-24786).
-order="$(grep -o 'step [1-5]' "$W/seq1.log" | tr -d ' ' | tr '\n' ',')"
-case "$order" in 'step1,step2,step3,step4,step5,') ;; *) fail "happy: the steps did not run in order ($order)";; esac
+# The sequence's OWN marker. "step N" matched version-install.sh's numbered steps in the same log, which made the
+# order look wrong (rows/20261125T233514Z-16680).
+order="$(grep -o 'SEQSTEP [1-5]' "$W/seq1.log" | tr -d ' ' | tr '\n' ',')"
+case "$order" in 'SEQSTEP1,SEQSTEP2,SEQSTEP3,SEQSTEP4,SEQSTEP5,') ;; *) fail "happy: the steps did not run in order ($order)";; esac
 ok
 
 # --- 2. a FAILED restart moves the pointer BACK -----------------------------------------------------------------
