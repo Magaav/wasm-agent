@@ -86,9 +86,20 @@ if (!existsSync(join(root, 'lua')) || !existsSync(join(root, 'rust'))) {
 }
 
 // ---- the allow-list first: an exempt door is not shipped and its closure is not walked --------------
+// IS THIS THE PRODUCT TREE? The update capability's own Lua is what hands a door to a shell (update.lua
+// runs the installed updater; remote_update.lua execs release-install.sh and rollback-node.sh), so a tree
+// that carries neither cannot be expected to name one - measured 25/11: the release-channel e2e packs a
+// PUBLISHED bundle from a fixture repo with two stub Lua files and no such code. The same fact decides the
+// ALLOW-LIST below: an exemption for a door this tree does not exec is stale in the product tree (that is the
+// rule this file exists for) and meaningless in a fixture, which carries the allow file only because main's
+// 24/11 fix copies all of scripts/lib into the e2e fixture by rule.
+const productTree = existsSync(join(root, 'lua/core/update.lua')) || existsSync(join(root, 'lua/core/remote_update.lua'))
 const allowPath = join(root, 'scripts/lib/install-script-doors.allow');
 const exempt = new Map();
-if (existsSync(allowPath)) {
+if (!productTree && existsSync(allowPath)) {
+  process.stderr.write('install-script-doors: door_list_fixture_tree: ' + allowPath + ' is not consulted - this tree is not the product tree, so an exemption in it describes code this tree does not carry\n')
+}
+if (productTree && existsSync(allowPath)) {
   for (const raw of readFileSync(allowPath, 'utf8').split('\n')) {
     const line = raw.trim();
     if (line === '' || line.startsWith('#')) continue;
@@ -195,7 +206,6 @@ const sources = walk(join(root, 'lua'), '.lua', []).filter((f) => !isTestPath(f)
 // neither cannot be expected to name one - measured 25/11: the release-channel e2e packs a PUBLISHED bundle from
 // a fixture repo with two stub Lua files and no such code, and refusing that was wrong. A tree that DOES carry
 // them and still names no door is the defect this list exists for, and it stays red.
-const productTree = existsSync(join(root, 'lua/core/update.lua')) || existsSync(join(root, 'lua/core/remote_update.lua'))
 if (found.size === 0) {
   if (!productTree) {
     process.stderr.write('install-script-doors: door_list_fixture_tree: nothing in ' + root + ' names an install-relative script, and this tree does not carry lua/core/update.lua or lua/core/remote_update.lua, so it is not the product tree and cannot name a door (it carries ' + sources + ' Lua/Rust source(s))\n')
