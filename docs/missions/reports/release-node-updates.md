@@ -382,6 +382,26 @@ reads /home/victor/wasm-agent/checkout, ~/.local/bin/installed.txt is unchanged 
 and the live node answers /health 200. Nothing of mine runs now: every scratch sentinel/node/rendezvous I
 started was stopped by PID (registry 19890, peer011, peerfix, gr-row watcher and registry 17890).
 
+## 9b. Cut condition 1 in progress: the v0.1.1 node's LOCAL door on a test channel (commit 1f8a34d4)
+
+Fable: the two unrun rows are CUT conditions, they continue after this lands. This is the first of them.
+
+Writing the row found the reason it had never been testable. scripts/install.sh resolves the index it reads
+(WA_INSTALL_BASE / WA_INSTALL_REF, or the new WA_INSTALL_INDEX), fetches the CORE from that channel - and then
+ran the core WITHOUT --index, so bootstrap.sh fell back to its own default, the PUBLIC index. A v0.1.1 node whose
+updater had just read a local channel therefore compared itself against GitHub and answered
+"this node already runs the newest published bundle (v0.1.1); nothing to do", measured in the row's first run.
+
+FIX (1f8a34d4): the linux channel passes the index it read to the core, and WA_INSTALL_INDEX names one
+explicitly. scripts/test-install.sh 56 -> 58 checks (both new rows red before it).
+
+WHAT THE ROW'S FIRST RUN ALSO TAUGHT (its own bugs, fixed in the next commit): a file:// channel must be laid
+out PER COMMIT - scripts/install.sh resolves the core at <base>/<the commit the index names>/scripts/linux/
+bootstrap.sh, the shape raw.githubusercontent.com/<repo>/<sha>/ has - so the row now writes that directory and
+links <base>/main to it. And its assertion that the update was accepted matched the word "installed" inside
+"nothing was installed": it now asserts the node is NOT told it is current, that the answer names the release
+the channel carries, and that the version and installed.txt actually move.
+
 ## 10. Not done, and known failures
 
 - CUT CONDITION, not a landing condition (Fable 25/11): the v0.1.1 peer upgrading itself by LOCAL

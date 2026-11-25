@@ -113,12 +113,16 @@ TRIPLE=$(sed -n 's/^target_triple=//p' "$BUNDLE/bundle.manifest" | head -1)
 ASSET2=$(basename "$(ls "$BUILD"/wa-linux-*.tar.gz | head -1)")
 # WA_INSTALL_BASE/REF shape: <base>/<ref>/releases/index-linux.json, <base>/<ref>/scripts/linux/bootstrap.sh,
 # its libs, and config/release-keys.txt - a local copy of this checkout, which is what a published channel is.
-BASE="$R/base"; REF=main; TREE="$BASE/$REF"
+# A LOCAL CHANNEL IS LAID OUT PER COMMIT: scripts/install.sh resolves the core at
+# <base>/<the commit the index names>/scripts/linux/bootstrap.sh - the shape raw.githubusercontent.com/<repo>/<sha>/
+# has - so the row writes that directory (and keeps <base>/main as a link, which is what WA_INSTALL_REF names).
+BASE="$R/base"; REF=main; TREE="$BASE/$COMMIT"
 mkdir -p "$TREE/releases" "$TREE/scripts/linux" "$TREE/scripts/lib" "$TREE/config" "$TREE/assets"
 cp -f "$ROOT/scripts/linux/bootstrap.sh" "$TREE/scripts/linux/bootstrap.sh"
 for lib in release-signing.sh release_verify.py install-record.sh node-pins.sh; do cp -f "$ROOT/scripts/lib/$lib" "$TREE/scripts/lib/$lib"; done
 cp -f "$ROOT/config/release-keys.txt" "$TREE/config/release-keys.txt"
 cp -f "$BUILD/$ASSET2" "$TREE/assets/$ASSET2"
+ln -sfn "$COMMIT" "$BASE/$REF"
 python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$TREE/assets" --key A >/dev/null 2>&1 || skip 'the branch channel could not be signed'
 MANSHA2=$(sha256sum "$BUNDLE/bundle.manifest" | cut -d' ' -f1)
 INSHA=$(sha256sum "$ROOT/scripts/linux/bootstrap.sh" | cut -d' ' -f1)
@@ -158,7 +162,14 @@ ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 300 "$PEER/install/wa" update
 printf '%s\n' "$ANSWER" | sed 's/^/    /' | tail -6
 UNSUPERVISED=0
 printf '%s' "$ANSWER" | grep -q 'release_update_unsupervised' && UNSUPERVISED=1
-ok "$(printf '%s' "$ANSWER" | grep -Eq 'queued|installed' && echo 1)" "the v0.1.1 node's own `wa update` accepts the release from the local channel" "$(printf '%s' "$ANSWER" | tail -2)"
+# THREE THINGS, NOT ONE WORD: the updater must NOT answer that the node is current (the defect this row found -
+# it compared against the public index while reading a local one), it must name the release it found, and the
+# install must then happen (asserted by the version and the record below, not by the word "installed").
+ok "$(printf '%s' "$ANSWER" | grep -q 'already runs the newest published bundle' && echo 0 || echo 1)" \
+  "the updater did NOT answer that the node is already current (it read the local channel, not the public index)" \
+  "$(printf '%s' "$ANSWER" | tail -3)"
+ok "$(printf '%s' "$ANSWER" | grep -q "$SHORT" && echo 1)" \
+  "and it names the release the local channel carries: $SHORT" "$(printf '%s' "$ANSWER" | tail -2)"
 if [ "$UNSUPERVISED" = 1 ]; then
   # No user manager here (the runner withholds one): the product names the command it would have run in a
   # transient unit, and the row runs exactly that command - its own words, no workaround.
