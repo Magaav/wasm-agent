@@ -821,8 +821,28 @@ function M.check(options)
 end
 
 function M.run(options)
-  if host.getenv('WASM_AGENT_PROVENANCE')=='child' then return {ok=false,error='update_coordinator_only',status='refused',message='Workers merge/report; only coordinator requests installation.'} end
   options = options or {}
+  -- A CHILD SHELL DOES NOT INSTALL. A worker session merges and reports; only a coordinator request
+  -- installs (measured 24/11: a child that ran `wa update` replaced the node).
+  --
+  -- ...AND THE ONE CONTINUATION OF AN INSTALL IS NOT A CHILD (mission release-node-updates, D7, 25/11).
+  -- lua/core/remote_update.lua answers a master's update request by ACCEPTING it and running the rest in a
+  -- detached child (`wa update --accept <id>`, M.spawn_accepted): the host stamps every detached operation
+  -- with the marker of the process that started it, so on a node whose own process carries `child` (a node
+  -- started from an agent's shell - exactly the dry run's peer) the child was refused HERE, one line before
+  -- the work, with `update_coordinator_only`. The fleet step then failed on BOTH kinds of node: a release
+  -- node with no_runtime_tree (D1), a tree node with this.
+  --
+  -- The accepted child is not a worker starting an install: it is the tail of a request that
+  -- lua/core/remote_update.lua admitted only after the caller's signature checked out against this node's
+  -- roster/binding, that it wrote down with the target commit in its own record, and that it hands out
+  -- ONCE (M.run_accepted claims the id with mkdir before this line runs). run_accepted is the one caller
+  -- that passes `signed_request`; the CLI has no flag that sets it, and M.request_command below still
+  -- clears the marker for the sentinel request itself (the reviewed escape, update.lua around :934). So
+  -- the marker keeps meaning what it says for every other shell, hook and tool a child may run.
+  if host.getenv('WASM_AGENT_PROVENANCE')=='child' and options.signed_request ~= true then
+    return {ok=false,error='update_coordinator_only',status='refused',message='Workers merge/report; only coordinator requests installation.'}
+  end
   local facts = M.facts(options)
   -- A release check is a question, not a deploy. `/update` with `check` never writes a request, never
   -- synchronizes the tree and never takes a backup: it is the one path a window calls on load, and a

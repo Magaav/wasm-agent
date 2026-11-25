@@ -1001,6 +1001,10 @@ check session-park bash scripts/test-session-park.sh
 # processes: a real node and a real `wa chat --once` worker, and the real sentinel binary against a stub /health.
 # Their Lua halves (scripts/test-deploy-wait.lua) are fast-path rows by name.
 WA_BIN="$bin" check deploy-wait bash scripts/test-deploy-wait.sh
+# WHAT A REQUEST RECORDS WHEN A NAMED MAIN IS BEHIND ORIGIN (24/11): the real sentinel writes the request in a
+# fixture repository whose bundle main is behind origin/main, and the node's own Lua prints the pause,
+# 'did not happen' and release lines - each must name the commit a deploy would install.
+WA_BIN="$bin" check deploy-target bash scripts/test-deploy-target.sh
 # THE UPGRADE FROM THE LAST RELEASE (Fable 24/11): a ledger created by v0.1.1's own setup, upgraded by THIS
 # tree, must have a fresh ledger's columns and must dispatch a wake. RED on main: self_wakes missing run_id.
 WA_BIN="$bin" check ledger-upgrade bash scripts/test-ledger-upgrade.sh
@@ -1009,6 +1013,11 @@ WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
 # marker mid-turn pauses the turn; the marker then goes with nothing installed and the node's own tick runs
 # exactly ONE resume turn whose ledger row carries '[deploy] the update did not happen'.
 WA_BIN="$bin" check deploy-release-node bash scripts/test-deploy-release-node.sh
+# AN INSTALL HOLDS A SESSION ONCE, FROM ITS FIRST PAUSE UNTIL THE NODE IS BACK (r8c G blocker): a real scratch node
+# where the deploy is CLAIMED and moved to done/ at once (the sentinel detaches it) and then compiles for 60 s with no
+# request, no claimed request and no marker - the 21:15Z hole - with three sessions mid-turn, then a killed deploy, a
+# scripts-only install and two requests back to back, every resume counted at the loopback model.
+WA_BIN="$bin" check deploy-alive-hold bash scripts/test-deploy-alive-hold.sh
 # ONE TURN, ONE PROVIDER REQUEST (r8a/4, 8ef62fea): the instrument every later paid-turn assertion needs - a
 # turn against a stub provider this row owns, asserting exactly ONE request for one turn. It needs no live
 # node and no real provider: its own `wa chat --once --offline` in a scratch home, a loopback stub on an
@@ -1286,6 +1295,17 @@ check preflight bash scripts/test-preflight.sh
 # is a recorded fact; and a finished mission lands itself. Each is seconds and self-contained (a fixture
 # repository, a stub landing, a stub fast path), so they belong on the fast path and not only in the nightly.
 check regenerate bash scripts/test-regenerate.sh
+# A FEDERATED CONNECTOR READ BETWEEN TWO REAL SCRATCH NODES (24/11, G blocker). The master runs a peer's
+# connector as peer_<node>__<tool>; the call crosses the signed peer call, arrives in the peer's outbound relay
+# lane, and there the node starts a persistent MCP read session as a supervised operation - three things that
+# meet only between processes (the relay lane's runtime owner `relay:<rid>`, the owner Lua names, and the
+# manager's comparison of the two). Measured before the fix: every pair (main->main, main->v0.1.1,
+# v0.1.1->v0.1.1) answered mcp_session_startup_failed / operation_not_yours and left a 3600 s session parked on
+# the peer, while the same read on the peer itself answered ok. It is here and not only in the full gate
+# because "main is green" is a recorded fact about the fast path (scripts/main-health.sh runs this file), and
+# a cross-node connector read is a row nobody had: the bug was green in every single-process test for six days.
+# Three processes, its own homes and ports, no model, no vault, no live fleet; `WA_BIN="$bin"` is what it runs.
+WA_BIN="$bin" check federated-connector-read node scripts/test-federated-connector-read.mjs
 check main-health bash scripts/test-main-health.sh
 check drive bash scripts/test-drive.sh
 # The worker's own gate loop (item 3): a red preflight resumes the SAME session with the failed rows up to

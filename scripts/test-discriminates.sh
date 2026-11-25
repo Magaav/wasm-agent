@@ -322,7 +322,16 @@ run_one() { # <path> <added|modified>
     return
   fi
   if printf '%s' "$last" | grep -Eqi "$ENV_RE"; then
-    record environment "$path" "the machine could not run it: $(printf '%s' "$last" | grep -Eo "$ENV_RE" | head -1)"
+    # THE REASON IS NEVER EMPTY (Fable, 25/11). This test is case-INSENSITIVE and the extraction was not, so a
+    # row that merely said "killed" in its own words - scripts/test-esc-stops-pty.mjs, "the row killed them by
+    # pid" - matched 'Killed' here and then printed nothing, and the verdict read "the machine could not run
+    # it: " with no reason at all. Measured 25/11: the pty row RAN on the base code (21 ok, 1 failed) and was
+    # recorded as environment-with-no-reason, which is neither the truth nor a judgment.
+    reason=$(printf '%s' "$last" | grep -Eoi "$ENV_RE" | head -1)
+    if [ -z "$reason" ]; then
+      reason="the marker matched case-insensitively but not verbatim, so this script cannot name it; last line: $(printf '%s' "$last" | tail -1 | cut -c1-120 | tr '\t' ' ')"
+    fi
+    record environment "$path" "the machine could not run it: $reason"
     return
   fi
   # ...EXCEPT THE ONE LOAD FAILURE LUA PREFIXES WITH `lua error:`: the host answers `lua_root_unreadable: <path>`

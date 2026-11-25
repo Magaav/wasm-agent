@@ -61,6 +61,19 @@ fn block<'a>(log: &'a str, reason: &str) -> Option<(Vec<&'a str>, Option<String>
     Some((lines, terminal))
 }
 
+/// Does the install record name this commit? The record is a commit, or a sentence saying why it names
+/// none ("no install record at …"), and only the first can answer. Either side may be abbreviated (a deploy
+/// records 12 characters, a request 40), so the shorter names the comparison.
+fn names(installed: &str, commit: &str) -> bool {
+    let commit = commit.trim();
+    if commit.len() < 7 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) { return false; }
+    let installed = installed.trim();
+    let hex = installed.bytes().take_while(|b| b.is_ascii_hexdigit()).count();
+    if hex < 7 { return false; } // "no install record at /x" names no commit: unknown is not a yes
+    let length = hex.min(commit.len()).min(40);
+    installed[..length].eq_ignore_ascii_case(&commit[..length])
+}
+
 /// The verdict for one request, from three facts - the commit it asked for, the commit the install record names,
 /// and the installer's log. Pure, so the decision is judged without a filesystem (installer_outcome_tests.rs).
 pub(crate) fn verdict_of(target: &str, installed: &str, log: &str, reason: &str) -> Outcome {
@@ -68,8 +81,11 @@ pub(crate) fn verdict_of(target: &str, installed: &str, log: &str, reason: &str)
     if target.is_empty() {
         return Outcome::Running; // no request, no verdict: unknown is not yes
     }
-    // Installed first: the record is the fact an install leaves, and it is named by commit.
-    if !installed.trim().is_empty() && target.starts_with(installed.trim()) {
+    // Installed first: the record is the fact an install leaves, and it is named by commit. It is POSITIVE
+    // evidence only - a record that names another commit proves nothing here, and never fails the request by
+    // itself; that is the installer's own block below. Caller: hand this the request's expected SHA when it
+    // has one (verdict(id) does), never the advisory target that was recorded at request time.
+    if names(installed, target) {
         return Outcome::Installed;
     }
     match block(log, reason) {
@@ -92,19 +108,60 @@ pub(crate) fn verdict_of(target: &str, installed: &str, log: &str, reason: &str)
 
 /// The verdict for `id`, read from the files a sentinel has: its own queue record for the request, the install
 /// record beside the installed binary, and the installer's log.
+///
+/// WHICH COMMIT THE REQUEST IS JUDGED BY (24/11). A protocol request carries two: `expected_sha`, the commit it
+/// demanded (`--expected-sha`; deploy.sh revalidates it and installs nothing else), and `target_commit`, what a
+/// deploy would have installed when the request was WRITTEN - advisory, and stale as soon as main moves. On
+/// `work` the second was a host bundle's main seven days behind, so a request that installed exactly what it
+/// demanded (`345e51be`) was judged against a commit it never mentioned (`74d48431`) and, with a rotated log,
+/// failed. The demanded commit is read first; the recorded one answers only when no commit was demanded.
 pub(crate) fn verdict(id: &str) -> Option<Outcome> {
     let record = std::fs::read(sentinel_dir().join("done").join(format!("{id}.json")))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())?;
     let request = record.get("request").cloned().unwrap_or(Value::Null);
-    let target = request.get("target_commit").and_then(Value::as_str)
-        .or_else(|| request.get("expected_sha").and_then(Value::as_str))
+    let target = request.get("expected_sha").and_then(Value::as_str)
+        .or_else(|| request.get("target_commit").and_then(Value::as_str))
         .unwrap_or("")
         .to_string();
     let reason = request.get("reason").and_then(Value::as_str).unwrap_or("");
     let installed = deploy_outcome::installed_commit();
     let log = std::fs::read_to_string(log_path()).unwrap_or_default();
     Some(verdict_of(&target, &installed, &log, reason))
+}
+
+/// THE RETRY THIS REQUEST IS OWED, as a command that can run.
+///
+/// MEASURED (24/11): the hint named the request's recorded target as `--expected-sha`, and `deploy.sh` refuses
+/// an expected SHA that is not exactly HEAD and origin/main of its tree - so on `work` the hint read
+/// `--expected-sha 74d48431 ...`, a command that could only be refused (`expected SHA is not exact
+/// origin/main`). A hint therefore carries `--expected-sha` only when the request DEMANDED one and a deploy
+/// would still take that commit; otherwise it asks for what this queue installs anyway - origin/main - with no
+/// pin, and says which of the two absences it is.
+fn retry_hint(request: &Value) -> String {
+    let asked = request.get("reason").and_then(Value::as_str).unwrap_or("");
+    let reason = asked.replace('\'', "");
+    let expected = request.get("expected_sha").and_then(Value::as_str).unwrap_or("");
+    let accepted = !expected.is_empty() && deploy_protocol::expected_sha_accepted(expected);
+    let pin = if accepted { format!(" --expected-sha {expected}") } else { String::new() };
+    // A REQUEST /update WROTE IS RE-ASKED WITH THE VERB THE PERSON USED (Fable, 24/11). /update prefixes its own
+    // reason ("/update: …", lua/core/update.lua), so the hint can tell the two apart: a person who typed
+    // /update must not be handed the sentinel's internal verb first, and must not have to know that
+    // `request deploy` is what /update does. The same command, in the operator's own words, then the sentinel's
+    // spelling for anyone scripting it.
+    let command = if asked.trim_start().starts_with("/update") {
+        format!("run wa update again (or: wa-sentinel request deploy --reason '{reason}'{pin})")
+    } else {
+        format!("re-request with: wa-sentinel request deploy --reason '{reason}'{pin}")
+    };
+    let why = if accepted {
+        " - that commit is still exactly origin/main, so deploy.sh accepts it"
+    } else if expected.is_empty() {
+        " - no --expected-sha: this request demanded no commit, and a commit it only recorded when it was written is not a pin deploy.sh would accept"
+    } else {
+        " - no --expected-sha: the commit it demanded is not exactly origin/main now, and deploy.sh refuses an expected SHA that is not"
+    };
+    format!("{command}{why}")
 }
 
 /// THE REQUEST A SPAWNED INSTALLER NEVER FINISHED ENDS HERE: `failed/` with the installer's own reason, one queue
@@ -126,9 +183,7 @@ pub(crate) fn fail_unobserved(id: &str, why: &str) -> Result<bool> {
     if !request.is_object() {
         return Ok(false);
     }
-    let retry = format!("re-request with: wa-sentinel request deploy --expected-sha {} --reason '{}'",
-        request.get("target_commit").and_then(Value::as_str).unwrap_or(""),
-        request.get("reason").and_then(Value::as_str).unwrap_or("").replace('\'', ""));
+    let retry = retry_hint(&request);
     let detail = format!("the installer ended and nothing was installed: {why}; it is re-queued automatically once, when this node is next quiet; {retry}");
     wa_operation::atomic_json(&failed_path, &json!({
         "request": request, "ok": false, "phase": "unobserved", "detail": detail, "at": now_epoch()

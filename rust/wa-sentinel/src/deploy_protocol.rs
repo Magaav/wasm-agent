@@ -421,41 +421,117 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The commit a deploy queued right now would install: `origin/main` of the tree a deploy builds from.
-///
-/// `request deploy` records this into the request file at the moment it is written, so a later `status`
-/// can say what will be installed even after main has moved. It is advisory evidence, never authority:
-/// `canonical_script` revalidates the source SHA before building and before swapping, so a stale recorded
-/// commit cannot widen what a deploy does - it can only tell an operator what was asked for and when.
-pub(crate) fn target_commit() -> Option<String> {
-    // The same override `deploy.sh` honours, so the recorded commit is the one the deploy would build.
-    let root = std::env::var("WA_DEPLOY_ROOT")
+/// The tree a deploy would build from: the same override `deploy.sh` honours (`WA_DEPLOY_ROOT`), else the
+/// canonical checkout the running binary was installed from.
+fn deploy_root() -> Option<PathBuf> {
+    std::env::var("WA_DEPLOY_ROOT")
         .ok()
         .map(|value| PathBuf::from(value.trim()))
         .filter(|path| path.is_dir())
         .map(Ok)
         .unwrap_or_else(canonical_root)
-        .ok()?;
-    target_commit_at(&root).ok()
+        .ok()
 }
 
-/// `origin/main` as `root` sees it, or an error saying what could not be read.
+/// The commit a deploy queued right now would install, recorded into the request file when it is written.
 ///
-/// Split from the root resolution so a fixture repository can prove that what a request recorded at
-/// request time survives a later move of main.
+/// `request deploy` records this at the moment the request is written, so a later `status` can say what will
+/// be installed even after main has moved. It is advisory evidence, never authority: `canonical_script`
+/// revalidates the source SHA before building and before swapping, so a stale recorded commit cannot widen
+/// what a deploy does - it can only tell an operator what was asked for and when. The rule itself is stated
+/// once, in `docs/DEPLOY-TARGET.md`, and both halves cite it.
+pub(crate) fn target_commit() -> Option<String> {
+    target_commit_at(&deploy_root()?).ok()
+}
+
+/// A `git` answer that is allowed to be "no" or "cannot tell" - both are `None`.
 ///
-/// A checkout that names another source of main (`git config wa.deployRemote <remote>`, deploy.sh rule 2 -
-/// the laptop sandbox's host bundle, 29/10) deploys that remote's main, so that is the commit recorded.
+/// The rule's questions ("is HEAD on this main?", "how far behind is HEAD?") are answered by exit status, and
+/// a ref this checkout cannot read must not be read as a yes: `deploy.sh` skips a main it cannot resolve, and
+/// so does this. The bailing `git` above stays for what a deploy cannot proceed without.
+fn git_answer(root: &Path, args: &[&str]) -> Option<String> {
+    quiet_command("git").arg("-C").arg(root).args(args).output().ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// The refs that may name main for `root`, built the way `deploy.sh` rule 2 builds its `MAIN_REFS`:
+/// `origin/main` first, then each `wa.deployRemote` remote's main, and only refs this checkout can resolve.
+/// The same set, so a request cannot be recorded against a main the installer would never look at.
+fn main_refs(root: &Path) -> Vec<String> {
+    let mut refs: Vec<String> = Vec::new();
+    let mut remotes: Vec<String> = vec!["origin".into()];
+    for remote in git(root, &["config", "--get-all", "wa.deployRemote"]).unwrap_or_default().lines() {
+        let remote = remote.trim();
+        if !remote.is_empty() { remotes.push(remote.to_string()); }
+    }
+    for remote in remotes {
+        let main = format!("{remote}/main");
+        if refs.contains(&main) { continue; }
+        if git_answer(root, &["rev-parse", "--verify", "-q", &main]).is_some() { refs.push(main); }
+    }
+    refs
+}
+
+/// HEAD, when `deploy.sh` rule 2 would accept it as what to install: on one of `refs` and behind none of
+/// them. `None` for a "no" AND for a question this checkout cannot answer - unknown is not a yes, and a
+/// recorded target must never name a commit the installer would refuse.
+fn installable_head(root: &Path, refs: &[String]) -> Option<String> {
+    let head = git_answer(root, &["rev-parse", "HEAD"])?;
+    // With no readable main at all deploy.sh's rule 2 does not run; the sentinel does not mirror that
+    // unchecked build (docs/DEPLOY-TARGET.md), it records origin/main or nothing.
+    if refs.is_empty() { return None; }
+    if !refs.iter().any(|main| git_answer(root, &["merge-base", "--is-ancestor", "HEAD", main]).is_some()) {
+        return None; // not on a named main: deploy.sh refuses an unmerged branch, and so does this
+    }
+    for main in refs {
+        let behind = git_answer(root, &["rev-list", "--count", &format!("HEAD..{main}")])?;
+        if behind != "0" { return None; } // behind a named main: deploy.sh refuses, and so does this
+    }
+    Some(head)
+}
+
+/// What a deploy of `root` would install: the rule stated once in `docs/DEPLOY-TARGET.md`.
+///
+/// HEAD when `deploy.sh` would accept it; `origin/main` otherwise, which is what a deploy installs once the
+/// tree is on main and behind none of them. Never a named remote's main - a `wa.deployRemote` bundle may be
+/// days behind, and recording its tip is how every request on `work` came to name `74d48431` while the
+/// installer built `345e51be` (24/11) - and never a main that is behind `origin/main`.
+///
+/// No fetch: this records what this checkout can see when the request is written, and `deploy.sh` fetches and
+/// revalidates its mains before it builds. A request must not depend on a network call to be written.
+///
+/// Split from the root resolution so a fixture repository can prove what a request records, and that what it
+/// recorded survives a later move of main.
 pub(crate) fn target_commit_at(root: &Path) -> Result<String> {
-    let named = git(root, &["config", "--get-all", "wa.deployRemote"]).unwrap_or_default();
-    let main = named.lines().map(|remote| format!("{}/main", remote.trim()))
-        .find(|main| git(root, &["rev-parse", "--verify", "-q", main]).is_ok())
-        .unwrap_or_else(|| "origin/main".into());
-    let commit = git(root, &["rev-parse", &main]).with_context(|| format!("{main} is not readable"))?;
+    let refs = main_refs(root);
+    let commit = match installable_head(root, &refs) {
+        Some(head) => head,
+        None => git(root, &["rev-parse", "origin/main"])
+            .context("origin/main is not readable, and HEAD is not on a named main it is not behind")?,
+    };
     if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("{main} is not a full commit SHA: {commit}");
+        bail!("recorded target is not a full commit SHA: {commit}");
     }
     Ok(commit)
+}
+
+/// Whether `deploy.sh` would accept `sha` as `--expected-sha` right now: rule 2's tail requires it to be
+/// exactly HEAD and exactly origin/main of the tree a deploy would build, and it refuses anything else
+/// (`scripts/deploy.sh`, the `EXPECTED_SHA` block - "expected SHA is not exact origin/main"). A text that
+/// NAMES a `--expected-sha` command asks this first, so the command it offers is never one the installer
+/// must refuse (measured 24/11: the retry hint offered the stale bundle's main).
+pub(crate) fn expected_sha_accepted_at(root: &Path, sha: &str) -> bool {
+    let sha = sha.trim();
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) { return false; }
+    git_answer(root, &["rev-parse", "HEAD"]).as_deref() == Some(sha)
+        && git_answer(root, &["rev-parse", "origin/main"]).as_deref() == Some(sha)
+}
+
+/// `expected_sha_accepted_at` over the tree a deploy would build. A deploy root that cannot be read is a "no":
+/// a hint may say less, but it may not offer a command nobody can show the installer would take.
+pub(crate) fn expected_sha_accepted(sha: &str) -> bool {
+    deploy_root().is_some_and(|root| expected_sha_accepted_at(&root, sha))
 }
 
 /// Select only the configured runtime repository's PRIMARY checkout. No request-supplied path.

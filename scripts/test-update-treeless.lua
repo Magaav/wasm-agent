@@ -57,6 +57,34 @@ ok(has(tree_refusal and tree_refusal.next, "release"),
   "and the refusal offers the release path by name instead of leaving the operator to guess",
   tree_refusal and tree_refusal.next)
 
+-- ---- (a2) ...AND IT IS ONE LINE THAT CARRIES THE COMMAND (mission release-node-updates, D1, 25/11) ------
+-- Measured on a scratch peer installed from the published v0.1.1 bundle: "wa update peer011 --commit <sha>"
+-- answered three lines of prose that named mode="release" and no command, so the fleet step - which asks for
+-- an exact commit - was told what a release is and not what to type. The line below is what it answers now:
+-- the command, with the caller's own commit in it.
+local line = remote.summary(tree_refusal)
+ok(tree_refusal and tree_refusal.one_line == true,
+  "the refusal says it is a one-line answer", tree_refusal and tostring(tree_refusal.one_line))
+ok(not has(line, string.char(10)) and line == tostring(tree_refusal.message),
+  "the answer a person reads is ONE line, and it is the reply's own message", line)
+ok(has(line, "wa update ") and has(line, "--release") and has(line, "--commit " .. TARGET),
+  "and that one line is the exact command, with the commit the caller asked for", line)
+ok(has(line, "installed from a release"),
+  "it says why the tree door is not the one to use", line)
+ok(remote.next_line(tree_refusal) == nil,
+  "the fix is not printed twice: the line already carries it", tostring(remote.next_line(tree_refusal)))
+ok(remote.next_line({ error = "any_other", observed = "x", summary = "peer any_other: x", next = "do the thing" }) == "do the thing",
+  "a refusal that does NOT carry its fix on the line still gets its next: line")
+ok(has(tree_refusal and tree_refusal.next, "--release --commit " .. TARGET),
+  "reply.next still carries the command on its own, for a tool that reads fields and not sentences",
+  tree_refusal and tree_refusal.next)
+-- No commit named: the release door cannot be asked without one (release_commit_required), so the line asks
+-- for a commit rather than ending in an empty "--commit".
+local no_commit = remote.admit({ action = "request", reason = "treeless, no commit" }, MASTER)
+ok(has(no_commit and no_commit.message, "--commit <40-hex>"),
+  "with no commit to name, the line asks for one instead of printing an empty --commit",
+  no_commit and no_commit.message)
+
 -- ---- (b) --binary on that node takes the release path, and is not refused for a tree it never wanted ----
 local binary = remote.admit({ action = "request", commit = TARGET, mode = "binary", reason = "treeless binary install" }, MASTER)
 ok(binary == nil or binary.error ~= "no_runtime_tree",
@@ -85,6 +113,44 @@ pcall(host.exec, "mkdir -p '" .. empty .. "'", "")
 local none = updater.check({ install = empty, sentinel_dir = sentinel_dir })
 ok(none and has(none.observed, "names no commit"),
   "an install with no record at all is said to have none (not confused with a stale one)", none and none.observed)
+
+-- ---- (f) THE COORDINATOR'S OWN ONE LINE, against the published v0.1.1 peer's verbatim refusal ---------
+-- The node that most needs to say the right thing is the one that cannot be changed: a peer installed from the
+-- published v0.1.1 bundle answers an ordinary commit request with the prose below (MEASURED 25/11 on a scratch
+-- pair, ready-1). The fleet step runs on the COORDINATOR, so the one line has to be built there - from the
+-- selector the operator used and the commit they asked for - and the peer's own words must survive in observed.
+--
+-- Nothing here reaches a node or a roster: host.http is stubbed to answer nothing, because the roster is not
+-- what this row is about and a test must never call a live fleet.
+local peer_http = host.http
+host.http = function() return nil end
+-- A FRESH TABLE PER CALL: the module annotates the reply it is handed, so one shared fixture table would carry
+-- the first call's fields into the second and every row after it would assert the previous row's mutation.
+local function v011_refusal(tweak)
+  return {
+    error = "no_runtime_tree", effect = "none",
+    observed = "this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit",
+    next = 'this node is installed from a release: ask for it with mode="release" (wa update <node> --release), which fetches the published release and installs it as a neighbour process',
+  }
+end
+local answer = remote.request(function() return v011_refusal() end, "peer011", { commit = TARGET, reason = "the fleet step" })
+local answer_line = remote.summary(answer)
+ok(answer and answer.error == "no_runtime_tree", "the refusal is still no_runtime_tree (the code every caller reads)", answer and answer.error)
+ok(answer and answer.one_line == true, "the coordinator marks it as a one-line answer")
+ok(not has(answer_line, string.char(10)) and answer_line == tostring(answer.message),
+  "the answer a person reads is ONE line", answer_line)
+ok(has(answer_line, "wa update peer011 --release --commit " .. TARGET),
+  "and it is the exact command, named for the node the operator asked about, with their commit", answer_line)
+ok(has(answer and answer.observed, "no runtime-worktree.txt"),
+  "the peer's own observation is kept, not replaced by the coordinator's sentence", answer and answer.observed)
+ok(not has(answer_line, 'mode="release"'),
+  "and the prose that named a mode and no command is not what the operator reads", answer_line)
+ok(remote.next_line(answer) == nil, "the command is not printed a second time under next:")
+-- A caller that NAMED its door is not lectured about it.
+local quiet = remote.request(function() return v011_refusal() end, "peer011", { commit = TARGET, mode = "release" })
+ok(quiet and quiet.one_line == nil, "a --release request gets the peer's answer unchanged (it already named the door)",
+  quiet and tostring(quiet.one_line))
+host.http = peer_http
 
 updater.facts = real_facts
 if failed > 0 then error(checks .. " checks, " .. failed .. " FAILED") end
