@@ -91,7 +91,10 @@ I="$W/i1"; in_place "$I" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
 sequence "$I" "$COMMIT" > "$W/seq1.log" 2>&1 || { sed -n '1,10p' "$W/seq1.log" >&2; fail "happy: the sequence must succeed"; }
 grep -q 'version_folders_ok' "$W/seq1.log" || fail "happy: the sequence does not say it finished"
 ok
-[ "$(cat "$W/share/current" 2>/dev/null; WA_SHARE_ROOT="$W/share" . scripts/lib/versions.sh; wa_version_current)" = "$ID" ] || fail "happy: current does not name the new version"
+# ONE command, not two concatenated: the first version read `cat current` and `wa_version_current` into the same
+# string, so it could never equal the id (the runner caught it: rows/20261125T233148Z-25616).
+happy_now="$(WA_SHARE_ROOT="$W/share" bash -c '. scripts/lib/versions.sh; wa_version_current' 2>/dev/null)"
+[ "$happy_now" = "$ID" ] || fail "happy: current is '$happy_now', not the new version"
 [ -f "$W/share/versions/$ID/version.txt" ] || fail "happy: no version folder"
 ok
 for name in wa lua-core scripts; do
