@@ -316,7 +316,7 @@ fi
 SENT=
 for _ in $(seq 1 60); do
   "$INSTALL/wa-sentinel" status 2>/dev/null | grep -q 'sentinel:.*watching' && { SENT=1; break; }
-  [ "$_" = 1 ] && env HOME="$HOME" WASM_AGENT_HOME="$HOME" WASM_AGENT_DATA="$DATA"       WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" WA_SENTINEL_SUPERVISOR=none       WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl" "$INSTALL/wa-sentinel" start > "$W/sentinel-start.log" 2>&1
+  [ "$_" = 1 ] && env HOME="$HOME" WASM_AGENT_HOME="$HOME" WASM_AGENT_DATA="$DATA"       WA_PORT="$PORT" WA_CLIENT_PORT="${CLIENT_PORT:-$((PORT + 1))}" WA_SENTINEL_SUPERVISOR=none       WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl" "$INSTALL/wa-sentinel" start > "$W/sentinel-start.log" 2>&1
   sleep 0.5
 done
 if [ -z "$SENT" ]; then
