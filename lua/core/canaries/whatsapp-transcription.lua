@@ -10,11 +10,6 @@ local guard = dofile('lua/core/canaries/guard.lua')
 local M = { mode = 'read' }
 
 function M.run()
-  -- An account of this kind must be configured on this node before the index means anything
--- (lua/core/canaries/account.lua): an empty index here is 'not proven', not a broken feature.
-  local account = dofile('lua/core/canaries/account.lua')
-  local present, why = account.present('wa-whatsapp')
-  if not present then return 'not_proven', 'no_account', why end
   local ran, ok, stage, detail = guard.no_send(function()
     if type(host.whatsapp_search) ~= 'function' then return false, 'capability_missing', 'this binary has no whatsapp_search' end
     local answered, raw = pcall(host.whatsapp_search, json.encode({ kind = 'voice', limit = 5 }))

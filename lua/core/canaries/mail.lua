@@ -19,11 +19,6 @@ end
 -- reports the feature off-node instead of guessing.
 local M = { mode = 'read' }
 function M.run()
-  -- An account of this kind must be configured on this node before the index means anything
--- (lua/core/canaries/account.lua): an empty index here is 'not proven', not a broken feature.
-  local account = dofile('lua/core/canaries/account.lua')
-  local present, why = account.present('wa-email')
-  if not present then return 'not_proven', 'no_account', why end
   if type(host.email_search) ~= 'function' then return false, 'capability_missing', 'this binary has no email_search' end
   local ok, raw = pcall(host.email_search, json.encode({ limit = 1 }))
   if not ok then return false, 'index_unreadable', tostring(raw) end

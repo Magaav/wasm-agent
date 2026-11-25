@@ -192,7 +192,8 @@ function M.run(feature, opts)
     }
   end
   -- THE FOURTH OUTCOME: 'not_proven'. A canary asked a question this node cannot answer - the mailbox and the
-  -- linked device live elsewhere (lua/core/canaries/account.lua) - answers `return 'not_proven', stage, why`.
+  -- linked device live elsewhere - answers `return 'not_proven', stage, why`. No detector decides this:
+  -- the canary own answer does (Fable, 25/11).
   -- It is NOT a pass (nothing was proven) and NOT a failure (nothing here is broken), and it records nothing:
   -- the row's last real success keeps its own time, exactly as 'off' does. The release step refuses a release
   -- whose canary is not_proven on EVERY node asked (feature_canary.aggregate).
@@ -277,7 +278,7 @@ end
 -- nowhere: the account lives on some other node, so the release has proven nothing about that feature. It is
 -- not a fail (no node said it was broken) and it is certainly not a pass - so it is named and it is red.
 function M.aggregate(answers)
-  local proven, asked, answered_somewhere, failed, off, nowhere, nodata = {}, {}, {}, {}, {}, {}, {}
+  local proven, asked, failed, off, nowhere = {}, {}, {}, {}, {}
   for _, answer in ipairs(answers or {}) do
     local node = tostring((type(answer) == "table" and answer.node) or "?")
     for _, result in ipairs((type(answer) == "table" and answer.results) or {}) do
@@ -288,15 +289,9 @@ function M.aggregate(answers)
       elseif result.skipped then
         -- off-node is not an answer about this feature's health
       elseif result.not_proven then
-        -- RULING (c), 25/11: only 'no_account' and 'cutting' say the release was not PROVEN; 'no_data' says the
-        -- account is served here and holds nothing of that kind - listed, and never blocking.
-        local stage = tostring(result.stage or '')
-        if stage == 'no_account' or stage == 'cutting' then
-          asked[feature] = (asked[feature] or 0) + 1
-        else
-          answered_somewhere[feature] = true
-          nodata[#nodata + 1] = string.format('%s (%s)', feature, stage ~= '' and stage or 'not_proven')
-        end
+        -- NO STAGE EXCEPTIONS (Fable's final shape, 25/11): a canary not_proven on every node asked was proven
+        -- nowhere, whatever its stage. 'no_data' included.
+        asked[feature] = (asked[feature] or 0) + 1
       elseif result.ok then
         -- a pass on this node: already recorded above, and it is not a failure of anything
       else
@@ -305,15 +300,12 @@ function M.aggregate(answers)
     end
   end
   for feature, count in pairs(asked) do
-    -- RULING (c): blocking only when EVERY answer was no_account/cutting - a node that said no_data answered
-    -- about this account (it is served somewhere and holds nothing), so the release is not blind here.
-    if not proven[feature] and not answered_somewhere[feature] then
+    if not proven[feature] then
       nowhere[#nowhere + 1] = string.format("%s (not proven on %d node(s) asked)", feature, count)
     end
   end
   table.sort(failed); table.sort(nowhere)
-  table.sort(nodata)
-  return { failed = failed, off = off, proven_nowhere = nowhere, not_proven_no_data = nodata }
+  return { failed = failed, off = off, proven_nowhere = nowhere }
 end
 
 return M
