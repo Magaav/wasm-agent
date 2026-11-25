@@ -446,3 +446,64 @@ fn a_job_that_died_on_an_older_component_is_not_the_answer_a_new_call_reads() {
     let again = ask_in(&queue, seam::Op::Contacts, &args, 1, BUILD);
     assert_eq!(again["id"].as_u64(), Some(fresh));
 }
+
+/// The op carried as data answers the SAME bytes as the typed-op path it replaces, and asks the
+/// component the SAME question.
+///
+/// `reactions` is the first op moved onto the data seam (`answer_text`): the host stops naming a variant
+/// per op, which is the coupling that made every WhatsApp change a host rebuild. A move like that is only
+/// safe if it is invisible - the request on the wire, and the answer the tool gives, stay byte for byte
+/// what they were. This test cannot pass on the tree before the change (`ask_text_in` does not exist
+/// there), and on the tree after it fails if either drifts.
+#[test]
+fn the_op_named_as_data_answers_the_same_bytes_as_the_typed_op() {
+    let args = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"});
+    let (_h1, typed_q) = queue("opdata-typed");
+    let (_h2, data_q) = queue("opdata-data");
+
+    // 1. Nothing has answered yet: "still running", byte for byte (it carries the job id, so this also
+    //    pins that both paths queued the same request).
+    let typed = ask_in(&typed_q, seam::Op::Reactions, &args, 1, BUILD);
+    let as_data = ask_text_in(&data_q, "reactions", &args, 1, BUILD);
+    assert_eq!(typed["error"], "whatsapp_reactions_slow");
+    assert_eq!(json_text(&typed), json_text(&as_data));
+
+    // 2. The same question on the wire: the payload the component validates.
+    let typed_job = typed_q.job(wa_queue::JobId(typed["id"].as_u64().expect("typed job id"))).unwrap().unwrap();
+    let data_job = data_q.job(wa_queue::JobId(as_data["id"].as_u64().expect("data job id"))).unwrap().unwrap();
+    assert_eq!(typed_job.payload, data_job.payload, "the component is asked the same bytes");
+    assert_eq!(seam::Request::decode(&data_job.payload).unwrap().op, "reactions");
+
+    // 3. A refusal before anything is queued: the same word, the same sentence.
+    let bad = serde_json::json!({"chat": "not a chat", "id": "3EB0C0FFEE11"});
+    let typed_bad = ask_in(&typed_q, seam::Op::Reactions, &bad, 1, BUILD);
+    let data_bad = ask_text_in(&data_q, "reactions", &bad, 1, BUILD);
+    assert_eq!(data_bad["error"], "whatsapp_reactions_bad_chat");
+    assert_eq!(json_text(&typed_bad), json_text(&data_bad));
+
+    // 4. An op nobody knows is refused by name and writes no job: the typed path cannot even spell it,
+    //    and the data path must not let the word through to the component.
+    let ready_before = data_q.stats(seam::QUEUE).unwrap().ready;
+    let unknown = ask_text_in(&data_q, "nope", &args, 1, BUILD);
+    assert_eq!(unknown["error"], "whatsapp_nope_bad_op");
+    assert_eq!(unknown["ok"], false);
+    assert_eq!(data_q.stats(seam::QUEUE).unwrap().ready, ready_before, "no job for an op nothing can answer");
+
+    // 5. A settled answer is the tool answer, through the same shaper: the data path's job, answered by
+    //    the component, comes back as the component wrote it (never as a slow query).
+    let wa_queue::TakeOutcome::Job(taken) = data_q.take(seam::QUEUE, COMPONENT, None).unwrap() else {
+        panic!("the data path's job must be takeable");
+    };
+    let component_answer = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11", "count": 0, "reactions": []});
+    let settled = seam::answer(seam::Op::Reactions, component_answer.clone());
+    data_q.done_by(taken.id, COMPONENT, &serde_json::to_vec(&settled).unwrap()).unwrap();
+    let answered = settle(&data_q, seam::Op::Reactions, taken.id.0, 1);
+    assert_eq!(json_text(&answered), json_text(&settled), "the tool answer is the component's answer");
+    assert_eq!(answered["ok"], true);
+}
+
+/// One answer as the bytes it leaves the host as: key order is the encoder's, and the comparison is of
+/// the document.
+fn json_text(value: &Value) -> String {
+    serde_json::to_string(value).expect("a JSON value")
+}

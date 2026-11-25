@@ -80,8 +80,12 @@ pub extern "C-unwind" fn message(l: *mut wa_host_support::lua::LuaState) -> std:
 }
 
 /// `host.whatsapp_reactions({chat, id})`.
+///
+/// The first op carried as DATA instead of a variant this module names: the bind says the word on the
+/// wire, `Request::validate` parses it, and nothing in this file has to be edited for the op to exist
+/// (see [`answer_text`], the first slice of "WhatsApp leaves the host").
 pub extern "C-unwind" fn reactions(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
-    answer(l, seam::Op::Reactions)
+    answer_text(l, "reactions")
 }
 
 /// `host.whatsapp_media({chat, id})`.
@@ -146,13 +150,21 @@ pub(crate) fn component_missing() -> Option<(String, Option<String>)> {
 /// node, so the answer names it when the node was told (`WASM_AGENT_WHATSAPP_OWNER`) instead of
 /// pretending the job is in flight. A CLI or `WA_SCRIPT` process has no registry of its own and is
 /// skipped: only the serving node may call its own absent component absent.
+///
+/// One shaper for both spellings of the op (see [`component_absent_text`]): the answer a tool reads
+/// must not depend on whether its capability named a variant or the word on the wire.
 fn component_absent(op: seam::Op) -> Option<Value> {
+    component_absent_text(op.as_str())
+}
+
+/// [`component_absent`] for an op named as data: the same answer, in the tool's own words.
+fn component_absent_text(op: &str) -> Option<Value> {
     let (state, owner) = component_missing()?;
     let detail = match &owner {
         Some(owner) => format!("this node runs no {COMPONENT} component; the WhatsApp account is served by {owner}"),
         None => format!("this node runs no {COMPONENT} component"),
     };
-    let mut answer = seam::refusal(op, "whatsapp_component_absent", detail);
+    let mut answer = seam::refusal_text(op, "whatsapp_component_absent", detail);
     answer["component"] = json!(COMPONENT);
     answer["state"] = json!(state);
     if let Some(owner) = owner {
@@ -172,6 +184,25 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
     1
 }
 
+/// An op named as data: the same call as [`answer`], with the word on the wire instead of the enum.
+///
+/// This is the seam a move out of the hub needs. A bind says `answer_text(l, "reactions")`, so an op
+/// adds no variant and no match arm here - the set of ops is written down once, in `seam::Op` (the
+/// component's dispatch) and in `seam::Request::validate`, which parses the op out of the payload.
+///
+/// Nothing about the answer changes: the same `seam::Request`, the same `validate()`, the same dedupe
+/// key, the same `settle()`, and the same answer shapers - because `validate()` hands back the parsed
+/// `seam::Op` and every shaper downstream still takes it. What is gone is this file's list of ops.
+fn answer_text(l: *mut wa_host_support::lua::LuaState, op: &str) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => component_absent_text(op).unwrap_or_else(|| ask_text(op, &args, seam::WAIT_MS)),
+        Err(_) => seam::refusal_text(op, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
 /// Build the request from the tool's arguments, in the one shape the component reads back.
 ///
 /// The count is one field on the wire and two names in the catalogue: `limit` for the ops that page an
@@ -179,14 +210,24 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
 /// not page anything). Either name is accepted for either op, so a caller that says `count` to a
 /// search or `limit` to a backfill is understood instead of silently getting the default.
 fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusal> {
+    request_of_text(op.as_str(), args)
+}
+
+/// [`request_of`] with the op as the word on the wire: the same request, the same checks.
+///
+/// The one piece of op knowledge left here is the count's name - `count` before `limit` for `backfill`,
+/// which pages nothing and asks the phone how many messages to reach for. It is kept verbatim, keyed by
+/// the word, so this is not a place the wire shape can drift.
+fn request_of_text(op: &str, args: &Value) -> Result<seam::Verified, seam::Refusal> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
     let number = |key: &str| args.get(key).and_then(Value::as_i64);
-    let limit = match op {
-        seam::Op::Backfill => args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64)),
-        _ => args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64)),
+    let limit = if op == seam::Op::Backfill.as_str() {
+        args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64))
+    } else {
+        args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64))
     };
     let request = seam::Request {
-        op: op.as_str().to_string(),
+        op: op.to_string(),
         q: text("q"),
         chat: text("chat"),
         id: text("id"),
@@ -236,6 +277,24 @@ fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: 
         Err(answer) => return answer,
     };
     settle(q, op, id, wait_ms)
+}
+
+/// [`ask`] for an op named as data.
+fn ask_text(op: &str, args: &Value, wait_ms: u64) -> Value {
+    ask_text_in(&queue(), op, args, wait_ms, &component_build())
+}
+
+/// [`ask_in`] for an op named as data: validate, enqueue, wait - the same three steps, the same queue.
+fn ask_text_in(q: &wa_queue::Queue, op: &str, args: &Value, wait_ms: u64, build: &str) -> Value {
+    let verified = match request_of_text(op, args) {
+        Ok(verified) => verified,
+        Err(refusal) => return seam::refusal_text(op, refusal.code, refusal.detail),
+    };
+    let id = match enqueue(q, &verified, build) {
+        Ok(id) => id,
+        Err(answer) => return answer,
+    };
+    settle(q, verified.op, id, wait_ms)
 }
 
 fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified, build: &str) -> Result<u64, Value> {

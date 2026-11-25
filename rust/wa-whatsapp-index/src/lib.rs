@@ -688,10 +688,19 @@ pub fn answer(op: Op, body: serde_json::Value) -> serde_json::Value {
 /// The answer of a query that was refused or failed: a word, one line of detail, no text, and never
 /// an `ok` a caller could read as success.
 pub fn refusal(op: Op, code: &str, detail: impl AsRef<str>) -> serde_json::Value {
+    refusal_text(op.as_str(), code, detail)
+}
+
+/// [`refusal`] for a caller that carries the op as the word on the wire instead of the enum.
+///
+/// The bytes are the enum version's by construction: `refusal` is this function plus `op.as_str()`, and
+/// `Op::tool()` is `whatsapp_<word>` for every op. It exists so a host bind can name its op as DATA
+/// (`answer_text(l, "reactions")`) and still refuse in the tool's own words before anything is asked.
+pub fn refusal_text(op: &str, code: &str, detail: impl AsRef<str>) -> serde_json::Value {
     serde_json::json!({
         "ok": false,
-        "op": op.as_str(),
-        "error": format!("{}_{code}", op.tool()),
+        "op": op,
+        "error": format!("whatsapp_{op}_{code}"),
         "detail": detail.as_ref().chars().take(160).collect::<String>(),
         "effect": "none",
     })
