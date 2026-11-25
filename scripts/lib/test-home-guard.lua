@@ -11,9 +11,12 @@
 -- ledger in it - because that path does not END in `/.wasm-agent`.
 --
 -- So the rule is an ALLOW-LIST plus an independent refusal, and both name their reason:
---   1. the home must sit under the scratch root the suite owns (GATE_ROOT, else TMPDIR). Anything
---      else - a real home, a sibling worktree, a path someone typed - refuses without further
---      inspection;
+--   1. the home must sit under a scratch root the run owns: the one the caller names (GATE_ROOT, else
+--      TMPDIR) OR the orchestrator's row contract root, WA_ROW_SCRATCH_ROOT (25/11, measured in row
+--      20261125T223107Z-6213: the row runner gives a row HOME=<root>/home with TMPDIR=<root>/tmp, so a
+--      guard that knew only TMPDIR refused every Lua row there - "this test writes a ledger: it refuses
+--      to run (the test home <root>/home is not under the scratch root <root>/tmp)"). Anything else - a
+--      real home, a sibling worktree, a path someone typed - refuses without further inspection;
 --   2. it must not carry the live node's own markers, `<home>/.wasm-agent/node.key` (a private key)
 --      or `<home>/.wasm-agent/memory.db` (the ledger and the MCP registry). This is what catches the
 --      case the allow-list alone would wave through on a node whose scratch root is inside its state
@@ -49,6 +52,7 @@ end
 -- nil when the home is safe, else one named reason. `opts`:
 --   home     the WASM_AGENT_HOME the test will write (required)
 --   scratch  the root the suite owns: GATE_ROOT, else TMPDIR (required)
+--   root     the row contract's root (WA_ROW_SCRATCH_ROOT); read from the environment when not given
 --   exists   optional `function(path) -> boolean`, for a test with no filesystem
 --   resolve  optional `function(path) -> path`, to compare real paths (symlinked /tmp)
 function M.reason(opts)
@@ -58,18 +62,33 @@ function M.reason(opts)
   if type(home) ~= "string" or home == "" then
     return "no test home (WASM_AGENT_HOME is unset)"
   end
-  if type(scratch) ~= "string" or scratch == "" then
-    return "no scratch root (GATE_ROOT and TMPDIR are both unset), so a home cannot be told from a real one"
+  -- THE ROOTS THIS RUN MAY NAME: the caller's (GATE_ROOT, else TMPDIR) and the row contract's own, which the
+  -- orchestrator's runner exports and the fast path does not (25/11). One allow-list, two spellings, and the home
+  -- still has to be UNDER one of them - this widens nothing about a real home.
+  local roots = {}
+  if type(scratch) == "string" and scratch ~= "" then roots[#roots + 1] = scratch end
+  local contract_root = opts.root
+  if contract_root == nil and type(host) == "table" and type(host.getenv) == "function" then
+    local ok, value = pcall(host.getenv, "WA_ROW_SCRATCH_ROOT")
+    if ok and type(value) == "string" and value ~= "" then contract_root = value end
+  end
+  if type(contract_root) == "string" and contract_root ~= "" then roots[#roots + 1] = contract_root end
+  if #roots == 0 then
+    return "no scratch root (GATE_ROOT, TMPDIR and WA_ROW_SCRATCH_ROOT are all unset), so a home cannot be told from a real one"
   end
   local exists = opts.exists or host_exists
   local resolve = opts.resolve
-  local resolved_home, resolved_scratch = normalize(home), normalize(scratch)
-  if resolve then
-    resolved_home = normalize(resolve(home))
-    resolved_scratch = normalize(resolve(scratch))
+  local resolved_home = normalize(home)
+  if resolve then resolved_home = normalize(resolve(home)) end
+  local allowed, named = false, {}
+  for _, root in ipairs(roots) do
+    local resolved_root = normalize(root)
+    if resolve then resolved_root = normalize(resolve(root)) end
+    named[#named + 1] = resolved_root
+    if under(resolved_home, resolved_root) then allowed = true end
   end
-  if not under(resolved_home, resolved_scratch) then
-    return "the test home " .. resolved_home .. " is not under the scratch root " .. resolved_scratch
+  if not allowed then
+    return "the test home " .. resolved_home .. " is not under the scratch root " .. table.concat(named, " or ")
   end
   for _, marker in ipairs(M.MARKERS) do
     local path = resolved_home .. "/.wasm-agent/" .. marker
