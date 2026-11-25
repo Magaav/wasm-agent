@@ -288,7 +288,32 @@ do
   local answer = dofile('lua/core/mcp_cli.lua').run_cli({ 'list' }, { print = function(line) printed[#printed + 1] = line end,
     ctx = ctx, list_options = { cache_only = true, counts = false } })
   ok(answer.ok == true, 'wa mcp list answers: ' .. json.encode({ ok = answer.ok, error = answer.error }))
-  ok(table.concat(printed, '\n') == text80, 'wa mcp list prints exactly what /mcp draws')
+  -- ONE LIST, TWO RENDERERS, still character for character (25/11). Two lines belong to the SURFACE and not
+  -- to the list: the age line names the verb that surface answers to ("/mcp refresh" in a chat,
+  -- "wa mcp list --refresh" in a pipe), and a pipe has no keys, so the panel's key hint row is not printed
+  -- there. Every other row must be identical, in the same order - that is what this row proves instead of a
+  -- whole-text comparison that the two deliberate lines would break.
+  local function rows_without_surface_lines(text)
+    local rows, age = {}, nil
+    for _, row in ipairs(lines_of(text)) do
+      if has(row, 're-reads them') then age = row
+      elseif row ~= balloon.hint_for(root) then rows[#rows + 1] = row end
+    end
+    -- The hint is a block: a blank row and then the hint row. Removing the hint row leaves that blank
+    -- behind in the chat's text and nowhere in the pipe's, so the trailing blank goes with it - both texts
+    -- end on their last row.
+    while #rows > 0 and rows[#rows] == '' do table.remove(rows) end
+    return rows, age
+  end
+  local chat_rows, chat_age = rows_without_surface_lines(text80)
+  local cli_rows, cli_age = rows_without_surface_lines(table.concat(printed, '\n'))
+  ok(table.concat(cli_rows, '\n') == table.concat(chat_rows, '\n'),
+    'wa mcp list prints the same rows as /mcp draws, in the same order')
+  ok(has(chat_age or '', '/mcp refresh re-reads them'), 'the balloon names its own refresh verb: ' .. tostring(chat_age))
+  ok(has(cli_age or '', 'wa mcp list --refresh re-reads them'), 'and the pipe names the one it can run: ' .. tostring(cli_age))
+  ok(has(text80, 'Enter opens a connector \u{b7} Esc or \u{2190} closes'),
+    'the panel keeps its key hint: a chat has a keyboard')
+  ok(not has(table.concat(printed, '\n'), 'Esc or \u{2190}'), 'a pipe is not told about keys it does not have')
   -- `all` is declared on its own line: a closure created inside the declaration that defines it captures
   -- the global, not the local (the first version of this row did exactly that and indexed nil).
   local all = {}
@@ -302,6 +327,99 @@ do
     { print = function(line) refused_flag[#refused_flag + 1] = line end, ctx = ctx })
   ok(bad.ok == false and bad.error == 'mcp_usage' and bad.exit == 2,
     'an argument nothing knows is refused by name: ' .. json.encode(bad))
+end
+
+-- ================================================= 3. the list never asks another node (25/11)
+--
+-- The brief: "Budget: the local list in under 200 ms. Whatever needs another node is cached, or arrives
+-- after; it never blocks the first paint." Measured before this section existed: "wa mcp list" 3.5 s and
+-- 6.4 s on the laptop and 3.4 s here - the federation catalogue re-read whenever its ten-minute cache was
+-- old, and the WhatsApp row asking the account node for its chat count on every run (2.3 s on avell).
+--
+-- Two things are proved here, and neither is a wall-clock guess:
+--   * STRUCTURAL: with a catalogue that is an hour old, a read (the operator's own `wa mcp list`, no flags)
+--     leaves that catalogue exactly as old as it found it - the rows come from the cache and no peer is
+--     asked. Before this round the same call refreshed it (the age would reset), which is what makes this
+--     row fail there.
+--   * SAID OUT LOUD: the same output carries how old the peer half is and the verb that re-reads it, so a
+--     cached answer is visible on the screen instead of implied by a fast one.
+-- A wall-clock ceiling is asserted too, generous on purpose (this suite runs beside a build on a shared
+-- machine): the measured figure is printed, and the failure that matters - waiting on a peer - is caught by
+-- the catalogue's age, not by a stopwatch a loaded node can trip.
+do
+  local mcp_cli = dofile('lua/core/mcp_cli.lua')
+  local federation_now = dofile('lua/core/federation.lua')
+  -- An hour-old catalogue with the peer row section 2 kept, written where the refresh keeps it.
+  local stale_at = (tonumber(host.now()) or 0) - 3600
+  local aged = { at = stale_at, peers = { ['peer-mail'] = { name = 'mail', node_id = 'peer-mail', at = stale_at,
+    tools = {}, connectors = on_the_peer } } }
+  local wrote = json.decode(host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+    json.encode({ 'federation.catalog.v2', json.encode(aged) })))
+  ok(wrote.ok == true, 'an hour-old catalogue is in the store: ' .. json.encode(wrote))
+  ok(math.abs((tonumber(federation_now.cached().at) or 0) - stale_at) < 1,
+    'and it is what this node reads back: ' .. tostring(federation_now.cached().at))
+
+  local lines = {}
+  local started = host.now()
+  -- NO list_options: this is the operator's own `wa mcp list`, the call whose default is being changed.
+  local answer = mcp_cli.run_cli({ 'list' }, { print = function(line) lines[#lines + 1] = line end, ctx = ctx })
+  local elapsed_ms = ((host.now()) - started) * 1000
+  print(string.format('measured: wa mcp list with an hour-old catalogue %.0f ms', elapsed_ms))
+  local text = table.concat(lines, '\n')
+  ok(answer.ok == true, 'wa mcp list answers with no flags at all: ' .. json.encode({ ok = answer.ok, error = answer.error }))
+  ok(math.abs((tonumber(federation_now.cached().at) or 0) - stale_at) < 1,
+    'a read does not refresh the catalogue: read back ' .. tostring(federation_now.cached().at)
+      .. ', wrote ' .. tostring(stale_at))
+  ok(has(text, 'other nodes: read 1 h 0 min ago'), 'and it says how old the peer rows are: '
+    .. tostring(text:match('[^\n]*other nodes[^\n]*')))
+  ok(has(text, 'wa mcp list --refresh re-reads them'), 'with the verb that re-reads them: '
+    .. tostring(text:match('[^\n]*re-reads[^\n]*')))
+  ok(has(text, 'On other nodes - 1 hidden'), 'the peer rows are there, from the cache: '
+    .. tostring(text:match('[^\n]*On other nodes[^\n]*')))
+  ok(not has(text, 'Esc or \u{2190}'), 'and no key hint ends it: a pipe has no keys')
+  ok(elapsed_ms < 1000, string.format('a read of a cached catalogue is under a second: %.0f ms', elapsed_ms))
+
+  -- `/mcp` between runs is the same read: the chat already passes cache_only (chat.lua, 17/11), and the
+  -- default is now the same for every caller - only `fresh = true` asks the fleet.
+  local chatted = mcp_cli.run('', { ctx = ctx, print = function() end })
+  -- `/mcp`'s view is the balloon stack (`mcp_command.views`: command, captured_at, views, view), the same
+  -- shape `M.views` answers with - the view it was built from is the one that carries the age.
+  local chat_view = type(chatted) == 'table' and chatted.view or nil
+  ok(type(chat_view) == 'table' and chat_view.ok == true, '/mcp answers between runs: ' .. json.encode(chatted))
+  ok(math.abs((tonumber(federation_now.cached().at) or 0) - stale_at) < 1,
+    '/mcp does not refresh the catalogue either: read back ' .. tostring(federation_now.cached().at))
+  ok(chat_view and chat_view.peers_age ~= nil, 'and its view carries the age of the peer rows: '
+    .. tostring(chat_view and chat_view.peers_age))
+
+  -- THE EXPLICIT VERB, in both spellings. It may wait, and it does the reading.
+  local reread = {}
+  local refreshed = mcp_cli.run_cli({ 'list', '--refresh' },
+    { print = function(line) reread[#reread + 1] = line end, ctx = ctx })
+  local refreshed_text = table.concat(reread, '\n')
+  ok(refreshed.ok == true, 'wa mcp list --refresh answers: ' .. json.encode({ ok = refreshed.ok, error = refreshed.error }))
+  ok(has(refreshed_text, 'catalogue re-read'), 'it says what it re-read: '
+    .. tostring(refreshed_text:match('[^\n]*catalogue re-read[^\n]*')))
+  ok((tonumber(federation_now.cached().at) or 0) > stale_at,
+    'and the catalogue is new after it: ' .. tostring(federation_now.cached().at) .. ' > ' .. tostring(stale_at))
+
+  local chat_lines = {}
+  local chat_refresh = mcp_cli.run('refresh', { ctx = ctx,
+    print = function(line) chat_lines[#chat_lines + 1] = line end })
+  ok(chat_refresh.ok == true, '/mcp refresh answers: ' .. json.encode({ ok = chat_refresh.ok, error = chat_refresh.error }))
+  ok(has(table.concat(chat_lines, '\n'), 'catalogue re-read'), 'and says what it re-read: '
+    .. tostring(table.concat(chat_lines, '\n')))
+
+  -- The usage names the verb, so a reader who only types `wa mcp list --help` learns it exists.
+  local help = {}
+  mcp_cli.run_cli({ '--help' }, { print = function(line) help[#help + 1] = line end })
+  ok(has(table.concat(help, '\n'), '--refresh'), 'the usage names --refresh: ' .. table.concat(help, ' | '))
+
+  -- An unknown flag is still refused by name (unknown is not yes) - and --refresh did not loosen that.
+  local refused = {}
+  local bad = mcp_cli.run_cli({ 'list', '--refreshing' },
+    { print = function(line) refused[#refused + 1] = line end, ctx = ctx })
+  ok(bad.ok == false and bad.error == 'mcp_usage' and bad.exit == 2,
+    'a flag nothing knows is refused by name: ' .. json.encode(bad))
 end
 
 if failed > 0 then
