@@ -248,6 +248,10 @@ record_step() { # <dir> <LUA_FAST 0|1> <the commit this deploy holds> -> runs th
     . "$RECORD_STEP"
     note() { printf 'note: %s\n' "$*"; }
     fail() { printf 'deploy: %s\n' "$*" >&2; exit 1; }
+    # deploy.sh defines this ABOVE the block this test extracts (it is how a failure on the far side of the
+    # swap is recorded instead of refusing); the harness has to provide it, or every row that reaches one
+    # reads `post_swap_problem: command not found` - which is what this file reported on 24/11.
+    post_swap_problem() { printf 'post-swap problem: %s\n' "$1"; }
     INSTALL_DIR="$dir"; COMMIT="$held"; BRANCH=main; LUA_FAST="$fast"; RELEASE=''; REASON=''
     SOURCE_ROOT=''; RUNNING_SOURCE=binary; RUNNING_WHY='the running binary reports it'
     RUNNING_COMMIT="$STUB_COMMIT"; INSTALLED_BINARY_COMMIT="$STUB_COMMIT"

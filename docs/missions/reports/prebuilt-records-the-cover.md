@@ -35,7 +35,7 @@ that had already swapped and restarted the node.
 
 | site | before | now |
 | --- | --- | --- |
-| `record_installed`: bytes report another commit than expected | `fail refused(build_commit_mismatch)`, exit 2, NO record (work's interim record stayed) | the pre-swap proof refuses first; the far-side check records a problem and the record is written |
+| `record_installed`: bytes report another commit than expected | `fail refused(build_commit_mismatch)`, exit 2, NO record (work's interim record stayed) | BEFORE the swap it is still that refusal (a build whose bytes are not its commit is never installed - `scripts/test-install-record.sh` pins it); AFTER the swap the same disagreement is a recorded problem and the record is written |
 | `record_installed`: `commit=`/`binary_source_commit=` not 40-hex | `fail`, exit 2, no record | refused BEFORE the swap where the ids are known; after it, `record_id_why=`/`binary_id_why=` + `commit=unknown` |
 | listener pid is not the pid the install recorded | `fail` "two nodes, one port", exit 2 | recorded + exit 3 |
 | sentinel would not start / did not start watching (`fail_installed`) | `fail_installed` printed and exited 1, taking the REST OF THE INSTALL with it - the scripts are shipped after it | recorded, `watcher_command=` written into the record, the deploy goes on and ships everything else, exit 3 |
@@ -91,6 +91,15 @@ quota) and the deploy refused `cargo_unavailable` (its build fallback, on a node
 before the swap, not work's `build_commit_mismatch`. Two attempts showed it. So the red I measured is the cut
 condition, not the incident; the incident itself is work's log, and the green above is the proof that the path
 now completes.
+
+## One of my own changes was a loosening, and the gate caught it (the last commit)
+
+My first cut made the bytes-vs-commit disagreement a recorded problem on EVERY path, including the build path
+before the swap - which deleted a real guard (a build whose bytes are not the commit they were taken for must
+never be installed). `scripts/test-install-record.sh` failed on it (96 checks, 3 failed: "a build whose bytes
+report ANOTHER commit is refused"). The check is now conditional on `SWAPPED`: before the swap it refuses by
+name exactly as it did, after it it records. The same test file needed one fixture line (`post_swap_problem`,
+which deploy.sh defines above the block the test extracts) - its assertions are untouched, and it is 96/0.
 
 ## Also found and fixed (5b38b31b)
 

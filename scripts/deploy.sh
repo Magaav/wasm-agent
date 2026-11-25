@@ -1993,13 +1993,17 @@ record_installed() {
       note "the installed binary cannot report its own build (build_info=absent): installed.txt records commit=unknown, not this deploy's intention"
     fi
   elif ! wa_same_commit "$record_commit" "$record_expected"; then
-    # NOT A REFUSAL ANY MORE (24/11). The bytes were proved against the release they were taken for BEFORE
-    # the swap (the staged binary's --build-info, above); by the time this runs upgrade.sh has restarted the
-    # node, so refusing here would leave the state this check exists to prevent - new bytes running under an
-    # INTERIM record. A disagreement now means the swap installed something other than the bytes this deploy
-    # proved, which is a fact to record loudly (post_swap_problem= below, and the bytes' own answer as
-    # binary_commit=), not a reason to leave the install unrecorded.
-    post_swap_problem recording "the installed binary reports commit ${record_commit:0:12} but this deploy proved ${record_expected:0:12}; the record names the bytes' own answer and record_expected="
+    # BEFORE THE SWAP IT IS STILL A REFUSAL; AFTER IT, A RECORDED PROBLEM (24/11). A build whose bytes are not
+    # the commit they were taken for must never be installed, and this step is reached before the install on
+    # that path - scripts/test-install-record.sh pins it by name. Once upgrade.sh has restarted the node the
+    # bytes serve, so a refusal there would leave the state this check exists to prevent (new bytes running
+    # under an INTERIM record): the disagreement is then recorded, with the bytes' own answer as
+    # binary_commit= and record_expected= naming what was proved.
+    if [ "${SWAPPED:-0}" = 1 ]; then
+      post_swap_problem "recording: the installed binary reports commit ${record_commit:0:12} but this deploy proved ${record_expected:0:12}"
+    else
+      fail "refused(build_commit_mismatch): the binary at $INSTALLED_BIN_FOR_RECORD reports commit ${record_commit:0:12} but this deploy meant to install ${record_expected:0:12} - the bytes are not the commit they were taken for (a stale build artifact, a reused target directory, or a mislabelled release). Nothing was recorded over the previous record."
+    fi
   fi
   # COMMIT= IS THE LUA TREE'S ON A FAST-PATH INSTALL (21/11), and that is not a belief: the tree at $COMMIT is
   # what this deploy installed beside the binary it kept, and commit= is what every reader of this record asks
