@@ -178,15 +178,45 @@ own and a peer call is judged by the peer's schema.
    > the dispatch door's own words: `<tool>` does not take the argument `<name>` - its own schema never
    > declares that name, so nothing ran. It declares: <names>.
 
-## 7. What I could not verify (and did not do)
+## 7. Base discrimination (rule 16): every new or changed row fails on the base
+
+Base worktree `/tmp/tt-base` at `70eb209d` (own build: `/home/victor/wasm-agent/target/m-tt-base`), the
+branch's TEST files copied in, the base tree's own Lua and binary:
+
+| row | on the base | why |
+|---|---|---|
+| `test-unknown-argument.lua` | RED — "the call was refused by the name it sent: null" | base accepts the undeclared name and runs the call |
+| `test-capabilities-filter.lua` | RED — "only the named entries…: [time, remember, …]" | base ignores `names` and answers the whole catalogue |
+| `test-codemode-failure-results.lua` | RED — "both calls that settled are listed: (nothing)" | base answers no `done` |
+| `test-tool-schema-fidelity.lua` | RED — 4 failed ("a schema that declares arguments is closed unless it says otherwise") | base treats an absent `additionalProperties` as open |
+| `test-tool-arguments.lua` | RED — "a name one letter from a declared one is refused WITH the name meant" | base records and runs |
+| `test-edit-aliases.lua` | RED — the handler's `unsupported_edit_option` | base never reaches the contract |
+
+Rust rows: `wa-term` and `wa-whatsapp` were not re-run against the base by me — the new tests name constants
+(`PIN_MARK`) and fields (`hidden`) that the base does not have, so they cannot pass there; `scripts/test-discriminates.sh`
+at the land gate is the authority.
+
+## 7b. Failures that are NOT this branch (run on the base too)
+
+Under the single-row runner I used (its own scratch home, the tree's binary, `cwd` = the repo root), three
+rows fail the same way on the BASE commit, so they are this node/runner and not this change:
+`test-done-gate.lua` (30 failed / 89 checks on the base and on this branch), `test-resource-claims.lua`
+("unknown fixture mode"), `test-native-target-resource.lua` (a nil root). `test-remote-refusals.lua` and
+`test-mcp.lua` fail in the runner for a missing `policy.json` / MCP config in the scratch home.
+
+## 8. What I could not verify (and did not do)
 
 * **A real connector and a real peer.** The one rule is proved against a forwarding TOOL (`remote`, open by
   declaration) and against the host's own schemas, never against a live MCP server or a second node (mission
   rule: no live fleet from work). A connector whose published schema is NARROWER than what it accepts will now
   be refused locally for the difference; `additionalProperties: true` in its schema is the fix, and no such
   connector was measured here.
-* **The full fast path on this exact commit** — the run was started and is queued behind another mission's
-  suite lock; its verdict is in section 8 only if it completed. Rows run singly are listed where they are.
+* **The full fast path on this exact commit** — started twice; the first operation never spawned a
+  process, the second is queued behind another mission's `fast.sh` holding `~/Work/missions/.suite.lock`. Its
+  verdict is in section 9 only if it completed before this report was written; the rows I ran singly are
+  listed where they are (about 40).
+* **A connector's real schema.** No live MCP server or peer was contacted (mission rule). The one rule is
+  proved against the schemas on this node and against a forwarding tool.
 * **The TUI row by eye.** Item 5 is proved by `cargo test`, not by looking at a terminal: the three dots on a
   real multi-line message followed by scrolling it out of view.
 * `scripts/test-discriminates.sh` (base discrimination for the whole branch) was not run by me; the land
