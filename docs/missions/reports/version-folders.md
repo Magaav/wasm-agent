@@ -15,6 +15,13 @@ Branch: `change/version-folders` (based on origin/main `ebf6d2ec`). Requirements
                the next start                     scripts/test-version-repair.lua + 5 more in
                                                   scripts/test-versions.sh through the real start path:
                                                   the absent link is back and the command answered
+    78960a31   S3 + R3: the installer, and a cut   scripts/version-install.sh (9 steps, resumable),
+               at EVERY step boundary             scripts/test-version-install.sh (10 checks: end to end,
+                                                  rerun continues, no-room refused before staging, and a
+                                                  SIGKILL after each of the 8 steps leaves a node whose wa
+                                                  answers and which installs again to the end), plus
+                                                  scripts/lib/scratch-env.sh and the G-condition lint
+                                                  scripts/test-installer-data-isolation.sh (14 checks)
 
 Rows that exist and pass (each named in its failure message):
 
@@ -32,9 +39,11 @@ Rows that do NOT exist yet and are the next commits (named, not implied):
     R5 first half IS green (5a093959): a cut leaves an absent link, and the next start puts it back through
            the real binary (WA_SHARE_ROOT + WA_INSTALL_DIR + this tree's Lua), never replacing a real
            directory and repairing nothing on a healthy install.
-    R3     a SIGKILL at every migration and install step boundary; after each: wa --version, a /health
-           answer, and an update still completes. Needs S3 (the deploy path assembles a version).
-    R8     the sentinel's order and the old-supervisor fallback. Needs S6.
+    R3     GREEN at the step boundaries (78960a31): a SIGKILL after each of the installer's 8 steps, then the
+           install's own wa answers and the same install runs again to the end. The cut INSIDE a step (between
+           "rename the real path aside" and "rename the link onto it") is not reachable from that hook; that
+           window is covered by lua/core/version_repair.lua and scripts/test-version-repair.lua.
+    R8     the sentinel's order and the old-supervisor fallback. Needs S6, which is NOT built yet.
 
 ## The measured ground this is built on (24/11, read-only)
 
@@ -97,6 +106,37 @@ So S4 is Lua (\`lua/core/version_repair.lua\`, called from \`init.lua\` before t
 \`host.file_exists\` does not exist in this host's surface (\`host.path_kind\` answers "missing" for both an absent
 path and a dangling link, which is exactly the question), and \`host.exec\` answers a JSON envelope rather than
 bare stdout (the row built a scratch path out of the envelope on its first run).
+
+## Scratch isolation (Fable 25/11, binding): the G condition and the guard
+
+Every installer run on this branch is isolated by construction, not by habit:
+
+- \`scripts/lib/scratch-env.sh\` holds the clean prefix and a checker over every dimension Fable named - HOME,
+  WASM_AGENT_HOME, the data dir, WA_INSTALL_DIR, the unit dir, WASM_AGENT_DB, XDG_CONFIG_HOME,
+  WA_RUNTIME_WORKTREE, WA_SENTINEL_SCRIPTS, a stub systemctl (never the real one), the ports (never
+  8799/8800/8801/8810) and the vault URLs.
+- \`scripts/test-version-install.sh\` applies that prefix, installs its stub systemctl, and asks the checker
+  BEFORE it runs anything; it also hashes the three operator files
+  (~/.config/systemd/user/wa-sentinel.service, ~/.local/bin/runtime-worktree.txt, ~/.local/bin/installed.txt)
+  before and after and stops the row on any difference.
+- \`scripts/test-installer-data-isolation.sh\` (Fable's G condition, 14 checks) proves the checker REJECTS each
+  live dimension on its own, that the installer row asks it before running, and that neutralising a harness
+  which inherits HOME, XDG_CONFIG_HOME and a ledger path lands on ISOLATED with the three files unchanged.
+- Every run below was made under \`env -i\` with the scratch prefix, after the orchestrator's own guard:
+
+```
+scratch-guard: root /tmp/wa-scratch-vf (2026-11-25T00:36:24Z)
+  ok   HOME = /tmp/wa-scratch-vf/home
+  ok   WASM_AGENT_HOME = /tmp/wa-scratch-vf/home
+  ok   data dir = /tmp/wa-scratch-vf/home/.wasm-agent
+  ok   install dir (WA_INSTALL_DIR) = /tmp/wa-scratch-vf/install
+  ok   unit dir = /tmp/wa-scratch-vf/units
+  ok   WASM_AGENT_DB unset
+  ok   WA_SENTINEL_UNIT_SYSTEMCTL = /tmp/wa-scratch-vf/bin/systemctl-stub
+  ok   WASM_AGENT_PORT = 19799
+  ok   WASM_AGENT_CLIENT_PORT = 19800
+scratch-guard: ISOLATED
+```
 
 ## Not in this slice
 
