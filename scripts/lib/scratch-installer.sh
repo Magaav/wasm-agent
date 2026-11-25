@@ -35,8 +35,15 @@
 # scripts/test-installer-data-isolation.sh proves the six dimensions on a child of this library and proves that a
 # harness which only replaces HOME (tonight's) is caught.
 #
-# Pure bash, no jq, no python: the rows run under env -i with a bare PATH.
+# THE OPERATOR'S HOME, CAPTURED WHEN THIS FILE IS SOURCED. A row replaces HOME before it sources anything else (that is
+# the first thing a harness does), so by the time the environment is built, $HOME is the row's OWN scratch home - and a
+# guard that asks "is this the operator home?" against it answers yes for every child. Measured in the orchestrator's
+# runner, 25/11 03:24Z: refused(real_node_home) for the row's own scratch home, and the row's 14 checks failed behind
+# it. So the home that is captured BEFORE the row touches HOME is the one the refusal is about, and a caller that
+# knows better can name it: WA_INSTALLER_OPERATOR_HOME.
+WA_INSTALLER_OPERATOR_HOME="${WA_INSTALLER_OPERATOR_HOME:-${HOME:-}}"
 
+# Pure bash, no jq, no python: the rows run under env -i with a bare PATH.
 # THE LIVE PORTS: 8799/8800 are the node, 8801 its client, 8810 the launcher's. A child of this library may never
 # point at one of them, because a probe on the live port is a probe of the live node.
 wa_installer_live_port() {
@@ -85,11 +92,13 @@ wa_installer_env_prepare() {
   case "$root" in /*) ;; *) printf 'refused(installer_env_relative): the scratch root %s is not absolute, so where it points depends on the cwd\n' "$root" >&2; return 2 ;; esac
   [ -d "$root" ] || { printf 'refused(installer_env_missing): the scratch root %s does not exist\n' "$root" >&2; return 2; }
   root="$(CDPATH= cd -- "$root" 2>/dev/null && pwd -P)" || { printf 'refused(installer_env_unresolved): the scratch root cannot be resolved\n' >&2; return 2; }
-  real_home="$(CDPATH= cd -- "${HOME:-/nonexistent}" 2>/dev/null && pwd -P)" || real_home=
+  real_home="$(CDPATH= cd -- "${WA_INSTALLER_OPERATOR_HOME:-${HOME:-/nonexistent}}" 2>/dev/null && pwd -P)" || real_home=
+  [ -n "$real_home" ] || { printf 'refused(installer_env_operator_home): the operator home could not be resolved, so a child home cannot be proven distinct from it\n' >&2; return 2; }
   real_store="$real_home/.wasm-agent"
   local child_home="$root/home"
   # THE HOME THE CHILD WOULD GET MUST NOT BE THE OPERATOR'S OR ITS STORE (the shared rule, scripts/lib/scratch-home.sh).
-  wa_scratch_home_guard "$child_home" || return 2
+  # the guard compares against $HOME, so it is asked with the OPERATOR home in front of it, not the row's.
+  HOME="$real_home" wa_scratch_home_guard "$child_home" || return 2
   case "$root/" in
     "$real_home/"|"$real_store/"*) printf 'refused(installer_env_real): the scratch root %s is the operator home or inside the operator store\n' "$root" >&2; return 2 ;;
   esac

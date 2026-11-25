@@ -240,6 +240,14 @@ ok "$([ "$(field DBUS_SESSION_BUS_ADDRESS)" = "unix:path=$R/no-bus" ] && echo 1)
 # --- and the refusals, each by name, before anything is created ---
 out="$(wa_installer_env_prepare --root "$REAL_HOME" --port "$PORT" 2>&1)"; rc=$?
 ok "$([ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'refused(' && echo 1)" "the operator home is refused as a scratch root" "rc=$rc $out"
+# AND IT STILL WORKS WHEN THE ROW HAS ALREADY REPLACED HOME. Measured in the orchestrator's runner, 25/11 03:24Z: a
+# row does `export HOME=$W/home` as its first act, so a guard asked with that HOME in front of it answered "this is
+# the operator home" about the row's own scratch home, refused(real_node_home), and the row's 14 checks failed behind
+# it. The library captures the operator home when it is sourced, and this check is that capture.
+out="$(HOME="$R/home" WASM_AGENT_HOME="$R/home" wa_installer_env_prepare --root "$R" --port "$PORT" 2>&1)"; rc=$?
+ok "$([ "$rc" = 0 ] && printf '%s' "$out" | grep -q '^HOME=' && echo 1)" \
+  "a row that already replaced HOME still gets an environment (the operator home is captured at source time)" \
+  "rc=$rc $(printf '%s' "$out" | head -2 | tr '\n' '|')"
 out="$(wa_installer_env_prepare --root "$R" --port 8799 2>&1)"; rc=$?
 ok "$([ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'live port' && echo 1)" "the live port 8799 is refused by name" "rc=$rc $out"
 out="$(wa_installer_env_prepare --root "$R" --port "$PORT" --install-dir /usr/local/bin 2>&1)"; rc=$?
