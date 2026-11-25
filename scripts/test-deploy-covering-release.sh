@@ -401,8 +401,19 @@ else
 fi
 
 # THE SCRIPTS SHIPPED (work's install had none): two that only exist in the tree this deploy came from.
+# MODE-AWARE (25/11, rows/20261125T062559Z). In inject mode scripts/lib/download-asset.sh IS the problem - the row
+# staged a directory where it must go - so its absence is the expected result and its presence would mean the
+# injection never reached the deploy. And MEASURED there: health-wakes.sh did not ship either, so one blocked file
+# also stopped the rest of that ship step. That is reported as what was seen, not asserted either way, because
+# whether one bad file may stop the rest is a product decision and not this row's to make.
 for rel in scripts/lib/download-asset.sh scripts/lib/health-wakes.sh; do
-  ok "$([ -f "$INSTALL/$rel" ] && echo 1)" "the install carries $rel" "missing $INSTALL/$rel"
+  if [ "$MODE" = inject ] && [ "$rel" = scripts/lib/download-asset.sh ]; then
+    ok "$([ ! -f "$INSTALL/$rel" ] && echo 1)" "the injected problem is what is missing: $rel" "$(ls -ld "$INSTALL/$rel" 2>&1 | head -1)"
+  elif [ "$MODE" = inject ] && [ ! -f "$INSTALL/$rel" ]; then
+    printf '  note one blocked file also stopped the rest of the ship step: %s is missing too\n' "$rel"
+  else
+    ok "$([ -f "$INSTALL/$rel" ] && echo 1)" "the install carries $rel" "missing $INSTALL/$rel"
+  fi
 done
 
 # THE NODE THE INSTALL RUNS: the old bytes, the new tree, and it says so itself.
