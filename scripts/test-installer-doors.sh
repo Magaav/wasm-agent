@@ -79,27 +79,47 @@ PID="$(WA_SENTINEL_UNIT_SYSTEMCTL="$DUMP" wa_service_pid wa-serve.service)"
 ok
 
 # ---- B. THE PORT DOOR ---------------------------------------------------------------------------
-[ "$(WASM_AGENT_PORT=19799 WASM_AGENT_CLIENT_PORT=19800 wa_node_port)" = "19799" ] \
-  || bad 'wa_node_port ignores WASM_AGENT_PORT, the spelling the node itself reads'
-ok
-[ "$(WASM_AGENT_PORT=19799 WASM_AGENT_CLIENT_PORT=19800 wa_node_client_port)" = "19800" ] \
-  || bad 'wa_node_client_port ignores WASM_AGENT_CLIENT_PORT'
-ok
-[ "$(WA_PORT=18001 WASM_AGENT_PORT=19799 wa_node_port)" = "18001" ] \
-  || bad 'an explicit WA_PORT no longer outranks WASM_AGENT_PORT'
-ok
-[ "$(WASM_AGENT_PORT=19799 wa_node_client_port)" = "19800" ] \
-  || bad 'with no client port named, the client port does not follow the node port'
-ok
-[ "$(wa_node_port)" = "8799" ] || bad 'with nothing named the historical 8799 is not the answer any more'
-ok
+# ALL FOUR PORT VARIABLES ARE CLEARED, THEN THE CASE'S OWN ARE NAMED (measured in the orchestrator's runner, row
+# 20261125T222843Z-13846): the runner exports WA_PORT, WASM_AGENT_PORT and WASM_AGENT_CLIENT_PORT, the row inherits
+# them, and a check that names only one of them reads another and reports the fallback as broken. Each case therefore
+# starts from nothing and states exactly what it is about - the same isolation the deploy itself gets in part C.
+port_case() { # <function> <expected> <description> [NAME=value ...]
+  local fn=$1 want=$2 what=$3 got kv
+  shift 3
+  got=$( set -u
+    unset WA_PORT WA_CLIENT_PORT WASM_AGENT_PORT WASM_AGENT_CLIENT_PORT
+    for kv in "$@"; do export "$kv"; done
+    "$fn"
+  )
+  [ "$got" = "$want" ] || bad "$what (got '$got', wanted '$want')"
+  ok
+}
+port_case wa_node_port 19799 'wa_node_port honours WASM_AGENT_PORT, the spelling the node itself reads' \
+  WASM_AGENT_PORT=19799 WASM_AGENT_CLIENT_PORT=19800
+port_case wa_node_client_port 19800 'wa_node_client_port honours WASM_AGENT_CLIENT_PORT' \
+  WASM_AGENT_PORT=19799 WASM_AGENT_CLIENT_PORT=19800
+port_case wa_node_port 18001 'an explicit WA_PORT outranks WASM_AGENT_PORT' \
+  WA_PORT=18001 WASM_AGENT_PORT=19799
+port_case wa_node_client_port 19800 'with no client port named, the client port follows the node port' \
+  WASM_AGENT_PORT=19799
+port_case wa_node_port 8799 'with nothing named, the historical 8799 is still the answer'
 
 # ---- C. THE DEPLOY ITSELF, AS A SCRATCH RUN SEES IT --------------------------------------------
 # The refusal at deploy.sh's first precondition names the install it resolved AND the source of that answer. Both
 # doors are visible in its one line, and nothing is written: the install directory named here does not exist.
 DEPLOY="$ROOT/scripts/deploy.sh"
-run_deploy() { timeout 20 bash "$DEPLOY" 2>&1; }
-OUT="$(WA_INSTALL_DIR="$WORK/nope" WA_SENTINEL_UNIT_SYSTEMCTL="$DUMP" WASM_AGENT_PORT=19799 WASM_AGENT_CLIENT_PORT=19800 run_deploy)"
+# THE SAME ISOLATION AS PART B, for the deploy process: the four port variables are cleared and only the ones the case
+# names are exported, because a runner exports all of them and the deploy would then read the runner's port instead of
+# the one this row is proving (measured in row 20261125T222843Z-13846). `env` cannot call a shell function, so the
+# clearing is a subshell - that was the second mistake this row made on its way to the runner.
+deploy_out() { # [NAME=value ...] -> the deploy's output, port variables as named and nothing else
+  local kv
+  ( set -u
+    unset WA_PORT WA_CLIENT_PORT WASM_AGENT_PORT WASM_AGENT_CLIENT_PORT
+    for kv in "$@"; do export "$kv"; done
+    timeout 20 bash "$DEPLOY" 2>&1 )
+}
+OUT="$(deploy_out WA_INSTALL_DIR="$WORK/nope" WA_SENTINEL_UNIT_SYSTEMCTL="$DUMP" WASM_AGENT_PORT=19799 WASM_AGENT_CLIENT_PORT=19800)"
 has "$OUT" 'refused(install_dir_missing)' 'the scratch deploy stops at its first precondition'
 has "$OUT" "$WORK/unit-install" 'naming the SCRATCH install its unit claims'
 hasnt "$OUT" ':8799' 'and never the live node port'
@@ -111,7 +131,7 @@ PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));prin
 python3 -c "import socket,time;s=socket.socket();s.bind(('127.0.0.1',$PORT));s.listen(1);time.sleep(60)" &
 HOLD=$!
 sleep 1
-OUT="$(WA_INSTALL_DIR="$WORK/nope" WA_SENTINEL_UNIT_SYSTEMCTL="$NONE" WASM_AGENT_PORT="$PORT" WASM_AGENT_CLIENT_PORT="$((PORT + 1))" run_deploy)"
+OUT="$(deploy_out WA_INSTALL_DIR="$WORK/nope" WA_SENTINEL_UNIT_SYSTEMCTL="$NONE" WASM_AGENT_PORT="$PORT" WASM_AGENT_CLIENT_PORT="$((PORT + 1))")"
 has "$OUT" "on port $PORT" 'the deploy asked for the port the node own spelling named'
 hasnt "$OUT" ':8799' 'and never the live node port'
 kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null; HOLD=""
