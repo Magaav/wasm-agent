@@ -370,6 +370,15 @@ else
   ok "$([ -n "$derive_line" ] && [ -n "$check_line" ] && [ -n "$tar_line" ] && [ "$derive_line" -lt "$check_line" ] && [ "$check_line" -lt "$tar_line" ] && echo 1)" \
     "scripts/release-linux.sh derives the doors, checks the staged bundle, and only then tars it" \
     "derive=${derive_line:-none} check=${check_line:-none} tar=${tar_line:-none}"
+  # THE COUNT THE GATE READS IS THE ONE THE PACKER DERIVED: bundle.manifest carries install_doors=<n>, and the
+  # index entry the packer offers carries the same number, so a published release states its own door count and
+  # the cut gate can refuse a zero without downloading the tarball.
+  ok "$(grep -Fq 'echo "install_doors=${#doors[@]}"' "$ROOT/scripts/release-linux.sh" && echo 1)" \
+    "the manifest the bundle ships states install_doors=<the derived count>"
+  ok "$(grep -Fq 'entry.install_doors=Number(doors)' "$ROOT/scripts/release-linux.sh" && echo 1)" \
+    "and the index entry the packer offers carries the same count (the field the cut gate reads)"
+  ok "$(grep -Fq '"${#doors[@]}" <<' "$ROOT/scripts/release-linux.sh" && echo 1)" \
+    "the count travels into that program as an argument, not from a second computation"
 fi
 
 printf 'release completeness ok (%d checks, %d failed)\n' "$checks" "$failed"
