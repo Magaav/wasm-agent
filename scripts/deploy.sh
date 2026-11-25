@@ -316,9 +316,24 @@ DEPLOY_ALIVE_LIB="$(dirname "$0")/lib/deploy-alive.sh"
 if [ -r "$DEPLOY_ALIVE_LIB" ]; then
   . "$DEPLOY_ALIVE_LIB"
   if command -v wa_deploy_alive_write >/dev/null 2>&1; then
-    if wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" 2>/dev/null; then
+    # A REFUSAL IS NOT SWALLOWED (25/11, measured in the runner: rows/20261125T044552Z). The 2>/dev/null here hid
+    # refused(deploy_alive_held) and the deploy then walked on - through the pin check, to a fail that cleared the
+    # record it had been refused to touch. A second deploy that a live one is holding must stop HERE, by name.
+    _alive_err="${TMPDIR:-/tmp}/deploy-alive.$$.err"
+    if wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" 2>"$_alive_err"; then
+      rm -f "$_alive_err"
       note "deploy: running state written (pid $$)"
     else
+      _alive_rc=$?
+      _alive_msg="$(tr '\n' ' ' < "$_alive_err" 2>/dev/null)"
+      rm -f "$_alive_err"
+      case "$_alive_msg" in
+        "refused(deploy_alive_held)"*)
+          echo "deploy: $_alive_msg" >&2
+          command -v write_result >/dev/null 2>&1 && write_result false "$_alive_msg" deploy_alive_held 1
+          exit "$_alive_rc"
+          ;;
+      esac
       note "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
     fi
   fi
