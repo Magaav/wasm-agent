@@ -444,7 +444,12 @@ record_install() {
     if [ "${ANCESTRY:-0}" = 2 ]; then printf 'ancestry_unverified=yes\n'; fi
     true
   } >> "$record" \
-    && mv -f "$record" "${TARGET_DIR:-$INSTALL_DIR}/installed.txt"
+    && { . "$(dirname "$0")/lib/versions.sh" 2>/dev/null || true
+         if command -v wa_version_refuse_record_replace >/dev/null 2>&1; then
+           wa_version_refuse_record_replace "${TARGET_DIR:-$INSTALL_DIR}/installed.txt" \
+             || { rm -f "$record"; say "the install record is a link: this install must run with WA_VERSION_STAGING"; return 1; }
+         fi
+         mv -f "$record" "${TARGET_DIR:-$INSTALL_DIR}/installed.txt"; }
 }
 
 health() { curl -s -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }

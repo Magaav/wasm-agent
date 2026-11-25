@@ -268,6 +268,24 @@ wa_version_link_legacy() { # <install-dir>
 ' "$install"
 }
 
+# 6. THE RECORD IS THE POINTER'S OWN FILE - so a writer must never REPLACE it (Fable 25/11, fix 6).
+#
+# installed.txt is a symlink into current/ once a node is adopted. Every READER is unaffected (a link is
+# transparent to read_file, cat, grep), but a writer that does the usual "write a temp file, mv it onto the
+# record" REPLACES THE LINK with a regular file - and then the pointer and the record can disagree again, which is
+# the exact defect requirement 4 removes. So the writers ask this first:
+#
+#   wa_version_refuse_record_replace <path>   0 when <path> is a regular file (or absent): writing it is fine,
+#                                            4 and version_record_is_a_link when it is a LINK: write the record into
+#                                            the staging tree instead and let version-install.sh link it.
+wa_version_refuse_record_replace() {
+  local path="${1:?record path}"
+  [ -L "$path" ] || return 0
+  printf 'version_record_is_a_link: %s points at the current version; write the record into the staging tree (WA_VERSION_STAGING) and let the install link it
+' "$path" >&2
+  return 4
+}
+
 # 7. RETENTION. [<keep=3>]
 #
 # Removed only when ALL of these hold: it is not current, not the version before current, no LIVE process

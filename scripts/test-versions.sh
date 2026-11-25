@@ -261,6 +261,23 @@ file_loop="$(sed -n '/for name in wa wa-sentinel/,/for name in lua-core scripts/
 case "$file_loop" in *'mv "$install/$name" '*) fail "fix 4: the program is still MOVED AWAY before the link";; esac
 ok
 
+# --- FIX 6: THE RECORD IS A LINK, and a writer must not replace it (Fable 25/11) ------------------------------
+# Every reader is unaffected; the risk is the "temp file, mv onto the record" writer, which would turn the link back
+# into a regular file and let the pointer and the record disagree again.
+rec_dir="$W/rec"; mkdir -p "$rec_dir/share/versions/aaaaaaaaaaaa" "$rec_dir/install"
+printf 'commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$rec_dir/share/versions/aaaaaaaaaaaa/installed.txt"
+ln -sfn "$rec_dir/share/versions/aaaaaaaaaaaa/installed.txt" "$rec_dir/install/installed.txt"
+if wa_version_refuse_record_replace "$rec_dir/install/installed.txt" 2> "$W/rec.err"; then
+  fail "fix 6: a writer was allowed to replace the record LINK"
+fi
+grep -q 'version_record_is_a_link' "$W/rec.err" || { sed -n '1,3p' "$W/rec.err" >&2; fail "fix 6: the refusal is not named version_record_is_a_link"; }
+ok
+[ -L "$rec_dir/install/installed.txt" ] || fail "fix 6: the guard itself replaced the link"
+wa_version_refuse_record_replace "$rec_dir/install/not-a-link.txt" 2>/dev/null || fail "fix 6: a regular file must be writable"
+ok
+grep -q 'wa_version_refuse_record_replace' scripts/upgrade.sh || fail "fix 6: upgrade.sh's record writer does not ask the guard"
+ok
+
 # --- the report's number: REAL disk, not apparent ------------------------------------------------------------
 wa_version_disk eeeeeeeeeeee | grep -q '^version_disk eeeeeeeeeeee real=[0-9]* apparent=' || fail "report: wa_version_disk names real blocks and apparent bytes"
 ok
