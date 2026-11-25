@@ -1363,7 +1363,16 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
   -- A healthy block never does: its own items and value are the answer, and its bytes must not move.
   if result.ok==false and result.done==nil then
     local done=settled_answers(result.calls)
-    if #done>0 then
+    -- ONE FAILED CALL IS ITS OWN ERROR, and repeating it costs bytes for nothing: measured on the scripted
+    -- task set, a single refused call answered `error` AND `done[1].result.error` with the same sentence
+    -- (+799 bytes a turn). The block hands back finished work when there IS some - another call settled
+    -- beside the failure, or the block stopped for a reason that is not a call at all (a timeout, a
+    -- stall, a syntax error), where a lone finished answer is exactly what was lost.
+    local failed_call=false
+    for _,call in ipairs(result.calls or {}) do
+      if type(call)=='table' and call.ok==false then failed_call=true end
+    end
+    if #done>0 and (#done>1 or not failed_call) then
       result.done=done
       result.done_note='done: the calls that finished before this error, in order, with the answer each one '
         ..'produced. Read them instead of running the work again. An entry that carries `unread` instead of '
