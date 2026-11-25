@@ -74,7 +74,7 @@ M.TOOLS = {
     returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,truncated}',
   },
   {
-    verb = 'search', capability = 'whatsapp_search', effect = 'read',
+    verb = 'search', capability = 'whatsapp_index', effect = 'read',
     description = 'Search every WhatsApp message this account has indexed: text, captions, document filenames and voice-note transcripts, accent-folded, so "acao" finds "Ação" and "relatorio" finds "Relatório.pdf". Messages of every kind are indexed (text, image, video, audio, voice note, document, sticker, location, contact card, poll) and so are edits and deletions. Narrow with at least one of q, chat, kind or from; the filters combine (since/until is a time window in epoch milliseconds, seconds accepted). Every hit carries the chat name, the sender name, the time three ways (at, at_local, at_iso) and the message shape, and a long body is a pointer to whatsapp_message. The best match comes first; a search that matched more than it could return says truncated=true and matched=N. The answer says how it is sorted (order) and how fresh it is (as_of, index, last_received_s, connected); every hit carries its time and chat.',
     parameters = { type = 'object', properties = {
       q = { type = 'string', maxLength = 200, description = 'Literal text, accent-folded.' },
