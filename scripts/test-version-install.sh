@@ -77,7 +77,7 @@ install_dir() { # <dir>: what today's install looks like before the switch - a r
 }
 run_installer() { # <staging> <install> [extra env...]
   local staging="$1" install="$2"; shift 2
-  env "$@" bash scripts/version-install.sh --staging "$staging" --commit "$COMMIT" --install "$install" --share "$W/share"
+  env "$@" bash scripts/version-install.sh --staging "$staging" --commit "${WA_ROW_COMMIT:-$COMMIT}" --install "$install" --share "$W/share"
 }
 
 # --- the install that works -----------------------------------------------------------------------------------
@@ -121,14 +121,16 @@ ok
 # A cut between the seal and the rename leaves versions/.staging-<id> at 0555; rm -rf then refuses forever and every
 # later install of that version dies with version_staging_unwritable. The installer must be able to clear it.
 S5="$W/stage5"; I5="$W/install5"; stage "$S5"; install_dir "$I5"
-mkdir -p "$W/share/versions/.staging-$ID/left/lua"
-printf 'half' > "$W/share/versions/.staging-$ID/left/lua/init.lua"
-chmod 0555 "$W/share/versions/.staging-$ID" "$W/share/versions/.staging-$ID/left" "$W/share/versions/.staging-$ID/left/lua" 2>/dev/null || true
-chmod 0444 "$W/share/versions/.staging-$ID/left/lua/init.lua" 2>/dev/null || true
-run_installer "$S5" "$I5" WA_VERSION_MARGIN_BYTES=0 > "$W/i5.log" 2>&1 || { sed -n '1,6p' "$W/i5.log" >&2; fail "fix 5: a sealed staging directory blocked the retry"; }
-[ -d "$W/share/versions/.staging-$ID" ] && fail "fix 5: the stale staging directory is still there after a successful install"
+COMMIT_F=cccccccccccccccccccccccccccccccccccccccc; ID_F=cccccccccccc
+printf 'commit=%s\nbranch=main\n' "$COMMIT_F" > "$S5/installed.txt"
+mkdir -p "$W/share/versions/.staging-$ID_F/left/lua"
+printf 'half' > "$W/share/versions/.staging-$ID_F/left/lua/init.lua"
+chmod 0555 "$W/share/versions/.staging-$ID_F" "$W/share/versions/.staging-$ID_F/left" "$W/share/versions/.staging-$ID_F/left/lua" 2>/dev/null || true
+chmod 0444 "$W/share/versions/.staging-$ID_F/left/lua/init.lua" 2>/dev/null || true
+run_installer "$S5" "$I5" WA_VERSION_MARGIN_BYTES=0 WA_ROW_COMMIT="$COMMIT_F" > "$W/i5.log" 2>&1 || { sed -n '1,6p' "$W/i5.log" >&2; fail "fix 5: a sealed staging directory blocked the retry"; }
+[ -d "$W/share/versions/.staging-$ID_F" ] && fail "fix 5: the stale staging directory is still there after a successful install"
 ok
-[ -f "$W/share/versions/$ID/version.txt" ] || fail "fix 5: the retry did not assemble the version"
+[ -f "$W/share/versions/$ID_F/version.txt" ] || fail "fix 5: the retry did not assemble the version"
 ok
 
 # --- R3: a SIGKILL after each step boundary, then: does the node answer, and can it be installed again? -------
