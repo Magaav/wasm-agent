@@ -267,6 +267,94 @@ for k = 1, #parked_before do
   eq(tostring(parked_after[k].prompt), tostring(parked_before[k].prompt), "parked row " .. k .. " keeps its prompt (no release line was stamped on it)")
 end
 
+-- ---- 5. THE INSTALLED LINE NAMES THE PROGRAM AND THE TREE, VERBATIM (factory-small-items item 1, 25/11) ------
+-- MEASURED on this node: `wa --version` answers `wasm-agent v0.1.2 - va1857d15 - tree 70eb209d` - a PROGRAM and a
+-- TREE - and the release line named only the tree. A Lua-only install therefore said "this node now runs <tree>"
+-- while the program was unchanged, and a compile install said the same while the program had moved too.
+--
+-- This drives the real tick twice and asserts the EXACT first line of what the resumed worker reads: once for a
+-- Lua-only install (the tree moves, the bytes do not) and once for a compile install (program and tree both move).
+-- The third case is the replay the brief names: a pause taken while scripts/upgrade.sh's INTERIM record is the last
+-- word records the INCOMING commit as if the node ran it, so the finished record looks unchanged and the release
+-- says "the update did not happen" after a real install. An interim record is not an identity; that release says
+-- what it can see instead.
+local function full_record(fields)
+  local order = { "commit", "lua_tree", "lua_fast_path", "binary_commit", "binary_release", "sha256",
+    "record_role", "via" }
+  local body = {}
+  for _, key in ipairs(order) do
+    if fields[key] ~= nil then body[#body + 1] = key .. "=" .. fields[key] end
+  end
+  local wrote = host.write_file(install_dir .. "/installed.txt", table.concat(body, "\n") .. "\n")
+  check(wrote == true, "the install record is written at " .. install_dir .. "/installed.txt")
+end
+local function first_line(text)
+  return (tostring(text or ""):match("^[^\n]*") or "")
+end
+local function release_notice(session, at)
+  marker(T0 - 60, 900)
+  local wake = unpause(session, { no_record = false })
+  return wake, function()
+    marker(T0 - 3600, 900)
+    sent = { count = 0, ids = {} }
+    selfloop.tick({ now = at, dispatch = counted })
+    return rows("SELECT * FROM self_wakes WHERE id=?", { wake })[1]
+  end
+end
+
+-- 5a. A LUA-ONLY INSTALL: the tree moves, the bytes (and so the program) do not.
+full_record({ commit = "aaaa1111bbbb2222", lua_tree = "aaaa1111bbbb2222", lua_fast_path = "1",
+  binary_commit = "cccc3333dddd4444", sha256 = "1111111111111111" })
+local lua_session = memory.start_session("local", "chat", { id = "fsi-lua-only", user_id = "master", title = "lua" })
+local _, finish_lua = release_notice(lua_session, T0 + 10)
+full_record({ commit = "bbbb5555eeee6666", lua_tree = "bbbb5555eeee6666", lua_fast_path = "1",
+  binary_commit = "cccc3333dddd4444", sha256 = "1111111111111111" })
+local lua_row = finish_lua()
+eq(first_line(lua_row.prompt),
+  "[deploy] installed: this node now runs program vcccc3333dddd, tree bbbb5555eeee "
+    .. "(was program vcccc3333dddd, tree aaaa1111bbbb).",
+  "a Lua-only install says the program it kept and the tree it moved")
+
+-- 5b. A COMPILE INSTALL: program and tree are the commit that was built, and both moved.
+full_record({ commit = "dddd4444eeee5555", lua_tree = "dddd4444eeee5555", lua_fast_path = "0",
+  sha256 = "2222222222222222" })
+local compile_session = memory.start_session("local", "chat", { id = "fsi-compile", user_id = "master", title = "compile" })
+local _, finish_compile = release_notice(compile_session, T0 + 11)
+full_record({ commit = "ffff6666aaaa7777", lua_tree = "ffff6666aaaa7777", lua_fast_path = "0",
+  sha256 = "3333333333333333" })
+local compile_row = finish_compile()
+eq(first_line(compile_row.prompt),
+  "[deploy] installed: this node now runs program vffff6666aaaa, tree ffff6666aaaa "
+    .. "(was program vdddd4444eeee, tree dddd4444eeee).",
+  "a compile install names the program and the tree it installed, and the pair it replaced")
+
+-- 5c. THE REPLAY: a pause taken inside the swap, with scripts/upgrade.sh's interim record as the last word.
+full_record({ commit = "ffff6666aaaa7777", record_role = "interim", via = "deploy.sh" })
+local interim_session = memory.start_session("local", "chat", { id = "fsi-interim", user_id = "master", title = "interim" })
+local interim_wake, finish_interim = release_notice(interim_session, T0 + 12)
+local interim_record_file = json.decode(host.read_file(record_dir .. "/" .. interim_session .. ".json") or "{}")
+eq(interim_record_file.installed_tree, nil, "a pause taken on an interim record names no tree: the swap is not done")
+eq(interim_record_file.installed_commit, nil, "and no commit")
+full_record({ commit = "ffff6666aaaa7777", lua_tree = "ffff6666aaaa7777", lua_fast_path = "0",
+  sha256 = "3333333333333333" })
+local interim_row = finish_interim()
+check((interim_row.prompt or ""):find(pause.UNKNOWN, 1, true) ~= nil,
+  "the release after an install it could not measure says the pause ended: " .. tostring(interim_row.prompt):sub(1, 200))
+check((interim_row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) == nil,
+  "and it never says the update did not happen after an install that happened")
+check((interim_row.prompt or ""):find("ffff6666aaaa", 1, true) ~= nil,
+  "naming the tree this node runs now")
+
+-- 5d. THE FACTS THAT COUNT AS A MOVE, as functions: a rebuild of the same commit (same ids, new bytes) is an
+-- install; so is a prebuilt install whose program moved; and two identical records are still not one.
+eq(pause.install_moved({ tree = "t", commit = "c", program = "p", sha256 = "old" },
+  { tree = "t", commit = "c", program = "p", sha256 = "new" }), true,
+  "a rebuild of the same commit moves the bytes, so the release says installed")
+eq(pause.install_moved({ tree = "t", commit = "c", program = "p1", sha256 = "s" },
+  { tree = "t", commit = "c", program = "p2", sha256 = "s" }), true, "a program that moved is an install")
+eq(pause.install_moved({ tree = "t", commit = "c", program = "p", sha256 = "s" },
+  { tree = "t", commit = "c", program = "p", sha256 = "s" }), false, "the same four facts twice is not an install")
+
 pcall(host.remove_file, record_dir .. "/" .. swap_session .. ".json")
 pcall(host.remove_file, MARKER)
 print("deploy release ok (" .. checks .. " checks): a leaked or crashed marker releases ONE resume turn per paused session, that says what happened, and leaves a held session alone")
