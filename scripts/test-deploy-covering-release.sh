@@ -143,10 +143,19 @@ FLOOR=""
     "$(sha256sum "$RELEASE/wa-$TRIPLE-$SHORT" | cut -d' ' -f1)" "$(wc -c < "$RELEASE/wa-$TRIPLE-$SHORT" | tr -d ' ')" \
     "$(sha256sum "$RELEASE/wa-sentinel-$TRIPLE-$SHORT" | cut -d' ' -f1)" "$(wc -c < "$RELEASE/wa-sentinel-$TRIPLE-$SHORT" | tr -d ' ')"
 } > "$RELEASE/node-$SHORT.manifest"
+# THE CHANNEL IS FLAT, AND THAT IS MEASURED, NOT GUESSED: wa_node_fetch_asset's local branch reads "$local_base/$asset"
+# with no tag directory (scripts/lib/node-binaries.sh). In rows/20261125T045928Z the assets sat under
+# $CHANNEL/node-$SHORT/ and the downloader answered node_release_incomplete for the flat path. So every file the
+# channel serves is copied flat beside the release directory too, and the URL the deploy gets is the channel itself.
+for _f in "node-$SHORT.manifest" "wa-$TRIPLE-$SHORT" "wa-sentinel-$TRIPLE-$SHORT" SHA256SUMS SHA256SUMS.sig; do
+  [ -f "$RELEASE/$_f" ] && cp -f "$RELEASE/$_f" "$CHANNEL/$_f"
+done
+unset _f
 python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$RELEASE" --key A > /dev/null 2>&1 \
   || skip_all "the local covering release could not be signed with the TEST key"
 cd "$ROOT" || skip_all "cannot return to the checkout"
 printf '%s\n' "node-$SHORT" > "$RELEASE/releases.txt"
+printf '%s\n' "node-$SHORT" > "$CHANNEL/releases.txt"
 export WA_NODE_BINARIES_URL="file://$RELEASE"
 export WA_RELEASE_KEYS="$KEYS"
 echo "stub channel: $RELEASE (node-$SHORT built here from $SHORT and signed with the TEST key; no GitHub call, no credential)"
