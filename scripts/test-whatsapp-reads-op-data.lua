@@ -74,6 +74,7 @@ end
 -- anything is enqueued, so the comparison cannot depend on this node's state. The tool door is compared
 -- too: it is the path the model takes (`M.invoke`), and after a repoint it goes through the generic row.
 local OPS = {
+  { op = "read", args = {} },
   { op = "search", args = {} },
 }
 

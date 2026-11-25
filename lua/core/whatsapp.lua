@@ -93,7 +93,7 @@ M.TOOLS = {
     returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text}],count,matched,truncated}',
   },
   {
-    verb = 'read', capability = 'whatsapp_read', effect = 'read',
+    verb = 'read', capability = 'whatsapp_index', effect = 'read',
     description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page. An older name for this question - whatsapp_read, mcp_whatsapp_native_read_newest_<hash>, mcp_whatsapp_native_inspect_chat_<hash>, or peer_<node>__whatsapp_read - is refused with this one, so a name from an older build still finds the tool that answers it. The answer says how fresh it is (as_of, index, pending) and whether a quiet answer is this chat or a stuck pipe (last_received_s, connected); read again in a second when pending is not empty. One person under @lid and phone is one history.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 80, description = 'An exact chat JID, or a name to resolve (ambiguous names answer with candidates).' },
