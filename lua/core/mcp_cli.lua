@@ -338,9 +338,13 @@ function M.run_cli(argv, opts)
   for key, value in pairs(opts.list_options or {}) do list_options[key] = value end
   if refresh then
     -- An explicit verb may wait: the reader asked for this node's peers to be asked. The chat count comes
-    -- with it, because the same reader is asking for the whole picture (`wa mcp list --all` prints it).
+    -- with it, because the same reader is asking for the whole picture (`wa mcp list --all` prints it) -
+    -- and for that this read must NOT be cache-only: `whatsapp.service_row` forces `counts = false` under
+    -- `cache_only` (its own line, 17/11), so passing `counts = true` beneath it reads as nothing.
+    -- `cache_only = false` is safe here: the catalogue was just written, so `federation.catalog` answers
+    -- from it without asking anyone again (a failed refresh leaves `.tried` behind, which holds RETRY = 60 s).
     emit('  ' .. command.refresh_text(command.refresh_peers()))
-    list_options.cache_only = true
+    list_options.cache_only = false
     list_options.counts = true
   end
   local view = command.list(ctx, list_options)

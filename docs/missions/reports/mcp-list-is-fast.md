@@ -109,8 +109,9 @@ scratch home).
 
 `flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` on this worktree (queued behind other suites,
 as the rule says; it ran alone): **fast path ok, 492 checks, 0 skipped, 1149 s, exit 0** - `lua 382/382
-passed`, the 4 named skips are the same ones the runner names every day, and `discrimination ok`.
-Failure is nothing: there was none to attribute to another tree.
+passed`, the 4 named skips are the same ones the runner names every day, and `discrimination ok`. It was
+run again after the last three-line fix (`--refresh` reading the chat count): **492 checks, 0 skipped, 882 s,
+exit 0**. No failure to attribute to another tree.
 
 ## Where the test's store comes from
 
@@ -128,7 +129,10 @@ for.
   still reads as it did. If it lists peers, it still refreshes on `TTL` - a follow-up, not a claim.
 * `wa mcp list --all` now prints `carries: chats unknown` for the WhatsApp row unless it runs with
   `--refresh`: the chat count is the one other number that needs a node. The chat has said `chats unknown`
-  since 17/11 (it passes `cache_only`), so this is the pipe catching up, not a new silence.
+  since 17/11 (it passes `cache_only`), so this is the pipe catching up, not a new silence. `--refresh` does
+  read that count (`cache_only = false` for that one call - `whatsapp.service_row` forces `counts = false`
+  under `cache_only`, so `counts = true` alone reads as nothing), and that half is **code-verified only**: a
+  scratch home has no account node, and I did not call the live fleet to watch the count arrive.
 * A connector whose key is literally `refresh` can no longer be opened by bare `/mcp refresh` (its verbs
   still work: `/mcp refresh on`). Refusing the guess would cost a registry read in the verb's own path; named
   here instead.
