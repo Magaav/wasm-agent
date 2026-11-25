@@ -179,6 +179,72 @@ Read it this way:
 
 Reproduce: `bash measure/model-agnostic/run.sh /tmp/tt-base /home/victor/wasm-agent/target/m-tt-base/release/wa $PWD /home/victor/wasm-agent/target/m-tools-tell-the-truth/release/wa`.
 
+## (i) Is `q -> query` real? It was NOT, and it is now: the prefix rule
+
+Edit distance alone would never make the approved example real: `q` is 4 edits from `query` and the threshold
+is `math.max(2, floor(#sent/2)) = 2`, so the committed code answered `unknown_argument:q` with NO suggestion.
+Fixed in `2f7f66e6` - a declared name that starts with the sent word (or the other way round) wins before
+distance does, shortest first:
+
+```lua
+-- lua/core/json_contract.lua (and the same rule in lua/core/tool_arguments.lua)
+local prefix
+for candidate in pairs(declared or {}) do
+  local word = tostring(candidate)
+  local shorter, longer = sent, word
+  if #shorter > #longer then shorter, longer = longer, shorter end
+  if #shorter >= 1 and #longer > #shorter and longer:sub(1, #shorter) == shorter then
+    if not prefix or #word < #prefix or (#word == #prefix and word < prefix) then prefix = word end
+  end
+end
+if prefix then return prefix end          -- a prefix beats distance
+... distance decides only among the rest (threshold unchanged: max(2, floor(#sent/2)))
+```
+
+REAL ROW OUTPUT (scratch home, branch tree, `tools.dispatch(memory,'search_messages',{q='laura'})`):
+
+```
+error:    unknown_argument:q - did you mean query?
+message:  `search_messages` does not take the argument `q` - its own schema never declares that name, so
+          nothing ran. It declares: after, before, byte_limit, group_by, limit, match, node, offset, query,
+          roles, scope, session_id, sort, tool_name, view.
+fix:      drop `q`, did you mean `query`? `search_messages` takes: after, before, byte_limit, group_by,
+          limit, match, node, offset, query, roles, scope, session_id, sort, tool_name, view.
+```
+
+Two directions are pinned as rows (`test-json-contract.lua`, 18 checks): `{"q"}` against a schema declaring
+`query` -> `unknown_argument:q - did you mean query?`, and `{"query"}` against a schema declaring `q` ->
+`unknown_argument:query - did you mean q?`.
+
+## (ii) The old refusal vs the new one, same schema, same call
+
+Closed schema `{q, from, limit}`, the call `{"query":"laura"}`, base tree vs branch tree, both run here:
+
+| | base (`schema_extra`) | branch (`unknown_argument`) |
+|---|---|---|
+| code | `schema_extra:arguments.query (accepted: from, limit, q)` | `unknown_argument:query - did you mean q?` |
+| message | `search does not take the argument \`query (accepted: from, limit, q)\`; the call carried a name that is not in its schema (json_contract.lua).` | `search does not take the argument \`query\` - its own schema never declares that name, so nothing was dispatched (lua/core/tool_arguments.lua).` |
+| fix | `drop \`query (accepted: from, limit, q)\`; search takes from (string), limit (integer), q (string)` | `drop \`query\`, did you mean \`q\`?; search takes from (string), limit (integer), q (string)` |
+
+The new refusal says everything the old one did - the accepted names are in the fix, in the same
+`name (type)` form - and two things it did not: the name that was meant, and the argument name quoted on its
+own. The old sentence swallowed the accepted list INSIDE the quotation marks (`query (accepted: ...)`), so a
+reader parsing the quoted argument got a string that is not an argument name.
+
+## (iii) Ledger census: the 51 tools, 7 days, counts only
+
+Source: the node's ledger through the product's own seam (`host.sql_rows`, the surface `wa show` uses; the
+agent's bash/file tools are refused this store by `lua/core/secret_guard.lua`, and that refusal is why this is
+a SELECT-only script run on `WA_SCRIPT`, not `sqlite3`). Window: `created_at` of the last 7 days
+(`lo 1794995620 .. hi 1795650188`). Assistant tool calls whose target is a known host tool: **52063**.
+Undeclared argument names: **3 calls, 1 tool (`run`)**, fields `timeout`, `timeout_s`, `rows`, `ry` (0.006% of
+the calls). No argument text failed to parse (`undecodable_arguments: 0`).
+
+So the 51 tools that used to accept anything were, in the last week, hit with an undeclared name exactly
+three times - all on `run`, where the model reached for `timeout`/`timeout_s` (the schema says
+`timeout_ms`) and twice for names that are not arguments at all. Each of those three calls now costs one
+refusal and one round instead of running with the field silently dropped.
+
 ### 5.4 Rows
 
 * `scripts/test-unknown-argument.lua` (new) — **18 checks, 0 failed**: a script's call is refused by name
