@@ -74,6 +74,22 @@ ok "$(grep -q '"pid":'"$$" "$PATH_ALIVE" && echo 1)" "and the record now names u
 wa_deploy_alive_clear "$DATA"
 ok "$([ ! -f "$PATH_ALIVE" ] && echo 1)" "and we clear our own record" ""
 
+# THE CONTRACT MOVED (Fable 25/11, change/guards-before-alive). "First act" is now "after the local guards,
+# before 0e and before any network": a record written before a refusal is a record a deploy that never ran took,
+# and it paused sessions it never used. The four checks above are unchanged and still hold; these are the new
+# sentence on the same line_of/ALIVE_LINE.
+G_TURN="$(grep -n 'cannot deploy from a turn running on the node it would replace' "$DEPLOY" | grep -v '^[[:space:]]*#' | head -1 | cut -d: -f1)"
+G_CLI="$(grep -n 'deploying from a CLI turn needs a sentinel supervising the node' "$DEPLOY" | grep -v '^[[:space:]]*#' | head -1 | cut -d: -f1)"
+G_INSTALL="$(grep -n 'refused(install_dir_missing)' "$DEPLOY" | grep -v '^[[:space:]]*#' | head -1 | cut -d: -f1)"
+ZERO_E="$(grep -n '^# 0e\.' "$DEPLOY" | head -1 | cut -d: -f1)"
+for pair in "the node-turn refusal:$G_TURN" "the cli-turn refusal:$G_CLI" "install_dir_missing:$G_INSTALL"; do
+  name=${pair%%:*}; line=${pair#*:}
+  ok "$([ -n "$line" ] && [ -n "$ALIVE_LINE" ] && [ "$ALIVE_LINE" -gt "$line" ] && echo 1)" \
+    "the alive record is written AFTER $name" "alive at ${ALIVE_LINE:-none}, $name at ${line:-none}"
+done
+ok "$([ -n "$ZERO_E" ] && [ -n "$ALIVE_LINE" ] && [ "$ALIVE_LINE" -lt "$ZERO_E" ] && echo 1)" \
+  "and BEFORE 0e, the first thing that asks the network" "alive at ${ALIVE_LINE:-none}, 0e at ${ZERO_E:-none}"
+
 printf 'test-deploy-alive-first: %d checks, %d failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
 exit 0
