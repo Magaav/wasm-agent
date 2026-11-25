@@ -46,6 +46,14 @@ Rows that do NOT exist yet and are the next commits (named, not implied):
            install's own wa answers and the same install runs again to the end. The cut INSIDE a step (between
            "rename the real path aside" and "rename the link onto it") is not reachable from that hook; that
            window is covered by lua/core/version_repair.lua and scripts/test-version-repair.lua.
+    CONVERSION  GREEN (7eb1fa22cc9b) through the row runner, 10 checks: scripts/versions-adopt.sh with
+                --dry-run writing nothing, the real conversion leaving a verified version folder, a second run
+                saying adopt_already_adopted, and a failed verification ROLLING BACK to the in-place install
+                exactly as it was (rows/20261125T010504Z, rc=0 leftovers=0 canary green).
+    NETWORK     No row or installer on this branch reads the public channel: a grep of every one of them finds
+                no https://, no curl and no gh, so none of them can spend the GitHub allowance and none needs the
+                local stub channel.
+
     R8     GREEN (ae4288fd) through the row runner: the sentinel refuses to move before the node is healthy
            (sentinel_move_before_node), a failed new start leaves the PREVIOUS version supervising through a
            drop-in naming its absolute path, and nothing supervising is named. 5 checks,
