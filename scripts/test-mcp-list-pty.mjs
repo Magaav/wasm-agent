@@ -23,7 +23,21 @@ import {fileURLToPath} from 'node:url';
 import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BIN = process.env.WA_BIN || process.env.FAST_BIN || 'wa';
+// THE BINARY MUST BE A PATH, because the session below starts with `env -i` and PATH=/usr/bin:/bin: a bare
+// `wa` there is 'command not found', the tmux session dies before drawing anything, and the row fails with an
+// empty screen (measured 25/11 when it was run by hand). WA_BIN/FAST_BIN first (the runner's), then this
+// node's own PATH, then a SKIP by name.
+function resolveBin() {
+  const named = process.env.WA_BIN || process.env.FAST_BIN || '';
+  if (named) return named.startsWith('/') ? named : spawnSync('sh', ['-c', 'command -v ' + named], {encoding: 'utf8'}).stdout.trim() || named;
+  const found = spawnSync('sh', ['-c', 'command -v wa'], {encoding: 'utf8'}).stdout.trim();
+  return found;
+}
+const BIN = resolveBin();
+if (!BIN || spawnSync('sh', ['-c', 'test -x ' + BIN]).status !== 0) {
+  console.log('SKIP mcp-list-pty: no wa binary to drive (WA_BIN/FAST_BIN unset and none on PATH)');
+  process.exit(0);
+}
 const REAL_HOME = path.join(os.homedir(), '.wasm-agent');
 const SCRATCH_ROOT = [os.tmpdir(), '/tmp', '/var/tmp'].find(base => !path.resolve(base).startsWith(REAL_HOME + path.sep));
 if (!SCRATCH_ROOT) { console.error('mcp-list-pty: no scratch root outside ' + REAL_HOME); process.exit(2); }
@@ -164,9 +178,37 @@ try {
   console.log('mcp list pty: prompt drawn after ' + promptMs + ' ms from launch');
   console.log('mcp list pty: peers asked during /mcp = ' + peerConnections.count + ' of ' + PEERS.length);
   console.log('mcp list pty: fixture arrivals = ' + JSON.stringify([...new Set(arrivals)]));
-  console.log('mcp list pty ok (1 measurement)');
   tmux(['send-keys', '-t', SESSION, 'C-c']);
-  finish(0);
+
+  // AND THE PIPE, which is the part of this row that DISCRIMINATES. A chat's /mcp has read its caches since
+  // 22/11, so on the tree before this round it asks nobody either - a row that only times the balloon passes on
+  // both trees and catches nothing. `wa mcp list` is the surface that DID refresh: on a store with no catalogue
+  // at all it asks every online peer (these four, which accept and never answer, so the refresh spends their
+  // deadlines up to `federation.BUDGET` = 15 s), and after this round it reads the cache and asks nobody.
+  // Same binary, same ledger, same fixture, no key pressed: the count of peer connections is the verdict.
+  const beforePipe = peerConnections.count;
+  const piped = spawnSync('env', ['-i', ...Object.entries(ENV).map(([k, v]) => k + '=' + v),
+    BIN, '--db', path.join(WORK, 'ledger.db'), 'mcp', 'list'], {encoding: 'utf8', timeout: 45000});
+  const askedByPipe = peerConnections.count - beforePipe;
+  const pipedText = String(piped.stdout || '') + String(piped.stderr || '');
+  console.log('mcp list pty: peers asked during "wa mcp list" = ' + askedByPipe + ' of ' + PEERS.length);
+  let failed = 0;
+  const check = (name, condition, detail) => {
+    if (condition) { console.log('ok - ' + name); return; }
+    failed += 1;
+    console.log('FAIL - ' + name + (detail ? (': ' + detail) : ''));
+  };
+  check('/mcp drew its list', Boolean(marker));
+  check('/mcp asked no peer in a fresh chat', peerConnections.count - askedByPipe === 0,
+    'a chat read that refreshes pays every peer deadline before the list appears');
+  check('wa mcp list exited 0', piped.status === 0, 'status ' + piped.status + ', stderr: ' + String(piped.stderr || '').slice(0, 200));
+  check('wa mcp list printed the list', pipedText.includes(MARKER), pipedText.slice(0, 200));
+  check('wa mcp list asked no peer', askedByPipe === 0,
+    askedByPipe + ' of ' + PEERS.length + ' peers were asked: the list read the catalogue instead of refreshing it');
+  check('wa mcp list says the peer half was never read', pipedText.includes('other nodes: not read yet'),
+    String(pipedText.match(/[^\n]*other nodes[^\n]*/) || 'no such line'));
+  console.log('mcp list pty ok (' + (6 - failed) + ' of 6 checks)');
+  finish(failed === 0 ? 0 : 1);
 } catch (error) {
   if (started) {
     console.log('FAIL - ' + error.message);

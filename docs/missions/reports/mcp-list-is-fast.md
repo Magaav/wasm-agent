@@ -83,6 +83,24 @@ only 203 s old, of which the WhatsApp chat count alone was 2315.8 ms; when the c
 600 s `TTL` it adds `federation.refresh`, up to `federation.BUDGET` = 15 s, and that is where 16-19 s comes
 from. After this branch no surface takes that shape unless a reader types `--refresh` / `/mcp refresh`.
 
+## The pty row (scripts/test-mcp-list-pty.mjs)
+
+Added by this mission's sibling session (commits `ebd52902`, `11b87588` - the same work, a different model
+id in the trailer) and finished here. It drives the real binary in a real pty against a fixture rendezvous of
+**four peers that accept and never answer**, and it measures both surfaces:
+
+* `/mcp` typed at the prompt: **57-59 ms** to the list drawing, **0 of 4 peers asked**, prompt drawn after
+  320 ms from launch;
+* `wa mcp list` on the same ledger: **0 of 4 peers asked**, exit 0, and `other nodes: not read yet` on the
+  page.
+
+That second half is what makes the row discriminate: on a clean `origin/main` worktree it **fails 3 of 6
+checks** - base's `wa mcp list` asks the four peers and does not finish inside 45 s (`status null`), and it
+has no never-read line. The chat half alone passes on both trees (the chat has read its caches since 22/11),
+which is why it is not the verdict on its own. It is wired into `scripts/fast.sh` beside `chat-start-pty`
+(verified here by running the row and its wrapper: `mcp list pty ok (6 of 6 checks)`), and its `.sh` wrapper
+is there for a row runner that takes `.sh` rows.
+
 ## What changed
 
 **00b7a087 `mcp list: read the caches, print their age, refresh on request`**
