@@ -87,7 +87,7 @@ sequence() { # <install> <commit> [extra args...]
 }
 
 # --- 1. happy path ---------------------------------------------------------------------------------------------
-I="$W/i1"; in_place "$I" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
+I="$W/i1"; in_place "$I" "$COMMIT"; echo ok > "$SEQ_MODE"
 sequence "$I" "$COMMIT" > "$W/seq1.log" 2>&1 || { sed -n '1,10p' "$W/seq1.log" >&2; fail "happy: the sequence must succeed"; }
 grep -q 'version_folders_ok' "$W/seq1.log" || fail "happy: the sequence does not say it finished"
 ok
@@ -109,7 +109,7 @@ case "$order" in 'step1,step2,step3,step4,step5,') ;; *) fail "happy: the steps 
 ok
 
 # --- 2. a FAILED restart moves the pointer BACK -----------------------------------------------------------------
-I2="$W/i2"; in_place "$I2" "$PREV_COMMIT"
+I2="$W/i2"; in_place "$I2" "$COMMIT"
 WNEW="$W/w2"; mkdir -p "$WNEW"; cp -a "$W/share/versions/$ID" "$WNEW/" 2>/dev/null || true
 # a second scratch share with the previous version already current, so there IS a version to go back to
 mkdir -p "$W/share2/versions/$PREV_ID"; printf 'id=%s\ninstall_dir=%s\n' "$PREV_ID" "$I2" > "$W/share2/versions/$PREV_ID/version.txt"
@@ -128,13 +128,13 @@ now="$(WA_SHARE_ROOT="$W/share2" bash -c '. scripts/lib/versions.sh; wa_version_
 ok
 
 # --- 3. a FAILED sentinel -------------------------------------------------------------------------------------
-I3="$W/i3"; in_place "$I3" "$PREV_COMMIT"; echo sentinel-fail > "$SEQ_MODE"
+I3="$W/i3"; in_place "$I3" "$COMMIT"; echo sentinel-fail > "$SEQ_MODE"
 bash scripts/version-sequence.sh --install "$I3" --candidate "$I3/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share3" > "$W/seq3.log" 2>&1 \
   && fail "failed sentinel: without the expectation the sequence must not claim success"
 grep -q 'version_folders_sentinel_failed' "$W/seq3.log" || { sed -n '1,12p' "$W/seq3.log" >&2; fail "failed sentinel: the failure is not named"; }
 ok
-I4="$W/i4"; in_place "$I4" "$PREV_COMMIT"
+I4="$W/i4"; in_place "$I4" "$COMMIT"
 bash scripts/version-sequence.sh --install "$I4" --candidate "$I4/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share4" --sentinel-fail-expected > "$W/seq4.log" 2>&1 \
   || { sed -n '1,12p' "$W/seq4.log" >&2; fail "failed sentinel: with the expectation the sequence reports it"; }
@@ -142,7 +142,7 @@ grep -q 'sentinel_move_failed_as_expected' "$W/seq4.log" || fail "failed sentine
 ok
 
 # --- 4. a required member that is not there --------------------------------------------------------------------
-I5="$W/i5"; in_place "$I5" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
+I5="$W/i5"; in_place "$I5" "$COMMIT"; echo ok > "$SEQ_MODE"
 bash scripts/version-sequence.sh --install "$I5" --candidate "$I5/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/absent-lua" --share "$W/share5" > "$W/seq5.log" 2>&1 \
   && fail "member required: a missing lua-core must fail the sequence"
