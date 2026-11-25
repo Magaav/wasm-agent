@@ -542,10 +542,6 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db 
 # LIVE CHECKS (advisory until rehearsed), and the cut continues to the tag. The row drives land.impl.canaries with
 # fixture canaries; the wrapper owns the scratch root the test-home guard needs and runs the tree under test.
 gate_run bash scripts/test-release-canaries-advisory.sh
-# A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
-# install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
-# the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.
-gate_run bash scripts/test-publish-named-release.sh                          # a release named node-<sha12> for the cut, byte-identical to its cover
 # THE CUT BUILDS ITS OWN RELEASE (25/11, nextcloud-b): a tree-less node runs the binary EMBEDDED Lua, so a
 # release renamed from a cover gives it the cover Lua while --build-info names the release commit. A commit
 # whose compiled inputs a published release already covers must still be BUILT by the cut.

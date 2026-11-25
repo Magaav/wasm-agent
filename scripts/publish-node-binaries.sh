@@ -67,7 +67,6 @@ CHECK=0
 LOCAL=0
 ENSURE=0
 PUBLISH=0
-NAMED_FROM_COVER=0
 COMMIT=""
 GLIBC_FLOOR="2.31"
 TARGETS=""
@@ -103,7 +102,6 @@ while [ "$#" -gt 0 ]; do
     --local) LOCAL=1; shift ;;
     --ensure) ENSURE=1; shift ;;
     --publish) PUBLISH=1; shift ;;
-    --named-from-cover) NAMED_FROM_COVER=1; shift ;;
     --allow-empty-codemode) ALLOW_EMPTY=1; shift ;;
     -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown_option: $1" ;;
@@ -386,18 +384,6 @@ if [ "$ENSURE" = 1 ]; then
     if [ "$PUBLISH" = 1 ]; then
       components_step || true
       publish_report
-    fi
-    # A RELEASE NAMED FOR THIS COMMIT (25/11, Fable decision A). "Covered" is not installable on a node with
-    # no tree: scripts/release-install.sh fetches exactly node-<sha12> of the commit it is asked for, and a
-    # cut answered only by "covered: node-<other12>" published nothing, so that node answered
-    # node_release_unavailable. The bytes for this commit are the cover's (asserted, not assumed), so they are
-    # published once more under this commit's own name - a NEW release, never a replacement.
-    if [ "$NAMED_FROM_COVER" = 1 ] && [ "$ensure_tag" != "$(wa_node_release_tag "$COMMIT")" ]; then
-      named_args=(--commit "$COMMIT" --cover-tag "$ensure_tag" --out "$OUT/named-$SHORT")
-      [ -n "$(wa_node_release_repo "$ROOT" 2>/dev/null)" ] && named_args+=(--repo "$(wa_node_release_repo "$ROOT" 2>/dev/null)")
-      [ "$PUBLISH" = 1 ] && named_args+=(--publish)
-      bash "$ROOT/scripts/publish-named-release.sh" "${named_args[@]}" \
-        || fail "named_release_refused: the release named for $COMMIT could not be made from $ensure_tag" 2
     fi
     exit 0
   fi
