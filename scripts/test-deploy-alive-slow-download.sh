@@ -82,6 +82,19 @@ ok "$([ -f "$ALIVE" ] && echo 1)" "the alive record exists before the download i
 HOLDER="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$ALIVE" 2>/dev/null | head -1)"
 ok "$([ -n "$HOLDER" ] && echo 1)" "and it names the deploy that wrote it (pid ${HOLDER:-none})" "$(cat "$ALIVE" 2>/dev/null)"
 ok "$(grep -q 'running state written (pid' "$OUT" && echo 1)" "and the deploy said so on its own output" "$(grep 'running state' "$OUT" | head -1)"
+# THE RECORD NAMES THE COMMIT ONCE THE DEPLOY KNOWS IT (25/11, measured during the rc-cover install): alive-first
+# writes the record before COMMIT is resolved, and it said "commit":"unknown" while the install ran - a held worker
+# turn was told it waited for "the install of unknown". Same pid, same start time, and the commit appears.
+alive_commit=""
+for _ in $(seq 1 100); do
+  alive_commit="$(sed -n 's/.*"commit":"\([^"]*\)".*/\1/p' "$ALIVE" 2>/dev/null | head -1)"
+  [ -n "$alive_commit" ] && [ "$alive_commit" != unknown ] && break
+  sleep 0.1
+done
+ok "$([ -n "$alive_commit" ] && [ "$alive_commit" != unknown ] && echo 1)" \
+  "the alive record names the deploy's commit once it is resolved, not 'unknown'" "commit=${alive_commit:-none} record=$(cat "$ALIVE" 2>/dev/null)"
+ok "$([ "$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$ALIVE" | head -1)" = "$HOLDER" ] && echo 1)" \
+  "and it is still the same deploy's record (same pid), not a new one" "holder=$HOLDER record=$(cat "$ALIVE" 2>/dev/null)"
 
 # ---- the second deploy, which must be turned away ------------------------------------------------------
 SECOND="$W/deploy2.out"

@@ -667,6 +667,13 @@ if [ -n "$MAIN_REFS" ]; then
     || fail "this tree's commit $(git rev-parse --short HEAD) is not on $(printf '%s' "$MAIN_REFS" | sed 's/ / or /g'); merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
 fi
 COMMIT="$(git rev-parse --short HEAD)"
+# THE ALIVE RECORD NAMES THE COMMIT AS SOON AS THERE IS ONE (25/11, measured during the rc-cover install): the record
+# is written as the deploy's first act, before COMMIT is resolved, so it said "commit":"unknown" - and a worker turn
+# held during that install was told it was "waiting for the install of unknown". Same pid, same start time: only the
+# commit changes, and the write still refuses a holder that is not us.
+if command -v wa_deploy_alive_write >/dev/null 2>&1 && [ -n "${DEPLOY_ALIVE_DIR:-}" ]; then
+  wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "$COMMIT" >/dev/null 2>&1 || true
+fi
 # THE FULL ID, for the record (24/11): `COMMIT` is a display id (12 hex) and installed.txt names ids a reader
 # compares - a covering install records commit= as the TREE it installed, and a 12-hex value there is refused
 # by the record's own 40-hex rule.
