@@ -270,3 +270,14 @@ whose green depends on the live install is the defect that started this round.
 
 The rule's own row, through the runner at `0c591d73` (`rows/20261125T033726Z`): `rc=0, leftovers=0`, "the check catches
 the orphaned line that was shipped", "no installer executes a line of a message", 74 checks, 0 failed.
+
+## Gate round, 25/11: the merge with main (`c4b5780d`)
+
+The preflight stopped the gate on the merge with main 173d64b0 (two files). Resolved by merging main INTO the branch -
+one merge commit, nothing rebased - and both resolutions are measured: the lint against `origin/main` is 259 lines added
+and 0 deleted (main's file plus this round's sections), and the row differs from main's by exactly the one cleared marker
+this round removed. After the merge `git merge-tree --write-tree origin/main HEAD` reports no conflicts, the branch is 0
+behind and 20 ahead, no conflict markers remain, and `deploy.sh` carries both the branch's post-swap record and main's
+alive write. Rows after the merge: `test-installer-data-isolation` 51/0 (163 rows scanned), `test-release-install-exec`
+rc=0 15/0, `test-install-guards` rc=0 74/0, and `test-deploy-covering-release` SKIPs by name because no published release
+covers the new base yet (its green stands at `40ffd00d` against base 82f57859).
