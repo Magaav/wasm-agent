@@ -260,7 +260,8 @@ printf '\nB. the concrete case: a harness that says ok and leaves a live-HOME pr
 # Replica 1 - the harness's own child: scratch HOME, and the unit dir, the ledger and the port inherited (which is
 # exactly what the row of 24/11 had). Nothing is opened: the process only sleeps.
 M1="wa-isolation-probe-harness-$$"
-pid1="$(HOME="$R/home" XDG_CONFIG_HOME="$REAL_HOME/.config" WASM_AGENT_DB="$REAL_HOME/.wasm-agent/memory.db" \
+pid1="$(env -u WASM_AGENT_PORT -u WA_PORT -u WASM_AGENT_CLIENT_PORT -u WA_CLIENT_PORT \
+  HOME="$R/home" XDG_CONFIG_HOME="$REAL_HOME/.config" WASM_AGENT_DB="$REAL_HOME/.wasm-agent/memory.db" \
   bash -c "$(printf "bash -c 'while :; do sleep 1; done' %q & sleep 0" "$M1")" >/dev/null 2>&1; sleep 0.4; proc_with_marker "$M1" | head -1)"
 MARKERS+=("$M1")
 v1="$(isolation_violations "${pid1:-0}" "$R" 2>&1)"; rc1=$?
@@ -271,7 +272,8 @@ ok "$(printf '%s' "$v1" | grep -q 'live ledger' && echo 1)" "and the ledger" "$(
 ok "$(printf '%s' "$v1" | grep -q 'WASM_AGENT_PORT is unset' && echo 1)" "and the missing port (the symptom: a sentinel with no WASM_AGENT_PORT)" "$(printf '%s' "$v1" | tr '\n' '|')"
 # Replica 2 - what a systemd unit hands the sentinel: the LIVE home itself (pid 635976's shape).
 M2="wa-isolation-probe-unit-$$"
-pid2="$(HOME="$REAL_HOME" WASM_AGENT_DB="$REAL_HOME/.wasm-agent/memory.db" \
+pid2="$(env -u WASM_AGENT_PORT -u WA_PORT -u WASM_AGENT_CLIENT_PORT -u WA_CLIENT_PORT \
+  HOME="$REAL_HOME" WASM_AGENT_DB="$REAL_HOME/.wasm-agent/memory.db" \
   bash -c "$(printf "bash -c 'while :; do sleep 1; done' %q & sleep 0" "$M2")" >/dev/null 2>&1; sleep 0.4; proc_with_marker "$M2" | head -1)"
 MARKERS+=("$M2")
 v2="$(isolation_violations "${pid2:-0}" "$R" 2>&1)"; rc2=$?
@@ -393,4 +395,10 @@ for harness in scripts/test-deploy-covering-release.sh; do
   grep -Fq 'wa_installer_run' "$harness" && say_ok || say_bad "$harness does not run its installer through wa_installer_run"
 done
 
+# A COUNTED FAILURE IS AN EXIT STATUS (25/11, measured in rows/20261125T074304Z): the row printed "52 checks, 1 failed"
+# and exited 0, so the runner logged rc=0 over a red. The counter now decides the status.
+if [ "${guard_failed:-0}" != 0 ]; then
+  printf 'installer data isolation FAILED: %s failure(s)\n' "$guard_failed" >&2
+  exit 1
+fi
 echo "installer data isolation ok ($checked row(s) checked, $runs installer invocation(s), all with their own state dir)"
