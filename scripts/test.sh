@@ -527,6 +527,10 @@ gate_run bash scripts/test-install-window.sh                             # the w
 # The version window (Fable 25/11, the orphan rule): a fixture feed, so no node, no network, no clock.
 # It lives on the gate rather than in the declared list for the same reason its sibling above does.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$DB.version-window" | grep "version window ok"
+# A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
+# install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
+# the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.
+gate_run bash scripts/test-publish-named-release.sh                          # a release named node-<sha12> for the cut, byte-identical to its cover
 gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
 
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
