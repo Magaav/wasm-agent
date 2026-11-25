@@ -312,42 +312,14 @@ note() {
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
 }
 
-# THE DEPLOY SAYS IT IS RUNNING AS ITS FIRST ACT, BEFORE ANY NETWORK (25/11, Fable's G). The file used to be written
-# after the lock claim - which is after the components preflight, the git fetches, the program download and
-# provisioning: seconds on a compile install, the WHOLE download on every fleet node (49 s on work, minutes on a slow
-# link). During it nothing said a deploy was alive: the request was already in done/, and no marker and no alive file
-# existed. lua/core/deploy_pause.lua reads this file and holds sessions while the pid it names is alive.
-# A LIVE HOLDER'S FILE IS NEVER TAKEN OVER, and the trap below clears only our own: a second deploy that is turned
-# away (a lock, a preflight) must not release the sessions the first one is holding.
+# THE DEPLOY-RUNNING RECORD: ITS LIBRARY IS LOADED HERE, THE RECORD IS WRITTEN BELOW (25/11, Fable). The path is
+# resolved before the script changes directory. lua/core/deploy_pause.lua reads the record and holds sessions while
+# the pid it names is alive.
 DEPLOY_ALIVE_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
 DEPLOY_ALIVE_LIB="$(dirname "$0")/lib/deploy-alive.sh"
 [ -r "$DEPLOY_ALIVE_LIB" ] || DEPLOY_ALIVE_LIB="${SOURCE_ROOT:-/nonexistent}/scripts/lib/deploy-alive.sh"
 if [ -r "$DEPLOY_ALIVE_LIB" ]; then
   . "$DEPLOY_ALIVE_LIB"
-  if command -v wa_deploy_alive_write >/dev/null 2>&1; then
-    # A REFUSAL IS NOT SWALLOWED (25/11, measured in the runner: rows/20261125T044552Z). The 2>/dev/null here hid
-    # refused(deploy_alive_held) and the deploy then walked on - through the pin check, to a fail that cleared the
-    # record it had been refused to touch. A second deploy that a live one is holding must stop HERE, by name.
-    _alive_err="${TMPDIR:-/tmp}/deploy-alive.$$.err"
-    if wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" 2>"$_alive_err"; then
-      rm -f "$_alive_err"
-      note "deploy: running state written (pid $$)"
-    else
-      _alive_rc=$?
-      _alive_msg="$(tr '\n' ' ' < "$_alive_err" 2>/dev/null)"
-      rm -f "$_alive_err"
-      case "$_alive_msg" in
-        "refused(deploy_alive_held)"*)
-          # A REFUSAL BEFORE ANYTHING WAS TOUCHED IS A PRE-SWAP REFUSAL (25/11, Fable's fix 2): it used to exit 3
-          # with problems=1, and exit 3 now MEANS "installed, with problems" - a lie about a deploy that never
-          # touched the node. fail() is the pre-swap path: exit 1, problems 0, the same four writes as every other.
-          fail "$_alive_msg"
-          ;;
-      esac
-      note "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
-    fi
-  fi
-  trap 'command -v wa_deploy_alive_clear >/dev/null 2>&1 && wa_deploy_alive_clear "$DEPLOY_ALIVE_DIR"' EXIT
 else
   note "the deploy-alive library is missing ($DEPLOY_ALIVE_LIB): a session paused in this deploy may be resumed while it compiles"
 fi
@@ -508,6 +480,42 @@ cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
 # fact recorded about where the deploy came from names this directory. If it is a canonical checkout a
 # landing may move it at any moment; the build reads a pinned worktree instead (step 3c).
 SOURCE_ROOT="$ROOT"
+
+# THE DEPLOY SAYS IT IS RUNNING BEFORE ANY NETWORK - AND AFTER THE REFUSALS THAT NEED NONE (25/11, Fable).
+# The record used to be written after the lock claim - after the components preflight, the git fetches, the program
+# download and provisioning: the WHOLE download on a fleet node (49 s on work). During it nothing said a deploy was
+# alive. So it moved to the top of the script (rc-cover, 97e201d5) - and that was one step too far: measured the same
+# day (deploy.log 09:48Z-10:00Z), a deploy that this script then REFUSED ("deploying from a CLI turn needs a sentinel
+# supervising the node", "cannot deploy from a turn running on the node it would replace") had already written the
+# record, so a deploy that was never going to run took the live record and paused sessions. The record is written
+# HERE: after every check above (the turn guards, the gate shell, the install directory, the service's own install),
+# none of which touches the network, and before the first thing that does (0e, the components question).
+# A LIVE HOLDER'S FILE IS NEVER TAKEN OVER, and the trap below clears only our own: a second deploy that is turned
+# away must not release the sessions the first one is holding.
+if command -v wa_deploy_alive_write >/dev/null 2>&1; then
+  # A REFUSAL IS NOT SWALLOWED (25/11, measured in the runner: rows/20261125T044552Z). The 2>/dev/null here hid
+  # refused(deploy_alive_held) and the deploy then walked on - through the pin check, to a fail that cleared the
+  # record it had been refused to touch. A second deploy that a live one is holding must stop HERE, by name.
+  _alive_err="${TMPDIR:-/tmp}/deploy-alive.$$.err"
+  if wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" 2>"$_alive_err"; then
+    rm -f "$_alive_err"
+    note "deploy: running state written (pid $$)"
+  else
+    _alive_rc=$?
+    _alive_msg="$(tr '\n' ' ' < "$_alive_err" 2>/dev/null)"
+    rm -f "$_alive_err"
+    case "$_alive_msg" in
+      "refused(deploy_alive_held)"*)
+        # A REFUSAL BEFORE ANYTHING WAS TOUCHED IS A PRE-SWAP REFUSAL (25/11, Fable's fix 2): it used to exit 3
+        # with problems=1, and exit 3 now MEANS "installed, with problems" - a lie about a deploy that never
+        # touched the node. fail() is the pre-swap path: exit 1, problems 0, the same four writes as every other.
+        fail "$_alive_msg"
+        ;;
+    esac
+    note "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
+  fi
+fi
+command -v wa_deploy_alive_clear >/dev/null 2>&1 && trap 'command -v wa_deploy_alive_clear >/dev/null 2>&1 && wa_deploy_alive_clear "$DEPLOY_ALIVE_DIR"' EXIT
 
 # 0e. THE COMPONENTS, ASKED BEFORE ANYTHING IS TOUCHED (24/11, work at 20:56Z). The update downloaded and
 #     verified node-9a0c589adfa0, then found no bundle for its lock (components-df6f97708c72: HTTP 404),
