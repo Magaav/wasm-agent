@@ -524,6 +524,7 @@ gate_run bash scripts/test-deploy-fail-verdict.sh                      # a refus
 gate_run bash scripts/test-deploy-alive-first.sh                       # the record is written first, and it is ours
 gate_run bash scripts/test-deploy-guards-before-alive.sh                 # a refused deploy leaves NO running record and pauses nobody (Fable 25/11)
 gate_run bash scripts/test-install-window.sh                             # the web installer picks the exact build it was asked for (orphan check, 25/11)
+gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
 
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 # NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
