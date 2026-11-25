@@ -92,12 +92,19 @@ run_deploy() { # <label> <expected sentence> <env...>
 run_deploy 'node turn' 'cannot deploy from a turn running on the node it would replace' \
   WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$WORK/install" WA_DEPLOY_ROOT="$ROOT"
 
-# 2. A CLI turn with no sentinel: `turn_owner` reads argv, so the row gives it the argv a CLI turn really has -
-#    an ancestor whose basename is `wa` with the subcommand `chat` (a copy of this shell under that name; it is
-#    the shape the guard reads, not a claim that a chat is running).
-cp -f "$(command -v bash)" "$WORK/wa" 2>/dev/null || fail 'could not place the argv stand-in'
-WATCH_PID=; watch_start
-OUT="$(env WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$WORK/install" WA_DEPLOY_ROOT="$ROOT" "$WORK/wa" chat -c "bash '$DEPLOY'" 2>&1)"; RC=$?
+# 2. A CLI turn with no sentinel: `turn_owner` reads argv, so the row gives it the argv a CLI turn really has --
+#    an ancestor whose basename is `wa` with the subcommand `chat`. Measured 25/11 (row 20261125T113919Z-18166):
+#    `wa chat -c cmd` exits 127 (bash reads `chat` as a script name) and an `exec` stand-in would replace the very
+#    process whose argv the guard walks. So it is a two-line script that runs the deploy as its CHILD and stays
+#    alive, invoked as `wa chat`.
+{
+  echo '#!/bin/bash'
+  echo "bash '$DEPLOY'"
+  echo 'exit $?'
+} > "$WORK/wa" || fail 'could not place the argv stand-in'
+chmod +x "$WORK/wa" || fail 'could not make the argv stand-in executable'
+watch_start
+OUT="$(env WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$WORK/install" WA_DEPLOY_ROOT="$ROOT" "$WORK/wa" chat 2>&1)"; RC=$?
 watch_stop
 [ "$RC" = 1 ] || fail "cli turn: a pre-swap refusal exits 1, got $RC"
 has "$OUT" 'deploying from a CLI turn needs a sentinel supervising the node (wa-sentinel start); none is watching' 'cli turn names its refusal'
