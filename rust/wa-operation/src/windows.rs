@@ -257,6 +257,22 @@ impl Process {
     pub fn terminate(&mut self) -> io::Result<()> {
         check(unsafe { TerminateJobObject(self.job.0, 1) })
     }
+    /// END A COMMAND A PERSON STOPPED - the same contract as the unix stop (process.rs), on a platform
+    /// that has no polite signal to offer: TerminateJobObject ends every process in the job at once, so
+    /// there is no grace here, and the record says `JOB` rather than claiming a TERM it never sent.
+    pub fn stop(&mut self) -> io::Result<Stopped> {
+        check(unsafe { TerminateJobObject(self.job.0, 1) })?;
+        let mut survivors = true;
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_millis(100) {
+            survivors = self.descendants()?;
+            if !survivors {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(Stopped { signal: "JOB", grace_ms: 0, needed_kill: false, survivors })
+    }
     pub fn descendants(&self) -> io::Result<bool> {
         match self.live_descendants() {
             Ok(live) => Ok(!live.is_empty()),
