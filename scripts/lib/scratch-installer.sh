@@ -27,6 +27,11 @@
 #   wa_installer_run --root "$W" --cd "$TREE" --port "$PORT" --install-dir "$W/install" \
 #     --set WA_DEPLOY_FULL=1 -- bash scripts/deploy.sh --reason "a row"
 #
+# THIS LIBRARY IS THE HALF THAT BUILDS; scripts/lib/install-isolation.sh (mission release-node-updates) is the half
+# that JUDGES. That guard asks the six questions of the environment a run will use; this library asks it about the
+# environment it just built, before any child starts. A builder and a guard that disagree is a refusal here, not a
+# surprise in the middle of an install.
+#
 # scripts/test-installer-data-isolation.sh proves the six dimensions on a child of this library and proves that a
 # harness which only replaces HOME (tonight's) is caught.
 #
@@ -45,7 +50,7 @@ wa_installer_live_port() {
 wa_installer_systemctl_stub() { # <root> -> prints the stub path
   local root="${1-}" bin path
   [ -n "$root" ] || { printf 'refused(installer_stub_no_root): the systemctl stub needs a scratch root\n' >&2; return 1; }
-  bin="$root/bin"; path="$root/bin/systemctl"
+  bin="$root/bin"; path="$root/bin/systemctl-stub"
   mkdir -p "$bin" || { printf 'refused(installer_stub_mkdir): cannot create %s\n' "$bin" >&2; return 1; }
   cat > "$path" <<'STUB'
 #!/bin/sh
@@ -124,6 +129,9 @@ wa_installer_env_prepare() {
   # --- the dimensions. Nothing inherited survives except what is named here. ---
   mkdir -p "$child_home" "$root/tmp" "$root/units" "$root/config" "$root/run" "$root/data" "$root/cache" "$root/state" "$root/bin" \
     || { printf 'refused(installer_env_mkdir): cannot create the scratch tree under %s\n' "$root" >&2; return 2; }
+  # THE STUB IS NOT NAMED systemctl, and that is deliberate: scripts/lib/install-isolation.sh refuses any
+  # WA_SENTINEL_UNIT_SYSTEMCTL whose name ends in /systemctl, because a real one handed to a scratch run can
+  # restart the operator's unit. A stub carrying that name would make the guard's own refusal unreadable.
   stub="$(wa_installer_systemctl_stub "$root")" || return 2
   [ -n "$install" ] || install="$root/install"
   mkdir -p "$install" || { printf 'refused(installer_env_mkdir): cannot create the install dir %s\n' "$install" >&2; return 2; }
@@ -188,6 +196,19 @@ wa_installer_run() {
   for kv in "${sets[@]:-}"; do [ -n "$kv" ] && opts+=(--set "$kv"); done
   while IFS= read -r line; do [ -n "$line" ] && envlines+=("$line"); done < <(wa_installer_env_prepare "${opts[@]}")
   [ ${#envlines[@]} -gt 0 ] || { printf 'refused(installer_run_env): the environment could not be built\n' >&2; return 2; }
+  # THE REVIEWED GUARD (scripts/lib/install-isolation.sh, mission release-node-updates) ASKS THE SAME QUESTION OF
+  # THE ENVIRONMENT THIS LIBRARY JUST BUILT. If the two ever disagree, this is the line that says so - by refusing.
+  local repo_root guard_out
+  repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd -P)" || repo_root=
+  if [ -n "$repo_root" ] && [ -r "$repo_root/scripts/lib/install-isolation.sh" ]; then
+    guard_out="$(env -i "${envlines[@]}" bash -c '. "$1/scripts/lib/install-isolation.sh"; wa_install_isolation_guard "$2" "$3"' _ "$repo_root" "$root" "$root/home" 2>&1)" || {
+      printf 'refused(installer_env_guard): install-isolation.sh refuses the environment this library built: %s\n' "$(printf '%s' "$guard_out" | tr '\n' '|')" >&2
+      return 2
+    }
+  else
+    printf 'refused(installer_env_guard_missing): scripts/lib/install-isolation.sh is not beside this library, so the environment it built cannot be judged by the reviewed guard\n' >&2
+    return 2
+  fi
   if [ -n "$cwd" ]; then
     [ -d "$cwd" ] || { printf 'refused(installer_run_cwd): %s is not a directory\n' "$cwd" >&2; return 2; }
     ( cd "$cwd" && exec env -i "${envlines[@]}" "${args[@]}" )

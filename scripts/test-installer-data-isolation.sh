@@ -1,53 +1,121 @@
 #!/usr/bin/env bash
-# NOTHING THIS REPO RUNS MAY REACH THE OPERATOR'S INSTALL. THIS IS THE LINT THAT SAYS SO (25/11, Fable's G item).
+# The lint this leak earns: a test that runs the INSTALLER must name its own data dir.
 #
-# WHAT HAPPENED WITHOUT IT. On the night of 24/11 a harness (scripts/test-deploy-covering-release.sh, run by hand from
-# a mission directory) reported
+# The failure it prevents (24/11, twice in one afternoon): scripts/test-upgrade-idle.sh ran upgrade.sh with
+# the inherited environment. upgrade.sh writes the deploy-pending signal before it waits -
+# `DEPLOY_SIGNAL_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"` (upgrade.sh:648), written
+# with `to ${COMMIT:-unknown}` (:659) - so one run of a test wrote ~/.wasm-agent/deploy-pending.json and
+# every running session on the machine paused after its step; the node never resumed them, because no
+# install was coming. A test that touches the operator's data dir is not a test, it is an outage.
 #
-#     deploy covering release ok (16 checks, 0 failed)
-#
-# and left a wa-sentinel behind with HOME=/home/victor and no WASM_AGENT_PORT (pid 635976, killed at 00:38:06Z). It
-# had also rewritten the LIVE ~/.config/systemd/user/wa-sentinel.service and ~/.local/bin/runtime-worktree.txt and run
-# sentinels on the LIVE ledger. The harness had replaced HOME with a scratch directory - and replaced nothing else:
-#
-#     the unit dir   scripts/lib/sentinel-unit.sh:41   ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user  -> inherited
-#     the manager    XDG_RUNTIME_DIR                                                            -> inherited
-#     the ledger     WASM_AGENT_DB                                                              -> inherited
-#     the port       WASM_AGENT_PORT                                                            -> unset (= 8799)
-#
-# and it stripped the marker the turn guard reads (`env -u WASM_AGENT_IN_TURN`), which is why the deploy went ahead
-# inside a turn at all. A green row that reaches the live node is worse than a red one: it is the only failure a
-# reviewer cannot see.
-#
-# WHAT THIS FILE ASSERTS
-#   A. the six dimensions, DYNAMICALLY, on a real child of scripts/lib/scratch-installer.sh: INSTALL_DIR, the unit
-#      dir, the systemctl it is given (a stub under the scratch root, never /usr/bin/systemctl), the DB, XDG (both
-#      config and runtime), the port (never 8799/8800/8801/8810), the guard marker preserved rather than stripped,
-#      and no vault URL carried over. Plus the refusals: the operator home, a live port and an install dir outside
-#      the scratch root are each refused by name before anything is created.
-#   B. the CONCRETE CASE. A harness that reports "ok" and leaves a process behind is caught: this test starts two
-#      replicas of what leaked that night (one with the scratch HOME and the inherited unit/ledger/port, one with the
-#      live HOME a systemd unit hands a sentinel) and its checker must name each violation; then it starts the SAME
-#      leftover through the wrapper and its checker must be clean. If the checker is ever loosened, this half fails.
-#   C. every row that RUNS scripts/deploy.sh or scripts/upgrade.sh (statements, continuation lines joined; the
-#      literal path or $DEPLOY/$UPGRADE): it may not strip the marker, and it may not detach (setsid/nohup/disown)
-#      - except a statement that does both, re-roots the process tree on purpose and names its own scratch HOME,
-#      WASM_AGENT_HOME, WA_INSTALL_DIR and WA_PORT, which is the one fixture whose SUBJECT is the guard itself
-#      (scripts/test-deploy-ancestry.sh).
-#
-# WHAT IT DOES NOT COVER, said plainly so nobody reads a pass as more than it is: a row that STARTS a sentinel
-# (wa-sentinel, bootstrap.sh, install.sh) is not in set C; the statements it scans are the ones that pass their
-# environment inline, because a row that sets its variables in a function and calls `bash "$DEPLOY"` is judged by
-# the function, not by that one line. The rows that reach an installer are counted and printed either way.
-#
-#   bash scripts/test-installer-data-isolation.sh
-#
-# Exit: 0 green; 1 a check failed. Its own scratch root only; it refuses to run when the root it made is the
-# operator's home or store (scripts/lib/scratch-home.sh), and it never starts an installer (its children are shells
-# that sleep, and it stops every one of them by pid).
+# What counts as RUNNING the installer, and what does not:
+#   runs     `bash .../upgrade.sh`, `bash .../deploy.sh`, `sh`, `source`/`.` of one, `$(...)` of one, and a
+#            copy of one that is then executed (a fixture that stands in for the real script)
+#   does not `bash -n` (a syntax check runs nothing), grep/cat/sed/awk reads, and a stub whose NAME is
+#            upgrade.sh or deploy.sh under the test's own $WORK
+# A file that runs one must set WASM_AGENT_DATA, WASM_AGENT_HOME or HOME somewhere (the usual shape is a
+# run() wrapper), and the row it runs must have been fixed to do so.
 set -uo pipefail
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-cd "$ROOT" || exit 2
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+fails=0
+checked=0
+runs=0
+for file in scripts/test-*.sh; do
+  case "$file" in scripts/test-installer-data-isolation.sh) continue ;; esac
+  [ -f "$file" ] || continue
+  checked=$((checked + 1))
+  # Does the file name its own state dir at all?
+  sets=no
+  if grep -qE '(WASM_AGENT_DATA|WASM_AGENT_HOME|HOME)=' "$file"; then sets=yes; fi
+  # Which lines EXECUTE the installer? The line has to put bash/sh/source/. in front of something that IS
+  # the installer - a path ending upgrade.sh or deploy.sh, or a variable the file fills with one. A line
+  # that merely mentions $DEPLOY (an extract, a grep, an assignment to another name) runs nothing.
+  while IFS= read -r hit; do
+    line="${hit%%:*}"
+    text="${hit#*:}"
+    case "$text" in '#'*) continue ;; esac
+    printf '%s' "$text" | grep -qE 'bash -n' && continue
+    printf '%s' "$text" | grep -qE '\$WORK/(stub-)?[A-Za-z0-9_.-]*(upgrade|deploy)\.sh' && continue
+    if printf '%s' "$text" | grep -qE '(^|[;|&(=]|\$\()[[:space:]]*(bash|sh|source|\.)[[:space:]]+[^|;&]*((upgrade|deploy)\.sh|[$][A-Z_]*(UPGRADE|DEPLOY))'; then
+      runs=$((runs + 1))
+      if [ "$sets" = no ]; then
+        echo "installer-data-isolation FAILED: $file:$line runs the installer with the inherited state dir:" >&2
+        echo "    $text" >&2
+        echo "    set WASM_AGENT_DATA (or WASM_AGENT_HOME and HOME) to a scratch directory for that run" >&2
+        fails=$((fails + 1))
+      fi
+    fi
+  done < <(grep -nE '(upgrade|deploy)\.sh|["$]\$?[A-Z_]*(UPGRADE|DEPLOY)["$]' "$file" 2>/dev/null || true)
+done
+
+# The rule must be able to fail: the two rows this round fixed are named, so a regression in either is red.
+for must in scripts/test-upgrade-idle.sh scripts/test-glibc-floor.sh; do
+  grep -qE '(WASM_AGENT_DATA|WASM_AGENT_HOME)=' "$must" \
+    || { echo "installer-data-isolation FAILED: $must no longer names its own state dir" >&2; fails=$((fails + 1)); }
+done
+
+[ "$fails" = 0 ] || { echo "installer-data-isolation: $fails file(s) run the installer with the real state dir" >&2; exit 1; }
+
+# ---- THE SIX THINGS AROUND THE STATE DIR (25/11, mission release-node-updates, Fable's G condition) --------
+# The lint above asks one question: does the row name its own STATE DIR? The night of 24-25/11 showed five more
+# things a scratch installer run must not inherit, and each of them was a live one: WA_INSTALL_DIR unset (which
+# means the operator's ~/.local/bin), the systemd unit dir (an inherited XDG_CONFIG_HOME is where the LIVE
+# wa-sentinel.service lives - two scratch runs rewrote it that night), WA_SENTINEL_UNIT_SYSTEMCTL left as the
+# real systemctl, WASM_AGENT_DB naming the operator's ledger, and the node's port 8799/8800.
+#
+# scripts/lib/install-isolation.sh answers all six for the environment the run WILL use, and its answer is what
+# the harnesses below call before they start an installer. The rows here prove the guard refuses a live
+# environment (the RED row the condition asks for), passes a scratch one, and that the harnesses call it.
+. "$ROOT/scripts/lib/install-isolation.sh" || { echo "installer isolation FAILED: no scripts/lib/install-isolation.sh" >&2; exit 1; }
+
+REAL_HOME="${HOME:-}"
+SCRATCH_ROOT="${TMPDIR:-/tmp}"
+case "$SCRATCH_ROOT" in "$REAL_HOME"|"$REAL_HOME"/*) SCRATCH_ROOT=/tmp ;; esac
+PROBE="$(CDPATH= cd -- "$SCRATCH_ROOT" && pwd -P)/wa-isolation-probe-$$"
+mkdir -p "$PROBE/home" "$PROBE/install" "$PROBE/units" "$PROBE/bin" "$PROBE/config" || exit 1
+trap 'rm -rf "$PROBE"' EXIT
+printf '#!/bin/sh\nexit 1\n' > "$PROBE/bin/systemctl-stub"; chmod +x "$PROBE/bin/systemctl-stub"
+
+checks=0; guard_failed=0
+say_ok() { checks=$((checks + 1)); }
+say_bad() { checks=$((checks + 1)); guard_failed=$((guard_failed + 1)); echo "installer isolation FAILED: $1" >&2; }
+
+# RED: an inherited, live-looking environment is refused, and every reason is named. The home the run would use
+# is an argument, because `env -i` drops everything this shell had.
+live=$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$REAL_HOME" \
+  WA_INSTALL_DIR="$REAL_HOME/.local/bin" XDG_CONFIG_HOME="$REAL_HOME/.config" \
+  WASM_AGENT_DB="$REAL_HOME/.wasm-agent/memory.db" WASM_AGENT_PORT=8799 WASM_AGENT_CLIENT_PORT=8800 \
+  bash -c '. "$1/scripts/lib/install-isolation.sh"; wa_install_isolation_guard "$2" "$3"' _ "$ROOT" "$PROBE" "$REAL_HOME" 2>&1)
+rc=$?
+[ "${rc:-0}" != 0 ] && say_ok || say_bad 'a live-looking environment was NOT refused by the isolation guard'
+for needle in "WA_INSTALL_DIR = $REAL_HOME/.local/bin" \
+              "WA_SENTINEL_UNIT_DIR = $REAL_HOME/.config/systemd/user" \
+              "WA_SENTINEL_UNIT_SYSTEMCTL is systemctl, the real systemctl" \
+              "WASM_AGENT_DB = $REAL_HOME/.wasm-agent/memory.db" \
+              "WASM_AGENT_PORT = 8799 is a live port" \
+              "the data dir = $REAL_HOME/.wasm-agent"; do
+  printf '%s\n' "$live" | grep -Fq "$needle" && say_ok || say_bad "the refusal does not name: $needle"
+done
+
+# GREEN: a scratch environment passes, so the guard is a check and not a wall.
+green=$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$PROBE/home" WASM_AGENT_HOME="$PROBE/home" \
+  WA_INSTALL_DIR="$PROBE/install" XDG_CONFIG_HOME="$PROBE/config" WA_SENTINEL_UNIT_DIR="$PROBE/units" \
+  WA_SENTINEL_UNIT_SYSTEMCTL="$PROBE/bin/systemctl-stub" WASM_AGENT_PORT=17999 WASM_AGENT_CLIENT_PORT=18000 \
+  bash -c '. "$1/scripts/lib/install-isolation.sh"; wa_install_isolation_guard "$2" "$3"; echo "answer=$?"' _ "$ROOT" "$PROBE" "$PROBE/home" 2>&1)
+printf '%s\n' "$green" | grep -q 'answer=0' && say_ok || say_bad "a fully scratch environment was refused: $green"
+
+# THE HARNESSES CALL IT: a harness that runs an installer cannot quietly lose the isolation it was given.
+for harness in scripts/test-bootstrap-gate.sh scripts/test-release-install-exec.sh scripts/test-linux-release-fetch.sh; do
+  grep -Fq 'install-isolation.sh' "$harness" && say_ok || say_bad "$harness does not source scripts/lib/install-isolation.sh"
+  grep -Fq 'wa_install_isolation_guard' "$harness" && say_ok || say_bad "$harness does not run the isolation guard before its installer"
+  grep -Fq 'WA_SENTINEL_UNIT_DIR' "$harness" && say_ok || say_bad "$harness does not name a scratch unit dir"
+done
+
+[ "$guard_failed" = 0 ] || exit 1
+echo "installer isolation ok ($checks checks: a live environment is refused, a scratch one passes, and the installer harnesses call the guard)"
+
 . "$ROOT/scripts/lib/scratch-home.sh"
 . "$ROOT/scripts/lib/scratch-installer.sh"
 
@@ -70,7 +138,7 @@ trap cleanup EXIT
 R="$W/root"
 mkdir -p "$R" || exit 2
 
-checks=0; failed=0
+failed=0
 ok()   { checks=$((checks + 1)); if [ "$1" = "1" ]; then printf '  ok   %s\n' "$2"; else failed=$((failed + 1)); printf '  FAIL %s%s\n' "$2" "${3:+ - $3}"; fi; }
 under() { # <path> <root> -> 1 when the path is the root or under it
   case "$1" in "$2"|"$2"/*) echo 1 ;; *) echo 0 ;; esac
@@ -273,6 +341,30 @@ ok "$(printf '%s' "$own_code" | grep -q 'wa_installer_run' && ! printf '%s' "$ow
   "$own runs its deploy through wa_installer_run and carries no guard variable in its code (only in the comment that explains why it cannot)" \
   "$(printf '%s' "$own_code" | grep -nE -- '-u WASM_AGENT_IN_TURN|WASM_AGENT_IN_TURN=|wa_installer_run' | head -3)"
 
-printf '\ninstaller data isolation: %d checks, %d failed\n' "$checks" "$failed"
-[ "$failed" = 0 ] || exit 1
-exit 0
+# THE ORIGINAL RULE OF THIS FILE (24/11), kept verbatim as one more check: a row that runs the installer names its
+# own state dir, or every session on the machine pauses on a deploy-pending signal that no install will answer.
+ok "$([ "$fails" = 0 ] && echo 1)" "every row that runs the installer names its own state dir ($checked row(s) checked, $runs installer invocation(s))" \
+  "$fails file(s) run the installer with the real state dir"
+# THE SIX DIMENSIONS ARE ALSO THE BUILDER'S CONTRACT (25/11, prebuilt-records-the-cover): scripts/lib/
+# scratch-installer.sh REFUSES to run anything unless the environment it built passes the reviewed guard
+# (scripts/lib/install-isolation.sh, release-node-updates) - so the two files cannot disagree.
+GUARD_ENV="$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$R/home" WASM_AGENT_HOME="$R/home" \
+  WA_INSTALL_DIR="$R/install" XDG_CONFIG_HOME="$R/config" WA_SENTINEL_UNIT_DIR="$R/units" \
+  WA_SENTINEL_UNIT_SYSTEMCTL="$R/bin/systemctl-stub" WASM_AGENT_DB="$R/ledger.db" \
+  WASM_AGENT_PORT=17999 WASM_AGENT_CLIENT_PORT=18000 \
+  bash -c '. "$1/scripts/lib/install-isolation.sh"; wa_install_isolation_guard "$2" "$3"; echo "answer=$?"' _ "$ROOT" "$R" "$R/home" 2>&1)"
+ok "$(printf '%s' "$GUARD_ENV" | grep -q 'answer=0' && echo 1)" \
+  "the environment this file calls isolated is the one install-isolation.sh calls isolated" "$(printf '%s' "$GUARD_ENV" | tr '
+' '|')"
+
+printf '\nthe six dimensions and the rows: %d checks, %d failed\n' "$checks" "$failed"
+[ "$failed" = 0 ] || guard_failed=$((guard_failed + failed))
+
+# THE HARNESS OF THIS BRANCH CALLS THE BUILDER, which calls the guard (above). Named here so a regression in the
+# row is red in this file, not only in the row.
+for harness in scripts/test-deploy-covering-release.sh; do
+  grep -Fq 'scratch-installer.sh' "$harness" && say_ok || say_bad "$harness does not source scripts/lib/scratch-installer.sh"
+  grep -Fq 'wa_installer_run' "$harness" && say_ok || say_bad "$harness does not run its installer through wa_installer_run"
+done
+
+echo "installer data isolation ok ($checked row(s) checked, $runs installer invocation(s), all with their own state dir)"
