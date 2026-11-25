@@ -239,6 +239,11 @@ local function validate(schema,node,path,extra)
    elseif type(extra)=='table' and extra[key] then
     -- the caller's own module says this tool takes the name (a synonym its handler maps, a field the
     -- runtime stamps); it is not a name the schema never declares by accident.
+   elseif path~='arguments' and next(schema.properties or {})==nil and not schema.required then
+    -- NOT THE TOOL'S OWN ARGUMENTS, AND NOTHING DECLARED: `arguments={type="object"}` is how a schema says
+    -- "an object of anything" (the target's own arguments, a free-form bag). Closing that would refuse every
+    -- key of a bag the schema deliberately did not enumerate - measured on `tool_call`, whose `arguments`
+    -- subschema is exactly this shape.
    else
     local did=nearest(key,schema.properties)
     return 'unknown_argument:'..tostring(key)..(did and (' - did you mean '..did..'?') or '')
