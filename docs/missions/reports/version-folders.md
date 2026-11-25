@@ -78,6 +78,17 @@ is back to ui/ alone, verified by `ls`), and the test itself refuses a scratch i
 lesson: the library operates on the real root by design, so anything that CALLS it in a probe must export
 `WA_SHARE_ROOT`; the row's own guard is what caught the same class in the test's first run.
 
+## Where S4 (a cut finishes itself) is decided: wa-host, not Lua
+
+Requirement 5 says a step is either atomic or finished by wa ITSELF at its next start. The repair cannot live in
+Lua: the interpreter has no capability to create a link (host.read_file and host.path_facts exist; there is no
+host.symlink), and exec-ing \`ln\` from an interpreter that has just failed to resolve its own tree is the wrong
+shape. It belongs in \`rust/wa-host/src/main.rs\`, before Lua is loaded: when \`<share>/current/version.txt\`
+exists, put back any legacy link that is missing or dangling (lua-core, scripts, wa, wa-sentinel, and ui in the
+share root), and do nothing when there is no current - which is every node today. The row that comes with it
+breaks a link, runs \`wa --version\` against the scratch install, and asserts the link is back and the command
+answered.
+
 ## Not in this slice
 
 (d) - side-by-side start, the listener handoff, fd passing, run-journal ownership (item 3(ii) and E3). Windows:
