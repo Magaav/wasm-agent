@@ -515,6 +515,13 @@ else
 fi
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
+# NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
+# HOME, ran the real deploy, reported "ok (16 checks, 0 failed)" - and left a wa-sentinel with HOME=/home/victor and
+# no WASM_AGENT_PORT behind, having rewritten the LIVE unit file, restarted the LIVE sentinel and run it on the LIVE
+# ledger. This row measures the six dimensions on a real child of scripts/lib/scratch-installer.sh, proves its
+# checker catches that harness and clears the wrapper's own leftover, and fails any row that strips the turn guard
+# or detaches an installer it cannot isolate. It runs nothing that installs.
+gate_run bash scripts/test-installer-data-isolation.sh
 gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards
 WA_BIN="$BIN" gate_run bash scripts/test-node-pins.sh                 # a rollback is a record, and it gates the next move
 # One name for the build, composed in Rust: the pin ledger is fleet-wide, so a record for ANOTHER node

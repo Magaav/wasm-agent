@@ -38,6 +38,7 @@ set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT" || exit 2
 . "$ROOT/scripts/lib/scratch-home.sh"
+. "$ROOT/scripts/lib/scratch-installer.sh"
 . "$ROOT/scripts/lib/service-target.sh"
 . "$ROOT/scripts/lib/node-binaries.sh"
 
@@ -172,29 +173,36 @@ ok "$(grep -q 'SWAPPED=1' "$DEPLOY_SRC" && grep -q 'post_swap_problem' "$DEPLOY_
 # ---- run the real deploy --------------------------------------------------------------------------
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 [ -n "$PORT" ] || skip_all "no free port for the scratch node"
-WA_SERVICE_UNIT_FILE="$W/no-such.unit"; export WA_SERVICE_UNIT_FILE
 OUT="$W/deploy.out"
-# A COMMENT INSIDE A CONTINUED COMMAND ENDS IT (`#` is not an argument): the first form of this block ran
-# `env` with no command and printed the environment. Every comment for the deploy's environment is ABOVE
-# the command that carries it, and two of them matter:
-#   * NO SYSTEMD USER SESSION for this scratch home (XDG_RUNTIME_DIR and DBUS point at scratch paths): with
-#     one, the sentinel step finds the MACHINE unit and tries to restart that - measured,
-#     "systemctl --user restart wa-sentinel.service" - so the watcher of THIS install never starts;
-#   * nothing outside owns the watcher in a scratch home (WA_SENTINEL_SUPERVISOR=none, deploy.sh's own seam).
+# THE ENVIRONMENT IS REBUILT, NOT FILTERED (25/11). This block used to be
+#     ( cd "$TREE" && env -u WASM_AGENT_IN_TURN -u WA_INSTALL_DIR -u WA_PORT HOME="$HOME" ... bash scripts/deploy.sh )
+# and that is what reached the operator's machine: the row replaced HOME and nothing else, so the deploy's unit path
+# (${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user, scripts/lib/sentinel-unit.sh:41) was the LIVE one, its
+# `systemctl --user` talked to the LIVE manager through the inherited XDG_RUNTIME_DIR, and the sentinel it
+# restarted ran on the LIVE ledger through the inherited WASM_AGENT_DB - while `env -u WASM_AGENT_IN_TURN` removed
+# the one guard that would have refused inside a turn. scripts/lib/scratch-installer.sh now builds the child's
+# environment from an allow-list: HOME, WASM_AGENT_HOME, WA_INSTALL_DIR, the unit dir, a systemctl STUB, the ledger,
+# XDG config+runtime and the port are all under $W, the marker travels unchanged, and the live ports are refused.
+# That library is what scripts/test-installer-data-isolation.sh measures, so this row is safe to run anywhere.
 # WA_DEPLOY_FULL=1 IS THE TREE'S OWN WAY TO SAY "install the tree fully", and it is what puts this row on the
 # COVERING path instead of the Lua fast path. Both are correct, and they are different questions: the fast
 # path keeps the installed binary (nothing compiled changed, so there is nothing to download) and never asks
 # the release channel anything; the covering path is a deploy that INSTALLS a binary and therefore must take
 # the newest published build of this tree's compiled inputs - which is the branch work's 22:17Z update ran,
 # and the branch whose record was wrong. The row names the knob rather than pretending the two are one path.
-( cd "$TREE" && env -u WASM_AGENT_IN_TURN -u WA_INSTALL_DIR -u WA_PORT \
-    WA_DEPLOY_FULL=1 WA_DEPLOY_TREE_WAIT=60 \
-    WA_DEPLOY_ROOT="$TREE" WA_INSTALL_DIR="$INSTALL" WA_PORT="$PORT" \
-    WA_SERVICE_UNIT_FILE="$W/no-such.unit" WA_SENTINEL_SUPERVISOR=none \
-    XDG_RUNTIME_DIR="$W/xdg" DBUS_SESSION_BUS_ADDRESS="unix:path=$W/no-bus" \
-    HOME="$HOME" WASM_AGENT_HOME="$HOME" \
-    bash scripts/deploy.sh --reason "test-deploy-covering-release: a covering release must record both facts" \
-    > "$OUT" 2>&1 ); rc=$?
+# WA_DEPLOY_FULL=1 IS THE TREE'S OWN WAY TO SAY "install the tree fully", and it is what puts this row on the
+# COVERING path instead of the Lua fast path. Both are correct, and they are different questions: the fast path keeps
+# the installed binary (nothing compiled changed, so there is nothing to download) and never asks the release channel
+# anything; the covering path is a deploy that INSTALLS a binary and therefore must take the newest published build
+# of this tree's compiled inputs - which is the update work's 22:17Z run was, and the branch whose record was wrong.
+# WA_SENTINEL_SUPERVISOR=none: nothing outside owns the watcher in a scratch home (deploy.sh's own seam).
+wa_installer_run --root "$W" --cd "$TREE" --port "$PORT" --install-dir "$INSTALL" \
+  --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_TREE_WAIT=60 \
+  --set WA_DEPLOY_ROOT="$TREE" \
+  --set WA_SERVICE_UNIT_FILE="$W/no-such.unit" --set WA_SENTINEL_SUPERVISOR=none \
+  -- bash scripts/deploy.sh --reason "test-deploy-covering-release: a covering release must record both facts" \
+  > "$OUT" 2>&1
+rc=$?
 
 if grep -q 'refused(canonical_busy)' "$OUT" 2>/dev/null; then
   skip_all "the fixture tree is not clean enough for a deploy to run from: $(git -C "$TREE" status --porcelain | head -3 | tr '\n' ';') "

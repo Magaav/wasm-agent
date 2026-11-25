@@ -144,7 +144,7 @@ WT="$W/tree"
 if git -C "$ROOT" worktree add -q --detach "$WT" HEAD 2>/dev/null; then
   sed -i 's/^\(codemode \)[0-9a-f]*/\1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$WT/components.lock" 2>/dev/null
   mkdir -p "$W/live-install"
-  out="$(cd "$WT" && env -u WASM_AGENT_IN_TURN WA_DEPLOY_ROOT="$WT" WA_INSTALL_DIR="$W/live-install" WA_PORT=18471 \
+  out="$(cd "$WT" && env WA_DEPLOY_ROOT="$WT" WA_INSTALL_DIR="$W/live-install" WA_PORT=18471 \
     WA_RELEASE_API_BASE="http://127.0.0.1:1/api" HOME="$HOME" PATH="$NO_TOOLCHAIN" \
     bash scripts/deploy.sh --reason components-preflight-test 2>&1)"; rc=$?
   # THE DEPLOY'S TURN GUARD COMES FIRST AND HAS TWO REFUSALS: a turn ON the node ("cannot deploy from a turn")

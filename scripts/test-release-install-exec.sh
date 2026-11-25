@@ -105,7 +105,7 @@ chmod +x "$INSTALL/wa"
 printf '%s\n' "$$" > "$INSTALL/serve.pid"
 out="$(cd "$INSTALL" && env -i HOME="$HOME_DIR" PATH=/usr/local/bin:/usr/bin:/bin \
     WA_INSTALL_DIR="$INSTALL" WA_PORT=24555 WA_SERVICE_UNIT_FILE="$W/no-unit" WA_SERVICE_PID=0 \
-    WA_RELEASE_KEYS="$KEY" WA_SUPERVISED=1 WASM_AGENT_IN_TURN= \
+    WA_RELEASE_KEYS="$KEY" WA_SUPERVISED=1 \
     timeout 120 bash "$UPGRADE" "$CAND" --release "$DIR" 2>&1)"
 case "$out" in
   *"no new binary to install"*)
