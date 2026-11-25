@@ -146,6 +146,13 @@ PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); p
 [ -n "$PORT" ] || skip_all "no free port for the scratch node"
 WA_SERVICE_UNIT_FILE="$W/no-such.unit"; export WA_SERVICE_UNIT_FILE
 OUT="$W/deploy.out"
+# A COMMENT INSIDE A CONTINUED COMMAND ENDS IT (`#` is not an argument): the first form of this block ran
+# `env` with no command and printed the environment. Every comment for the deploy's environment is ABOVE
+# the command that carries it, and two of them matter:
+#   * NO SYSTEMD USER SESSION for this scratch home (XDG_RUNTIME_DIR and DBUS point at scratch paths): with
+#     one, the sentinel step finds the MACHINE unit and tries to restart that - measured,
+#     "systemctl --user restart wa-sentinel.service" - so the watcher of THIS install never starts;
+#   * nothing outside owns the watcher in a scratch home (WA_SENTINEL_SUPERVISOR=none, deploy.sh's own seam).
 # WA_DEPLOY_FULL=1 IS THE TREE'S OWN WAY TO SAY "install the tree fully", and it is what puts this row on the
 # COVERING path instead of the Lua fast path. Both are correct, and they are different questions: the fast
 # path keeps the installed binary (nothing compiled changed, so there is nothing to download) and never asks
@@ -156,10 +163,6 @@ OUT="$W/deploy.out"
     WA_DEPLOY_FULL=1 WA_DEPLOY_TREE_WAIT=60 \
     WA_DEPLOY_ROOT="$TREE" WA_INSTALL_DIR="$INSTALL" WA_PORT="$PORT" \
     WA_SERVICE_UNIT_FILE="$W/no-such.unit" WA_SENTINEL_SUPERVISOR=none \
-    # ^ and NO systemd user session for this scratch home: with one, the sentinel step finds the MACHINE's
-    #   unit and tries to restart that (measured: "systemctl --user restart wa-sentinel.service"), so the
-    #   watcher of THIS install never starts. A scratch XDG_RUNTIME_DIR makes `systemctl --user` unable to
-    #   answer, and the sentinel then starts as a plain child of this row.
     XDG_RUNTIME_DIR="$W/xdg" DBUS_SESSION_BUS_ADDRESS="unix:path=$W/no-bus" \
     HOME="$HOME" WASM_AGENT_HOME="$HOME" \
     bash scripts/deploy.sh --reason "test-deploy-covering-release: a covering release must record both facts" \
@@ -218,7 +221,10 @@ for rel in scripts/lib/download-asset.sh scripts/lib/health-wakes.sh; do
 done
 
 # THE NODE THE INSTALL RUNS: the old bytes, the new tree, and it says so itself.
-VERSION="$("$INSTALL/wa" --version 2>/dev/null | head -1)"
+# WA_INSTALL_DIR is how a binary finds the record it names beside itself (rust/wa-host/src/main.rs:413):
+# with it unset the label reads ~/.local/bin, where a scratch home has no installed.txt, and the tree
+# half is silently absent (measured while writing this row).
+VERSION="$(WA_INSTALL_DIR="$INSTALL" "$INSTALL/wa" --version 2>/dev/null | head -1)"
 ok "$(printf '%s' "$VERSION" | grep -q "v${C1:0:7}" && echo 1)" "wa --version names the OLD binary's build (${C1:0:7})" "$VERSION"
 ok "$(printf '%s' "$VERSION" | grep -q "tree ${C2:0:12}" && echo 1)" "and the NEW tree (tree ${C2:0:12})" "$VERSION"
 
