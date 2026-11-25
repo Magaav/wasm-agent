@@ -400,7 +400,7 @@ if [ "$MODE" = inject ]; then
 # the normal end, not fail() - and that end used to write result.json without a verdict, so the file said failed
 # over an install that succeeded with a problem. Read the field here, on this path, where the defect was.
 RES="${DATA:-$HOME/.wasm-agent}/deploy-result.json"
-[ -f "$RES" ] || RES="$INSTALL_DIR/deploy-result.json"
+[ -f "$RES" ] || RES="$INSTALL/deploy-result.json"
 ok "$(grep -q '"verdict": *"installed_with_problems"' "$RES" 2>/dev/null && echo 1)" "result.json names installed_with_problems on the normal end, not failed" "$(tr -d '\n' < "$RES" 2>/dev/null | cut -c1-220)"
 ok "$(grep -q '"problems": *1' "$RES" 2>/dev/null && echo 1)" "and the count that goes with it, 1" "$(grep -o 'problems[^,]*' "$RES" 2>/dev/null | head -1)"
 else
