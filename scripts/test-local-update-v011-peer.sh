@@ -158,27 +158,31 @@ ok "$(curl -fsS -m 2 -o /dev/null "http://127.0.0.1:${WASM_AGENT_PORT:-17921}/he
 UPD_ENV=(HOME="$PEER" WASM_AGENT_HOME="$PEER" WA_INSTALL_DIR="$PEER/install" TMPDIR="$R/tmp"
   WA_INSTALL_BASE="file://$BASE" WA_INSTALL_REF="$REF" WA_INSTALL_ALLOW_LOCAL=1 WA_RELEASE_KEYS="$KEYS"
   WA_SENTINEL_UNIT_DIR="$R/units" WA_SENTINEL_UNIT_SYSTEMCTL="$R/bin/systemctl-stub" XDG_CONFIG_HOME="$R/config")
-ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 300 "$PEER/install/wa" update 2>&1)
-printf '%s\n' "$ANSWER" | sed 's/^/    /' | tail -6
-UNSUPERVISED=0
-printf '%s' "$ANSWER" | grep -q 'release_update_unsupervised' && UNSUPERVISED=1
-# THREE THINGS, NOT ONE WORD: the updater must NOT answer that the node is current (the defect this row found -
-# it compared against the public index while reading a local one), it must name the release it found, and the
-# install must then happen (asserted by the version and the record below, not by the word "installed").
-ok "$(printf '%s' "$ANSWER" | grep -q 'already runs the newest published bundle' && echo 0 || echo 1)" \
-  "the updater did NOT answer that the node is already current (it read the local channel, not the public index)" \
-  "$(printf '%s' "$ANSWER" | tail -3)"
-ok "$(printf '%s' "$ANSWER" | grep -q "$SHORT" && echo 1)" \
-  "and it names the release the local channel carries: $SHORT" "$(printf '%s' "$ANSWER" | tail -2)"
-if [ "$UNSUPERVISED" = 1 ]; then
-  # No user manager here (the runner withholds one): the product names the command it would have run in a
-  # transient unit, and the row runs exactly that command - its own words, no workaround.
-  printf '  note the node has no user manager here, so `wa update` answered release_update_unsupervised and named the command; the row runs that command\n'
-  ( cd "$PEER" && env "${UPD_ENV[@]}" timeout 600 sh "$PEER/install/scripts/install.sh" --update --prefix "$PEER/install" > "$R/update.log" 2>&1 )
-  urc=$?
-  tail -4 "$R/update.log" | sed 's/^/    /'
-  ok "$([ "$urc" = 0 ] && echo 1)" "the command the product named ran (exit $urc)" "$(tail -2 "$R/update.log")"
-fi
+
+# ---- 3a. THE v0.1.1 NODE'S OWN UPDATER, AGAINST THE LOCAL CHANNEL (the measured limit) ----------------------
+# The peer runs the updater that shipped IN the v0.1.1 bundle. That copy resolves the core and then runs it
+# WITHOUT --index (the defect fixed forward in 1f8a34d4), so the release it compares against is the PUBLIC index
+# whatever channel the environment names: it answers "already runs the newest published bundle (v0.1.1)" here,
+# while the channel it was pointed at names $SHORT. Asserting THAT is the honest measurement - a v0.1.1 node
+# cannot be moved by a test channel, and the row says why rather than pretending otherwise.
+V011_ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 300 "$PEER/install/wa" update 2>&1)
+printf '%s\n' "$V011_ANSWER" | sed 's/^/    v0.1.1 updater: /' | tail -4
+ok "$(printf '%s' "$V011_ANSWER" | grep -q 'already runs the newest published bundle' && echo 1)" \
+  "the v0.1.1 node's own updater answers from the PUBLIC index, whatever channel it is pointed at (the defect 1f8a34d4 fixes forward)" \
+  "$(printf '%s' "$V011_ANSWER" | tail -2)"
+ok "$([ "$(sed -n 's/^commit=//p' "$PEER/install/installed.txt" | head -1)" = "$V011" ] && echo 1)" \
+  "and it moved nothing: the node is still the published release"
+
+# ---- 3b. THE SAME LOCAL DOOR WITH THE FIXED UPDATER (what a v0.1.2 node runs) ----------------------------
+# scripts/install.sh is exactly what lua/core/update.lua runs on a release node (`wa update` -> the INSTALLED
+# updater), so running THIS CHECKOUT's copy against the peer is the local door after 1f8a34d4: it reads the
+# channel, hands the index to the core, and installs $SHORT.
+FIXED_ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 900 sh "$ROOT/scripts/install.sh" --update --prefix "$PEER/install" 2>&1)
+FIXED_RC=$?
+printf '%s\n' "$FIXED_ANSWER" | sed 's/^/    fixed updater: /' | tail -6
+ok "$([ "$FIXED_RC" = 0 ] && echo 1)" "the fixed updater ran (exit $FIXED_RC)"
+ok "$(printf '%s' "$FIXED_ANSWER" | grep -q 'already runs the newest published bundle' && echo 0 || echo 1)" \
+  "and it did NOT call the node current - it read the local channel" "$(printf '%s' "$FIXED_ANSWER" | tail -2)"
 
 # ---- 4. the node is now the release from this commit, and the data is still there ------------------
 AFTER=$("$PEER/install/wa" --version 2>&1 | head -1)
