@@ -29,6 +29,7 @@ Measured on avell, 25/11.
 | `public/components/*.js` (10 files) | 77,142 | bills, calendar, holidays, notifications, workspaces, ... |
 | `i18n.js` + `theme.js` + `sync-queue.js` + `offline-records.js` | 26,967 | translations, theme, offline write queue |
 | total delivered before any text exists | 149,948 (149,292 of it JS) | `wc -c` over that set |
+| JS the shell actually pulls (import closure) | 111,910 | 6 modules: app.js, core.js, i18n.js, calendar.js, sync-queue.js, holidays.js - the minimum needed to draw one calendar day |
 
 The only text in the document is its `<title>` and meta description. Every view of the product is a
 page that needs scripts: measured, the served HTML has no content node at all.
@@ -112,7 +113,7 @@ replay, workspace isolation over HTTP and over MCP, bearer revocation, attachmen
   CSRF header.
 - Stage 2 (HTML parser + DOM + JS on QuickJS) buys nothing for this product and costs the most: to
   run this UI an engine must implement custom elements, shadow roots, `innerHTML`, `Intl`,
-  `crypto`, `localStorage` and an absent service worker, and then execute 149,948 B of JavaScript
+  `crypto`, `localStorage` and an absent service worker, and then execute 111,910 B of JavaScript (the import closure the shell actually pulls, 6 modules)
   whose output is a re-rendering of the JSON stage 1 already holds. Stage 2 pays on other people's
   sites: server-rendered HTML with forms and inline script.
 - Stage 3 (host-supervised headless browser) is what shadow DOM and layout really need, and should
