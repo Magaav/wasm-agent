@@ -204,6 +204,12 @@ register "$COORD" "$PEER/install/wa" coord
 FACT=$(HOME="$PEER" WASM_AGENT_HOME="$PEER" "$PEER/install/wa" remember "the release door keeps this fact" 2>/dev/null | tail -1)
 ok "$([ -n "$FACT" ] && echo 1)" "a ledger fact is written before the update: $FACT"
 
+# THE COMMAND THE D1 TEXT PRINTS, RUN HERE (Fable 25/11: every command a text prints is run by a row). The
+# refusal that text is copied from says "wa update <node> --release --commit <sha>"; this is that command, with
+# <node> being the peer's node id (the row addresses the peer by id because a scratch node's NAME can collide
+# with another node on the same registry - measured 25/11, two nodes both answering to the host name). It is
+# printed first so the text and the row can be compared without reading this file.
+printf 'release door update: command: wa update %s --release --commit %s   (node id; the peer registered as "peer")\n' "$PEER_ID" "$COMMIT"
 ANSWER=$(cd "$COORD" && HOME="$COORD" WASM_AGENT_HOME="$COORD" \
   WASM_AGENT_RENDEZVOUS="http://127.0.0.1:$RPORT" WASM_AGENT_RELAY="http://127.0.0.1:$RPORT" \
   WASM_AGENT_NODE_NAME=coord TMPDIR="$R/tmp" \

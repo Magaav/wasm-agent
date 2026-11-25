@@ -207,6 +207,14 @@ by starting a node; the guard row above is what proves the decision instead. The
 installed by deploy.sh) was not run either: the row above is a release install, and it is the one this mission
 can build inside its time.
 
+### What a same-user process can still do - APPROVED WORDING (Fable, 25/11, for the RC)
+
+a same-user process can reach M.run{signed_request=true} (a Lua script through the node, or a forged accept
+record), exactly as it could clear WASM_AGENT_PROVENANCE in v0.1.1, whose escape was the same cleared variable.
+So this is PARITY with v0.1.1, not a new hole: the guard is a rail against a worker installing by accident, not
+a wall against a hostile process. Making it a fact (the child re-verifies the signed envelope itself; a boolean
+is refused) is queued as item 5 of _queue/installer-refuses-a-target-it-was-not-given.md, week 1.
+
 ## 7. A scratch install is isolated or it does not start (`7e10d2b3`)
 
 scripts/lib/install-isolation.sh answers six questions about the environment a run WILL use: the state dir,
@@ -310,6 +318,22 @@ audited before writing those lines: neither row names github.com or gh anywhere,
 request, and the only github.com in scripts/linux/bootstrap.sh is the launcher comment at its head - the code
 fetches the index, the sums and the assets from the URL the index names, which in these rows is file://.
 
+### The command the text prints is the command a row runs
+
+The refusal of section 4 prints `wa update peer011 --release --commit <sha>` (scripts/test-update-treeless.lua
+asserts that string, 26 checks), and the row runs exactly that form:
+
+```
+$ grep -n 'update "$PEER_ID" --release --commit "$COMMIT"' scripts/test-release-door-update.sh
+210:  timeout 600 "$PEER/install/wa" update "$PEER_ID" --release --commit "$COMMIT" 2>&1)
+```
+
+The row names the node by ID where the text writes `<node>`, and it prints that itself before it runs it
+(`release door update: command: wa update <id> --release --commit <sha>   (node id; the peer registered as
+"peer")`), because a scratch node's NAME can collide with another node on the same registry - measured 25/11,
+two nodes both answering to the host name. So the form is the one the text gives; only the spelling of `<node>`
+differs, and the row says which spelling it used.
+
 ## 8. The guard, pasted (every install row of this mission was run under it)
 
 ```
@@ -346,10 +370,11 @@ started was stopped by PID (registry 19890, peer011, peerfix, gr-row watcher and
 
 ## 10. Not done, and known failures
 
-- The v0.1.1 peer upgrading itself by LOCAL `wa update` from the signed test channel (the coordinator's new
-  row): NOT RUN. The installer-over-v0.1.1 row is measured (section 2).
-- The nextcloud kind (installed.txt via=remote-update.sh, no runtime-worktree.txt, v0.1.1): NOT reproduced and
-  NOT measured. No door was proved from it, and nextcloud was not touched.
+- CUT CONDITION, not a landing condition (Fable 25/11): the v0.1.1 peer upgrading itself by LOCAL
+  `wa update` from the signed test channel. NOT RUN; the installer-over-v0.1.1 row is measured (section 2).
+- CUT CONDITION, not a landing condition (Fable 25/11): the nextcloud kind (installed.txt
+  via=remote-update.sh, no runtime-worktree.txt, v0.1.1). NOT reproduced and NOT measured; no door was proved
+  from it and nextcloud was not touched.
 - The TREE-peer end-to-end row (a checkout installed by deploy.sh, a real install to a second commit): NOT RUN.
   The release-door row is green under the runner (section 7b); the tree deploy door is a different path and is
   not proved by it.
