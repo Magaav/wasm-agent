@@ -127,6 +127,10 @@
       "reason": "needs a built kernel binary and the profile-crossing probe for the compiled-module cache (docs/KERNEL.md, A2.7): a per-change proof, not a landing row, because it rebuilds and measures guest crossings"
     },
     {
+      "file": "scripts/test-deploy-alive-slow-download.sh",
+      "reason": "runner only: an installer row - it needs the row runner scratch install, its own ports and a sentinel of its own, so it never runs on a landing"
+    },
+    {
       "file": "scripts/test-devloop.sh",
       "reason": "needs the wasm32-wasip2 toolchain and rebuilds a real component three times (wa dev --once, watch, --restart): too slow and too toolchain-dependent for a landing gate, run by hand when the dev loop changes"
     },
