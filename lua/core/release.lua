@@ -273,6 +273,10 @@ function M.fetch(options)
   -- take the newer of the two; page further only while neither names a version this channel can install.
   local best = latest
   local scanned = latest_body and entries_in(latest_body) or 0
+  -- WITH LATEST IN HAND ONLY ONE MORE PAGE CAN CHANGE THE ANSWER. A newer pre-release, if there is one, is
+  -- the newest entry of the list; reading five pages to learn that there is none was a defect of its own,
+  -- and it ended in nil - discarding the version the node already held.
+  if best then bound = 1 end
   for page = 1, bound do
     local body, reason = get(base .. "/repos/" .. slug .. "/releases?per_page=" .. M.PAGE_SIZE ..
       "&page=" .. page)
@@ -290,6 +294,8 @@ function M.fetch(options)
     end
     if count == 0 then break end
   end
+  -- A version was in hand all along: nothing newer was found, so that is the answer.
+  if best then return best end
   return nil, "no_version_in_" .. tostring(scanned) .. "_entries"
 end
 

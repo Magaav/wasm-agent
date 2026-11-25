@@ -60,6 +60,19 @@ ok(found ~= nil and found.tag == "v0.1.3-rc.1",
 ok(#asked == 2, "after reading Latest and the first page - and no more (" .. tostring(#asked) .. ")")
 print("prerelease-beside-latest: requests = " .. tostring(#asked) .. ", tag = " .. tostring(found and found.tag))
 
+-- ---- W3: Latest in hand, and NOTHING newer on the page - it must not be discarded ----------------------
+-- 120 builds and no version at all beyond Latest: the pre-release channel reads one page and answers with
+-- what it already had. Before this fix it read five pages and returned nil, discarding v0.1.2.
+local noisy = {}
+for i = 0, 119 do noisy[#noisy + 1] = node_build(i) end
+get, asked = transport(noisy, json.encode(build("v0.1.2", false)))
+found = release.fetch({ get = get, installed = "v0.1.1-rc.4", prerelease = true })
+ok(found ~= nil and found.tag == "v0.1.2",
+  "a pre-release node whose page holds no version answers with Latest (got " .. tostring(found and found.tag) .. ")")
+ok(#asked == 2, "in exactly two requests: Latest and one page (" .. tostring(#asked) .. ")")
+print("prerelease-latest-no-newer: requests = " .. tostring(#asked) .. ", tag = " .. tostring(found and found.tag) .. ", entries read = 120")
+
+
 -- ---- the measured window shapes, with the Latest that today's repo really has: a node BUILD ----------
 feed = {}
 for i = 0, 24 do feed[#feed + 1] = node_build(i) end
