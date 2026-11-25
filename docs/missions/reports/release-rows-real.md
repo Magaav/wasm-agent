@@ -4,6 +4,14 @@ Branch `change/release-rows-real`, base `origin/main` `ebf6d2ec`. Nothing pushed
 live node called (no `wa call`, `tools.remote`, `nodes.list`, `land` or `deploy` against any peer; every
 row here is a scratch HOME, a private tmux server and a local fixture port).
 
+## What moved under this mission (reported, not restructured)
+
+This session did not push anything. While it ran, the orchestrator's landing queue merged this branch at
+`a2777c25` into `origin/main` as `013a1aa3` ("land-quick: merge change/release-rows-real", 2026-11-24
+21:14:37 -0300) — so the A fix is already on main, and `2428320d` (this report) is the only unlanded commit
+on the branch, sitting on top of it. Nothing was rebased, squashed or rewritten; the branch's shape is
+`013a1aa3 + report`.
+
 ## A. release-channel and test-release-channel-e2e — the row was broken, not the release
 
 **Reproduced, ebf6d2ec, first case of the row, twice:** `WA_E2E_KEEP=1 TMPDIR=/tmp bash
