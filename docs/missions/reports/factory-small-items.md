@@ -147,6 +147,24 @@ records the file it was handed):
 Moved them by hand into `_orch/` as `row-runner14.sh` and `deliver-row-verdict4.sh`; nothing renamed `row-runner13.sh`
 away, because the orchestrator is running the v0.1.2 cut through it.
 
+## Item 6 (orchestrator, 25/11, after the brief) - a reader that walks away is not a crash (8fc8a514)
+
+MEASURED with the installed binary: `wa --version` into a reader that closes its end printed
+`thread 'main' panicked at library/std/src/io/stdio.rs:1209:9: failed printing to stdout: Broken pipe (os error 32)` and
+exited 101; `wa --build-info` and `wa features` did the same, and `wa features | head -1` is the brief's
+`wa call <node> ... | head` shape.
+
+rust/wa-host/src/main.rs: `quiet_when_the_reader_leaves()` installs ONE panic hook at the top of main(), so every
+printing subcommand is covered; a print-macro panic whose payload says stdout + EPIPE exits 141 (128 + SIGPIPE) with
+nothing on stderr, and every other panic keeps its handler and its message (a reader that left is not "the node went
+away", so `wa call`'s connection errors still speak).
+
+Row: scripts/test-broken-pipe.sh, wired into scripts/test.sh after the installer-doors row - 9 checks: three
+Rust-printing subcommands exit 141 and say nothing to a reader that closed first; `wa features | head -1` prints its
+first line and leaves no panic text; the CONTROL holds that a reader that STAYS gets the same bytes and the same exit
+code (so "quiet" is not "prints nothing"); and `wa help` (the Lua print path, which never panicked) is quiet too.
+`broken pipe ok (9 checks)` against this tree's build; RED against the installed binary at the first case.
+
 ## Rows through the orchestrator's runner (25/11, 22:2x-22:3xZ)
 
 The brief says rows go through the runner, and the runner found four real defects that a direct run had hidden - each
