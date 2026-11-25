@@ -577,9 +577,30 @@ function M.admit(args, caller)
       routed_from = kind
       kind = 'release'
     else
-      return { error = 'no_runtime_tree', effect = 'none',
+      -- ONE LINE, AND THE LINE CARRIES THE COMMAND (mission release-node-updates, D1, 25/11). This used to
+      -- answer three lines of prose that named mode="release" and no command at all, so the fleet step -
+      -- which asks for an exact commit - was told what a release IS and not what to type, and a person had to
+      -- work out that --release also takes the commit they already had. Measured 25/11 on a scratch peer
+      -- installed from the published v0.1.1 bundle: "wa update peer011 --commit <sha>" answered
+      -- no_runtime_tree with that prose, and the same request with --release --commit <sha> was accepted.
+      --
+      -- WHO PICKS THE DOOR: the fleet step, from the node's install kind (a release node gets
+      -- --release --commit, a tree node gets --commit), and the judge of an update stays the node's own
+      -- installed.txt. A person who types the wrong door gets the right command back, with their commit
+      -- already in it, on one line: reply.one_line is honoured by M.summary, reply.next carries the same
+      -- command for a tool, and M.next_line keeps it from being printed twice.
+      local name = trim(nodes.node_name())
+      if name == '' then name = '<node>' end
+      -- WITHOUT A COMMIT THERE IS NOTHING TO PUT IN IT: the release door takes a 40-hex commit
+      -- (scripts/release-install.sh refuses release_commit_required without one), so the line asks for one
+      -- instead of ending in an empty --commit.
+      local want = trim(commit)
+      if want == '' then want = '<40-hex>' end
+      local command = 'wa update ' .. name .. ' --release --commit ' .. want
+      return { error = 'no_runtime_tree', effect = 'none', one_line = true,
         observed = 'this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit',
-        next = 'this node is installed from a release: ask for it with mode="release" (wa update <node> --release), which fetches the published release and installs it as a neighbour process' }
+        message = name .. ' is installed from a release, not a checkout: move it with: ' .. command,
+        next = command }
     end
   end
   local record = new_record(kind, '', reason, caller, args)
@@ -1269,6 +1290,9 @@ end
 function M.summary(reply)
   if type(reply) ~= 'table' then return 'no answer from the peer' end
   if reply.error then
+    -- A REFUSAL THAT KNOWS ITS ONE LINE SAYS IT (D1, 25/11): the release node's refusal carries the exact
+    -- command in reply.message, and prose about what a release is would only push it off the line.
+    if reply.one_line and type(reply.message) == 'string' and trim(reply.message) ~= '' then return trim(reply.message) end
     local detail = tostring(reply.observed or reply.message or '')
     return string.format('%s %s%s%s', tostring(reply.node or 'peer'), tostring(reply.error),
       detail ~= '' and (': ' .. detail) or '',
@@ -1281,6 +1305,20 @@ function M.summary(reply)
   if reply.detail and reply.detail ~= '' then parts[#parts + 1] = tostring(reply.detail) end
   if reply.installed_commit and reply.installed_commit ~= '' and state ~= 'installed' then parts[#parts + 1] = 'installed ' .. tostring(reply.installed_commit) end
   return table.concat(parts, '; ')
+end
+
+-- The refusal's fix, unless the line already carries it. An answer that says the same command twice is
+-- not one line, and the operator reads the same sentence twice for nothing.
+function M.next_line(reply)
+  if type(reply) ~= 'table' then return nil end
+  local fix = trim(reply.next)
+  if fix == '' then return nil end
+  -- The line the caller will print: reply.summary when the reply carries one, else the sentence
+  -- M.summary builds from it (a refusal straight out of admit() has no summary field yet).
+  local line = trim(reply.summary)
+  if line == '' then line = M.summary(reply) end
+  if line:find(fix, 1, true) then return nil end
+  return fix
 end
 
 -- Ask a peer to update itself. One signed call; the peer answers with the record id and the
@@ -1410,6 +1448,22 @@ function M.request(call, selector, options)
       message = tostring(reply.message or 'the deadline passed before that node answered'),
       summary = string.format('NOT KNOWN YET: %s did not answer inside the deadline; whether it accepted the request is unknown, and it was NOT refused.', tostring(reply.node or selector)),
       next = 'read it back: wa update ' .. tostring(selector) .. ' --status --id ' .. tostring(request_id) }
+  end
+  -- THE ONE LINE FOR A RELEASE-INSTALLED NODE (mission release-node-updates, D1, 25/11). A peer with no tree
+  -- refuses an ordinary commit request with no_runtime_tree, and the node that has the most to say about it -
+  -- one installed from the published v0.1.1 bundle - cannot be changed any more: its own sentence is three
+  -- lines of prose that names mode="release" and no command at all. The coordinator holds the two things that
+  -- sentence needs (the selector the operator used, and the commit they asked for), so the fix is stated HERE,
+  -- in one line, whatever the peer's build answers. The peer's own words are NOT dropped: they stay in
+  -- observed, and the new line is message/summary. Only a caller that named no mode gets it: a --binary or
+  -- --release request has already said which door it wants.
+  if tostring(reply.error or '') == 'no_runtime_tree' and trim(options.commit) ~= ''
+    and (trim(options.mode) == '' or trim(options.mode) == 'tree') then
+    local command = 'wa update ' .. tostring(selector) .. ' --release --commit ' .. trim(options.commit)
+    reply.one_line = true
+    reply.message = tostring(selector) .. ' is installed from a release, not a checkout: move it with: ' .. command
+    reply.next = command
+    reply.summary = reply.message
   end
   local record_id = tostring(reply.record or reply.audit_id or '')
   if record_id ~= '' then
@@ -1773,7 +1827,10 @@ function M.cli(argv)
     print(json.encode(reply))
   elseif reply.error then
     print(M.summary(reply))
-    if reply.next then print('next: ' .. tostring(reply.next)) end
+    -- THE FIX IS PRINTED ONCE (D1, 25/11): a one-line refusal already carries the command, and saying it
+    -- again under "next:" is the same sentence twice.
+    local fix = M.next_line(reply)
+    if fix then print('next: ' .. fix) end
   elseif options.status then
     if reply.notice and reply.notice_text then print(reply.notice_text) end
     print(M.summary(reply))
