@@ -148,6 +148,15 @@ ok "$([ -f "$ALIVE" ] && [ "$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$ALIVE" | he
   "and the first deploy's record is still there, still naming it" "$(cat "$ALIVE" 2>/dev/null)"
 
 # ---- and when the first deploy ends, its record goes ------------------------------------------------
+# THE DEPLOY IS NOT KILLED MID-FLIGHT (25/11, rows/20261125T103938Z-13118): the row used to kill it the moment the
+# second deploy was refused, so the record was still there (its EXIT trap had not run) and its own outcome had not
+# been written - two failures that were the row's timing, not the product's. It is given time to end on its own,
+# which it does (it refuses the paced manifest), and the kill stays as the fallback so a hang cannot last.
+for _ in $(seq 1 600); do
+  [ ! -f "$ALIVE" ] && break
+  kill -0 "$DEPLOY_PID" 2>/dev/null || break
+  sleep 0.1
+done
 kill "$DEPLOY_PID" 2>/dev/null; wait "$DEPLOY_PID" 2>/dev/null; DEPLOY_PID=""
 for _ in $(seq 1 100); do [ ! -f "$ALIVE" ] && break; sleep 0.1; done
 ok "$([ ! -f "$ALIVE" ] && echo 1)" "when the first deploy ends, it clears its own record" "$(cat "$ALIVE" 2>/dev/null)"
