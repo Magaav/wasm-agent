@@ -82,6 +82,11 @@ what the budget can mean here.
 
 **63091926 `docs: the MCP list never asks another node to draw itself`** - `docs/MCP.md`.
 
+**ab6ba43d `mcp list: --refresh reads the chat count too (cache_only forces counts off)`** - the
+`--refresh` verb sets `cache_only = false` for that one call, because `whatsapp.service_row` overrides
+`counts` with `false` under `cache_only`; without it `--refresh` re-read the peers and still printed `chats
+unknown`.
+
 ## Tests, and where they are wired
 
 `scripts/test-mcp-list.lua` (every `scripts/test-*.lua` is a fast-path row; nothing to add to
