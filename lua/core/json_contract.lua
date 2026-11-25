@@ -141,6 +141,42 @@ end
 -- with empty `properties`, so there was nothing to read). The refusal now carries the names, sorted and
 -- bounded: the point is one retry, not a schema dump.
 local ACCEPTED_SHOWN = 12
+-- HOW FAR two names are apart, for the one suggestion a refusal makes. Plain Levenshtein, bounded: the
+-- strings here are argument names, so this is a handful of cells and never a cost worth optimising.
+local function edit_cost(a, b)
+ local la, lb = #a, #b
+ if la == 0 then return lb end
+ if lb == 0 then return la end
+ local row = {}
+ for j = 0, lb do row[j] = j end
+ for i = 1, la do
+  local previous = row[0]
+  row[0] = i
+  for j = 1, lb do
+   local current = row[j]
+   row[j] = math.min(row[j] + 1, row[j - 1] + 1, previous + (a:sub(i, i) == b:sub(j, j) and 0 or 1))
+   previous = current
+  end
+ end
+ return row[lb]
+end
+-- THE NAME THE CALLER PROBABLY MEANT, from the schema's own declared names, or nil when none is close.
+-- A suggestion that is not near the word sent sends the model to a second wrong call, which is worse
+-- than saying only what the tool takes - so the budget is half the length of the word, at least 2.
+-- Measured 14/11: a refusal that said only "does not take q" cost three calls and three refusals before
+-- the accepted name was found by luck.
+local function nearest(name, declared)
+ local best, best_cost
+ for candidate in pairs(declared or {}) do
+  local word = tostring(candidate)
+  local cost = edit_cost(tostring(name), word)
+  if best_cost == nil or cost < best_cost or (cost == best_cost and word < best) then
+   best, best_cost = word, cost
+  end
+ end
+ if not best or best_cost > math.max(2, math.floor(#tostring(name) / 2)) then return nil end
+ return best
+end
 local function accepted_note(schema)
  local names = {}
  for name in pairs(schema.properties or {}) do names[#names + 1] = tostring(name) end
@@ -152,12 +188,12 @@ local function accepted_note(schema)
  if #names > ACCEPTED_SHOWN then text = text .. ', ...' end
  return ' (accepted: ' .. text .. ')'
 end
-local function validate(schema,node,path)
+local function validate(schema,node,path,extra)
  -- OpenAPI/pydantic `nullable: true`: a null is accepted where the schema says it may be, otherwise
  -- the `type` check below would refuse an argument the connector's own contract allows.
  if schema.nullable==true and node.kind=='null' then return nil end
  if schema.anyOf then
-  local accepted=false;for _,branch in ipairs(schema.anyOf)do if not validate(branch,node,path) then accepted=true;break end end
+  local accepted=false;for _,branch in ipairs(schema.anyOf)do if not validate(branch,node,path,extra) then accepted=true;break end end
   if not accepted then return 'schema_anyof:'..path end
  end
  if schema.type then
@@ -179,13 +215,34 @@ local function validate(schema,node,path)
   if schema.minLength and length<schema.minLength or schema.maxLength and length>schema.maxLength then return 'schema_length:'..path end
  elseif node.kind=='array' then
   if schema.minItems and #node.children<schema.minItems or schema.maxItems and #node.children>schema.maxItems then return 'schema_items:'..path end
-  if schema.items then for i,item in ipairs(node.children)do local e=validate(schema.items,item,path..'['..i..']');if e then return e end end end
+  if schema.items then for i,item in ipairs(node.children)do local e=validate(schema.items,item,path..'['..i..']',extra);if e then return e end end end
  elseif node.kind=='object' then
   for _,key in ipairs(schema.required or {})do if not node.children[key] then return 'schema_required:'..path..'.'..key end end
+  -- AN OBJECT SCHEMA THAT DECLARES ARGUMENTS IS CLOSED (25/11, one rule, here and nowhere else).
+  --
+  -- MEASURED on this node before the rule: 52 of the 57 host tools declared arguments and still accepted
+  -- a name they never declared, and the 4 that take no arguments at all accepted anything; one schema in
+  -- a hundred refused. The handler dropped the value, so the call RAN AS A DIFFERENT CALL and answered as
+  -- if it had not - the class this mission exists for. `additionalProperties` was the only door that
+  -- refused, and it is the schema's own way of saying "closed", so it is what decides:
+  --   * `true` (or a schema) = open by declaration: a tool that forwards its arguments to something with
+  --     a schema of its own (`remote`, a connector, a peer). Its keys are judged by THAT schema, never
+  --     refused here for a name this host does not know;
+  --   * anything else - absent, or false - = closed, and a name outside `properties` is refused by name
+  --     with the nearest name it does declare, because "unknown argument: q" without "did you mean
+  --     query?" is a refusal a model has to guess its way out of.
   for _,key in ipairs(node.keys)do local sub=(schema.properties or {})[key]
-   if sub then local e=validate(sub,node.children[key],path..'.'..key);if e then return e end
-   elseif schema.additionalProperties==false then return 'schema_extra:'..path..'.'..key..accepted_note(schema)
-   elseif type(schema.additionalProperties)=='table' then local e=validate(schema.additionalProperties,node.children[key],path..'.'..key);if e then return e end end
+   if sub then local e=validate(sub,node.children[key],path..'.'..key,extra);if e then return e end
+   elseif type(schema.additionalProperties)=='table' then local e=validate(schema.additionalProperties,node.children[key],path..'.'..key,extra);if e then return e end
+   elseif schema.additionalProperties==true then
+    -- open by declaration: the tool takes the arguments of something else, exactly as it says.
+   elseif type(extra)=='table' and extra[key] then
+    -- the caller's own module says this tool takes the name (a synonym its handler maps, a field the
+    -- runtime stamps); it is not a name the schema never declares by accident.
+   else
+    local did=nearest(key,schema.properties)
+    return 'unknown_argument:'..tostring(key)..(did and (' - did you mean '..did..'?') or '')
+   end
   end
  end
 end
@@ -213,9 +270,13 @@ function M.normalize_names(schema,text)
  return codec.encode(args),renamed
 end
 
-function M.validate(schema,text)
+-- `extra` is a SET of names the caller knows the tool accepts without the schema declaring them - the
+-- runtime's own fields and the synonyms its handlers map (lua/core/tool_arguments.lua INTERNAL, one list,
+-- one place). The rule stays the schema's: a name is accepted because the schema declares it, or because
+-- the caller's own module says this tool takes it; nothing else is let through.
+function M.validate(schema,text,extra)
  local node,err=M.parse(text);if not node then return nil,err end
- local ok,failure=pcall(function()return supported_schema(schema,'arguments') or validate(schema,node,'arguments')end)
+ local ok,failure=pcall(function()return supported_schema(schema,'arguments') or validate(schema,node,'arguments',extra)end)
  if not ok then return nil,'schema_unsupported:malformed' end
  if failure then return nil,failure end
  return node

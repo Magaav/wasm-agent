@@ -60,12 +60,20 @@ local function payload_of(tool, field)
   return nil
 end
 
--- 1. An undeclared field no longer refuses: the call runs, exactly as it did before the check existed.
-local ran = dispatch('bash', { command = 'printf hi', nope = 1 })
-check(ran.error == nil and tonumber(ran.code) == 0, 'an undeclared field does not refuse the call: ' .. json.encode(ran):sub(1, 200))
-check(tostring(ran.stdout) == 'hi', 'and the command really ran: ' .. tostring(ran.stdout):sub(1, 80))
+-- 1. An undeclared field IS refused, by name, and nothing runs (25/11: STEP 1 measured the field, STEP 2
+-- refuses it for the model's own calls - the one rule of this mission). The refusal names the name sent,
+-- the names the tool does take, and a suggestion when one is close enough to be worth making.
+local refused = dispatch('bash', { command = 'printf hi', nope = 1 })
+check(refused.error == 'unknown_argument:nope', 'an undeclared field is refused by name: ' .. json.encode(refused):sub(1, 240))
+check(refused.effect == 'none', 'and says no effect happened: ' .. json.encode(refused):sub(1, 240))
+check(refused.accepted ~= nil and json.encode(refused.accepted):find('command', 1, true) ~= nil,
+  'with the names the tool does take: ' .. json.encode(refused.accepted or {}):sub(1, 200))
 local none = dispatch('nodes', { probe = true })
-check(none.error ~= 'unknown_argument:probe', 'a no-argument tool is not refused for a field either: ' .. json.encode(none):sub(1, 160))
+check(none.error == 'unknown_argument:probe', 'a no-argument tool refuses every field it is sent: ' .. json.encode(none):sub(1, 240))
+local suggested = dispatch('read', { path = home .. '/nothing-here', ofset = 1 })
+check(suggested.error == 'unknown_argument:ofset - did you mean offset?',
+  'a name one letter from a declared one is refused WITH the name meant: ' .. json.encode(suggested):sub(1, 300))
+check(tostring(suggested.fix):find('offset', 1, true) ~= nil, 'and the fix names it too: ' .. tostring(suggested.fix):sub(1, 200))
 
 -- 2. One event per distinct tool+field, with names only.
 local first = payload_of('bash', 'nope')

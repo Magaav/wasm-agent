@@ -21,6 +21,16 @@ local refusal=dofile('lua/core/refusal.lua')
 -- `summary: "read 200 · contacts 400 schema_extra:arguments.query · send 200"`, so the model reads what
 -- happened to each call before it reads any payload. Both loops record it; finish() writes the line.
 local status_lib=dofile('lua/core/status.lua')
+-- The names a tool accepts without its schema declaring them: the runtime's own fields and the synonyms
+-- its handlers map, in the ONE list that already exists (lua/core/tool_arguments.lua INTERNAL). The
+-- contract layer refuses a name the schema never declares, so the caller that knows the tool passes this.
+local accepted_extra
+local function extra_names()
+ if accepted_extra~=nil then return accepted_extra or nil end
+ local ok,module=pcall(dofile,'lua/core/tool_arguments.lua')
+ accepted_extra=(ok and type(module)=='table' and type(module.INTERNAL)=='table') and module.INTERNAL or false
+ return accepted_extra or nil
+end
 local function call_status(value) return status_lib.of(value) end
 local function call_why(value)
  if type(value)~='table' or (value.ok~=false and value.error==nil) then return nil end
@@ -637,7 +647,7 @@ local function settle_call(s,call)
    if wait_error then value,success={error=wait_error,effect='none'},false
    else
     stripped=contract.normalize_names(current['function'].parameters,stripped)
-    local _,err=contract.validate(current['function'].parameters,stripped or '{}')
+    local _,err=contract.validate(current['function'].parameters,stripped or '{}',extra_names())
     -- The refusal carries the rejected argument text AND the tool's own schema, so the fix can name
     -- the arguments this tool takes instead of letting the model guess (13/11: `notes_write` answered
     -- `notes_text_required` three times before the model found `text`).

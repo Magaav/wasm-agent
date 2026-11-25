@@ -110,6 +110,35 @@ function M.undeclared(name, args, parameters)
   return unknown
 end
 
+-- The nearest declared name, the same rule as the contract layer's (edit distance, half the word sent, at
+-- least 2, so a suggestion is only made when it is close enough to be worth naming).
+local function edit_cost(a, b)
+  if #a == 0 then return #b end
+  if #b == 0 then return #a end
+  local row = {}
+  for j = 0, #b do row[j] = j end
+  for i = 1, #a do
+    local previous = row[0]
+    row[0] = i
+    for j = 1, #b do
+      local current = row[j]
+      row[j] = math.min(row[j] + 1, row[j - 1] + 1, previous + (a:sub(i, i) == b:sub(j, j) and 0 or 1))
+      previous = current
+    end
+  end
+  return row[#b]
+end
+local function nearest(name, declared)
+  local best, best_cost
+  for candidate in pairs(declared or {}) do
+    local word = tostring(candidate)
+    local cost = edit_cost(tostring(name), word)
+    if best_cost == nil or cost < best_cost or (cost == best_cost and word < best) then best, best_cost = word, cost end
+  end
+  if not best or best_cost > math.max(2, math.floor(#tostring(name) / 2)) then return nil end
+  return best
+end
+
 -- `parameters` is the tool's own schema parameters object, or nil when this node has no schema for the name
 -- (an unknown tool, or one whose schema only a peer has). No schema is not a verdict: an unknown name is
 -- answered by the dispatcher's own unknown-tool path, so this refuses nothing on a schema it cannot read.
@@ -120,11 +149,12 @@ end
 -- nothing). The other half of the switch is measured, not promised: internal and peer callers come under
 -- enforcement only after 24 h with no `tool_arguments` event whose caller is internal or peer in this node's
 -- telemetry - the row scripts/test-tool-args-report.lua names that measurement, and the flip is this line.
--- SHIPPED 'off': the model door can be enforced again in one line ('model'), and G may ship with it only
--- when the full main-health is green with it. It is off here because STEP 2's field work is not finished:
--- turning it on today would re-red the rows whose callers still send an undeclared field (see the report's
--- field table), and a red main is not a place to discover that a declaration is missing.
-M.ENFORCE = 'off'
+-- SHIPPED 'model' (25/11, this mission). The field work STEP 2 was waiting on is done, and the mission
+-- that writes the one rule into the contract layer (lua/core/json_contract.lua) is the moment the model
+-- door closes: a call THE MODEL sent with a name its tool never declares is refused by name, with the
+-- nearest name the tool does take. Internal and peer callers stay report-only until the measurement above
+-- says otherwise - their fields are the runtime's own, and a peer call is judged by the PEER's schema.
+M.ENFORCE = 'model'
 
 -- Record always; refuse only what the switch names. STEP 1 recorded everything and refused nothing; STEP 2
 -- refuses the MODEL's own calls again (the door the model reads), and keeps internal and peer callers
@@ -140,16 +170,22 @@ function M.refusal(name, args, parameters, ctx)
   for key in pairs(declared) do names[#names + 1] = tostring(key) end
   table.sort(names)
   local list = #names > 0 and table.concat(names, ', ') or 'no arguments'
+  -- The same code and the same suggestion the contract layer makes (lua/core/json_contract.lua,
+  -- `unknown_argument:q - did you mean query?`), because a call refused at this door and the same call
+  -- refused inside a run block must read as one refusal, not two.
+  local first = unknown[1]
+  local did = nearest(first, declared)
   return {
-    error = 'unknown_argument:' .. table.concat(unknown, ','),
+    error = 'unknown_argument:' .. first .. (did and (' - did you mean ' .. did .. '?') or ''),
     tool = tostring(name),
     unknown_arguments = unknown,
     accepted = names,
     effect = 'none',
-    message = '`' .. tostring(name) .. '` declares: ' .. list .. '. Nothing ran: an argument the tool does not '
-      .. 'declare is refused by name rather than ignored, because a dropped field is a call that did something '
-      .. 'else in silence.',
-    fix = 'send only the names `' .. tostring(name) .. '` declares: ' .. list .. '.',
+    did_you_mean = did,
+    message = '`' .. tostring(name) .. '` does not take the argument `' .. first .. '` - its own schema '
+      .. 'never declares that name, so nothing ran. It declares: ' .. list .. '.',
+    fix = 'drop `' .. first .. '`' .. (did and (', did you mean `' .. did .. '`?') or '')
+      .. ' `' .. tostring(name) .. '` takes: ' .. list .. '.',
     input = table.concat(unknown, ', '),
   }
 end
