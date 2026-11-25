@@ -31,10 +31,13 @@ if [ -n "${WA_ROW_SCRATCH_ROOT:-}" ]; then
 else
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-guards-before-alive.XXXXXX")"
 fi
-mkdir -p "$WORK"
+mkdir -p "$WORK" "$WORK/home" "$WORK/data" "$WORK/install"
+# THE GUARD RUNS BEFORE THE SCRATCH HOME IS EXPORTED (measured 25/11, row 20261125T113637Z-14951): it resolves the
+# OPERATOR home from \$HOME, so with \$HOME already pointing at the (still empty) scratch home it answers
+# refused(real_node_home) - could not be resolved - which is the guard being right again. Candidate first, guard
+# second, export third.
+wa_scratch_home_guard "$WORK/home" || { echo 'guards-before-alive REFUSED: the scratch home is the operator node home' >&2; exit 2; }
 export HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home"
-wa_scratch_home_guard "$HOME" || { echo 'guards-before-alive REFUSED: the scratch home is the operator node home' >&2; exit 2; }
-mkdir -p "$HOME" "$WORK/data" "$WORK/install"
 # THE RECORD'S OWN DIRECTORY: deploy.sh reads DEPLOY_ALIVE_DIR from WASM_AGENT_DATA first (deploy.sh:318), so the
 # row exports that and asks the library for the path - the watcher then looks exactly where the deploy would write.
 export WASM_AGENT_DATA="$WORK/data"
