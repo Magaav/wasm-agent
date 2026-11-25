@@ -235,7 +235,10 @@ else
   # A FIXTURE TREE, so "derived" is proven and not assumed: a door the code names appears, a path the code
   # names only against a TREE does not, and a door the code names that the tree lacks is refused by name.
   MINI="$W/doors-mini"; mkdir -p "$MINI/lua/core" "$MINI/rust/src" "$MINI/scripts/lib" "$MINI/scripts"
-  printf 'local install = "/opt/wa"\nlocal door = install .. "/scripts/fixture-door.sh"\nlocal tree = "/some/tree"\nlocal other = tree .. "/scripts/not-a-door.sh"\n' > "$MINI/lua/core/fixture.lua"
+  # A PRODUCT TREE for the allow-list rows below: the derivation treats a tree as the product's when it carries
+  # lua/core/update.lua or lua/core/remote_update.lua - the Lua that hands a door to a shell - and an exemption is
+  # a fact about that tree. The same file states the tree-relative path that must NOT become a member.
+  printf 'local install = "/opt/wa"\nlocal door = install .. "/scripts/fixture-door.sh"\nlocal tree = "/some/tree"\nlocal other = tree .. "/scripts/not-a-door.sh"\n' > "$MINI/lua/core/update.lua"
   printf '#!/bin/sh\nexit 0\n' > "$MINI/scripts/fixture-door.sh"
   printf '#!/bin/sh\nexit 0\n' > "$MINI/scripts/not-a-door.sh"
   mini="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
@@ -263,6 +266,18 @@ else
   stale="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
   ok "$([ "$rc" = 1 ] && printf '%s' "$stale" | grep -q 'stale_exemption' && echo 1)" \
     "an exemption nothing in the code needs is refused (an allow-list that drifts is a block-list)" "rc=$rc $(printf '%s' "$stale" | tail -1)"
+  rm -f "$MINI/scripts/lib/install-script-doors.allow"
+
+  # A TREE THAT IS NOT THE PRODUCT'S: it carries an allow file only because main's 24/11 fix copies all of
+  # scripts/lib into the release-channel e2e's fixture by rule. The derivation must not judge that file stale
+  # there - it says it does not consult it - and it must still answer with the doors it can see.
+  printf 'scripts/fixture-door.sh # carried by a fixture, exec by nothing here
+' > "$MINI/scripts/lib/install-script-doors.allow"
+  mv "$MINI/lua/core/update.lua" "$MINI/lua/core/not-the-product.lua"
+  notproduct="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 0 ] && printf '%s' "$notproduct" | grep -q 'is not consulted' && echo 1)" \
+    "a tree that is not the product tree has its allow file left alone, by name, instead of judged" "rc=$rc $(printf '%s' "$notproduct" | head -2)"
+  mv "$MINI/lua/core/not-the-product.lua" "$MINI/lua/core/update.lua"
   rm -f "$MINI/scripts/lib/install-script-doors.allow"
 
   # A STAGED BUNDLE: complete -> ok; a door removed -> refused BY NAME; a door present but not a member -> refused.
