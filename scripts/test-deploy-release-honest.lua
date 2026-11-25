@@ -112,9 +112,19 @@ eq(row.status, "dispatching", "the row is claimed by the release and handed over
 -- (scripts/test-deploy-release-node.sh) runs the same fact on a real scratch node, end to end.
 local record_dir = pause.paused_dir()
 local install_dir = dofile("lua/core/update.lua").install_dir()
-local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
-check(scratch_root ~= "" and install_dir:sub(1, #scratch_root) == scratch_root,
-  "the install record under test lives in this row's scratch home (" .. tostring(install_dir) .. "), never the machine's")
+-- THE SCRATCH ROOTS THIS RUN MAY NAME, asked of the one guard rather than spelled again (25/11, row
+-- 20261125T223323Z-17027): the row contract gives HOME=<root>/home, WA_INSTALL_DIR=<root>/install and
+-- TMPDIR=<root>/tmp, so the single GATE_ROOT/TMPDIR test refused a correct install directory in the runner.
+local roots = home_guard.roots({ scratch = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or "" })
+local function inside_a_root(value)
+  for _, root in ipairs(roots) do
+    if home_guard.under(value, root) then return true end
+  end
+  return false
+end
+check(#roots > 0 and inside_a_root(install_dir),
+  "the install record under test lives in this row's scratch space (" .. tostring(install_dir) .. " under "
+    .. table.concat(roots, " or ") .. "), never the machine's")
 local function install_record(commit, tree)
   local ok = host.write_file(install_dir .. "/installed.txt",
     "commit=" .. commit .. "\n" .. (tree and ("lua_tree=" .. tree .. "\n") or "") .. "at=2026-11-24T16:00:00Z\n")

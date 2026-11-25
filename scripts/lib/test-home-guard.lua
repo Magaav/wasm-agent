@@ -49,6 +49,26 @@ local function host_exists(path)
   return type(value) == "string" and value ~= ""
 end
 
+--- The scratch roots THIS RUN may name, in the order a row tries them: the suite's (GATE_ROOT, else TMPDIR) and the
+--- row contract's own (WA_ROW_SCRATCH_ROOT), which the orchestrator's runner exports and the fast path does not.
+--- Exported so a row that asks "is this path inside my scratch space?" asks the SAME question the home guard asks,
+--- instead of spelling a second rule (measured 25/11: nine Lua rows kept their own and refused a correct runner home).
+function M.roots(opts)
+  opts = opts or {}
+  local roots = {}
+  if type(opts.scratch) == "string" and opts.scratch ~= "" then roots[#roots + 1] = opts.scratch end
+  local contract_root = opts.root
+  if contract_root == nil and type(host) == "table" and type(host.getenv) == "function" then
+    local ok, value = pcall(host.getenv, "WA_ROW_SCRATCH_ROOT")
+    if ok and type(value) == "string" and value ~= "" then contract_root = value end
+  end
+  if type(contract_root) == "string" and contract_root ~= "" then roots[#roots + 1] = contract_root end
+  return roots
+end
+
+--- Is `child` `root` or a path under it (a separator boundary: /tmp/wa-1 is not under /tmp/wa)?
+function M.under(child, root) return under(child, root) end
+
 -- nil when the home is safe, else one named reason. `opts`:
 --   home     the WASM_AGENT_HOME the test will write (required)
 --   scratch  the root the suite owns: GATE_ROOT, else TMPDIR (required)
@@ -65,14 +85,7 @@ function M.reason(opts)
   -- THE ROOTS THIS RUN MAY NAME: the caller's (GATE_ROOT, else TMPDIR) and the row contract's own, which the
   -- orchestrator's runner exports and the fast path does not (25/11). One allow-list, two spellings, and the home
   -- still has to be UNDER one of them - this widens nothing about a real home.
-  local roots = {}
-  if type(scratch) == "string" and scratch ~= "" then roots[#roots + 1] = scratch end
-  local contract_root = opts.root
-  if contract_root == nil and type(host) == "table" and type(host.getenv) == "function" then
-    local ok, value = pcall(host.getenv, "WA_ROW_SCRATCH_ROOT")
-    if ok and type(value) == "string" and value ~= "" then contract_root = value end
-  end
-  if type(contract_root) == "string" and contract_root ~= "" then roots[#roots + 1] = contract_root end
+  local roots = M.roots({ scratch = scratch, root = opts.root })
   if #roots == 0 then
     return "no scratch root (GATE_ROOT, TMPDIR and WA_ROW_SCRATCH_ROOT are all unset), so a home cannot be told from a real one"
   end
