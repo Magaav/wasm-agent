@@ -1164,9 +1164,14 @@ function M.invoke(input,ctx)
  local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=op_owner,control=input.action~='call',vault_env=vault_env,vault_approval=input.vault_approval})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
- local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled',owner=op_owner})))
+ -- THE OWNER THE NODE RECORDED (24/11, mission federated-connector-read): `op_owner` is the name this call
+ -- ASKED for, and a call that arrives through the relay (or from a child task) is recorded under the
+ -- thread's runtime owner instead - so observing with `op_owner` answered `operation_not_yours` and the
+ -- one-shot client path failed the same way the read session did. The start receipt answers which name won.
+ local recorded_owner=start.owner or op_owner
+ local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled',owner=recorded_owner})))
  if not settled or settled.error or not settled.settled then
-  pcall(host.operation,'cancel',json.encode({id=id,owner=op_owner}));return fail('mcp_operation_unsettled',{operation_id=id,request=request,tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'})
+  pcall(host.operation,'cancel',json.encode({id=id,owner=recorded_owner}));return fail('mcp_operation_unsettled',{operation_id=id,request=request,tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'})
  end
  local raw=settled.stdout_path and host.read_file(settled.stdout_path);local answer=decode(raw)
  if answer and (settled.ok==false or settled.error or settled.code and settled.code~=0) then

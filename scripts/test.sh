@@ -587,6 +587,11 @@ gate_run bash scripts/test-component-build-wrapper.sh
 # signature, a missing manifest, a channel that does not answer (unknown, never complete), and that the tag
 # asked for is the one the COMMIT's lock names rather than the working tree's.
 gate_run bash scripts/test-release-completeness.sh
+# AN INSTALLER RUN IN A HARNESS IS ISOLATED OR IT DOES NOT RUN (25/11, mission release-node-updates, the G
+# condition). A scratch run that inherited the desktop's XDG_CONFIG_HOME rewrote the LIVE
+# wa-sentinel.service that night; this row proves the guard refuses a live-looking environment, that it passes
+# a scratch one, and that the installer-running harnesses in this tree call it.
+gate_run bash scripts/test-installer-data-isolation.sh
 # THE LANDING'S SECOND PUBLISH (24/11). Publishing covered the node binary only, so a landing that moved
 # components.lock published a binary whose components bundle was never made (components-df6f97708c72: HTTP
 # 404) and no node without a toolchain could update. The row proves the step in scripts/lib/landing-components-
@@ -1028,6 +1033,18 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-release.lua" "$BIN" --db "$D
 # runtime-worktree.txt, then a cwd holding rust/Cargo.toml), and nothing in the module is stubbed.
 gate_run bash -c 'd=$(mktemp -d); mkdir -p "$d/cwd" "$d/install"; cd "$d/cwd" || exit 1; WASM_AGENT_LUA_ROOT="$1" WASM_AGENT_HOME="$d" WA_INSTALL_DIR="$d/install" WA_SCRIPT="$1/scripts/test-update-treeless.lua" "$2" --db "$d/db"' _ "$WASM_AGENT_LUA_ROOT" "$BIN" > "$DB.treeless.log" 2>&1
 grep -q "update treeless ok" "$DB.treeless.log" || { tail -12 "$DB.treeless.log" >&2; exit 1; }
+# THE FOLLOW DOES NOT END ON AN UNREADABLE STATUS (25/11, mission release-node-updates D3). "wa update <node>"
+# printed "unknown - node_no_answer - 0s" and returned while the request was still running on that node, and the
+# loop had no bound at all. This row drives M.follow_remote through its own seams (call, clock, out, sleep) with
+# the relay deadline's REAL shape (nodes.remote_call:1786-1800): the deadline is "no answer yet", the follow
+# keeps polling to its bound, a refusal still ends it, and the module's own bound ends a follow nobody bounded.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-follow.lua" "$BIN" --db "$DB.remote-follow" | grep "remote follow ok"
+# A CHILD SHELL DOES NOT INSTALL, AND THE ACCEPTED TAIL IS NOT A CHILD (25/11, mission release-node-updates
+# D7). The fleet step was accepted and then refused by the peer's own detached child ("update_coordinator_only")
+# because the operation manager stamps every detached operation with the spawner's provenance. These rows drive
+# the real update.run and the real run_accepted: the child refusal is unchanged, the tail that continues a
+# verified master request is not stopped by it, and the accept verb runs only a record this node wrote.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-child-guard.lua" "$BIN" --db "$DB.update-child-guard" | grep "update child guard ok"
 # The pre-update backup skips every lock file the Rust sources open (binding.transport.sqlite broke /update, 04/11).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.backup-locks" | grep "backup locks ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
@@ -1801,6 +1818,16 @@ else
   [ "$stt_two_nodes" = "0" ] || exit "$stt_two_nodes"
 fi
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
+# A federated connector READ between two real nodes on one machine (24/11). The master runs a peer's
+# connector as `peer_<node>__<tool>`; the call crosses the signed peer call, arrives in the peer's outbound
+# relay lane, and there the node starts a persistent MCP read session as a supervised operation. Three
+# processes (a scratch rendezvous, the caller, an enrolled peer), two scratch homes, its own ports, no
+# model, no vault, no live fleet. It exists because the failure lives BETWEEN processes: the relay lane
+# makes the request the thread's runtime owner (`relay:<rid>`), Lua names an owner of its own, and the
+# operation manager compares them. Measured before 138f621d: every pair (main->main, main->v0.1.1,
+# v0.1.1->v0.1.1) answered `mcp_session_startup_failed` / `operation_not_yours` and left a 3600 s read
+# session parked on the peer, while the same read on the peer itself answered ok.
+gate_run node scripts/test-federated-connector-read.mjs "$BIN"
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh
 # Which conversation a turn lands in. The name a client sends is the only thing that
