@@ -51,11 +51,17 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
 WA="$(find_bin wa "${WA_BIN:-}" "$TARGET_DIR/release/wa" "$TARGET_DIR/debug/wa" \
   "$ROOT/rust/target/release/wa" "$ROOT/rust/target/debug/wa" "$(command -v wa 2>/dev/null || true)")" \
   || skip "no wa binary: set WA_BIN, or build rust/wa-host"
-SENTINEL="$(find_bin wa-sentinel "${WA_SENTINEL:-}" "$TARGET_DIR/release/wa-sentinel" "$TARGET_DIR/debug/wa-sentinel" \
+# THE SENTINEL THAT BELONGS TO THE NODE THIS ROW WAS HANDED (25/11, runner row 20261125T223521Z-8574): the row
+# SKIPPED in the orchestrator's row runner with "no wa-sentinel binary", because WA_BIN is the runner's installed
+# `wa` and nothing put wa-sentinel on PATH there - while that binary lives edge-to-edge with the one WA_BIN names.
+# So the sibling of WA_BIN is a candidate, after the explicit override and before the build outputs.
+SENTINEL="$(find_bin wa-sentinel "${WA_SENTINEL:-}" \
+  "${WA_BIN:+$(dirname "${WA_BIN}")/wa-sentinel}" \
+  "$TARGET_DIR/release/wa-sentinel" "$TARGET_DIR/debug/wa-sentinel" \
   "$ROOT/rust/target/release/wa-sentinel" "$ROOT/rust/target/debug/wa-sentinel" \
   "$ROOT/rust/wa-sentinel/target/release/wa-sentinel" "$ROOT/rust/wa-sentinel/target/debug/wa-sentinel" \
   "$(command -v wa-sentinel 2>/dev/null || true)")" \
-  || skip "no wa-sentinel binary: build rust/wa-sentinel"
+  || skip "no wa-sentinel binary: set WA_SENTINEL, or put it beside WA_BIN, or build rust/wa-sentinel"
 command -v git >/dev/null 2>&1 || skip "no git on this host"
 
 # A scratch directory the node's own guard accepts (scripts/lib/scratch-home.lua refuses a home inside the
