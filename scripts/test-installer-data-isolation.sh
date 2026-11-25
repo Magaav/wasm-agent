@@ -315,6 +315,20 @@ while IFS=$'\t' read -r file ln text; do
   case "$text" in *WASM_AGENT_IN_TURN=*) case "$text" in *WASM_AGENT_IN_TURN=1*) ;; *) strip='a cleared guard marker' ;; esac ;; esac
   detach=""
   case "$text" in *setsid*|*nohup*|*disown*) detach='a detached installer' ;; esac
+  # A CREDENTIAL IS NEVER HANDED TO AN INSTALLER UNDER TEST (25/11, Fable's D, after 40ffd00d): not as an env
+  # assignment on its statement, and not through the builder, which no longer has a pass-through at all. A row that
+  # reads a release channel uses a LOCAL STUB CHANNEL - a file:// index signed with the committed TEST key - and
+  # needs no credential. (A row that deliberately SETS a vault URL to prove the product clears it is not this: it is
+  # not on an installer's statement, and it is not forwarding the operator's.)
+  credential=""
+  case "$text" in
+    *GH_TOKEN=*|*GITHUB_TOKEN=*|*GH_CONFIG_DIR=*|*GITHUB_CONFIG_DIR=*|*OPENAI_API_KEY=*|*ANTHROPIC_API_KEY=*|*OPENCODE_GO_API_KEY=*|*WA_VAULT_ADMIN_TOKEN=*)
+      credential='a credential' ;;
+  esac
+  if [ -n "$credential" ]; then
+    offenders=$((offenders + 1))
+    ok 0 "$file:$ln does not hand the installer a credential" "the statement passes $credential: $(printf '%s' "$text" | cut -c1-150)"
+  fi
   # WHICH STATEMENT MAY BE EXEMPT: one that says where everything lands, in any order - its own scratch HOME or
   # WASM_AGENT_HOME, WA_INSTALL_DIR and WA_PORT. Anything less and a strip is a bypass, not a fixture.
   names_all=0
@@ -340,7 +354,11 @@ $(for f in scripts/test.sh scripts/test-*.sh; do
   done)
 ROWS
 # After a failed offender the loop counted it; when every statement is clean, nothing above printed a FAIL.
-ok "$([ "$offenders" = 0 ] && echo 1)" "no row strips the guard or detaches an installer without isolating it ($rows_reached statements run an installer)" "$offenders offender(s) above"
+ok "$([ "$offenders" = 0 ] && echo 1)" "no row strips the guard, detaches an installer without isolating it, or hands it a credential ($rows_reached statements run an installer)" "$offenders offender(s) above"
+# AND THE BUILDER ITSELF HAS NO PASS-THROUGH: a future edit that put one back would make every check above pass.
+builder_cred="$(grep -vE '^[[:space:]]*#' scripts/lib/scratch-installer.sh | grep -nE 'GH_TOKEN|GITHUB_TOKEN|GH_CONFIG_DIR' | head -2)"
+ok "$([ -z "$builder_cred" ] && echo 1)" \
+  "scripts/lib/scratch-installer.sh carries no credential variable in its code (its comment names them to say why they are gone)" "$builder_cred"
 # AND THE BRANCH'S OWN ROW GOES THROUGH THE LIBRARY (the six dimensions are the library's, so this is what makes the
 # row safe to run anywhere, not only under the orchestrator's runner).
 own="scripts/test-deploy-covering-release.sh"
