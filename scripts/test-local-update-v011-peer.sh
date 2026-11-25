@@ -156,7 +156,7 @@ for _ in $(seq 1 150); do curl -fsS -m 1 -o /dev/null "http://127.0.0.1:${WASM_A
 ok "$(curl -fsS -m 2 -o /dev/null "http://127.0.0.1:${WASM_AGENT_PORT:-17921}/health" 2>/dev/null && echo 1)" "the v0.1.1 node answers on its own port"
 
 UPD_ENV=(HOME="$PEER" WASM_AGENT_HOME="$PEER" WA_INSTALL_DIR="$PEER/install" TMPDIR="$R/tmp"
-  WA_INSTALL_BASE="file://$BASE" WA_INSTALL_REF="$REF" WA_INSTALL_ALLOW_LOCAL=1 WA_RELEASE_KEYS="$KEYS"
+  WA_INSTALL_BASE="file://$BASE" WA_INSTALL_REF="$REF" WA_INSTALL_ALLOW_LOCAL=1 WA_LINUX_RELEASE_ALLOW_LOCAL=1 WA_RELEASE_KEYS="$KEYS"
   WA_SENTINEL_UNIT_DIR="$R/units" WA_SENTINEL_UNIT_SYSTEMCTL="$R/bin/systemctl-stub" XDG_CONFIG_HOME="$R/config")
 
 # ---- 3a. THE v0.1.1 NODE'S OWN UPDATER, AGAINST THE LOCAL CHANNEL (the measured limit) ----------------------
@@ -174,6 +174,11 @@ ok "$([ "$(sed -n 's/^commit=//p' "$PEER/install/installed.txt" | head -1)" = "$
   "and it moved nothing: the node is still the published release"
 
 # ---- 3b. THE SAME LOCAL DOOR WITH THE FIXED UPDATER (what a v0.1.2 node runs) ----------------------------
+# TWO OPT-INS FOR ONE file:// CHANNEL, on purpose: scripts/install.sh makes a local URL opt in for the files IT
+# fetches (WA_INSTALL_ALLOW_LOCAL), and the core makes its own index opt in (WA_LINUX_RELEASE_ALLOW_LOCAL) -
+# measured 25/11: with only the first set, the fixed updater ran the core with "--index file://..." and the core
+# answered "bootstrap: local_url_refused ... (set WA_LINUX_RELEASE_ALLOW_LOCAL=1 for a fixture)". The row sets
+# both.
 # scripts/install.sh is exactly what lua/core/update.lua runs on a release node (`wa update` -> the INSTALLED
 # updater), so running THIS CHECKOUT's copy against the peer is the local door after 1f8a34d4: it reads the
 # channel, hands the index to the core, and installs $SHORT.
