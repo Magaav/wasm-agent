@@ -118,10 +118,12 @@ is built only by the cut, `ee1fda77`), so the node answers one line:
     from; a cover (another commit's build) is only installable when its embedded Lua tree is <C>'s, so pass
     --cover-commit <40-hex> --lua-inputs <sha256> ... The release channel said: node_release_unavailable: ...
 
-For the same C with the cover named (`--cover-commit <base> --lua-inputs <C's lua digest>`), the install
-runs and the record names the bytes' commit plus the Lua tree they embed. For a **Lua-changing** C the same
-invocation refuses `release_cover_lua_mismatch` with both digests - which is the second branch of the
-acceptance sentence, and the whole point.
+For the same C with the cover named (`--cover-commit <base> --lua-inputs <C's lua digest>`) the cover gate
+PASSES and the install continues to the next gate (its own identity check, which a real binary answers and
+the fixture ELF of the row cannot); the three record fields it then writes are added by `726215ce` and are
+**not** proved by a row - see the gap above. For a **Lua-changing** C the same invocation refuses
+`release_cover_lua_mismatch` with both digests, which is the second branch of the acceptance sentence and
+the whole point.
 
 **Not done, and it is the one thing between this and `wa update peer --release` doing it by itself**: the
 coordinator does not compute those two facts. `lua/core/remote_update.lua`'s `request_release` (`:449-475`)
