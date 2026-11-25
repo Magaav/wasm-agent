@@ -144,6 +144,36 @@ records the file it was handed):
 Moved them by hand into `_orch/` as `row-runner14.sh` and `deliver-row-verdict4.sh`; nothing renamed `row-runner13.sh`
 away, because the orchestrator is running the v0.1.2 cut through it.
 
+## Rows through the orchestrator's runner (25/11, 22:2x-22:3xZ)
+
+The brief says rows go through the runner, and the runner found four real defects that a direct run had hidden - each
+is a commit of its own:
+
+| row | commit | verdict from its own out.log |
+| --- | --- | --- |
+| test-installer-doors.sh | 13339aa5 | rc=0 - installer doors ok (15 checks); 20261125T223035Z-16308 |
+| test-deploy-release-honest.lua | a85c949f | rc=0 - deploy release ok (106 checks); 20261125T223439Z-792 |
+| test-deploy-target.sh | 57aaf2b4 | rc=0 - deploy target ok (14 checks); 20261125T223603Z-3364 |
+| test-deploy-release-node.sh | 57aaf2b4 | rc=0 - deploy-release-node ok (...); 20261125T223625Z-22586 |
+| test-home-guard.lua (new) | 57aaf2b4 | rc=0 - home guard ok (9 checks); 20261125T223727Z-22277 |
+| test-deploy-covering-release.sh | 57aaf2b4 | queued for item 5; see below |
+
+What the runner exposed, in the order it found it:
+
+* **the row read the runner's own ports** (row 20261125T222843Z-13846, rc=1): the runner exports WA_PORT,
+  WASM_AGENT_PORT and WASM_AGENT_CLIENT_PORT; a check that named one of the four read another, so the fallback it was
+  proving was never what it measured - and the `env` program cannot call a shell function. Fixed in 13339aa5: every case
+  starts from nothing. This is the same shape as item 4 itself, one level up.
+* **a Lua row could not run in the runner at all** (row 20261125T223107Z-6213): scripts/lib/test-home-guard.lua knew
+  only GATE_ROOT/TMPDIR as scratch roots and the row contract gives HOME=<root>/home with TMPDIR=<root>/tmp. Fixed in
+  98bec771 - WA_ROW_SCRATCH_ROOT is a scratch root, a home must still be UNDER one of them, and the live-node markers
+  still refuse - with a new row, scripts/test-home-guard.lua, wired into scripts/test.sh beside the release row.
+* **the release-honest row spelled its own safety rule** (row 20261125T223323Z-17027): its install directory was
+  checked against GATE_ROOT/TMPDIR alone, so a correct <root>/install was refused. Fixed in a85c949f by exporting
+  M.roots/M.under from the guard and asking it, and the check still refuses a path outside every root.
+* **a row that passes directly SKIPPED in the queue** (row 20261125T223521Z-8574): test-deploy-target.sh looked for
+  wa-sentinel on PATH and in the build outputs, and the runner has it beside WA_BIN. Fixed in 57aaf2b4.
+
 ## Checks run
 
 * `scripts/test-deploy-release-honest.lua` (WA_SCRIPT on the installed `wa`, scratch home): `deploy release ok (106
