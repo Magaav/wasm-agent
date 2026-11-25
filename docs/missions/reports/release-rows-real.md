@@ -378,3 +378,53 @@ either row or in any command I issued), and nothing cleared a guard variable by 
 build an `env -i` was the earlier guard *probe* (a read-only environment print for `scratch-guard.sh`), not a
 run of an installer; from now on the runner owns that for installer rows and I will not reproduce it.
 
+## known, in v0.1.1 too, fixed next
+
+Both of this row's reds are measured on main (the branch tip, `c484c2e6`) AND on the published v0.1.1
+(sha256-verified, `v2104a4d8`), so neither is a regression and neither is this branch's. Both are NAMED in the
+row (`KNOWN-FAIL`, counted apart: main-health reads `0 failed, 2 known-fail`), both point at their cause, and
+both are the first week-1 item in the brief Fable wrote — `_queue/esc-stops-what-it-started.md` ("Esc stops
+what it started: the process group, not only the prompt"). This section is the release-side record; no second
+brief was written.
+
+| # | what a person feels | measured, main | measured, v0.1.1 | cause (file:line) | row verdict |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Esc gives the prompt back, but the command keeps running to its own end | `sleep 30` gone after **29970 ms** (alive when the CLI itself died at +11467 ms) | **30002 ms** | the stop never signals the run's process group (the prompt is repainted, the tool's operation is left `accepted`) | `KNOWN-FAIL - bash: the shell the stop interrupted is gone 1000 ms after the prompt …` |
+| 2 | Esc → usable prompt takes about a second, sometimes half of one | **395-907 ms** (813-819 ms below it is the same slice) | **813-819 ms** | `lua/core/codemode_pending.lua:79` `M.SLICE_MS = 1000`; `operation_poll` (`:375-390`) asks `cancelled()` only BETWEEN slices, so the key lands anywhere in a 1 s window | `KNOWN-FAIL - bash: Esc gives back a usable prompt at once (300 ms idle …)` |
+
+Both rows keep printing the number every run; when the brief lands, the same lines say "the named known defect
+is FIXED" and the entry comes out of this table.
+
+**Row tail, measured twice at load 4.7 and 4.2:** `esc-stops pty: 21 ok, 0 failed, 2 known-fail`. On a loaded
+machine whose scale lifts the budget above the stop (measured at load 8.63: budget 1036 ms) check 2 prints
+`ok` and the count is `1 known-fail` — the row telling the truth about the machine it ran on, with the cause
+still named in this table.
+
+### The discrimination gate's reason (Fable: "so the reason isn't empty") — `d5bdce84`
+
+The gate's marker test was case-INSENSITIVE and its extraction was not, so a case-only match printed an empty
+reason: `environment  scripts/test-esc-stops-pty.mjs  the machine could not run it:` — and the row had tripped
+it with its own sentence ("the row killed them by pid", `Killed` being the gate's OOM/signal marker). Fixed in
+two places: the extraction is case-insensitive with a last-line fallback (`d5bdce84`), and the row says
+"stopped them itself, signal 9" (`c484c2e6`).
+
+**Measured, and it corrects the premise:** the pty row CAN run on the base — a base worktree at `ebf6d2ec`
+carrying the branch's row file ran it to its own verdict (`esc-stops pty: 22 ok, 0 failed, 1 known-fail`,
+exit 0). The gate was writing off a row it had not judged. After both fixes:
+
+```
+unchanged-verdict  scripts/test-esc-stops-pty.mjs   ...
+unchanged-verdict  scripts/test-release-channel-e2e.lua   ...
+unchanged-verdict  scripts/test-release-channel-e2e.sh   ...
+test-discriminates: 0 discriminating, 0 blocking, 0 not judged by this machine (0 … environment)
+```
+
+### Texts to approve (this round)
+
+1. the known-fail sentence for the stop: `the stop of a running shell is quantised to the code-mode pending
+   executor's 1 s poll slice (lua/core/codemode_pending.lua:79 M.SLICE_MS = 1000; operation_poll :375-390 asks
+   cancelled() only between slices), so Esc -> usable prompt depends on WHERE in the slice the key lands:
+   395 ms just before a boundary, 907 ms just after - week 1 item "Esc stops what it started"`
+2. the row's clean-up sentence: `1 process(es) still alive 1000 ms after the prompt (pids <n>; the row stopped
+   them itself, signal 9: <n>)`
+
