@@ -49,7 +49,14 @@ export WA_SENTINEL_UNIT_DIR="$R/units" WA_SENTINEL_UNIT_SYSTEMCTL="$R/bin/system
 export XDG_CONFIG_HOME="$R/config" TMPDIR="$R/tmp"
 printf '#!/bin/sh\nprintf "systemctl-stub: refused: %s\\n" "$*" >&2\nexit 1\n' > "$R/bin/systemctl-stub"
 chmod +x "$R/bin/systemctl-stub"
-wa_scratch_home_guard "$R/home" || { echo 'release door update: the scratch home is refused' >&2; exit 2; }
+# THE HOME GUARD IS ASKED ONLY WHEN THIS ROW IS RUN BY HAND. scripts/lib/scratch-home.sh answers "is this home
+# the OPERATOR'S?" by comparing against $HOME, and the orchestrator's row runner already runs every row with
+# HOME inside its own scratch root - asking it there refuses the very home it was given (measured: the row
+# stopped at refused(real_node_home) before it built anything).
+case "$(CDPATH= cd -- "$HOME" 2>/dev/null && pwd -P)" in
+  "$R"|"$R"/*) : ;;
+  *) wa_scratch_home_guard "$R/home" || { echo 'release door update: the scratch home is refused' >&2; exit 2; } ;;
+esac
 unset WASM_AGENT_DB WASM_AGENT_VAULT_URL WASM_AGENT_OPENCODE_GO_VAULT_URL WASM_AGENT_VAULT_DIR \
       WASM_AGENT_VAULT_KEYSTORE WASM_AGENT_VAULT_PASSPHRASE WASM_AGENT_VAULT_OPERATOR_URL
 
