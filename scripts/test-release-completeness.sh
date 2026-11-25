@@ -215,6 +215,61 @@ else
   kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; STUB_PID=""
 fi
 
+# ---- 8b. THE CUT REFUSES A PUBLISHED BUNDLE WITH ZERO DOORS (25/11, Fable) -------------------------------
+# The tree that packs a bundle may be a FIXTURE and say so, and a fixture bundle may carry no door. A PUBLISHED
+# entry that says install_doors=0 is a different thing: no node installed from it can be updated from another
+# node at all, because the release door execs <install>/scripts/release-install.sh (v0.1.1 answered code 127
+# exactly that way). So the cut's own gate judges the INDEX ENTRY AT THE COMMIT, not the tree's claim about
+# itself - and each case below is its own commit, carrying its own manifest and its own index entry.
+doors_case() { # <17|0|absent> -> COMMIT/SHORT set to a fixture commit published with that count
+  local count="$1" field=""
+  [ "$count" = absent ] || field=",\"install_doors\":$count"
+  mkdir -p "$REPO/releases"
+  printf '{"schema":"wasm-agent-linux-release-index","schema_version":1,"releases":[]}
+' > "$REPO/releases/index-linux.json"
+  ( cd "$REPO" && git add releases/index-linux.json && git -c user.email=t@t -c user.name=t commit -qm "release: doors=$count" )
+  local sha short
+  sha="$(git -C "$REPO" rev-parse HEAD)"; short="${sha:0:12}"
+  local size; size="$(wc -c < "$DIST/node-$SHORT/wa-x86_64-unknown-linux-gnu-$SHORT")"
+  printf '{"schema":"wasm-agent-linux-release-index","schema_version":1,"releases":[{"tag":"v0.0.0-test","commit":"%s","commit_short":"%s","target":"x86_64-unknown-linux-musl","arch":"x64","manifest_sha256":"deadbeef","url":"file://%s/wa-linux-x64-%s.tar.gz","size":10,"node_version":"24.22.1"%s}]}
+'     "$sha" "$short" "$W" "$short" "$field" > "$REPO/releases/index-linux.json"
+  ( cd "$REPO" && git add releases/index-linux.json && git -c user.email=t@t -c user.name=t commit -qm "release: the linux entry for $short" )
+  COMMIT="$(git -C "$REPO" rev-parse HEAD)"; SHORT="${COMMIT:0:12}"
+  # the node assets the walk HEADs, for THIS commit
+  mkdir -p "$DIST/node-$SHORT"
+  for asset in "node-$SHORT.manifest" SHA256SUMS SHA256SUMS.sig "wa-x86_64-unknown-linux-gnu-$SHORT" "wa-sentinel-x86_64-unknown-linux-gnu-$SHORT"; do
+    printf 'x' > "$DIST/node-$SHORT/$asset"
+  done
+  cat > "$MANIFEST_DIR/node-$SHORT.manifest" <<MANIFEST
+schema=wasm-agent-node-binaries/1
+source_commit=$COMMIT
+built_utc=2026-11-24T00:00:00Z
+x86_64-unknown-linux-gnu deadbeef 1 feedface 1
+MANIFEST
+}
+
+# GREEN FIRST, on a published entry that carries doors: the gate answers complete and names the count.
+doors_case 17
+out="$(run)"; rc=$?
+ok "$([ "$rc" = 0 ] && echo 1)" "a published bundle that carries install-side scripts is complete" "rc=$rc $(printf '%s' "$out" | tail -2)"
+ok "$(printf '%s
+' "$out" | grep -q '200 install_doors 17 v0.0.0-test' && echo 1)"   "and the gate says how many doors the published bundle carries" "$(printf '%s' "$out" | grep install_doors | head -2)"
+
+# RED: the same shape, published with a zero count.
+doors_case 0
+out="$(run)"; rc=$?
+ok "$([ "$rc" = 1 ] && echo 1)" "a PUBLISHED bundle with zero install-side scripts is NOT installable" "rc=$rc"
+ok "$(printf '%s
+' "$out" | grep -q '^0 install_doors v0.0.0-test ' && echo 1)" "and the row says the count is zero" "$(printf '%s' "$out" | tail -2)"
+ok "$([ "$(printf '%s
+' "$out" | tail -1)" = "$SHORT is NOT installable by download: install_doors=0@v0.0.0-test missing" ] && echo 1)"   "the verdict names the field and the tag" "$(printf '%s' "$out" | tail -1)"
+
+# NEITHER ZERO NOR FINE: an entry cut before the field existed is reported unknown and does not decide.
+doors_case absent
+out="$(run)"; rc=$?
+ok "$([ "$rc" = 0 ] && printf '%s
+' "$out" | grep -q 'unknown install_doors v0.0.0-test' && echo 1)"   "an entry that predates the field is reported unknown, neither zero nor claimed fine" "rc=$rc $(printf '%s' "$out" | grep install_doors | head -1)"
+
 # ---- 9. THE BUNDLE CARRIES EVERY DOOR THE CODE EXECS FROM THE INSTALL (25/11, release-node-updates D2) --
 # A peer installed from the published v0.1.1 bundle accepted `wa update <node> --release`, queued it, and then
 # died with "bash: <install>/scripts/release-install.sh: No such file or directory" (code 127): the packer's
@@ -235,7 +290,10 @@ else
   # A FIXTURE TREE, so "derived" is proven and not assumed: a door the code names appears, a path the code
   # names only against a TREE does not, and a door the code names that the tree lacks is refused by name.
   MINI="$W/doors-mini"; mkdir -p "$MINI/lua/core" "$MINI/rust/src" "$MINI/scripts/lib" "$MINI/scripts"
-  printf 'local install = "/opt/wa"\nlocal door = install .. "/scripts/fixture-door.sh"\nlocal tree = "/some/tree"\nlocal other = tree .. "/scripts/not-a-door.sh"\n' > "$MINI/lua/core/fixture.lua"
+  # A PRODUCT TREE for the allow-list rows below: the derivation treats a tree as the product's when it carries
+  # lua/core/update.lua or lua/core/remote_update.lua - the Lua that hands a door to a shell - and an exemption is
+  # a fact about that tree. The same file states the tree-relative path that must NOT become a member.
+  printf 'local install = "/opt/wa"\nlocal door = install .. "/scripts/fixture-door.sh"\nlocal tree = "/some/tree"\nlocal other = tree .. "/scripts/not-a-door.sh"\n' > "$MINI/lua/core/update.lua"
   printf '#!/bin/sh\nexit 0\n' > "$MINI/scripts/fixture-door.sh"
   printf '#!/bin/sh\nexit 0\n' > "$MINI/scripts/not-a-door.sh"
   mini="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
@@ -263,6 +321,18 @@ else
   stale="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
   ok "$([ "$rc" = 1 ] && printf '%s' "$stale" | grep -q 'stale_exemption' && echo 1)" \
     "an exemption nothing in the code needs is refused (an allow-list that drifts is a block-list)" "rc=$rc $(printf '%s' "$stale" | tail -1)"
+  rm -f "$MINI/scripts/lib/install-script-doors.allow"
+
+  # A TREE THAT IS NOT THE PRODUCT'S: it carries an allow file only because main's 24/11 fix copies all of
+  # scripts/lib into the release-channel e2e's fixture by rule. The derivation must not judge that file stale
+  # there - it says it does not consult it - and it must still answer with the doors it can see.
+  printf 'scripts/fixture-door.sh # carried by a fixture, exec by nothing here
+' > "$MINI/scripts/lib/install-script-doors.allow"
+  mv "$MINI/lua/core/update.lua" "$MINI/lua/core/not-the-product.lua"
+  notproduct="$(node "$DOORS" --root "$MINI" --list 2>&1)"; rc=$?
+  ok "$([ "$rc" = 0 ] && printf '%s' "$notproduct" | grep -q 'is not consulted' && echo 1)" \
+    "a tree that is not the product tree has its allow file left alone, by name, instead of judged" "rc=$rc $(printf '%s' "$notproduct" | head -2)"
+  mv "$MINI/lua/core/not-the-product.lua" "$MINI/lua/core/update.lua"
   rm -f "$MINI/scripts/lib/install-script-doors.allow"
 
   # A STAGED BUNDLE: complete -> ok; a door removed -> refused BY NAME; a door present but not a member -> refused.
@@ -300,6 +370,15 @@ else
   ok "$([ -n "$derive_line" ] && [ -n "$check_line" ] && [ -n "$tar_line" ] && [ "$derive_line" -lt "$check_line" ] && [ "$check_line" -lt "$tar_line" ] && echo 1)" \
     "scripts/release-linux.sh derives the doors, checks the staged bundle, and only then tars it" \
     "derive=${derive_line:-none} check=${check_line:-none} tar=${tar_line:-none}"
+  # THE COUNT THE GATE READS IS THE ONE THE PACKER DERIVED: bundle.manifest carries install_doors=<n>, and the
+  # index entry the packer offers carries the same number, so a published release states its own door count and
+  # the cut gate can refuse a zero without downloading the tarball.
+  ok "$(grep -Fq 'echo "install_doors=${#doors[@]}"' "$ROOT/scripts/release-linux.sh" && echo 1)" \
+    "the manifest the bundle ships states install_doors=<the derived count>"
+  ok "$(grep -Fq 'entry.install_doors=Number(doors)' "$ROOT/scripts/release-linux.sh" && echo 1)" \
+    "and the index entry the packer offers carries the same count (the field the cut gate reads)"
+  ok "$(grep -Fq '"${#doors[@]}" <<' "$ROOT/scripts/release-linux.sh" && echo 1)" \
+    "the count travels into that program as an argument, not from a second computation"
 fi
 
 printf 'release completeness ok (%d checks, %d failed)\n' "$checks" "$failed"

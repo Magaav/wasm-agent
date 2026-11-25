@@ -387,6 +387,13 @@ eq 'installed.txt says how it arrived' "$(rec via)" linux-bootstrap
 eq 'and records the updater that came with it' "$(rec updater)" scripts/install.sh
 [ -f "$P/scripts/install.sh" ] && ok 'the updater is installed beside the binary (a bundle member, verified with it)' \
   || bad 'updater not installed' "$(ls "$P/scripts" 2>/dev/null)"
+# THE UPDATER TELLS THE CORE WHICH INDEX IT READ (mission release-node-updates, cut condition 1). bootstrap.sh
+# defaults to the PUBLIC index, so without this line an updater pointed at a self-hosted or test channel fetched
+# its core from that channel and then compared the node against GitHub: a v0.1.1 node answered "already runs the
+# newest published bundle" from the public index while its own updater had read a file:// one, and the local
+# door could not be used (or tested) off the public channel.
+grep -Fq 'push "--index"; push "$index_url"' "$ROOT/scripts/install.sh"   && ok 'the installed updater hands the core the index it read (the local door can leave the public channel)'   || bad 'install.sh runs the core without --index: a local or self-hosted channel would still be compared against the public index'
+grep -Fq 'WA_INSTALL_INDEX' "$ROOT/scripts/install.sh"   && ok 'and an operator can name that index explicitly (WA_INSTALL_INDEX)'   || bad 'WA_INSTALL_INDEX is not read' 
 wa_before=$(sha_of "$P/wa")
 
 real_front "$T/i1.json"

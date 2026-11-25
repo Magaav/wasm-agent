@@ -166,6 +166,31 @@ wa_release_repo_slug() { # <repo>
 #   complete      0
 #   INCOMPLETE    1  and the last line is "<sha12> is NOT installable by download: <asset> missing"
 #   unknown       2  when a question could not be answered (never reported as complete)
+# <repo> <commit> -> one line per linux index ENTRY the channel carries at that commit: "<tag> <count|unknown> <url>".
+#
+# WHY THE COUNT IS IN THE INDEX (mission release-node-updates, Fable 25/11). A published bundle that carries
+# ZERO install-side scripts cannot be updated from another node at all: the release door execs
+# <install>/scripts/release-install.sh, and a node installed from such a bundle answers code 127 (measured on
+# v0.1.1 before the bundle carried its doors). The tree that packs the bundle now states how many it derived
+# (release-linux.sh writes install_doors into the manifest AND this entry), so the cut's own gate can refuse a
+# zero-door release without downloading a 25 MB tarball: this function only reads the index at the commit.
+wa_release_bundle_doors() { # <repo> <commit>
+  local repo="$1" commit="$2" index
+  # ABSENT IS NOT UNKNOWN: a commit that never published a linux bundle has no entry to judge, and that is the
+  # normal case for the node-binaries channel every landing publishes to. Only an index that EXISTS and cannot be
+  # parsed is unknown (exit 2).
+  index="$(git -C "$repo" show "$commit:releases/index-linux.json" 2>/dev/null)" || return 0
+  [ -n "$index" ] || return 0
+  printf '%s' "$index" | python3 -c '
+import json,sys
+try: doc=json.load(sys.stdin)
+except Exception: sys.exit(2)
+for r in doc.get("releases") or []:
+    count=r.get("install_doors")
+    print("%s %s %s" % (r.get("tag") or "?", count if isinstance(count,int) else "unknown", r.get("url") or ""))
+' 
+}
+
 wa_release_completeness() { # <repo> <commit> <workdir>
   local repo="$1" commit="$2" work="$3" short slug lock_tag names name asset url status rc=0 missing="" unknown=""
   short="${commit:0:12}"
@@ -215,6 +240,26 @@ wa_release_completeness() { # <repo> <commit> <workdir>
         *) printf '%s components.lock %s\n' "$status" "$url"; [ -n "$missing" ] || missing="$lock_tag/components.lock"; rc=1 ;;
       esac
     fi
+  fi
+  # THE PUBLISHED BUNDLE MUST CARRY THE DOORS A NODE EXECS (mission release-node-updates, Fable 25/11). The tree
+  # that packs a bundle may be a FIXTURE and say so (release-linux.sh's door_list_fixture_tree), and that is fine
+  # for a test bundle - but a PUBLISHED entry that says install_doors=0 is a release no node can be updated from,
+  # whatever the tree claimed about itself. This is the cut's own gate, so it refuses HERE.
+  doors_lines="$(wa_release_bundle_doors "$repo" "$commit" 2>/dev/null)"; doors_rc=$?
+  if [ "$doors_rc" = 2 ]; then
+    printf 'unknown install_doors releases/index-linux.json could not be read at %s\n' "$short"
+    [ "$rc" = 0 ] && rc=2
+  elif [ -n "$doors_lines" ]; then
+    while read -r doors_tag doors_count doors_url; do
+      [ -n "$doors_tag" ] || continue
+      case "$doors_count" in
+        0) printf '0 install_doors %s %s\n' "$doors_tag" "$doors_url"
+           [ -n "$missing" ] || missing="install_doors=0@$doors_tag"
+           rc=1 ;;
+        unknown) printf 'unknown install_doors %s %s\n' "$doors_tag" "$doors_url" ;;
+        *) printf '200 install_doors %s %s %s\n' "$doors_count" "$doors_tag" "$doors_url" ;;
+      esac
+    done <<< "$doors_lines"
   fi
   case "$rc" in
     0) printf 'complete node-%s and %s answer 200 for every asset\n' "$short" "${lock_tag:-the components bundle}" ;;

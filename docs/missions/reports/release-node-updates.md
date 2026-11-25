@@ -1,6 +1,11 @@
 # release-node-updates (G): a release-installed node must be updatable
 
-Branch `change/release-node-updates`, base `origin/main` ebf6d2ec. Commits: `2111510e` (the bundle carries every
+Branch `change/release-node-updates`, base `origin/main` ebf6d2ec, REBASED onto main 82f57859 for the
+landing gate (a merge conflict in scripts/test-release-channel-e2e.lua: main's 24/11 fix copies the whole
+scripts/lib DIRECTORY into the e2e's fixture by rule, which is strictly better than the two file names this
+branch had added there, so the branch takes main's hunk and its own list edits are dropped). The commits this
+report cites are the rebased ones; the pre-rebase hashes of the commits that are already in main did not
+change. Commits: `2111510e` (the bundle carries every
 script a node execs from its install, and a gate that derives that list from the code), `4b7e4fae` (a tree-less
 node answers `--commit` in one line with the command to type), `9c0a673e` (the follow says "no answer yet" and
 keeps to its own bound), `b30753b2` (D7: the accepted tail of a verified master request is not a child),
@@ -207,6 +212,14 @@ by starting a node; the guard row above is what proves the decision instead. The
 installed by deploy.sh) was not run either: the row above is a release install, and it is the one this mission
 can build inside its time.
 
+### What a same-user process can still do - APPROVED WORDING (Fable, 25/11, for the RC)
+
+a same-user process can reach M.run{signed_request=true} (a Lua script through the node, or a forged accept
+record), exactly as it could clear WASM_AGENT_PROVENANCE in v0.1.1, whose escape was the same cleared variable.
+So this is PARITY with v0.1.1, not a new hole: the guard is a rail against a worker installing by accident, not
+a wall against a hostile process. Making it a fact (the child re-verifies the signed envelope itself; a boolean
+is refused) is queued as item 5 of _queue/installer-refuses-a-target-it-was-not-given.md, week 1.
+
 ## 7. A scratch install is isolated or it does not start (`7e10d2b3`)
 
 scripts/lib/install-isolation.sh answers six questions about the environment a run WILL use: the state dir,
@@ -287,8 +300,22 @@ tree peer remote update ok (7 checks)
 rc=0 ... leftovers=0 canary_before=green canary_after=skip
 ```
 
-canary_after=skip is the runner's own field: it could not READ the canary after this row, which is not a
-claim that the canary stayed green - it is reported as it is. The discrimination for D7's decision is the unit
+canary_after=skip on that first run is the runner's own field: it could not READ the canary afterwards, which is
+not a claim that it stayed green. Fable asked for one rerun when no landing is active, so it was re-run at
+8393b573 AFTER the live node reported build=82f57859 (the RC installed):
+
+```
+rc=0 row=scripts/test-tree-peer-remote-update.sh commit=8393b573d448941ffb85481477c2c9dd76aa3fb4
+leftovers=0 canary_before=skip canary_after=green
+  (the product's own row: 39 checks)  accept two process ok (39 checks): 6 s of relay hold, one deploy, the peer on 6fe7d083
+  ok   the request settled INSTALLED (the follow ends installed)
+  ok   and the peer never answered update_coordinator_only (the D7 refusal)
+tree peer remote update ok (7 checks)
+```
+
+canary_before was skip on the rerun (the node had just come back from its install and the runner could not read
+the canary before the row). Across the two runs every direction has been seen green once - first before=green /
+after=skip, then before=skip / after=green - and neither run saw a red. The discrimination for D7's decision is the unit
 row of section 6 (red on the base with update_coordinator_only, green here); this row is the end-to-end proof
 on the release commit.
 
@@ -309,6 +336,22 @@ audited before writing those lines: neither row names github.com or gh anywhere,
 --local's build path (scripts/lib/build-requirements.sh, scripts/codemode-build.mjs) makes no GitHub API
 request, and the only github.com in scripts/linux/bootstrap.sh is the launcher comment at its head - the code
 fetches the index, the sums and the assets from the URL the index names, which in these rows is file://.
+
+### The command the text prints is the command a row runs
+
+The refusal of section 4 prints `wa update peer011 --release --commit <sha>` (scripts/test-update-treeless.lua
+asserts that string, 26 checks), and the row runs exactly that form:
+
+```
+$ grep -n 'update "$PEER_ID" --release --commit "$COMMIT"' scripts/test-release-door-update.sh
+210:  timeout 600 "$PEER/install/wa" update "$PEER_ID" --release --commit "$COMMIT" 2>&1)
+```
+
+The row names the node by ID where the text writes `<node>`, and it prints that itself before it runs it
+(`release door update: command: wa update <id> --release --commit <sha>   (node id; the peer registered as
+"peer")`), because a scratch node's NAME can collide with another node on the same registry - measured 25/11,
+two nodes both answering to the host name. So the form is the one the text gives; only the spelling of `<node>`
+differs, and the row says which spelling it used.
 
 ## 8. The guard, pasted (every install row of this mission was run under it)
 
@@ -344,12 +387,71 @@ reads /home/victor/wasm-agent/checkout, ~/.local/bin/installed.txt is unchanged 
 and the live node answers /health 200. Nothing of mine runs now: every scratch sentinel/node/rendezvous I
 started was stopped by PID (registry 19890, peer011, peerfix, gr-row watcher and registry 17890).
 
+## 9b. Cut condition 1 in progress: the v0.1.1 node's LOCAL door on a test channel (commit 15634942)
+
+Fable: the two unrun rows are CUT conditions, they continue after this lands. This is the first of them.
+
+Writing the row found the reason it had never been testable. scripts/install.sh resolves the index it reads
+(WA_INSTALL_BASE / WA_INSTALL_REF, or the new WA_INSTALL_INDEX), fetches the CORE from that channel - and then
+ran the core WITHOUT --index, so bootstrap.sh fell back to its own default, the PUBLIC index. A v0.1.1 node whose
+updater had just read a local channel therefore compared itself against GitHub and answered
+"this node already runs the newest published bundle (v0.1.1); nothing to do", measured in the row's first run.
+
+FIX (15634942): the linux channel passes the index it read to the core, and WA_INSTALL_INDEX names one
+explicitly. scripts/test-install.sh 56 -> 58 checks (both new rows red before it).
+
+WHAT THE ROW'S FIRST RUN ALSO TAUGHT (its own bugs, fixed in the next commit): a file:// channel must be laid
+out PER COMMIT - scripts/install.sh resolves the core at <base>/<the commit the index names>/scripts/linux/
+bootstrap.sh, the shape raw.githubusercontent.com/<repo>/<sha>/ has - so the row now writes that directory and
+links <base>/main to it. And its assertion that the update was accepted matched the word "installed" inside
+"nothing was installed": it now asserts the node is NOT told it is current, that the answer names the release
+the channel carries, and that the version and installed.txt actually move.
+
+### The five runs, and what each one measured
+
+1. install.sh ran the core WITHOUT --index: a v0.1.1 node answered "this node already runs the newest published
+   bundle (v0.1.1); nothing to do" while the channel it had been pointed at named a newer release. Fixed
+   forward in 15634942 (WA_INSTALL_INDEX, and the index the updater read is passed to the core).
+2. A file:// channel must be laid out PER COMMIT - <base>/<the commit the index names>/scripts/linux/
+   bootstrap.sh, the shape raw.githubusercontent.com/<repo>/<sha>/ has - or the core is unreachable.
+3. A file:// channel needs BOTH opt-ins: WA_INSTALL_ALLOW_LOCAL for the files the updater fetches and
+   WA_LINUX_RELEASE_ALLOW_LOCAL for the core's own index read. Each script makes a local URL opt in for
+   itself; a self-hosted channel therefore needs both.
+4. The v0.1.1 node's own updater cannot see a test channel at all (that copy predates the pass-through): the row
+   now asserts exactly that, and in production such a node moves when the PUBLIC index names v0.1.2.
+5. With the fixed updater the local door INSTALLED the release: the node came back as wasm-agent v0.1.2
+   v52704b38, installed.txt named the commit, the node id and the ledger fact were intact. That run still
+   failed on two of the ROW's own assertions - a version grep for the twelve-character commit when a bundle
+   prints eight, and the core's systemd user-unit step, which fires AFTER the install and cannot work where
+   there is no user manager ("systemd_user_unavailable ... or use --no-service"). Both fixed in 60ad7cee.
+
+GREEN at 60ad7cee (row 20261125T022452Z): rc=0, leftovers=0, canary green before and after,
+systemctl-calls.log empty, 18 checks:
+
+```
+  ok   the published v0.1.1 bundle is installed on the scratch peer
+  ok   and it runs the published release: wasm-agent v0.1.1 · v2104a4d8
+    v0.1.1 updater: this node already runs the newest published bundle (v0.1.1); nothing to do.
+  ok   the v0.1.1 node's own updater answers from the PUBLIC index, whatever channel it is pointed at
+  ok   the fixed updater ran (exit 0)
+  ok   the node now runs the release from this commit: wasm-agent v0.1.2 · v60ad7cee
+  ok   installed.txt names the commit it moved to
+  ok   the node id is unchanged: c2df86f9f65813d4abc1bd44f1c7b2c9
+  ok   the ledger fact survives the update
+local update v011 peer ok (18 checks): the published v0.1.1 node moved itself to 60ad7cee77e2 with its data
+```
+
+So the FIRST half of cut condition 1 is closed: a v0.1.1 bundle node's own updater cannot be pointed at a test
+channel (measured and asserted), and the local door - the updater lua/core/update.lua runs - moves such a node to
+a this-commit release and keeps its data. The second half (the nextcloud install kind) is untouched.
+
 ## 10. Not done, and known failures
 
-- The v0.1.1 peer upgrading itself by LOCAL `wa update` from the signed test channel (the coordinator's new
-  row): NOT RUN. The installer-over-v0.1.1 row is measured (section 2).
-- The nextcloud kind (installed.txt via=remote-update.sh, no runtime-worktree.txt, v0.1.1): NOT reproduced and
-  NOT measured. No door was proved from it, and nextcloud was not touched.
+- CUT CONDITION, not a landing condition (Fable 25/11): the v0.1.1 peer upgrading itself by LOCAL
+  `wa update` from the signed test channel. NOT RUN; the installer-over-v0.1.1 row is measured (section 2).
+- CUT CONDITION, not a landing condition (Fable 25/11): the nextcloud kind (installed.txt
+  via=remote-update.sh, no runtime-worktree.txt, v0.1.1). NOT reproduced and NOT measured; no door was proved
+  from it and nextcloud was not touched.
 - The TREE-peer end-to-end row (a checkout installed by deploy.sh, a real install to a second commit): NOT RUN.
   The release-door row is green under the runner (section 7b); the tree deploy door is a different path and is
   not proved by it.
