@@ -69,12 +69,19 @@ wa_install_isolation_guard() {
   under "WA_SENTINEL_UNIT_DIR" "$units" || bad=1
   if [ -n "${XDG_CONFIG_HOME:-}" ]; then under XDG_CONFIG_HOME "$XDG_CONFIG_HOME" || bad=1; fi
   local sudo="${WA_SENTINEL_UNIT_SYSTEMCTL:-systemctl}"
-  case "$sudo" in
-    systemctl|*/systemctl)
-      printf 'not_isolated: WA_SENTINEL_UNIT_SYSTEMCTL is %s, the real systemctl: a scratch run may restart the operator service\n' "$sudo" >&2
-      bad=1 ;;
-    *) under WA_SENTINEL_UNIT_SYSTEMCTL "$sudo" || bad=1 ;;
-  esac
+  # A SYSTEMCTL-SHAPED STUB INSIDE THE SCRATCH ROOT IS NOT THE REAL ONE (25/11, measured twice in
+  # rows/20261125T050751Z and rows/20261125T051534Z): the name test ran first, so a row's own stub at
+  # <scratch>/bin/systemctl was refused as "the real systemctl" and the deploy never installed. The location decides
+  # first; only a systemctl that is outside the root - bare, or a system path - is refused by name.
+  if under WA_SENTINEL_UNIT_SYSTEMCTL "$sudo"; then
+    :
+  else
+    case "$sudo" in
+      systemctl|*/systemctl)
+        printf 'not_isolated: WA_SENTINEL_UNIT_SYSTEMCTL is %s, the real systemctl: a scratch run may restart the operator service\n' "$sudo" >&2 ;;
+    esac
+    bad=1
+  fi
   # 5. THE LEDGER.
   if [ -n "${WASM_AGENT_DB:-}" ]; then under WASM_AGENT_DB "$WASM_AGENT_DB" || bad=1; fi
   # 6. THE PORT. The live node's, and the ports one command away from it, are not a scratch node's.
