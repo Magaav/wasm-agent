@@ -1790,6 +1790,22 @@ UPGRADE="$ROOT/scripts/upgrade.sh"
 if [ -n "$EXPECTED_SHA" ]; then
   [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] || fail "source changed from expected SHA before install"
 fi
+# THE VERSION-FOLDER INSTALL: ONE SWITCH, OFF AT LANDING (Fable 25/11, condition b). It is turned on per node, on
+# Fable's word, the laptop first - so nothing in this branch changes how any node installs until someone sets it.
+# With it off, this file is byte-for-byte the install path it was.
+#
+# WHAT IS ALREADY HERE: the conversion (scripts/versions-adopt.sh: convert an in-place node ONCE, verify, roll back
+# if the verification fails) and the staging half (upgrade.sh writes into WA_VERSION_STAGING and stops).
+# WHAT IS NOT: the sequence that SEALS the staged tree, MOVES the pointer and RESTARTS the node after the pointer
+# already names the new version (and the rollback that becomes a pointer move, with $BACKUP retired). Until that
+# hunk lands, turning the switch on would install a version the running node never restarts into, so it refuses
+# by name instead - a fast refusal is better than an install that silently waits for the next reboot.
+case "${WA_VERSION_FOLDERS:-0}" in
+  0) : ;;
+  1) fail "version_folders_incomplete: the conversion and the staging half are in this build, the seal+point+restart sequence is not - keep WA_VERSION_FOLDERS=0 until it lands" ;;
+  *) fail "version_folders_switch: WA_VERSION_FOLDERS must be 0 or 1, not $WA_VERSION_FOLDERS" ;;
+esac
+
 echo "deploy: installing through upgrade.sh"
 wa_phase installing
 # No log to follow: the heartbeat keeps the row alive through upgrade.sh's wait for an idle node.
