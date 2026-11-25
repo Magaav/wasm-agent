@@ -339,7 +339,10 @@ echo "test-install-guards: no orphaned message line (a comment block that lost i
 FIXTURE2="$WORK/orphan-fixture.sh"
 printf '%s\n' '# a comment block that ends one line early,' '# and its last line is no longer a comment.' 'deploy must never refuse because another session landed while it ran.' > "$FIXTURE2"
 orphans() { # <files...> -> prints file:line for each orphaned message line
+  # `line=$0` FIRST: without it every expression below is empty, the rule matches nothing, and the check passes
+  # on the very file it was written for (measured while writing it - the fixture that must fail did not).
   awk '
+    { line=$0 }
     line ~ /^[A-Za-z]/ && line ~ / / && line !~ /[;|&()$`\"'"'"'=<>{}\[\]\\]/ && line ~ /[.):]$/ && prev ~ /^#/ { print FILENAME ":" NR ": " line }
     { prev=line }
   ' "$@" 2>/dev/null
