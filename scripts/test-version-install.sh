@@ -78,7 +78,9 @@ install_dir() { # <dir>: what today's install looks like before the switch - a r
 run_installer() { # <staging> <install> [<commit>] [extra env...]
   local staging="$1" install="$2" commit="$COMMIT"
   shift 2
-  case "${1:-}" in ????????) commit="$1"; shift ;; esac
+  # A COMMIT, recognised by shape: all hex and not an option. An 8-character glob was the first attempt and it
+  # never matched a 40-hex id, so `env` was handed the commit as a program name (rows/20261125T103734Z-6007).
+  case "${1:-}" in ''|-*|*[!0-9a-f]*) ;; *) commit="$1"; shift ;; esac
   env "$@" bash scripts/version-install.sh --staging "$staging" --commit "$commit" --install "$install" --share "$W/share"
 }
 
