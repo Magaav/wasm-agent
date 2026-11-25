@@ -111,7 +111,9 @@ G_TURN=$(grep -n 'cannot deploy from a turn running on the node it would replace
 G_CLI=$(grep -n 'deploying from a CLI turn needs a sentinel supervising the node' "$DEPLOY" | grep -v '^\s*#' | head -1 | cut -d: -f1)
 G_INSTALL=$(grep -n 'refused(install_dir_missing)' "$DEPLOY" | grep -v '^\s*#' | head -1 | cut -d: -f1)
 G_0E=$(grep -n '^# 0e\.' "$DEPLOY" | head -1 | cut -d: -f1)
-SWEEP=$(line_of 'sweep_stale_staging')
+# THE CALL, NOT THE DEFINITION (measured 25/11, row 20261125T114425Z-7205: `line_of` matched the function
+# definition at line 345 and compared it with the record at 498 - the check failed on its own grep).
+SWEEP=$(grep -n '^sweep_stale_staging$' "$DEPLOY" | head -1 | cut -d: -f1)
 [ -n "$WRITE" ] || fail 'the alive write is not in deploy.sh any more'
 for pair in "node-turn:$G_TURN" "cli-turn:$G_CLI" "install-dir:$G_INSTALL"; do
   name=${pair%%:*}; line=${pair#*:}
