@@ -117,6 +117,19 @@ for _ in $(seq 1 100); do
 done
 ok "$([ -n "$alive_commit" ] && [ "$alive_commit" != unknown ] && echo 1)" \
   "the alive record names the deploy's commit once it is resolved, not 'unknown'" "commit=${alive_commit:-none} record=$(cat "$ALIVE" 2>/dev/null)"
+# THE EVIDENCE HAS TO SURVIVE THE RUN (25/11): the runner deletes the scratch root, so a failing row left
+# nothing to read - twice. The deploy's own output and the stub's log are printed HERE, in the row's log,
+# whether or not the assertion above held: they say whether the paced manifest was the file the deploy
+# fetched, and when the deploy ended.
+if [ -z "$alive_commit" ] || [ "$alive_commit" = unknown ]; then
+  echo "  -- diagnostics: no commit in the alive record"
+  echo "  -- deploy.out tail:"
+  tail -12 "$OUT" 2>/dev/null | sed "s/^/     /"
+  echo "  -- stub.log tail:"
+  tail -8 "$W/stub.log" 2>/dev/null | sed "s/^/     /"
+  echo "  -- alive record now: $(cat "$ALIVE" 2>/dev/null || echo "(absent)")"
+  echo "  -- deploy pid $DEPLOY_PID alive: $(kill -0 "$DEPLOY_PID" 2>/dev/null && echo yes || echo no)"
+fi
 ok "$([ "$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$ALIVE" | head -1)" = "$HOLDER" ] && echo 1)" \
   "and it is still the same deploy's record (same pid), not a new one" "holder=$HOLDER record=$(cat "$ALIVE" 2>/dev/null)"
 
