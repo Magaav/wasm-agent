@@ -23,8 +23,14 @@ ROOT="$(pwd)"
 DEPLOY="$ROOT/scripts/deploy.sh"
 . "$ROOT/scripts/lib/scratch-home.sh"
 . "$ROOT/scripts/lib/deploy-alive.sh"
-WORK="${WA_ROW_SCRATCH_ROOT:+$WA_ROW_SCRATCH_ROOT/tmp}${WA_ROW_SCRATCH_ROOT:-}"
-[ -n "${WA_ROW_SCRATCH_ROOT:-}" ] || WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-guards-before-alive.XXXXXX")"
+# THE ROW S OWN ROOT, in one piece (measured 25/11: the first shape concatenated two expansions and HOME became
+# <root>/tmp<root>/home, so the scratch-home guard refused by name - which is how it should fail, but the row
+# was the thing at fault).
+if [ -n "${WA_ROW_SCRATCH_ROOT:-}" ]; then
+  WORK="$WA_ROW_SCRATCH_ROOT/row-work"
+else
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-guards-before-alive.XXXXXX")"
+fi
 mkdir -p "$WORK"
 export HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home"
 wa_scratch_home_guard "$HOME" || { echo 'guards-before-alive REFUSED: the scratch home is the operator node home' >&2; exit 2; }
