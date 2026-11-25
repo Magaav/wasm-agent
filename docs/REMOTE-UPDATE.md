@@ -13,6 +13,17 @@ wa update openclaw --detach                 # ask, print the command that re-att
 wa update openclaw --follow                 # attach to the newest record and wait on it
 ```
 
+**A node installed from a published release has no tree, so it takes the release door**, and that door
+takes the commit too: `wa update <node> --release --commit <40-hex>` fetches that release and installs
+it on the node as a neighbour process (`scripts/release-install.sh` -> `scripts/upgrade.sh`). A plain
+`wa update <node> --commit <sha>` on such a node answers in one line with exactly that command - the
+fleet step picks the door from the node's install kind (release node: `--release --commit`; tree node:
+`--commit`), and the judge of whether an update happened is the node's own `installed.txt`, on either
+door. The bundle a node is installed from must carry the scripts that door runs;
+`scripts/lib/install-script-doors.mjs` derives that list from the code and
+`scripts/release-linux.sh` refuses to tar a bundle that is missing one (`door_missing` /
+`bundle_incomplete`), instead of the node answering with `bash: ... No such file or directory` (code 127).
+
 `wa update <node>` **follows by itself** (24/11): it asks, then reads the peer's own `status` - one call
 every 10 s, the peer's durable files are the answer - printing each state change with the time it took,
 until the node reports installed, failed or silent, and exits 0 only for installed. `--detach` returns

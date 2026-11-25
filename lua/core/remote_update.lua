@@ -577,9 +577,30 @@ function M.admit(args, caller)
       routed_from = kind
       kind = 'release'
     else
-      return { error = 'no_runtime_tree', effect = 'none',
+      -- ONE LINE, AND THE LINE CARRIES THE COMMAND (mission release-node-updates, D1, 25/11). This used to
+      -- answer three lines of prose that named mode="release" and no command at all, so the fleet step -
+      -- which asks for an exact commit - was told what a release IS and not what to type, and a person had to
+      -- work out that --release also takes the commit they already had. Measured 25/11 on a scratch peer
+      -- installed from the published v0.1.1 bundle: "wa update peer011 --commit <sha>" answered
+      -- no_runtime_tree with that prose, and the same request with --release --commit <sha> was accepted.
+      --
+      -- WHO PICKS THE DOOR: the fleet step, from the node's install kind (a release node gets
+      -- --release --commit, a tree node gets --commit), and the judge of an update stays the node's own
+      -- installed.txt. A person who types the wrong door gets the right command back, with their commit
+      -- already in it, on one line: reply.one_line is honoured by M.summary, reply.next carries the same
+      -- command for a tool, and M.next_line keeps it from being printed twice.
+      local name = trim(nodes.node_name())
+      if name == '' then name = '<node>' end
+      -- WITHOUT A COMMIT THERE IS NOTHING TO PUT IN IT: the release door takes a 40-hex commit
+      -- (scripts/release-install.sh refuses release_commit_required without one), so the line asks for one
+      -- instead of ending in an empty --commit.
+      local want = trim(commit)
+      if want == '' then want = '<40-hex>' end
+      local command = 'wa update ' .. name .. ' --release --commit ' .. want
+      return { error = 'no_runtime_tree', effect = 'none', one_line = true,
         observed = 'this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit',
-        next = 'this node is installed from a release: ask for it with mode="release" (wa update <node> --release), which fetches the published release and installs it as a neighbour process' }
+        message = name .. ' is installed from a release, not a checkout: move it with: ' .. command,
+        next = command }
     end
   end
   local record = new_record(kind, '', reason, caller, args)
@@ -1269,6 +1290,9 @@ end
 function M.summary(reply)
   if type(reply) ~= 'table' then return 'no answer from the peer' end
   if reply.error then
+    -- A REFUSAL THAT KNOWS ITS ONE LINE SAYS IT (D1, 25/11): the release node's refusal carries the exact
+    -- command in reply.message, and prose about what a release is would only push it off the line.
+    if reply.one_line and type(reply.message) == 'string' and trim(reply.message) ~= '' then return trim(reply.message) end
     local detail = tostring(reply.observed or reply.message or '')
     return string.format('%s %s%s%s', tostring(reply.node or 'peer'), tostring(reply.error),
       detail ~= '' and (': ' .. detail) or '',
@@ -1281,6 +1305,20 @@ function M.summary(reply)
   if reply.detail and reply.detail ~= '' then parts[#parts + 1] = tostring(reply.detail) end
   if reply.installed_commit and reply.installed_commit ~= '' and state ~= 'installed' then parts[#parts + 1] = 'installed ' .. tostring(reply.installed_commit) end
   return table.concat(parts, '; ')
+end
+
+-- The refusal's fix, unless the line already carries it. An answer that says the same command twice is
+-- not one line, and the operator reads the same sentence twice for nothing.
+function M.next_line(reply)
+  if type(reply) ~= 'table' then return nil end
+  local fix = trim(reply.next)
+  if fix == '' then return nil end
+  -- The line the caller will print: reply.summary when the reply carries one, else the sentence
+  -- M.summary builds from it (a refusal straight out of admit() has no summary field yet).
+  local line = trim(reply.summary)
+  if line == '' then line = M.summary(reply) end
+  if line:find(fix, 1, true) then return nil end
+  return fix
 end
 
 -- Ask a peer to update itself. One signed call; the peer answers with the record id and the
@@ -1411,6 +1449,22 @@ function M.request(call, selector, options)
       summary = string.format('NOT KNOWN YET: %s did not answer inside the deadline; whether it accepted the request is unknown, and it was NOT refused.', tostring(reply.node or selector)),
       next = 'read it back: wa update ' .. tostring(selector) .. ' --status --id ' .. tostring(request_id) }
   end
+  -- THE ONE LINE FOR A RELEASE-INSTALLED NODE (mission release-node-updates, D1, 25/11). A peer with no tree
+  -- refuses an ordinary commit request with no_runtime_tree, and the node that has the most to say about it -
+  -- one installed from the published v0.1.1 bundle - cannot be changed any more: its own sentence is three
+  -- lines of prose that names mode="release" and no command at all. The coordinator holds the two things that
+  -- sentence needs (the selector the operator used, and the commit they asked for), so the fix is stated HERE,
+  -- in one line, whatever the peer's build answers. The peer's own words are NOT dropped: they stay in
+  -- observed, and the new line is message/summary. Only a caller that named no mode gets it: a --binary or
+  -- --release request has already said which door it wants.
+  if tostring(reply.error or '') == 'no_runtime_tree' and trim(options.commit) ~= ''
+    and (trim(options.mode) == '' or trim(options.mode) == 'tree') then
+    local command = 'wa update ' .. tostring(selector) .. ' --release --commit ' .. trim(options.commit)
+    reply.one_line = true
+    reply.message = tostring(selector) .. ' is installed from a release, not a checkout: move it with: ' .. command
+    reply.next = command
+    reply.summary = reply.message
+  end
   local record_id = tostring(reply.record or reply.audit_id or '')
   if record_id ~= '' then
     remember(record_id, {
@@ -1538,6 +1592,31 @@ end
 M.REMOTE_POLL = 10
 M.REMOTE_HEARTBEAT = 60
 M.REMOTE_DETACHED = "detached: the install continues on %s; re-attach with wa update %s --follow"
+-- THE BOUND THE FOLLOW KEEPS TO (mission release-node-updates, D3, 25/11). A follow with no bound is a
+-- command that can never come back: `wa update <node>` passed neither o.polls nor o.seconds, so a node that
+-- stopped answering left the terminal waiting for ever, and the only way out was Ctrl-C - which says nothing
+-- about what happened. One hour, because a deploy that BUILDS can legitimately run that long (measured: the
+-- 101 s backup alone, and a cold build of minutes to tens of minutes); past it the follow says so, names the
+-- re-attach command, and exits non-zero - unknown is not yes.
+M.REMOTE_FOLLOW_BOUND = 3600
+-- The duration in the answer's own words, one function for the follow line and the bound's sentence.
+function M.elapsed(seconds)
+  local s = math.max(0, math.floor(tonumber(seconds) or 0))
+  if s >= 3600 then return string.format('%dh%02dm', math.floor(s / 3600), math.floor(s / 60) % 60) end
+  if s >= 60 then return string.format('%dm%02ds', math.floor(s / 60), s % 60) end
+  return s .. 's'
+end
+-- NO ANSWER YET, AND STILL RUNNING: an answer that is not an answer. nodes.remote_call answers a relay
+-- deadline with {error="remote_error", detail=..., not_known_yet=true, state="unknown"} (lua/core/nodes.lua
+-- :1786-1800) and M.status passes that through unchanged - the request is still running on that node, which
+-- is the one thing the caller must not be told to stop watching. A refusal is the node's own word and still
+-- ends the follow.
+function M.not_an_answer(reply)
+  if type(reply) ~= 'table' then return true end
+  if reply.not_known_yet == true then return true end
+  if tostring(reply.error or '') == "remote_answer_unreadable" then return true end
+  return reply.error ~= nil and trim(reply.state) == "unknown"
+end
 
 -- `call` and the seams (`out`, `clock`, `sleep`, `poll`, `polls`, `seconds`) are parameters for the same
 -- reason as `event_ledger.follow`'s: a test drives the loop without a node, a port or a wall clock.
@@ -1561,10 +1640,16 @@ function M.follow_remote(call, selector, id, options)
     local now = clock()
     local reply = M.status(call, selector, { id = id, session = o.session })
     if type(reply) ~= 'table' then return { ok = false, state = 'unreadable', seconds = now - started, printed = printed } end
+    -- AN UNREADABLE ANSWER IS NOT A STATE (D3). This loop used to end on it, printing "unknown - node_no_answer"
+    -- at 0 s: the peer had accepted the request and was working on it, and the operator was told to stop
+    -- watching. It is "no answer yet", the poll continues, and the bound above is what ends it.
+    local unreadable = M.not_an_answer(reply)
     local state = trim(reply.state)
+    if unreadable then state = 'no_answer' end
     if state == '' then state = reply.error and 'refused' or 'queued' end
     local label = tostring(reply.node or selector)
     local detail = trim(reply.detail)
+    if detail == '' then detail = trim(reply.error) end
     if state ~= last_state or not last_at or (now - last_at) >= M.REMOTE_HEARTBEAT then
       local body
       if state == 'installed' then
@@ -1572,6 +1657,10 @@ function M.follow_remote(call, selector, id, options)
         body = 'installed ' .. commit .. ' on ' .. label
       elseif state == 'failed' then
         body = 'FAILED on ' .. label .. (detail ~= '' and (': ' .. detail) or '')
+      elseif state == 'no_answer' then
+        -- "NO ANSWER YET", never "refused": the relay's deadline is not the node's word, and the request it
+        -- carries is still running there.
+        body = label .. ': no answer yet' .. (detail ~= '' and (' \226\128\148 ' .. detail) or '')
       elseif state == 'silent' then
         -- "NO ANSWER", not "SILENT": the peer did not report, and the word has to say what is missing rather
         -- than describe a sound (Fable 24/11, D).
@@ -1587,11 +1676,13 @@ function M.follow_remote(call, selector, id, options)
       return { ok = state == 'installed', state = state, reply = reply, seconds = now - started,
         rounds = rounds, printed = printed }
     end
-    if reply.error then
+    if reply.error and not unreadable then
       return { ok = false, state = 'refused', reply = reply, seconds = now - started, rounds = rounds, printed = printed }
     end
     rounds = rounds + 1
-    if (o.polls and rounds >= o.polls) or (o.seconds and (now - started) >= o.seconds) then
+    local bound = tonumber(o.seconds)
+    if not bound and not o.polls then bound = M.REMOTE_FOLLOW_BOUND end
+    if (o.polls and rounds >= o.polls) or (bound and (now - started) >= bound) then
       return { ok = false, state = state, unknown = true, timed_out = true, reply = reply,
         seconds = now - started, rounds = rounds, printed = printed }
     end
@@ -1773,7 +1864,10 @@ function M.cli(argv)
     print(json.encode(reply))
   elseif reply.error then
     print(M.summary(reply))
-    if reply.next then print('next: ' .. tostring(reply.next)) end
+    -- THE FIX IS PRINTED ONCE (D1, 25/11): a one-line refusal already carries the command, and saying it
+    -- again under "next:" is the same sentence twice.
+    local fix = M.next_line(reply)
+    if fix then print('next: ' .. fix) end
   elseif options.status then
     if reply.notice and reply.notice_text then print(reply.notice_text) end
     print(M.summary(reply))
@@ -1811,7 +1905,15 @@ function M.cli(argv)
       print(string.format(M.REMOTE_DETACHED, tostring(selector), tostring(selector)))
     end
     if attach ~= nil and not options.detach then
-      local result = M.follow_remote(nodes.remote_call, selector, attach, { session = options.session })
+      -- THE BOUND IS NAMED HERE, ONCE (D3, 25/11): a follow that can never come back is not a follow. The loop
+      -- polls through a relay deadline ("no answer yet") and stops at this bound, printing what to type to
+      -- re-attach instead of a state it does not have - and exits non-zero, because unknown is not yes.
+      local result = M.follow_remote(nodes.remote_call, selector, attach,
+        { session = options.session, seconds = M.REMOTE_FOLLOW_BOUND })
+      if result.timed_out then
+        print(string.format('%s: no answer yet after %s - the request is still that node\'s; re-attach with: wa update %s --follow',
+          tostring(selector), M.elapsed(M.REMOTE_FOLLOW_BOUND), tostring(selector)))
+      end
       return result.ok == true and 0 or 1
     end
   end
