@@ -3229,7 +3229,18 @@ function METHODS:failed(problem, opts)
   -- the code is the harness's word, and this line is the reader's.
   if tostring(problem or ""):find("run_cancelled", 1, true) then
     self:topic(false)
+    -- WHAT WENT WITH THE RUN (week 1, "Esc stops what it started"): a stop that ended work says so on the
+    -- same line - `stopped: sleep 30, after 0.7 s (nothing survived the 250 ms grace)` - and work the turn
+    -- started detached is named as still running instead. The sentence is the pending layer's (answered on
+    -- the call's own record and carried here by the cancel error, lua/core/codemode.lua cancel_error); a
+    -- cancel with no such sentence stopped nothing this build could name, and says only what it says.
+    local problem_text = tostring(problem or "")
+    local marker = problem_text:find("run_cancelled:", 1, true)
     local text = RESULT .. " Interrupted by user" .. (opts.self_wake and " (self-wake)" or "")
+    if marker ~= nil then
+      local note = (problem_text:sub(marker + #"run_cancelled:"):gsub("^%s+", ""):gsub("%s+$", ""))
+      if note ~= "" then text = text .. " · " .. note end
+    end
     self:line(paint(text, "warning", self.live))
     self:run_finished()
     return

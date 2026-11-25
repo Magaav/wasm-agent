@@ -90,6 +90,16 @@ local session_results=dofile('lua/core/codemode_results.lua')
 -- on the managed operations the node already supervises - this file only names which tool call an
 -- operation is (`lua/core/codemode_pending.lua`).
 local pending_calls=dofile('lua/core/codemode_pending.lua')
+-- THE STOP NAMES WHAT IT STOPPED (week 1, "Esc stops what it started"). The pending layer answers a
+-- stopped call with one sentence (`stop_note`: `stopped: sleep 30, after 0.7 s (nothing survived the
+-- 250 ms grace)`), which settles into this run's ctx; the cancel error then carries it, so the reader's
+-- own line can say what went with the run. It is display text and a ledger fact, never part of a
+-- request the provider sees: the run is over by the time this string exists.
+local function cancel_error(ctx)
+  local note=type(ctx)=='table' and type(ctx.stop_notice)=='string' and ctx.stop_notice or nil
+  if note==nil or note=='' then return 'run_cancelled' end
+  return 'run_cancelled: '..note
+end
 -- What a command's answer keeps for the caller, in one allow-list (lua/core/bash_result.lua).
 local bash_result=dofile('lua/core/bash_result.lua')
 -- What a connector answers, learned from its settled answers for the connector index (keys only).
@@ -650,6 +660,10 @@ local function settle_call(s,call)
      local live_started=tonumber(host.now()) or 0
      local called,result=pcall(pending_calls.invoke,s.dispatch,s.popts,call.tool,params,stripped,wait_s);admitted=true
      live_settled(ctx,call.id,call.tool,result,called,live_started)
+     -- The stop's sentence, kept on this run's ctx for the cancel error below (see cancel_error).
+     if called and type(result)=='table' and type(result.stop_note)=='string' and type(ctx)=='table' then
+       ctx.stop_notice=result.stop_note
+     end
      if called then
       -- A command's answer keeps what a caller acts on (lua/core/bash_result.lua). The dispatcher already
       -- slimmed a DIRECT call; this one is the same shape built from the operation record by the pending
@@ -825,7 +839,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
   while not done do
    local _,context_error=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
    if context_error then error(context_error) end
-   if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error('run_cancelled')end
+   if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error(cancel_error(ctx))end
    local admitted_now=json.decode(host.quickjs('admit',json.encode({id=sandbox,owner=scope})))
    if not admitted_now.ok then error(admitted_now.error)end
    local call=table.remove(pending,1)
@@ -948,7 +962,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
   -- rechecked, and a cancelled run stops before another effect.
   local _,context_error=guard_policy.admit(memory,role,ctx)
   if context_error then loop_error=context_error
-  elseif host.run_cancelled and json.decode(host.run_cancelled()).cancelled then loop_error='run_cancelled'
+  elseif host.run_cancelled and json.decode(host.run_cancelled()).cancelled then loop_error=cancel_error(ctx)
   else
    local progress,reason=seam({op='advance',session=session,reply=reply})
    reply=nil
