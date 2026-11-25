@@ -71,7 +71,6 @@ env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" checkout
 # tree sat at its own unlanded commit, and BOTH deploys refused with refused(source_pin_stale) before the
 # alive record could carry a commit. Pointing origin at the clone makes every fetch a no-op that answers the
 # clone's own main, which is the row's commit.
-env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" branch -f main "$SHORT" 2>/dev/null   || skip_all "cannot make the clone its own main"
 env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" remote set-url origin "$DEPLOY_TREE" 2>/dev/null   || skip_all "cannot point the clone at itself"
 env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" update-ref refs/remotes/origin/main "$SHORT"   || skip_all "cannot make the clone its own origin/main"
 echo "row: deploying from $DEPLOY_TREE, origin/main $(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" rev-parse --short=12 origin/main) HEAD $SHORT"
