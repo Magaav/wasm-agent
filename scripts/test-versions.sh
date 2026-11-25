@@ -278,6 +278,26 @@ ok
 grep -q 'wa_version_refuse_record_replace' scripts/upgrade.sh || fail "fix 6: upgrade.sh's record writer does not ask the guard"
 ok
 
+# --- THE ROLLBACK IS THE POINTER (Fable 25/11): the deploy's restart-failure branch moves it back --------------
+# A structural check, said as such: the sequence is one shell branch that no unit row has driven yet, so what can
+# be pinned today is that its failure path performs a POINTER MOVE (and copies nothing) and that the pointer move
+# it names really restores the previous version.
+seq="$(awk '/THE ROLLBACK IS THE POINTER/,/version_folders_restart_failed/' scripts/deploy.sh)"
+case "$seq" in *'wa_version_point "$VF_PREV"'*) ;; *) fail "the restart-failure path does not move the pointer back";; esac
+ok
+case "$seq" in *'cp -'*|*rollback/wa*) fail "the restart-failure path still copies a program";; esac
+ok
+# and the move itself is the cheap, reversible one (measured at 1663 us in round 1)
+rb="$W/rb"; mkdir -p "$rb/share/versions/aaaaaaaaaaaa" "$rb/share/versions/bbbbbbbbbbbb"
+printf 'id=aaaaaaaaaaaa\n' > "$rb/share/versions/aaaaaaaaaaaa/version.txt"
+printf 'id=bbbbbbbbbbbb\n' > "$rb/share/versions/bbbbbbbbbbbb/version.txt"
+WA_SHARE_ROOT="$rb/share" wa_version_point aaaaaaaaaaaa >/dev/null || fail "cannot point at a version"
+WA_SHARE_ROOT="$rb/share" wa_version_point bbbbbbbbbbbb >/dev/null || fail "cannot point at the other version"
+[ "$(WA_SHARE_ROOT="$rb/share" wa_version_current)" = bbbbbbbbbbbb ] || fail "the pointer does not name the version"
+WA_SHARE_ROOT="$rb/share" wa_version_point aaaaaaaaaaaa >/dev/null || fail "the rollback move failed"
+[ "$(WA_SHARE_ROOT="$rb/share" wa_version_current)" = aaaaaaaaaaaa ] || fail "the rollback move did not restore the previous version"
+ok
+
 # --- the report's number: REAL disk, not apparent ------------------------------------------------------------
 wa_version_disk eeeeeeeeeeee | grep -q '^version_disk eeeeeeeeeeee real=[0-9]* apparent=' || fail "report: wa_version_disk names real blocks and apparent bytes"
 ok

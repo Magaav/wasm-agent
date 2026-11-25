@@ -1842,7 +1842,17 @@ case "${WA_VERSION_FOLDERS:-0}" in
       WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
       WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
       bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
-      || fail "version_folders_restart_failed: see $INSTALL_DIR/deploy-upgrade.log (the pointer still names $VF_ID; roll back with wa_version_point $VF_PREV)"
+      || {
+        # THE ROLLBACK IS THE POINTER (Fable 25/11: rollback = a pointer move + a restart, zero operator steps).
+        # The restart failed with the pointer on the new version; move it back to the one that was running, so the
+        # NEXT restart - and the sentinel is always there to make one - brings the node up on the version that
+        # worked. No file is copied, nothing is reinstalled, and the deploy says exactly what it did.
+        if [ -n "$VF_PREV" ]; then
+          wa_version_point "$VF_PREV" >/dev/null \
+            && note "version folders: the restart failed, so current is back on $VF_PREV (a pointer move, no reinstall); the sentinel brings the node up on it"
+        fi
+        fail "version_folders_restart_failed: see $INSTALL_DIR/deploy-upgrade.log (current ${VF_PREV:+is back on $VF_PREV; }the new version $VF_ID is sealed and kept)"
+      }
 
     # 5. THE SENTINEL moves last, only now that the node answered on the new version; a failed start leaves the
     #    previous version supervising (scripts/lib/sentinel-move.sh).
