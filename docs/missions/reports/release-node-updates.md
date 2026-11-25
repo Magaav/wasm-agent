@@ -221,6 +221,46 @@ ROWS: scripts/test-installer-data-isolation.sh keeps its 159-row lint (landing 5
 a live-looking environment is REFUSED with each of the six named (the RED row the G condition asks for), a
 scratch environment passes, and the three harnesses name the guard.
 
+## 7b. The row, run GREEN by the orchestrator's row runner (63a41de4)
+
+Fable rule 2 (25/11): installer rows are run by the orchestrator, not by a worker. The row lives in the repo as
+scripts/test-release-door-update.sh (commit 90e0d6a7, plus two fixes the runner itself found: it must not
+defeat the runner's warm CARGO_TARGET_DIR, and it must not ask scripts/lib/scratch-home.sh about the scratch
+home the runner already gave it - that guard compares against $HOME, and inside the runner $HOME IS the row's
+scratch home). The orchestrator ran it at commit 63a41de4 in a fresh checkout and its own scratch root, after
+scratch-guard said ISOLATED:
+
+```
+row scripts/test-release-door-update.sh @ 63a41de4d2642e5b8990a185afe52425db6f282b in .../release-node-updates-20261125T010115Z (ports 34335/34336), timeout 3600 s
+  ok   the bundle names its own commit: 63a41de4d264 (x86_64-unknown-linux-gnu)
+  ok   the bundle carries the door the node execs: scripts/release-install.sh
+  ok   the bundle carries the door the node execs: scripts/upgrade.sh
+  ok   the bundle carries the door the node execs: scripts/lib/node-binaries.sh
+  ok   the public installer installed the bundle on a scratch peer
+  ok   and its install record names the commit the bundle reports
+  ok   a second signed release is served from this directory
+  ok   the coordinator has its own identity
+  ok   the row's own rendezvous answers
+  ok   the peer has its own identity
+  ok   the peer's node answers on its own port (49557)
+  ok   a ledger fact is written before the update: 4655328b-9a3c-4d00-94ec-418afa2a19db
+    remote update of peer: queued; commit 63a41de4d264
+    record 7f0aaa41-c7c7-4ee3-bb0d-684f25191c9e
+    installed 63a41de4d264 on peer · 0s
+  ok   the coordinator's follow ends INSTALLED on 63a41de4d264
+  ok   and no door answered code 127 (the defect this row exists for)
+  ok   the peer's own record says installed
+  ok   and names the commit that was installed
+  ok   installed.txt names the commit the door installed
+  ok   the ledger fact survives the install
+  ok   and the node is up after it
+release door update ok (19 checks)
+```
+
+row-result.txt: `rc=0 row=scripts/test-release-door-update.sh commit=63a41de4d2642e5b8990a185afe52425db6f282b
+leftovers=0 canary_before=green canary_after=green`. leftovers=0 and systemctl-calls.log is EMPTY: the row
+touched no unit and left no process.
+
 ## 8. The guard, pasted (every install row of this mission was run under it)
 
 ```
@@ -261,8 +301,9 @@ started was stopped by PID (registry 19890, peer011, peerfix, gr-row watcher and
   row): NOT RUN. The installer-over-v0.1.1 row is measured (section 2).
 - The nextcloud kind (installed.txt via=remote-update.sh, no runtime-worktree.txt, v0.1.1): NOT reproduced and
   NOT measured. No door was proved from it, and nextcloud was not touched.
-- The tree-peer end-to-end row (checkout installed by deploy.sh, a real install to a second commit): NOT RUN;
-  the release-door row stands in its place.
+- The TREE-peer end-to-end row (a checkout installed by deploy.sh, a real install to a second commit): NOT RUN.
+  The release-door row is green under the runner (section 7b); the tree deploy door is a different path and is
+  not proved by it.
 - The follower's bound is 3600 s with no flag to change it: an operator who wants a shorter bind has to wait for
   a product change (named, not hidden).
 - PRE-EXISTING, measured on the base worktree /tmp/base-ebf6d2ec at ebf6d2ec: scripts/test-linux-release-fetch.sh
