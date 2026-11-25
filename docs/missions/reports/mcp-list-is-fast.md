@@ -121,7 +121,20 @@ scratch home).
 as the rule says; it ran alone): **fast path ok, 492 checks, 0 skipped, 1149 s, exit 0** - `lua 382/382
 passed`, the 4 named skips are the same ones the runner names every day, and `discrimination ok`. It was
 run again after the last three-line fix (`--refresh` reading the chat count): **492 checks, 0 skipped, 882 s,
-exit 0**. No failure to attribute to another tree.
+exit 0**.
+
+**A third full run, on the tip that adds the `not read yet` line (`a473e9cc`), failed one row:
+`scripts/test-graph-quarantine-evidence.lua` hung** (watchdog killed it at 120 s; its log shows the graph
+component's `graph.db` quarantined as `database_disk_image_is_malformed`, rebuilt, quarantined again). It is
+**flaky, not mine and not this tree**: that row passed in both earlier full runs of the same tree (382/382
+Lua rows), it passed twice when run again through the runner's own narrowing
+(`WA_FAST_ROWS=scripts/test-graph-quarantine-evidence.lua`, 30/30), and it passed on a clean `origin/main`
+worktree (30/30). Nothing in this diff touches `lua/`, `rust/` or the component set that row exercises.
+Two other rows failed the same way and passed in the full runs of both trees: `check-deploy-bound` and
+`check-deploy-alive-hold` on the BASE tree in a narrowed run, and `check-deploy-wait` on mine in a narrowed
+run - timing rows under a narrowed run, on either side. None of the three is attributable to this branch.
+The evidence logs are in the runner's own evidence directory for each run
+(`wa-fast-evidence/<stamp>/failures.txt`).
 
 ## Where the test's store comes from
 
