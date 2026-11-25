@@ -1111,6 +1111,36 @@ local function fixed_tail(fix, tail)
  if fix:find(tail,1,true) then return fix end
  return fix..tail
 end
+-- ── THE FINISHED RESULTS OF A BLOCK THAT STOPPED (25/11, item 3) ────────────────────────────────────
+-- Bounded twice so a failure never costs more context than a success: one answer up to DONE_EACH bytes
+-- and the whole block up to DONE_TOTAL. An answer over that is a POINTER, never a silent cut: the entry
+-- carries `unread` {sha256, offset, bytes} and tool_result reads it byte for byte. The entries are in the
+-- order the calls settled, which is the order the script made them.
+local DONE_EACH=1200
+local DONE_TOTAL=4000
+local function settled_answers(calls)
+  local done,used={},0
+  for _,call in ipairs(calls or {}) do
+    if type(call)=='table' then
+      local entry={n=#done+1,id=call.id,name=call.name,ok=call.ok==true}
+      local evidence=type(call.evidence)=='table' and call.evidence or nil
+      if evidence and type(evidence.path)=='string' then
+        local raw=host.read_file(evidence.path)
+        if type(raw)=='string' and raw~='' then
+          if #raw<=DONE_EACH and used+#raw<=DONE_TOTAL then
+            local decoded_ok,decoded=pcall(json.decode,raw)
+            entry.result=decoded_ok and decoded or raw
+            used=used+#raw
+          else
+            entry.unread={sha256=evidence.sha256,offset=1,bytes=evidence.bytes or #raw}
+          end
+        end
+      end
+      done[#done+1]=entry
+    end
+  end
+  return done
+end
 local function explain(result,source,budget,origin,origin_line)
  if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
  local raw=result.error
@@ -1301,6 +1331,21 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local function finish(result)
   if type(result)~='table' then return result end
   result=explain(result,source,budget,origin,origin_line)
+  -- A BLOCK THAT STOPPED HANDS BACK WHAT IT FINISHED (25/11, item 3). Measured: a script that ran a
+  -- command and then hit a failing call answered only the error and a sentence naming the command
+  -- ("Already done, not undone: bash"). The command's output was in this node's evidence store and
+  -- nowhere the model could see it without already knowing its hash, so the model re-ran work that had
+  -- already finished - and a bash call is not always repeatable. A failed block now carries `done`.
+  -- A healthy block never does: its own items and value are the answer, and its bytes must not move.
+  if result.ok==false and result.done==nil then
+    local done=settled_answers(result.calls)
+    if #done>0 then
+      result.done=done
+      result.done_note='done: the calls that finished before this error, in order, with the answer each one '
+        ..'produced. Read them instead of running the work again. An entry that carries `unread` instead of '
+        ..'`result` is an answer too large for this block, and tool_result(sha256,offset,limit) reads it byte for byte.'
+    end
+  end
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
