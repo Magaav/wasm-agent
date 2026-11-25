@@ -166,6 +166,22 @@ name, so they stopped stubbing the door that was actually called. Each now resol
 `whatsapp.by_verb[verb].capability`, and `test-whatsapp-route.lua` takes the op from the request the way
 the real door does. No assertion was deleted or loosened (32/59/207/140 checks, the base's numbers).
 
+### The defect the move introduced, and its fix (d1266ca8)
+
+What 72b37107 bought at a price nobody audited: `whatsapp_index` is declared ReadOnly but carried ANY op,
+so a sandbox that joined it as a read could reach `backfill` (the primary phone is asked) and `download`
+(a decrypted file is written). Found by probing on a scratch node, not by reading the code:
+
+    whatsapp_index({op:"backfill", count:5})  -> whatsapp_backfill_slow, id 1, state queued
+    whatsapp_index({op:"download", ...})      -> whatsapp_download_slow, id 2, state queued
+
+The effect class belongs to the QUESTION, so d1266ca8 put it beside the op set (`seam::Op::effect()`:
+ReadOnly | Network | WritesFiles, in the shared contract) and the read door refuses any op whose class is
+not ReadOnly, by name, with the row to use instead (`whatsapp_backfill_use_its_own_door`). Rows:
+`the_generic_door_carries_only_the_reads_and_refuses_a_network_or_file_op` walks `seam::Op::ALL` and
+asserts both halves; the Lua row went 34 -> 40 checks; the model catalogue is unchanged
+(2a17427d...65e8c111b) and no capability row moved, so the inventory digest is 72b37107's.
+
 ### The stop condition, measured
 
 **`host.rs` never carried WhatsApp** (`rg -c -i whatsapp rust/wa-capabilities/src/host.rs` = 0, section 1),
