@@ -29,6 +29,22 @@ mkdir -p "$HOME"
 if [ -n "$original_home" ] && [ "$(cd "$HOME" && pwd -P)" = "$(cd "$original_home" 2>/dev/null && pwd -P)" ]; then
   printf 'REFUSED scratch_home_is_real: refusing to run in %s\n' "$HOME" >&2; exit 2
 fi
+# NOTHING LIVE IS INHERITED (Fable, 25/11 decision: every scratch run gets a scratch install, unit dir, DB
+# and config home, and this row is no exception - it runs scripts/release-linux.sh, which builds a bundle and
+# shells out to cargo, node and git). Each name below is one way a child could reach the operator's own
+# install, systemd unit, database or vault; they are dropped HERE, before anything runs, rather than trusted
+# to the caller. The row itself never installs anything (install.sh and bootstrap.sh travel INSIDE the bundle
+# this row checks, and the sentinel is a stand-in), so this is defence in depth, and it is checkable: run
+# scripts/_orch/scratch-guard.sh against "$T" with this environment and it answers ISOLATED.
+unset WASM_AGENT_DB WASM_AGENT_VAULT_URL WASM_AGENT_OPENCODE_GO_VAULT_URL WASM_AGENT_VAULT_OPERATOR_URL
+unset WA_INSTALL_DIR WA_SENTINEL_UNIT_DIR WA_SENTINEL_UNIT_SYSTEMCTL WA_SENTINEL_SCRIPTS WA_RUNTIME_WORKTREE
+for v in $(compgen -e | grep -E '^(WASM_AGENT_|WA_)'); do
+  case "$v" in WASM_AGENT_HOME|WASM_AGENT_LUA_ROOT|WA_BIN) continue ;; esac  # WA_BIN is this row's own input
+  unset "$v"
+done
+mkdir -p "$T/config" "$T/units" "$T/install" "$T/bin"
+export XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" XDG_STATE_HOME="$T/state"
+export WA_INSTALL_DIR="$T/install" WA_SENTINEL_UNIT_DIR="$T/units"
 export XDG_CACHE_HOME="$T/cache" GIT_CONFIG_GLOBAL="$T/gitconfig" GIT_CONFIG_NOSYSTEM=1
 git config --global user.email fixture@example.invalid
 git config --global user.name "Release channel fixture"
