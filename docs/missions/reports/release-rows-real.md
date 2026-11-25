@@ -340,3 +340,41 @@ field is empty. That is a gap in the gate's own message (it is non-blocking by i
 recorded here rather than left to look like a pass. The pty row's own red is pre-existing and named above
 (the bash stop's 1 s poll slice), and it is the same on the base.
 
+## Rule 1 (Fable, 25/11 ~00:45Z): a correction to my own commit, and what it cost to find
+
+**My `792a4c5a` violated it.** Its wrapper fence said "unset every `WASM_AGENT_*` and `WA_*`" — which clears
+`WASM_AGENT_IN_TURN` (what makes `deploy.sh`/`upgrade.sh` refuse to run inside a turn) and
+`WASM_AGENT_PROVENANCE` (`=child` is what makes `wa update` answer `update_coordinator_only`,
+`lua/core/update.lua:824`). A fence that strips those hands its children exactly the power the guard takes
+away. Fixed in **`28da72e0`**: the repository's own shape (`verify/slice.sh:14-22`) — a KEEP-LIST for the
+guard's variables plus `WA_BIN`, and a drop of the three runtime families only
+(`WASM_AGENT_*`/`WA_*`/`OPENAI_*`/`OPENCODE_*`/`ANTHROPIC_*`). The esc-stops row, which starts the CLI under
+`env -i`, now carries `WASM_AGENT_IN_TURN` and `WASM_AGENT_PROVENANCE` through when the caller has them.
+
+**Measured, not asserted:**
+
+```
+the fence against an environment carrying both kinds:
+  kept:    IN_TURN=1 PROVENANCE=child SKIP_UI=1 WA_BIN=/x PATH=/usr/bin:/bin TERM=xterm-256color
+  dropped: DB=gone HOME_VAR=gone VAULT=gone INSTALL=gone
+bash scripts/test-release-channel-e2e.sh                        -> release-channel-e2e ok (20 checks)
+the same row with WASM_AGENT_IN_TURN=1 exported                 -> release-channel-e2e ok (20 checks)
+the esc row's bash leg with IN_TURN/PROVENANCE passed through   -> 4 ok, 1 failed, 1 known-fail (stop 646 ms)
+```
+
+**The mistake in between, kept on the record because it is the same failure class:** my first replacement said
+"unset everything that is not the keep-list" and took `PATH` and `HOME` with it — the row died on
+`git: No such file or directory`, `HOME: unbound variable`, `rm: No such file or directory`. A fence that
+strips too much is the same failure it exists to prevent; it now names the three families and nothing else.
+
+**Rule 2 — no installer row in this mission, so no `row-request.txt`.** Neither row of this branch runs
+`upgrade.sh`, `deploy.sh`, `bootstrap.sh` or `wa-sentinel`: the e2e row copies `install.sh` and
+`bootstrap.sh` INTO the bundle it checks and never executes them, and its sentinel is a 3-line stand-in. If
+Fable wants a *release* row (`scripts/release-linux.sh` builds a bundle) under the runner as well, that is a
+one-line request — say so and I will write it.
+
+**Rule 1 in the rest of the session:** nothing I ran detached (`setsid`/`nohup`/`disown`/`&` appear nowhere in
+either row or in any command I issued), and nothing cleared a guard variable by name. The one place I did
+build an `env -i` was the earlier guard *probe* (a read-only environment print for `scratch-guard.sh`), not a
+run of an installer; from now on the runner owns that for installer rows and I will not reproduce it.
+
