@@ -186,7 +186,11 @@ ok "$([ "$(sed -n 's/^commit=//p' "$PEER/install/installed.txt" | head -1)" = "$
 # the v0.1.1 updater refuses the deploy), so the core's idle gate says "node_busy: the node on this port is
 # running a turn; re-run when idle, or --force" - measured 25/11. The row takes the flag the refusal names
 # rather than stopping the node to get around the gate, and scripts/install.sh forwards it to the core.
-FIXED_ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 900 sh "$ROOT/scripts/install.sh" --update --prefix "$PEER/install" --force 2>&1)
+# --no-service because this row has no systemd --user session to install into: measured 25/11, the core
+# installed the release and then refused with "systemd_user_unavailable: no systemd --user session (log in over
+# SSH as this user, or use --no-service and start: wa-sentinel start)" - the exit code was the unit step's, not
+# the install's. The row takes the flag that refusal names.
+FIXED_ANSWER=$(cd "$PEER" && env "${UPD_ENV[@]}" timeout 900 sh "$ROOT/scripts/install.sh" --update --prefix "$PEER/install" --force --no-service 2>&1)
 FIXED_RC=$?
 printf '%s\n' "$FIXED_ANSWER" | sed 's/^/    fixed updater: /' | tail -6
 ok "$([ "$FIXED_RC" = 0 ] && echo 1)" "the fixed updater ran (exit $FIXED_RC)"
@@ -195,7 +199,10 @@ ok "$(printf '%s' "$FIXED_ANSWER" | grep -q 'already runs the newest published b
 
 # ---- 4. the node is now the release from this commit, and the data is still there ------------------
 AFTER=$("$PEER/install/wa" --version 2>&1 | head -1)
-ok "$(printf '%s' "$AFTER" | grep -q "$SHORT" && echo 1)" "the node now runs the release from this commit: $AFTER" "before: $BEFORE"
+# A BUNDLE REPORTS ITS COMMIT IN THE EIGHT-CHARACTER FORM (measured 25/11: this node came back as
+# "wasm-agent v0.1.2 · v6299490f" for commit 6299490f2d9c), so the version check compares that form.
+VSHORT=${SHORT:0:8}
+ok "$(printf '%s' "$AFTER" | grep -q "$VSHORT" && echo 1)" "the node now runs the release from this commit: $AFTER" "before: $BEFORE"
 ok "$([ "$(sed -n 's/^commit=//p' "$PEER/install/installed.txt" | head -1)" = "$COMMIT" ] && echo 1)" \
   "installed.txt names the commit it moved to" "$(sed -n 's/^commit=//p' "$PEER/install/installed.txt" | head -1)"
 ok "$([ "$(HOME="$PEER" WASM_AGENT_HOME="$PEER" "$PEER/install/wa" node 2>/dev/null | sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p')" = "$NODEID" ] && echo 1)" \
