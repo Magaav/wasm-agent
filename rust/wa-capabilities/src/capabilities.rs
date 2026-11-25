@@ -257,6 +257,11 @@ pub const REGISTRY: &[Capability] = &[
     plain!("whatsapp_message", ReadOnly, crate::whatsapp_query::message, "One exact WhatsApp message by chat and id, with its full stored text - what an exact reply source and a sent-message echo are compared against"),
     plain!("whatsapp_reactions", ReadOnly, crate::whatsapp_query::reactions, "Who reacted to one WhatsApp message, with which emoji"),
     plain!("whatsapp_media", ReadOnly, crate::whatsapp_query::media, "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration, pages"),
+    // One row for every read-only question a component can grow on its own: the op travels in the
+    // request (`{op, ...args}`), so a new read answer needs no host change and this list stops being
+    // a place a WhatsApp change lands (2026-11-25, "WhatsApp leaves the host"). ReadOnly, because
+    // every op it can carry is: the effect class is what the sandbox joins and serializes on.
+    plain!("whatsapp_index", ReadOnly, crate::whatsapp_query::index, "Ask the WhatsApp index one read-only question the wa-whatsapp component knows: {op, ...args}, op being search, read, contacts, message, reactions or media; the answer is the one whatsapp_<op> gives"),
     plain!("whatsapp_download", WritesFiles, crate::whatsapp_query::download, "Decrypt one WhatsApp message's media into this node's bounded download folder and return the path"),
     // The one query that asks the phone: it enqueues on the same `whatsapp.query` queue, and the
     // component's answer is the history request it made (ids and counts), never a message.

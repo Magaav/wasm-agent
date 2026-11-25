@@ -507,3 +507,47 @@ fn the_op_named_as_data_answers_the_same_bytes_as_the_typed_op() {
 fn json_text(value: &Value) -> String {
     serde_json::to_string(value).expect("a JSON value")
 }
+
+/// The generic row (`whatsapp_index`, the op in the request) answers byte for byte what the named row
+/// of the same op answers, and queues the same job - for every read op it carries.
+///
+/// This is what lets the hub stop naming read ops: once a tool row points at the generic door, a new
+/// read-only op is the component's business, and no row, description or digest in `wa-capabilities`
+/// moves for it. The equality is asserted per op before any tool row is repointed, so the repoint has
+/// something to keep.
+#[test]
+fn the_generic_row_answers_the_same_bytes_as_the_named_row_for_every_read_op() {
+    let cases: [(&str, seam::Op, Value); 6] = [
+        ("search", seam::Op::Search, serde_json::json!({"q": "boleto", "chat": "15550000001@lid", "limit": 5})),
+        ("read", seam::Op::Read, serde_json::json!({"chat": "15550000001@lid", "limit": 3})),
+        ("contacts", seam::Op::Contacts, serde_json::json!({"q": "1555"})),
+        ("message", seam::Op::Message, serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"})),
+        ("reactions", seam::Op::Reactions, serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"})),
+        ("media", seam::Op::Media, serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"})),
+    ];
+    for (op_text, op, args) in cases {
+        let (_h1, named_q) = queue(&format!("generic-named-{op_text}"));
+        let (_h2, generic_q) = queue(&format!("generic-data-{op_text}"));
+        let named = ask_in(&named_q, op, &args, 1, BUILD);
+        // The generic door is handed the op in the request, as `M.invoke` hands it.
+        let mut with_op = args.clone();
+        with_op["op"] = serde_json::json!(op_text);
+        let generic = ask_index_in(&generic_q, &with_op, 1, BUILD);
+        assert_eq!(named["error"], format!("whatsapp_{op_text}_slow"), "{op_text}: nothing answered yet");
+        assert_eq!(json_text(&named), json_text(&generic), "{op_text}: the same answer bytes");
+        let named_job = named_q.job(wa_queue::JobId(named["id"].as_u64().expect("named job id"))).unwrap().unwrap();
+        let generic_job = generic_q.job(wa_queue::JobId(generic["id"].as_u64().expect("generic job id"))).unwrap().unwrap();
+        assert_eq!(named_job.payload, generic_job.payload, "{op_text}: the component is asked the same bytes");
+    }
+}
+
+/// The generic door refuses to guess: no `op` is a named refusal, not a queue write.
+#[test]
+fn the_generic_row_refuses_a_request_that_names_no_op() {
+    let (_host, q) = queue("generic-noop");
+    let ready_before = q.stats(seam::QUEUE).unwrap().ready;
+    let answer = ask_index_in(&q, &serde_json::json!({"q": "boleto"}), 1, BUILD);
+    assert_eq!(answer["error"], "whatsapp_index_op_required");
+    assert_eq!(answer["ok"], false);
+    assert_eq!(q.stats(seam::QUEUE).unwrap().ready, ready_before, "nothing is queued without an op");
+}

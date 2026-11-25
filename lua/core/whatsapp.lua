@@ -800,7 +800,12 @@ function M.invoke(tool, args)
     -- pretending the account is quiet.
     return { ok = false, error = tool.name .. '_unavailable', capability = tool.capability, effect = 'none' }
   end
-  local ok, answer = pcall(capability, json.encode(tool.request(args)))
+  local request = tool.request(args)
+  -- A generic row is told WHICH question: the word comes from this catalogue row, never from the
+  -- caller's arguments, so `whatsapp_index` (every read-only op a component knows) cannot be talked
+  -- into reaching one the tool does not name.
+  if tool.capability == 'whatsapp_index' then request.op = tool.verb end
+  local ok, answer = pcall(capability, json.encode(request))
   if not ok then return { ok = false, error = tool.name .. '_failed', detail = tostring(answer):sub(1, 160), effect = 'none' } end
   local decode_ok, decoded = pcall(json.decode, tostring(answer or ''))
   if not decode_ok or type(decoded) ~= 'table' then

@@ -196,11 +196,47 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
 fn answer_text(l: *mut wa_host_support::lua::LuaState, op: &str) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => component_absent_text(op).unwrap_or_else(|| ask_text(op, &args, seam::WAIT_MS)),
+        Ok(args) => answer_with(op, &args),
         Err(_) => seam::refusal_text(op, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
     1
+}
+
+/// The answer for one already-read request: this node cannot answer at all, or validate, queue and wait.
+fn answer_with(op: &str, args: &Value) -> Value {
+    component_absent_text(op).unwrap_or_else(|| ask_text(op, args, seam::WAIT_MS))
+}
+
+/// `host.whatsapp_index({op, ...args})` - the read answers a component can grow without the host.
+///
+/// The op travels IN the request instead of in this crate's row list, which is what makes a new
+/// read-only op the component's business: `op` is checked by `seam::Request::validate` (the check the
+/// component itself runs), an op nothing here can answer is refused `bad_op` before a job exists, and
+/// the answer is byte for byte the one `whatsapp_<op>` gives - proved for every op it carries in this
+/// module's tests (`the_generic_row_answers_the_same_bytes_as_the_named_row_for_every_read_op`).
+///
+/// The word comes from the catalogue row that called it (`M.invoke`, `lua/core/whatsapp.lua`), never
+/// from the arguments a caller typed, so a model cannot reach an op its tool does not name.
+pub extern "C-unwind" fn index(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => match index_op(&args) {
+            Some(op) => answer_with(op, &args),
+            None => seam::refusal_text("index", "op_required", OP_REQUIRED),
+        },
+        Err(_) => seam::refusal_text("index", "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// The one sentence a caller sees when the generic door is opened without saying which question it is.
+const OP_REQUIRED: &str = "op names the question and the arguments that op takes: {op: \"search\", ...}";
+
+/// The op a generic request carries, or `None` when it carries no usable one.
+fn index_op(args: &Value) -> Option<&str> {
+    args.get("op").and_then(Value::as_str).map(str::trim).filter(|op| !op.is_empty())
 }
 
 /// Build the request from the tool's arguments, in the one shape the component reads back.
@@ -282,6 +318,14 @@ fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: 
 /// [`ask`] for an op named as data.
 fn ask_text(op: &str, args: &Value, wait_ms: u64) -> Value {
     ask_text_in(&queue(), op, args, wait_ms, &component_build())
+}
+
+/// [`ask_text_in`] for a request that carries its own op (the generic row's path, driven by the tests).
+fn ask_index_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
+    match index_op(args) {
+        Some(op) => ask_text_in(q, op, args, wait_ms, build),
+        None => seam::refusal_text("index", "op_required", OP_REQUIRED),
+    }
 }
 
 /// [`ask_in`] for an op named as data: validate, enqueue, wait - the same three steps, the same queue.
