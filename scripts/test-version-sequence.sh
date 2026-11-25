@@ -130,13 +130,27 @@ now="$(WA_SHARE_ROOT="$W/share2" bash -c '. scripts/lib/versions.sh; wa_version_
 ok
 
 # --- 3. a FAILED sentinel -------------------------------------------------------------------------------------
-I3="$W/i3"; in_place "$I3" "$COMMIT"; echo sentinel-fail > "$SEQ_MODE"
+# A PREVIOUS VERSION must exist for step 5 to run at all: on a fresh share the sequence skips the sentinel move by
+# design (there is nothing to fall back to), which made the first version of this case prove nothing
+# (rows/20261125T233626Z-20949).
+seed_prev() { # <share> <install>
+  local share="$1" install="$2"
+  mkdir -p "$share/versions/$PREV_ID"
+  printf 'id=%s
+install_dir=%s
+' "$PREV_ID" "$install" > "$share/versions/$PREV_ID/version.txt"
+  printf '#!/bin/sh
+exit 0
+' > "$share/versions/$PREV_ID/wa-sentinel"; chmod +x "$share/versions/$PREV_ID/wa-sentinel"
+  ln -sfn "versions/$PREV_ID" "$share/current"
+}
+I3="$W/i3"; in_place "$I3" "$COMMIT"; seed_prev "$W/share3" "$I3"; echo sentinel-fail > "$SEQ_MODE"
 bash scripts/version-sequence.sh --install "$I3" --candidate "$I3/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share3" > "$W/seq3.log" 2>&1 \
   && fail "failed sentinel: without the expectation the sequence must not claim success"
 grep -q 'version_folders_sentinel_failed' "$W/seq3.log" || { sed -n '1,12p' "$W/seq3.log" >&2; fail "failed sentinel: the failure is not named"; }
 ok
-I4="$W/i4"; in_place "$I4" "$COMMIT"
+I4="$W/i4"; in_place "$I4" "$COMMIT"; seed_prev "$W/share4" "$I4"
 bash scripts/version-sequence.sh --install "$I4" --candidate "$I4/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share4" --sentinel-fail-expected > "$W/seq4.log" 2>&1 \
   || { sed -n '1,12p' "$W/seq4.log" >&2; fail "failed sentinel: with the expectation the sequence reports it"; }
