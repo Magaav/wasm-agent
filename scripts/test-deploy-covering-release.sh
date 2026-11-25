@@ -308,6 +308,24 @@ if grep -q 'cannot deploy from a turn running on the node\|needs a sentinel supe
   skip_all "the deploy's turn guard refused first (this test is running in a node turn): $(grep -m1 -oE 'cannot deploy from a turn[^.]*\.|needs a sentinel supervising the node[^)]*' "$OUT")"
 fi
 
+# A SECOND PASS WITH THE WATCHER ANSWERING (25/11). The deploy's proof that a watcher runs is IN THE CODE not
+# systemctl at all: it runs "$INSTALL_DIR/wa-sentinel" status and needs a line 'sentinel: ... watching ... pid N'
+# (deploy.sh:2367). MEASURED: the runner's systemctl stub logged ZERO calls in rows/20261125T052330Z, and a stub
+# cannot satisfy that proof. So this row starts a REAL sentinel from the binary its own first pass installed, waits
+# for exactly that status line, and runs the deploy once more - the record then read below is the second pass's.
+SENT=
+for _ in $(seq 1 60); do
+  "$INSTALL/wa-sentinel" status 2>/dev/null | grep -q 'sentinel:.*watching' && { SENT=1; break; }
+  [ "$_" = 1 ] && env HOME="$HOME" WASM_AGENT_HOME="$HOME" WASM_AGENT_DATA="$DATA"       WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" WA_SENTINEL_SUPERVISOR=none       WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl" "$INSTALL/wa-sentinel" start > "$W/sentinel-start.log" 2>&1
+  sleep 0.5
+done
+if [ -z "$SENT" ]; then
+  skip_all "the installed sentinel will not report itself watching in a scratch home, so the clean case cannot be measured here: $(tail -2 "$W/sentinel-start.log" 2>/dev/null | tr '\n' ' ')$("$INSTALL/wa-sentinel" status 2>&1 | head -2 | tr '\n' ' ')"
+fi
+echo "watcher: the installed sentinel answers watching - the second deploy pass starts from here"
+wa_installer_run --root "$W" --cd "$TREE" --port "$PORT" --install-dir "$INSTALL"   --set WA_DEPLOY_FULL=1 --set WA_DEPLOY_TREE_WAIT=60   --set WA_DEPLOY_ROOT="$TREE"   --set WA_SERVICE_UNIT_FILE="$W/no-such.unit" --set WA_SENTINEL_SUPERVISOR=none   --set WA_NODE_BINARIES_URL="file://$CHANNEL" --set WA_RELEASE_KEYS="$KEYS"   --set WA_SENTINEL_UNIT_SYSTEMCTL="$W/bin/systemctl"   -- bash scripts/deploy.sh --reason "test-deploy-covering-release: second pass, watcher answering"   > "$OUT" 2>&1
+rc=$?
+
 # The covering release is the FACT this row is about: if the resolver took this commit's OWN release, the row's
 # premise is gone and it says so by name instead of passing on a different path.
 if ! grep -qE "^deploy: binary_release: node-[0-9a-f]{12} ${C1}" "$OUT"; then
