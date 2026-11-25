@@ -81,9 +81,12 @@ classes are unchanged.
     {"detail":"chat JID contains whitespace or a control character","effect":"none","error":"whatsapp_reactions_bad_chat","ok":false,"op":"reactions"}
     {"detail":"the wa-whatsapp component has not answered yet; the same call reads the same job","effect":"none","error":"whatsapp_reactions_slow","id":1,"ok":false,"op":"reactions","retry":true,"state":"queued"}
 
-`15550000001@lid` in the row is a synthetic 555 number: no account, no phone, and the row never reaches
-the network (with no `wa-whatsapp` component on a scratch node, the third answer is a job on that node's
-own queue that nothing settles).
+The first two documents are asserted **as bytes**; the third is asserted field by field, because its
+`id` is the job's number and the row's promise there is the one the queue makes: the id is a positive
+number, and a repeated identical call reads the **same** job (that is the dedupe key surviving the move).
+`15550000001@lid` is a synthetic 555 number: no account, no phone, and the row never reaches the network
+(with no `wa-whatsapp` component on a scratch node, the third answer is a job on that node's own queue
+that nothing settles).
 
 ## 5. The count: commits that would stop rebuilding the host
 
@@ -120,6 +123,24 @@ digest change, so no binary is needed for the Lua half.
   `scripts/lib/fast-rows.sh:95-103` runs every `scripts/test-*.lua` the exclude file does not name, and
   this row is not in `scripts/fast-path.exclude` (`grep -c whatsapp-reactions-op-data` = 0).
 - No account was read: no live component, no phone, no peer, no `wa call`.
+
+## 6b. Pre-existing failures in the full suite (not this branch's)
+
+`cargo test -p wa-capabilities -p wa-whatsapp-index` on this branch: **408 passed, 5 failed**. The same
+five fail on the **base** commit, run in a worktree of its own (`git worktree add /tmp/wt-base-70eb
+70eb209d`, its own `CARGO_TARGET_DIR`, only those five tests selected): **0 passed, 5 failed, same panic
+sites**.
+
+| test | base | this branch | cause |
+|---|---|---|---|
+| `capabilities::tests::documented_inventory_matches_the_live_registry` | FAILED | FAILED | `registered but undocumented in docs/HOST.md: ["run_state"]` — a registry row the doc lacks; neither file is touched by 1fc54f29 (`git diff --stat 70eb209d HEAD -- docs/HOST.md rust/wa-capabilities/src/capabilities.rs` is empty) |
+| `operations::await_returns_at_its_own_wait::a_relayed_await_answers_at_wait_ms_and_never_holds_the_relay` | FAILED | FAILED | operations.rs:3149, same on both |
+| `operations::await_returns_at_its_own_wait::a_cancelled_shell_returns_before_its_settle_finishes` | FAILED | FAILED | operations.rs:3149 |
+| `operations::adoption_survives_the_relay_deadline::an_adopted_operation_survives_the_relay_deadline_and_runs_once` | FAILED | FAILED | operations.rs:3072 |
+| `operations::promotion_says_so::a_promoted_shell_says_in_the_same_result_that_it_moved_to_the_background` | FAILED | FAILED | operations.rs:3265 |
+
+The count is also the arithmetic of this branch: the base run selects 412 tests under that filter, this
+branch 413 — exactly the one test 1fc54f29 adds.
 
 ## 7. Texts to approve
 
