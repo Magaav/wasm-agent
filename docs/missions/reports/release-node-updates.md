@@ -420,8 +420,25 @@ the channel carries, and that the version and installed.txt actually move.
    prints eight, and the core's systemd user-unit step, which fires AFTER the install and cannot work where
    there is no user manager ("systemd_user_unavailable ... or use --no-service"). Both fixed in a211269f.
 
-The row at a211269f is queued on the orchestrator's runner (position 1, behind another mission's rows); its
-verdict lands in row-result.txt. Everything except the final green is measured above.
+GREEN at a211269f (row 20261125T022452Z): rc=0, leftovers=0, canary green before and after,
+systemctl-calls.log empty, 18 checks:
+
+```
+  ok   the published v0.1.1 bundle is installed on the scratch peer
+  ok   and it runs the published release: wasm-agent v0.1.1 · v2104a4d8
+    v0.1.1 updater: this node already runs the newest published bundle (v0.1.1); nothing to do.
+  ok   the v0.1.1 node's own updater answers from the PUBLIC index, whatever channel it is pointed at
+  ok   the fixed updater ran (exit 0)
+  ok   the node now runs the release from this commit: wasm-agent v0.1.2 · va211269f
+  ok   installed.txt names the commit it moved to
+  ok   the node id is unchanged: c2df86f9f65813d4abc1bd44f1c7b2c9
+  ok   the ledger fact survives the update
+local update v011 peer ok (18 checks): the published v0.1.1 node moved itself to a211269f77e2 with its data
+```
+
+So the FIRST half of cut condition 1 is closed: a v0.1.1 bundle node's own updater cannot be pointed at a test
+channel (measured and asserted), and the local door - the updater lua/core/update.lua runs - moves such a node to
+a this-commit release and keeps its data. The second half (the nextcloud install kind) is untouched.
 
 ## 10. Not done, and known failures
 
