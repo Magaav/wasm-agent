@@ -38,6 +38,12 @@ exit 1
 ' > "$SHIM/systemctl"
 chmod +x "$SHIM/systemctl"
 export PATH="$SHIM:$PATH"
+# AND ITS OWN PORT (measured 25/11, row 20261125T115425Z-12311): deploy.sh reads WA_PORT / WA_CLIENT_PORT
+# (default 8799/8800), NOT the runner\\'s WASM_AGENT_PORT, so it probed the LIVE node on 8799 and reported its
+# install dir. A free port of this row's own is what a scratch deploy has.
+free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+WA_PORT="$(free_port)"; export WA_PORT
+WA_CLIENT_PORT="$(free_port)"; export WA_CLIENT_PORT
 DATA="$WORK/data"
 INSTALL="$WORK/install"
 ALIVE="$(wa_deploy_alive_path "$DATA")"
