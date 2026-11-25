@@ -546,6 +546,10 @@ gate_run bash scripts/test-release-canaries-advisory.sh
 # release renamed from a cover gives it the cover Lua while --build-info names the release commit. A commit
 # whose compiled inputs a published release already covers must still be BUILT by the cut.
 gate_run bash scripts/test-cut-builds-own.sh                                # the cut builds node-<sha12> even when a signed cover already covers the commit
+# A COVER IS THE SAME PROGRAM ONLY IF ITS EMBEDDED LUA IS EQUAL TOO (week 1, 25/11): the publisher names
+# the Lua tree its bytes embed (lua_inputs=), and scripts/upgrade.sh - the one path that installs new
+# bytes - refuses a cover on a tree-less node unless that tree equals the target commit's, by name.
+gate_run bash scripts/test-cover-lua.sh                                    # a cover carries another commit Lua: the tree-less door refuses it, by name
 gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
 
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity

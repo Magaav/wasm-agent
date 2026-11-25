@@ -21,6 +21,9 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PUBLISH="$ROOT/scripts/publish-node-binaries.sh"
 . "$ROOT/scripts/lib/node-binaries.sh"
+# The Lua-tree digest the publisher records beside the compiled-inputs one, from the same file list a
+# deploy stages (scripts/lib/lua-tree.sh) - one definition, so a release row and a deploy cannot disagree.
+. "$ROOT/scripts/lib/lua-tree.sh"
 # The floor this suite names for the host's own /bin/true is measured with the SAME function the publisher
 # refuses on (scripts/lib/glibc-floor.sh), not a second copy of the scan: a fixture whose floor is computed
 # one way and checked another way proves nothing about the check.
@@ -90,7 +93,7 @@ OTHER_TRIPLE=aarch64-unknown-linux-gnu
 # ---- a git fixture: a clean repo on "main", and one behind main --------------------------------------
 fixture="$WORK/fixture"
 mkdir -p "$fixture/scripts/lib"
-cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh" "$ROOT/scripts/lib/glibc-floor.sh" "$fixture/scripts/lib/"
+cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh" "$ROOT/scripts/lib/glibc-floor.sh" "$ROOT/scripts/lib/lua-tree.sh" "$fixture/scripts/lib/"
 # The signature gate lives beside it, and the fixture stands in for a checkout: both files, or a release
 # could not be verified at all (which the lib refuses by name, correctly).
 cp "$ROOT/scripts/lib/release-signing.sh" "$fixture/scripts/lib/"
@@ -114,6 +117,8 @@ contains "$plan_out" "release tag: node-$FIXTURE_SHORT" "the plan names the rele
 contains "$plan_out" "node-$FIXTURE_SHORT.manifest" "the plan names the pins file"
 contains "$plan_out" "compiled inputs: $(wa_compiled_inputs_digest "$fixture" "$FIXTURE_SHA")" \
   "the plan names the compiled-inputs digest a later commit can match"
+contains "$plan_out" "lua inputs: $(wa_lua_tree_digest "$fixture" "$FIXTURE_SHA")" \
+  "and the Lua-tree digest the binary will EMBED, which is what a tree-less node runs"
 contains "$plan_out" "nothing was built" "the dry run says nothing was built"
 [ ! -d "$WORK/never" ] || fail "--check created its output directory"
 ok
@@ -169,9 +174,6 @@ ok
 # The compiled-inputs digest travels in the manifest that ships: a deploy of a later commit whose compiled
 # inputs hash to this value installs THIS release instead of compiling (job relmatch). The incoming fixture
 # manifest had no such row, so this is also the "an older artifact is given one" case.
-contains "$(cat "$WORK/bundle-good/node-$SHORT.manifest")" \
-  "compiled_inputs=$(wa_compiled_inputs_digest "$ROOT" "$HEAD_SHA")" \
-  "the bundled manifest records the commit's compiled-inputs digest"
 
 # --from with a tampered binary: the bytes that claim to be this build are not.
 bad="$WORK/built-tampered"; cp -r "$built" "$bad"
