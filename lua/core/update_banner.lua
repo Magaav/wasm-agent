@@ -331,6 +331,27 @@ function M.per_page()
   return M.DEFAULT_PER_PAGE
 end
 
+-- MEASURED 25/11: this reader finds the newest node BUILD, and builds sit at the top of the list - but a
+-- list page is not the whole list. A newest page that is all drafts, all another target, or all edited
+-- out of order used to leave the banner with `no_node_release`; and the same page size made the reader
+-- depend on how many builds a day published. So the shape is the version check's (release.lua): ask the
+-- release marked Latest first, page 100 at a time up to M.MAX_PAGES while nothing installable is found,
+-- and when nothing is found name the count read: no_build_in_<n>_entries.
+M.PAGE_SIZE = 100
+M.MAX_PAGES = 5
+
+function M.page_bound()
+  local configured = tonumber(trim(getenv("WA_UPDATE_CHECK_MAX_PAGES")))
+  if configured and configured >= 1 and configured <= 50 then return math.floor(configured) end
+  return M.MAX_PAGES
+end
+
+function M.api_base()
+  local configured = trim(getenv("WA_UPDATE_CHECK_API"))
+  if configured == "" then return "https://api.github.com" end
+  return (configured:gsub("/+$", ""))
+end
+
 function M.feed_url(repo)
   local configured = trim(getenv("WA_UPDATE_CHECK_FEED"))
   if configured == "off" then return nil end
@@ -366,12 +387,16 @@ local function http_get(url)
   return response.body
 end
 
-local function gh_get(repo)
-  local result = shell("gh api " .. quote("repos/" .. tostring(repo) .. "/releases?per_page=" .. M.per_page()) .. " 2>/dev/null")
+local function gh_get_path(path)
+  local result = shell("gh api " .. quote(path) .. " 2>/dev/null")
   if not result or tonumber(result.code) ~= 0 or type(result.stdout) ~= "string" or trim(result.stdout) == "" then
     return nil, "feed_unreachable"
   end
   return result.stdout
+end
+
+local function gh_get(repo)
+  return gh_get_path("repos/" .. tostring(repo) .. "/releases?per_page=" .. M.per_page())
 end
 
 local function curl_get(url, seconds)
@@ -406,6 +431,9 @@ function M.fetch(options, repo)
   end
   local url = o.url or M.feed_url(repo)
   if not url then return nil, "checks_disabled", nil end
+  -- An explicit feed (a mirror) or an injected request is one thing, taken exactly as given; the
+  -- paging below is the GitHub listing's own shape and is only used when nothing named a URL.
+  local explicit_feed = o.url ~= nil or trim(getenv("WA_UPDATE_CHECK_FEED")) ~= ""
   local order = { "http", "gh", "curl" }
   local configured = trim(o.transport ~= nil and tostring(o.transport) or getenv("WA_UPDATE_CHECK_TRANSPORT"))
   if configured ~= "" then order = { configured } end
@@ -415,27 +443,76 @@ function M.fetch(options, repo)
     for _, name in ipairs(order) do if name ~= "gh" then narrowed[#narrowed + 1] = name end end
     order = narrowed
   end
-  for _, name in ipairs(order) do
-    local body, reason, present
-    if name == "http" then
-      present = host.http ~= nil
-      if present then body, reason = http_get(url) else reason = "http_unavailable" end
-    elseif name == "gh" then
-      present = available("gh")
-      if present then body, reason = gh_get(repo) else reason = "gh_unavailable" end
-    elseif name == "curl" then
-      present = available("curl")
-      if present then body, reason = curl_get(url, o.seconds) else reason = "curl_unavailable" end
+  -- One request, through the transport order; returns body, reason, transport, present. `o.request`
+  -- (a function of the URL) is a row's transport: it keeps the paging under test without touching the
+  -- network or the machine's gh/curl.
+  local function ask(what)
+    if type(o.request) == "function" then
+      local body, reason = o.request(what.url)
+      return body, (body and nil or (reason or "feed_unreachable")), "request", true
     end
-    if body then
-      local list, parse_reason = M.parse_feed(body)
-      return list, parse_reason, name
+    for _, name in ipairs(order) do
+      local body, reason, present
+      if name == "http" then
+        present = host.http ~= nil
+        if present then body, reason = http_get(what.url) else reason = "http_unavailable" end
+      elseif name == "gh" then
+        present = available("gh")
+        if present then body, reason = gh_get_path(what.path) else reason = "gh_unavailable" end
+      elseif name == "curl" then
+        present = available("curl")
+        if present then body, reason = curl_get(what.url, o.seconds) else reason = "curl_unavailable" end
+      end
+      if body then return body, nil, name, true end
+      -- A transport that is present and failed IS the answer: falling through would be a second
+      -- request in the same window, which the fifteen-minute rule exists to prevent.
+      if present then return nil, reason or "feed_unreachable", name, true end
     end
-    -- A transport that is present and failed IS the answer: falling through would be a second
-    -- request in the same window, which the fifteen-minute rule exists to prevent.
-    if present then return nil, reason or "feed_unreachable", name end
+    return nil, "feed_unreachable", nil, false
   end
-  return nil, "feed_unreachable", nil
+  if explicit_feed then
+    local body, reason, name = ask({ url = url, path = nil })
+    if not body then return nil, reason, name end
+    local list, parse_reason = M.parse_feed(body)
+    return list, parse_reason, name
+  end
+  local slug = repo or M.repo(nil)
+  local base = M.api_base()
+  local function entries(body)
+    local ok, decoded = pcall(json.decode, tostring(body or ""))
+    if not ok or type(decoded) ~= "table" then return 0 end
+    if decoded[1] ~= nil then return #decoded end
+    -- an empty page is `[]`; anything else object-shaped is one release, unless it has NO keys at all
+    local keys = 0
+    for _ in pairs(decoded) do keys = keys + 1 end
+    return keys == 0 and 0 or 1
+  end
+  local scanned = 0
+  local pages = tonumber(o.max_pages) or M.page_bound()
+  for page = 0, pages do
+    local what
+    if page == 0 then
+      what = { url = base .. "/repos/" .. tostring(slug) .. "/releases/latest",
+        path = "repos/" .. tostring(slug) .. "/releases/latest" }
+    else
+      what = { url = base .. "/repos/" .. tostring(slug) .. "/releases?per_page=" .. M.PAGE_SIZE ..
+          "&page=" .. page,
+        path = "repos/" .. tostring(slug) .. "/releases?per_page=" .. M.PAGE_SIZE .. "&page=" .. page }
+    end
+    local body, reason, name = ask(what)
+    if body then
+      local count = entries(body)
+      scanned = scanned + count
+      local list, parse_reason = M.parse_feed(body)
+      if list then return list, parse_reason, name end
+      if count == 0 then break end
+    elseif page > 0 then
+      -- The Latest probe may simply have no answer (404 when nothing is marked Latest): that is not a
+      -- failure to report, it is a reason to page. A page that cannot be read IS the answer.
+      return nil, reason, name
+    end
+  end
+  return nil, "no_build_in_" .. tostring(scanned) .. "_entries", nil
 end
 
 -- ---- the comparison ---------------------------------------------------------

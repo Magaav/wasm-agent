@@ -9,6 +9,9 @@ SIGNER=release-signing-9356608c52260ed9
 PREFIX=${WA_PREFIX:-$HOME/.local/bin}
 UI=${WA_UI:-$HOME/.local/share/wasm-agent/ui}
 check=0; [ "${1:-}" = --check ] && check=1
+# --resolve prints the release this host would install and stops: no download, no install. It exists so the
+# choice this script makes can be measured on a machine with no assets to download (rows do exactly that).
+resolve=0; [ "${1:-}" = --resolve ] && resolve=1
 
 say() { printf 'install: %s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -31,11 +34,30 @@ say "channel: signed node binaries (releases tagged node-<commit>)"
 # scan stays as the fallback for a host that serves no pointer.
 tag=$(curl -fsSL "${WA_RELEASE_POINTER:-https://wa.colmeio.com/latest-node.txt}" 2>/dev/null | tr -d '[:space:]') || true
 case $tag in node-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;; *) tag= ;; esac
-[ -n "$tag" ] || tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=60" \
-      | sed -n 's/^ *"tag_name": "\(node-[0-9a-f]\{12\}\)".*/\1/p' | head -1) || true
-[ -n "$tag" ] || die "no_release: no node-<commit> release found"
+# MEASURED 25/11: the listing fallback was ONE page of 60, so a build that fell past the sixtieth newest
+# release made this installer answer no_release while the build existed. A page is not the list any more:
+#   1. the release marked Latest, one request - judged by the same node-<sha12> rule as everything here, so a
+#      version tag holding the badge is not mistaken for a build;
+#   2. otherwise page the list (100 per page, bounded) until a node build is found;
+#   3. otherwise name the count read: no_release: could not find a release in <n> entries.
+API=${WA_RELEASE_API:-https://api.github.com}
+PAGE_MAX=${WA_RELEASE_MAX_PAGES:-5}
+node_tag() { sed -n 's/"tag_name": "\(node-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\)".*/\1/p' | head -1; }
+[ -n "$tag" ] || tag=$(curl -fsSL "$API/repos/$REPO/releases/latest" 2>/dev/null | node_tag) || true
+entries=0
+page=1
+while [ -z "$tag" ] && [ "$page" -le "$PAGE_MAX" ]; do
+  body=$(curl -fsSL "$API/repos/$REPO/releases?per_page=100&page=$page" 2>/dev/null) || break
+  count=$(printf '%s\n' "$body" | grep -o '"tag_name"' | wc -l | tr -d ' ')
+  entries=$((entries + count))
+  tag=$(printf '%s\n' "$body" | node_tag)
+  [ "$count" -gt 0 ] || break
+  page=$((page + 1))
+done
+[ -n "$tag" ] || die "no_release: could not find a release in $entries entries"
 sha=${tag#node-}
 say "release: $tag"
+[ "$resolve" = 1 ] && { say "resolve: $tag (nothing downloaded)"; exit 0; }
 
 d=${TMPDIR:-/tmp}/wa-install-$$; mkdir -p "$d"; trap 'rm -rf "$d"' EXIT INT TERM
 base="https://github.com/$REPO/releases/download/$tag"

@@ -175,24 +175,37 @@ function M.feed_url()
   return M.DEFAULT_FEED
 end
 
--- Returns release, error. `options.fixture` is a file holding the endpoint's body and `options.url`
--- an explicit feed, so the tests never touch the network; the same names as environment overrides
--- (`WA_RELEASE_FIXTURE`, `WA_RELEASE_FEED`) exist for a node. `WA_OFFLINE` / `WA_SKIP_UPDATE_CHECK`
--- are the operator's off switches.
-function M.fetch(options)
-  options = options or {}
-  local fixture = trim(options.fixture ~= nil and options.fixture or getenv("WA_RELEASE_FIXTURE"))
-  if fixture ~= "" then
-    local text = read(fixture)
-    if not text then return nil, "feed_unreachable" end
-    return M.parse_release(text, options)
-  end
-  local offline = trim(options.offline ~= nil and tostring(options.offline) or getenv("WA_OFFLINE"))
-  if offline == "1" or offline == "true" or trim(getenv("WA_SKIP_UPDATE_CHECK")) == "1" then
-    return nil, "checks_disabled"
-  end
-  local url = options.url or M.feed_url()
-  if not url then return nil, "checks_disabled" end
+-- ---- the published side: the newest version, found without a window ------------------------------
+-- MEASURED 25/11 on the real repository: per-landing builds (releases tagged node-<sha12>) share the
+-- release list with the version tags, and /releases?per_page=20 answered twenty builds with no version
+-- tag among them (v0.1.1 was already at position 11, v0.1.0 at 13). A release-installed node then said
+-- `no_versioned_release` and could not tell whether it was behind - not "up to date", but not an answer
+-- either. So the size of one page is not the search space any more:
+--   1. ask /releases/latest first. One request, and it names the release the publisher marked Latest.
+--      A node BUILD can carry that badge (measured: node-39bbf2b69ea3 held it on 25/11), so its tag is
+--      judged by the same version rule as every other entry and never assumed to be a version;
+--   2. otherwise page the list - 100 per page, at most M.MAX_PAGES pages - until a version tag is found;
+--   3. if none is found, the reason NAMES the count read (no_version_in_<n>_entries) and the verdict says
+--      it: "could not find a version in <n> entries", never "nothing to do". `WA_RELEASE_FEED` (a mirror)
+--      is still taken exactly as given: one request, no paging behind an operator's explicit URL.
+M.PAGE_SIZE = 100
+M.MAX_PAGES = 5
+M.REPO = "Magaav/wasm-agent"
+
+function M.api_base()
+  local configured = trim(getenv("WA_RELEASE_API"))
+  if configured == "" then return "https://api.github.com" end
+  return (configured:gsub("/+$", ""))
+end
+
+function M.page_bound()
+  local configured = tonumber(trim(getenv("WA_RELEASE_MAX_PAGES")))
+  if configured and configured >= 1 and configured <= 50 then return math.floor(configured) end
+  return M.MAX_PAGES
+end
+
+-- One request through the node's bounded network capability. Returns the body, or nil and a reason.
+local function request(url)
   if not host.http then return nil, "http_unavailable" end
   local headers = json.encode({
     ["Accept"] = "application/vnd.github+json",
@@ -205,7 +218,68 @@ function M.fetch(options)
   if tonumber(response.status) ~= 200 then
     return nil, "feed_status_" .. tostring(response.status or "unknown")
   end
-  return M.parse_release(response.body, options)
+  return response.body
+end
+
+-- How many entries a page body holds (a single release object counts as one).
+local function entries_in(body)
+  local ok, decoded = pcall(json.decode, tostring(body or ""))
+  if not ok or type(decoded) ~= "table" then return 0 end
+  if decoded[1] ~= nil then return #decoded end
+  -- an empty page is `[]`; anything else object-shaped is one release, unless it has NO keys at all
+  local keys = 0
+  for _ in pairs(decoded) do keys = keys + 1 end
+  return keys == 0 and 0 or 1
+end
+
+-- Returns release, error. `options.fixture` is a file holding the endpoint's body, `options.url` an
+-- explicit feed and `options.get` an injected transport (so a row can page a stub feed with no network
+-- at all); the same names as environment overrides (`WA_RELEASE_FIXTURE`, `WA_RELEASE_FEED`) exist for a
+-- node. `WA_OFFLINE` / `WA_SKIP_UPDATE_CHECK` are the operator's off switches.
+function M.fetch(options)
+  options = options or {}
+  local fixture = trim(options.fixture ~= nil and options.fixture or getenv("WA_RELEASE_FIXTURE"))
+  if fixture ~= "" then
+    local text = read(fixture)
+    if not text then return nil, "feed_unreachable" end
+    return M.parse_release(text, options)
+  end
+  local offline = trim(options.offline ~= nil and tostring(options.offline) or getenv("WA_OFFLINE"))
+  if offline == "1" or offline == "true" or trim(getenv("WA_SKIP_UPDATE_CHECK")) == "1" then
+    return nil, "checks_disabled"
+  end
+  local get = options.get or request
+  local configured = trim(getenv("WA_RELEASE_FEED"))
+  if configured == "off" then return nil, "checks_disabled" end
+  local explicit = options.url or (configured ~= "" and configured or nil)
+  if explicit then
+    local body, reason = get(explicit)
+    if not body then return nil, reason end
+    return M.parse_release(body, options)
+  end
+  local slug = options.repo or M.REPO
+  local base = M.api_base()
+  -- 1. the release marked Latest, one request. Its tag is judged like any other: today that badge can be
+  -- on a node build, and a build is not a version this node installs.
+  local latest_body = get(base .. "/repos/" .. slug .. "/releases/latest")
+  if latest_body then
+    local release = M.parse_release(latest_body, options)
+    if release then return release end
+  end
+  -- 2. page until a version tag is found, bounded.
+  local scanned = 0
+  local bound = tonumber(options.max_pages) or M.page_bound()
+  for page = 1, bound do
+    local body, reason = get(base .. "/repos/" .. slug .. "/releases?per_page=" .. M.PAGE_SIZE ..
+      "&page=" .. page)
+    if not body then return nil, reason end
+    local count = entries_in(body)
+    scanned = scanned + count
+    local release = M.parse_release(body, options)
+    if release then return release end
+    if count == 0 then break end
+  end
+  return nil, "no_version_in_" .. tostring(scanned) .. "_entries"
 end
 
 -- ---- the installed side -----------------------------------------------------
@@ -227,8 +301,15 @@ function M.verdict(installed, release, reason)
   local verdict = { installed = installed, reason = reason }
   if not release then
     verdict.state = "unknown"
-    verdict.message = "cannot tell whether this node is behind the latest release: " ..
-      tostring(reason or "feed_unavailable")
+    local reason_text = tostring(reason or "feed_unavailable")
+    local count = reason_text:match("^no_version_in_(%d+)_entries$")
+    if count then
+      -- The count is the answer: how many entries were read and none of them was a version. Never
+      -- "nothing to do" - a node that heard every entry and found no version is not up to date.
+      verdict.message = "could not find a version in " .. count .. " entries"
+    else
+      verdict.message = "cannot tell whether this node is behind the latest release: " .. reason_text
+    end
     return verdict
   end
   verdict.latest = release.version
