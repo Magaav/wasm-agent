@@ -184,7 +184,25 @@ if (absent.length > 0) {
 }
 // Every door may be exempt (a fixture with one reviewed exemption); finding NO door at all is different, and
 // it means the derivation read nothing - which is never a pass.
-if (found.size === 0) die(1, 'install-script-doors: no_door_derived: nothing in ' + root + ' names an install-relative script, so this list cannot be right');
+// A TREE WITH NO LUA AND NO RUST SOURCES CANNOT NAME A DOOR, and that is a FIXTURE, not a tree that lost
+// them (measured 25/11: the release-channel e2e packs a bundle from a fixture repo that carries scripts and
+// no sources, and the derivation refused it). The distinction is what keeps the refusal honest: a tree that
+// HAS sources and names no door is still a red gate, because it carries code that could have grown one.
+const sources = walk(join(root, 'lua'), '.lua', []).filter((f) => !isTestPath(f)).length
+  + walk(join(root, 'rust'), '.rs', []).filter((f) => !isTestPath(f)).length
+// IS THIS THE PRODUCT TREE? The update capability's own Lua is what hands a door to a shell (update.lua runs the
+// installed updater; remote_update.lua execs release-install.sh and rollback-node.sh), so a tree that carries
+// neither cannot be expected to name one - measured 25/11: the release-channel e2e packs a PUBLISHED bundle from
+// a fixture repo with two stub Lua files and no such code, and refusing that was wrong. A tree that DOES carry
+// them and still names no door is the defect this list exists for, and it stays red.
+const productTree = existsSync(join(root, 'lua/core/update.lua')) || existsSync(join(root, 'lua/core/remote_update.lua'))
+if (found.size === 0) {
+  if (!productTree) {
+    process.stderr.write('install-script-doors: door_list_fixture_tree: nothing in ' + root + ' names an install-relative script, and this tree does not carry lua/core/update.lua or lua/core/remote_update.lua, so it is not the product tree and cannot name a door (it carries ' + sources + ' Lua/Rust source(s))\n')
+  } else {
+    die(1, 'install-script-doors: no_door_derived: nothing in ' + root + ' names an install-relative script, and this tree DOES carry the update capability\'s own Lua (' + sources + ' Lua/Rust source(s)), so its list cannot be right')
+  }
+}
 for (const path of exempt.keys()) {
   if (!found.has(path)) die(1, 'install-script-doors: stale_exemption: ' + path + ' is exempt in ' + allowPath + ' and no code in this tree execs it; drop the line');
 }

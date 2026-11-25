@@ -215,11 +215,22 @@ install -m755 "$ROOT/scripts/linux/bootstrap.sh" "$stage/scripts/linux/bootstrap
 # scripts/lib/install-script-doors.mjs (every "<install>/scripts/..." a Lua or Rust path execs, plus every
 # lib those scripts source, to a fixpoint), so a door the code grows is a red gate HERE - before the bundle
 # is tarred, let alone published - instead of a 127 on somebody's node.
-door_list="$(node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --list)" \
-  || fail "door_list_refused: $(printf '%s' "$door_list" | tail -3)"
+# AN EMPTY LIST IS ACCEPTED ONLY WHEN THE DERIVATION SAYS THIS IS NOT THE PRODUCT TREE (it names that on stderr:
+# door_list_fixture_tree, for a tree that carries no lua/core/update.lua and no lua/core/remote_update.lua - the
+# release-channel e2e's fixture repo, measured 25/11). A tree that carries them and names no door is refused.
+door_err="$out/door-list.err"
+door_list="$(node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --list 2> "$door_err")" \
+  || fail "door_list_refused: $(tail -3 "$door_err")"
 doors=()
 while IFS= read -r member; do [ -n "$member" ] && doors+=("$member"); done <<< "$door_list"
-[ "${#doors[@]}" -gt 0 ] || fail 'door_list_empty: scripts/lib/install-script-doors.mjs derived no member, and a bundle that ships no door is the defect this line exists for'
+# AN EMPTY LIST IS A FIXTURE ONLY. A tree with no Lua/Rust sources cannot name a door (the e2e's fixture repo:
+# measured 25/11), so it may pack a --local bundle and nothing else: a PUBLISHED bundle that ships no door is
+# the defect this block exists for, and it stays refused.
+if [ "${#doors[@]}" -eq 0 ]; then
+  grep -q 'door_list_fixture_tree' "$door_err" 2>/dev/null \
+    || fail 'door_list_empty: this tree says nothing about the scripts a node execs from its install, and the derivation did not name it as a fixture tree, so a published bundle could ship none of them'
+  say 'doors     0 install-side script(s): this tree is not the product tree (no lua/core/update.lua or remote_update.lua), so it names no door'
+fi
 for member in "${doors[@]}"; do
   [ -f "$ROOT/$member" ] || fail "door_missing: $member (the code execs it from the install; this tree does not have it)"
   mkdir -p "$stage/$(dirname "$member")"
@@ -248,7 +259,7 @@ esac
     | while IFS= read -r f; do sha256sum -- "$f"; done ) > "$stage/files.sha256"
 # THE BUNDLE IS COMPLETE OR IT IS NOT A RELEASE: every script the code execs from the install is a
 # member of files.sha256, not merely a file that happens to sit in the directory.
-node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --check "$stage" \
+node "$ROOT/scripts/lib/install-script-doors.mjs" --root "$ROOT" --check "$stage" 2>> "$door_err" \
   || fail "bundle_incomplete: a script a node execs from its install is missing from this bundle (named above); nothing was tarred"
 built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
