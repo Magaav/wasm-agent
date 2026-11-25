@@ -62,7 +62,10 @@ SHORT="$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)"
 # origin/main IS its HEAD. Nothing outside the row is touched, and the deploy is told to use it.
 DEPLOY_TREE="$W/tree"
 env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git clone -q "$ROOT" "$DEPLOY_TREE" 2>/dev/null   || skip_all "cannot clone the row's tree into its scratch root"
-env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" checkout -q "$SHORT" 2>/dev/null   || skip_all "cannot check out $SHORT in the row's clone"
+# ON MAIN, NOT DETACHED. Measured in rows/20261125T103226Z-9393: deploy.sh refuses a tree that is not a checkout of
+# main - "exactly one canonical main checkout is required; found 0 on branch refs/heads/main" - and a detached
+# clone has refs/heads/main but no checkout ON it, so the deploy ended before it ever wrote a commit.
+env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C "$DEPLOY_TREE" checkout -q -B main "$SHORT" 2>/dev/null   || skip_all "cannot check out $SHORT on main in the row's clone"
 # AND THE CLONE IS ITS OWN REMOTE. A clone of the row's tree still names the real repository as origin, and
 # deploy.sh fetches before it compares - so origin/main came back as the landed main (8d52b70f) while the row's
 # tree sat at its own unlanded commit, and BOTH deploys refused with refused(source_pin_stale) before the
