@@ -34,7 +34,11 @@ mkdir -p "$HOME" "$WORK/data" "$WORK/install"
 export WASM_AGENT_DATA="$WORK/data"
 DATA="$WORK/data"
 ALIVE="$(wa_deploy_alive_path "$DATA")"
-PAUSES="$HOME/.wasm-agent/deploy-pauses.jsonl"
+# THE PAUSE STORE IS THE ONE THE PRODUCT READS (lua/core/deploy_pause.lua:567: <dir>/pauses.jsonl, dir being the
+# data dir this row already exported), never a path guessed here - a guessed path that does not exist would
+# make this check pass for the wrong reason (measured: the first shape of this row named
+# $HOME/.wasm-agent/deploy-pauses.jsonl).
+PAUSES="$WASM_AGENT_DATA/pauses.jsonl"
 
 checks=0; failed=0
 ok() { checks=$((checks+1)); }
