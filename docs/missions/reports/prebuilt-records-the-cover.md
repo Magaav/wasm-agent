@@ -267,3 +267,6 @@ AND THIS IS THE FIRST GREEN THAT DOES NOT NEED THE LIVE NODE. The earlier "16 ch
 is green` with no FAIL line at all - which on a scratch home is impossible (the sentinel cannot start), so it could only
 have passed because the deploy had talked to the operator's user manager and the operator's sentinel answered. A row
 whose green depends on the live install is the defect that started this round.
+
+The rule's own row, through the runner at `0c591d73` (`rows/20261125T033726Z`): `rc=0, leftovers=0`, "the check catches
+the orphaned line that was shipped", "no installer executes a line of a message", 74 checks, 0 failed.
