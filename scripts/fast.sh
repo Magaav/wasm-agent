@@ -1295,6 +1295,17 @@ check preflight bash scripts/test-preflight.sh
 # is a recorded fact; and a finished mission lands itself. Each is seconds and self-contained (a fixture
 # repository, a stub landing, a stub fast path), so they belong on the fast path and not only in the nightly.
 check regenerate bash scripts/test-regenerate.sh
+# A FEDERATED CONNECTOR READ BETWEEN TWO REAL SCRATCH NODES (24/11, G blocker). The master runs a peer's
+# connector as peer_<node>__<tool>; the call crosses the signed peer call, arrives in the peer's outbound relay
+# lane, and there the node starts a persistent MCP read session as a supervised operation - three things that
+# meet only between processes (the relay lane's runtime owner `relay:<rid>`, the owner Lua names, and the
+# manager's comparison of the two). Measured before the fix: every pair (main->main, main->v0.1.1,
+# v0.1.1->v0.1.1) answered mcp_session_startup_failed / operation_not_yours and left a 3600 s session parked on
+# the peer, while the same read on the peer itself answered ok. It is here and not only in the full gate
+# because "main is green" is a recorded fact about the fast path (scripts/main-health.sh runs this file), and
+# a cross-node connector read is a row nobody had: the bug was green in every single-process test for six days.
+# Three processes, its own homes and ports, no model, no vault, no live fleet; `WA_BIN="$bin"` is what it runs.
+WA_BIN="$bin" check federated-connector-read node scripts/test-federated-connector-read.mjs
 check main-health bash scripts/test-main-health.sh
 check drive bash scripts/test-drive.sh
 # The worker's own gate loop (item 3): a red preflight resumes the SAME session with the failed rows up to
