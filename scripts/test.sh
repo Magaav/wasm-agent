@@ -518,6 +518,10 @@ WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installe
 # verdict of its own after it. This branch had replaced it with printf + exit, which lost the status file, the
 # deploy.log line, the result.json and the exit status every reader keys on.
 gate_run bash scripts/test-deploy-fail-verdict.sh                      # a refusal writes four things, and exit 1
+# ALIVE-FIRST (25/11, Fable's G): the deploy says it is running before the preflight, the fetches and the download,
+# and nobody else may take that record over or erase it. scripts/test-deploy-alive-first.sh reads the order off
+# deploy.sh and puts the record's ownership rules through the real functions.
+gate_run bash scripts/test-deploy-alive-first.sh                       # the record is written first, and it is ours
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 # NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
 # HOME, ran the real deploy, reported "ok (16 checks, 0 failed)" - and left a wa-sentinel with HOME=/home/victor and

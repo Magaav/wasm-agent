@@ -94,12 +94,56 @@ CHANNEL="$W/channel"; RELEASE="$CHANNEL/node-$SHORT"
 BUILD_TREE="$W/c1-tree"
 mkdir -p "$CHANNEL" "$BUILD_TREE" || skip_all "cannot make the stub channel under $W"
 git -C "$ROOT" worktree add -q --detach "$BUILD_TREE" "$C1" 2>/dev/null   || skip_all "cannot check out $C1 to build the covering release"
-( cd "$BUILD_TREE" && WA_RELEASE_KEYS="$KEYS" CARGO_TARGET_DIR="$W/target"     bash scripts/publish-node-binaries.sh --local --out "$RELEASE" --target "$TRIPLE" ) > "$W/channel.log" 2>&1   || skip_all "the local covering release could not be built from $SHORT: $(tail -3 "$W/channel.log" | tr '\n' ' ')"
-[ -f "$RELEASE/node-$SHORT.manifest" ] || skip_all "the publisher wrote no manifest for $SHORT: $(tail -3 "$W/channel.log" | tr '\n' ' ')"
-printf '%s\n' "node-$SHORT" > "$CHANNEL/releases.txt"
-export WA_NODE_BINARIES_URL="file://$CHANNEL"
+# THE BYTES, WITHOUT ZIG AND WITHOUT THE VAULT. Measured while writing this (c1probe, 25/11): plain cargo builds the
+# host triple once the code-mode assets are where build.rs looks for them; the publisher then verifies the artifact
+# set against a manifest but signs through wa-vault, which a row must not have a token for. So the row does what the
+# other stub-channel rows do: it builds, writes the manifest the product reads (with its OWN compiled-inputs digest),
+# and signs the sums with the committed TEST key (scripts/lib/release-fixture-sign.py), which is the signature the
+# verifier accepts. Nothing here is published and nothing asks for a secret.
+BUILT="$W/built"; mkdir -p "$BUILT" "$RELEASE"
+ASSET_SRC="$ROOT/.git/codemode-assets"
+if [ -d "$ASSET_SRC" ]; then
+  mkdir -p "$BUILD_TREE/.git"; cp -a "$ASSET_SRC" "$BUILD_TREE/.git/" 2>/dev/null || true
+fi
+CODEMODE_ENV=""
+for cand in "$BUILD_TREE"/.git/codemode-assets/*; do [ -d "$cand" ] && CODEMODE_ENV="$cand" && break; done
+( cd "$BUILD_TREE/rust" && WA_CODEMODE_BUILD_ASSETS="$CODEMODE_ENV" CARGO_TARGET_DIR="$W/target" \
+    cargo build --release --offline -q -p wa-host ) > "$W/build-wa.log" 2>&1 \
+  || skip_all "cannot build the node binary from $SHORT: $(tail -3 "$W/build-wa.log" | tr '\n' ' ')"
+( cd "$BUILD_TREE/rust/wa-sentinel" && WA_CODEMODE_BUILD_ASSETS="$CODEMODE_ENV" CARGO_TARGET_DIR="$W/target" \
+    cargo build --release --offline -q ) > "$W/build-sentinel.log" 2>&1 \
+  || skip_all "cannot build wa-sentinel from $SHORT: $(tail -3 "$W/build-sentinel.log" | tr '\n' ' ')"
+cp -f "$W/target/release/wa" "$RELEASE/wa-$TRIPLE-$SHORT" || skip_all "cannot stage the built wa"
+cp -f "$W/target/release/wa-sentinel" "$RELEASE/wa-sentinel-$TRIPLE-$SHORT" || skip_all "cannot stage the built wa-sentinel"
+chmod +x "$RELEASE/wa-$TRIPLE-$SHORT" "$RELEASE/wa-sentinel-$TRIPLE-$SHORT"
+DIGEST="$(. "$ROOT/scripts/lib/node-binaries.sh"; wa_compiled_inputs_digest "$ROOT" "$C1")"
+[ -n "$DIGEST" ] || skip_all "cannot compute the compiled-inputs digest of $SHORT"
+FLOOR=""
+[ -r "$ROOT/scripts/lib/glibc-floor.sh" ] && FLOOR="$(. "$ROOT/scripts/lib/glibc-floor.sh"; wa_glibc_max_symbol "$RELEASE/wa-$TRIPLE-$SHORT" 2>/dev/null)"
+[ -n "$FLOOR" ] || FLOOR=2.31
+{
+  printf 'schema=wasm-agent-node-binaries/1\n'
+  printf 'source_commit=%s\n' "$C1"
+  printf 'source_tree=%s\n' "$(git -C "$ROOT" rev-parse "$C1^{tree}")"
+  printf 'rustc_version=%s\n' "$(rustc --version 2>/dev/null | awk '{print $2}')"
+  printf 'zig_version=none-built-with-cargo\n'
+  printf 'glibc_floor=%s\n' "$FLOOR"
+  printf 'codemode=%s\n' "${CODEMODE_ENV:+embedded}"
+  [ -n "$CODEMODE_ENV" ] || printf 'codemode=empty\n'
+  printf 'built_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'compiled_inputs=%s\n' "$DIGEST"
+  printf '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes\n'
+  printf '%s %s %s %s %s\n' "$TRIPLE" \
+    "$(sha256sum "$RELEASE/wa-$TRIPLE-$SHORT" | cut -d' ' -f1)" "$(wc -c < "$RELEASE/wa-$TRIPLE-$SHORT" | tr -d ' ')" \
+    "$(sha256sum "$RELEASE/wa-sentinel-$TRIPLE-$SHORT" | cut -d' ' -f1)" "$(wc -c < "$RELEASE/wa-sentinel-$TRIPLE-$SHORT" | tr -d ' ')"
+} > "$RELEASE/node-$SHORT.manifest"
+python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$RELEASE" --key A > /dev/null 2>&1 \
+  || skip_all "the local covering release could not be signed with the TEST key"
+cd "$ROOT" || skip_all "cannot return to the checkout"
+printf '%s\n' "node-$SHORT" > "$RELEASE/releases.txt"
+export WA_NODE_BINARIES_URL="file://$RELEASE"
 export WA_RELEASE_KEYS="$KEYS"
-echo "stub channel: $CHANNEL (node-$SHORT built here from $SHORT; no GitHub call, no credential)"
+echo "stub channel: $RELEASE (node-$SHORT built here from $SHORT and signed with the TEST key; no GitHub call, no credential)"
 
 # THE TREE (C2): a scratch clone whose REMOTE'S main is this branch's commit. A deploy requires the tree it
 # runs from to be exactly origin/main and clean (step 2), so the fixture makes that true rather than arguing

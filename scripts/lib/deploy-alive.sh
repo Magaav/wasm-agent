@@ -43,12 +43,59 @@ wa_deploy_alive_start_time() { # <pid>
 }
 
 # Write the state atomically: a reader either sees the previous file or the whole new one.
+# THE LIVE HOLDER, if there is one: the pid the record names, read only when that pid is still alive AND its start
+# time is the one the record carries (a recycled pid is not this deploy). Prints the pid, or nothing.
+wa_deploy_alive_holder() { # <data-dir> -> pid of the deploy that owns the record, or nothing
+  local path text pid started now bound
+  path="$(wa_deploy_alive_path "$1")"
+  [ -r "$path" ] || return 0
+  text="$(cat "$path" 2>/dev/null)" || return 0
+  pid="$(printf '%s' "$text" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p' | head -1)"
+  started="$(printf '%s' "$text" | sed -n 's/.*"pid_start":\([0-9]*\).*/\1/p' | head -1)"
+  bound="$(printf '%s' "$text" | sed -n 's/.*"bound_seconds":\([0-9]*\).*/\1/p' | head -1)"
+  [ -n "$pid" ] || return 0
+  case "${bound:-}" in ''|*[!0-9]*) bound=1800 ;; esac
+  # A LIVE PID WITH THE RECORD'S START TIME IS THE HOLDER. A pid that is gone, or one that has been recycled (its
+  # start time differs), is not, and a record older than its own bound is not either - the stated cost of a reader
+  # that cannot look at the process table.
+  if [ -r "/proc/$pid/stat" ]; then
+    # A ZOMBIE IS NOT A HOLDER (measured while writing this test): /proc/<pid>/stat exists until the pid is reaped,
+    # so a killed deploy would hold its sessions until its parent got round to wait().
+    case "$(sed -n 's/^[0-9]* (.*) \([A-Za-z]\).*/\1/p' "/proc/$pid/stat" 2>/dev/null)" in
+      Z|X|x) return 0 ;;
+    esac
+    now="$(wa_deploy_alive_start_time "$pid" 2>/dev/null)" || return 0
+    if [ -n "$started" ] && [ "$now" != "$started" ]; then return 0; fi
+    printf '%s' "$pid"
+    return 0
+  fi
+  # A PID THAT IS ABSENT FROM A READABLE /proc IS A DEAD HOLDER, not a reader that cannot look: the fallback below
+  # is for a host with no process table at all, and applying it here made a killed deploy hold its sessions for the
+  # record's whole bound (measured while writing this test: the write still refused after the holder was killed).
+  if [ -d /proc/self ]; then return 0; fi
+  local since age
+  since="$(printf '%s' "$text" | sed -n 's/.*"since":\([0-9]*\).*/\1/p' | head -1)"
+  case "${since:-}" in ''|*[!0-9]*) return 0 ;; esac
+  age=$(( $(date +%s) - since ))
+  [ "$age" -lt "$bound" ] && printf '%s' "$pid"
+}
+
 wa_deploy_alive_write() { # <data-dir> [bound-seconds] [commit] [writer]
   local dir path tmp bound pid_start
   dir="$(wa_deploy_alive_dir "$1")"
   path="$(wa_deploy_alive_path "$1")"
   bound="${2:-1800}"
   case "$bound" in ''|*[!0-9]*|0) bound=1800 ;; esac
+  # A LIVE HOLDER IS NOT TAKEN OVER AND NOT ERASED (25/11, Fable's G). It used to be: a second deploy (one that a
+  # lock or a preflight turned away, or a hand-run one) rewrote the file with its own pid, so the sessions paused on
+  # the FIRST deploy were released while it was still installing.
+  local holder
+  holder="$(wa_deploy_alive_holder "$1")"
+  if [ -n "$holder" ] && [ "$holder" != "$$" ]; then
+    printf 'refused(deploy_alive_held): pid %s is running a deploy and holds %s; this one did not take it over\n' \
+      "$holder" "$(wa_deploy_alive_path "$1")" >&2
+    return 3
+  fi
   mkdir -p "$dir" 2>/dev/null || return 1
   tmp="$path.tmp.$$"
   pid_start="$(wa_deploy_alive_start_time "$$" 2>/dev/null)"
@@ -57,9 +104,18 @@ wa_deploy_alive_write() { # <data-dir> [bound-seconds] [commit] [writer]
   mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
+# CLEARED ONLY BY ITS OWN WRITER (25/11, Fable's G). The trap used to remove the file unconditionally, so a deploy
+# refused at the lock - or any other process that happened to exit through it - erased the RUNNING deploy's record
+# and released the sessions it was holding.
 wa_deploy_alive_clear() { # <data-dir>
-  local path
+  local path text pid
   path="$(wa_deploy_alive_path "$1")"
+  [ -r "$path" ] || return 0
+  text="$(cat "$path" 2>/dev/null)" || return 0
+  pid="$(printf '%s' "$text" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p' | head -1)"
+  if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+    return 0
+  fi
   rm -f "$path" "$path".tmp.* 2>/dev/null || true
 }
 

@@ -126,6 +126,7 @@ else
 fi
 SENTINEL_CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}/.wasm-agent"
 
+
 # The sentinel executes `run` scripts only from directories named here, and the install's own scripts
 # live in <install>/scripts. Without this, every job whose action is `run` fails with "run is disabled:
 # set WA_SENTINEL_SCRIPTS".
@@ -301,6 +302,30 @@ note() {
   printf '%s\t%s\t%s\tnote: %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
 }
+
+# THE DEPLOY SAYS IT IS RUNNING AS ITS FIRST ACT, BEFORE ANY NETWORK (25/11, Fable's G). The file used to be written
+# after the lock claim - which is after the components preflight, the git fetches, the program download and
+# provisioning: seconds on a compile install, the WHOLE download on every fleet node (49 s on work, minutes on a slow
+# link). During it nothing said a deploy was alive: the request was already in done/, and no marker and no alive file
+# existed. lua/core/deploy_pause.lua reads this file and holds sessions while the pid it names is alive.
+# A LIVE HOLDER'S FILE IS NEVER TAKEN OVER, and the trap below clears only our own: a second deploy that is turned
+# away (a lock, a preflight) must not release the sessions the first one is holding.
+DEPLOY_ALIVE_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
+DEPLOY_ALIVE_LIB="$(dirname "$0")/lib/deploy-alive.sh"
+[ -r "$DEPLOY_ALIVE_LIB" ] || DEPLOY_ALIVE_LIB="${SOURCE_ROOT:-/nonexistent}/scripts/lib/deploy-alive.sh"
+if [ -r "$DEPLOY_ALIVE_LIB" ]; then
+  . "$DEPLOY_ALIVE_LIB"
+  if command -v wa_deploy_alive_write >/dev/null 2>&1; then
+    if wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" 2>/dev/null; then
+      note "deploy: running state written (pid $$)"
+    else
+      note "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
+    fi
+  fi
+  trap 'command -v wa_deploy_alive_clear >/dev/null 2>&1 && wa_deploy_alive_clear "$DEPLOY_ALIVE_DIR"' EXIT
+else
+  note "the deploy-alive library is missing ($DEPLOY_ALIVE_LIB): a session paused in this deploy may be resumed while it compiles"
+fi
 
 # A staged copy that never reached its rename is residue, and nothing used to look for one.
 #
@@ -1302,23 +1327,9 @@ if ! wa_deploy_lock_claim "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG" "$SOURCE_ROOT"; then
   fail "${WA_DEPLOY_LOCK_REASON:-another deploy/onStale build holds $DEPLOY_LOCK; nothing built}"
 fi
 DEPLOY_LOCK_HELD=1
-# THE DEPLOY SAYS IT IS RUNNING, FROM HERE UNTIL IT EXITS (r8c 21:15Z). The sentinel starts this script DETACHED and
-# moves the request to `done/` the moment it has started it; this script then fetches and COMPILES for minutes and
-# writes the installer's marker only after the build, so for that whole stretch no request, no claimed request and no
-# marker said an install was coming - and every paused session was released into a paid turn that found installed.txt
-# unchanged and was told the update did not happen (two sessions, two turns each, measured 24/11 21:15-21:27Z).
-# scripts/lib/deploy-alive.sh writes one small file, this trap clears it, and lua/core/deploy_pause.lua holds the
-# sessions while the pid it names is alive. Best effort on purpose: a file that cannot be written must never stop an
-# install - what it costs is said on the deploy's own log.
-DEPLOY_ALIVE_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
-DEPLOY_ALIVE_LIB="$ROOT/scripts/lib/deploy-alive.sh"
-if [ -r "$DEPLOY_ALIVE_LIB" ]; then . "$DEPLOY_ALIVE_LIB"; fi
-if command -v wa_deploy_alive_write >/dev/null 2>&1; then
-  wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" \
-    || say "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
-else
-  say "the deploy-alive library is missing ($DEPLOY_ALIVE_LIB): a session paused in this deploy may be resumed while it compiles"
-fi
+# THE LOCK AND THE ALIVE RECORD ARE CLEARED TOGETHER FROM HERE (25/11, Fable's G). The WRITE happens at the top of this
+# script, before any network; what this line adds is the lock release, so one trap owns both from the moment the lock
+# is held. Clearing the alive file is a no-op unless this process wrote it (scripts/lib/deploy-alive.sh).
 trap 'command -v wa_deploy_alive_clear >/dev/null 2>&1 && wa_deploy_alive_clear "$DEPLOY_ALIVE_DIR"; wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"' EXIT
 
 # 3c. PIN THE COMMIT THE BUILD READS. The build used to read the tree this command was pointed at, and on
