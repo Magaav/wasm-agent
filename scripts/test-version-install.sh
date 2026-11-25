@@ -117,6 +117,20 @@ grep -q 'version_no_room free=' "$W/i2.log" || fail "the refusal is named versio
 [ ! -d "$W/share/versions/bbbbbbbbbbbb" ] || fail "a refused install wrote no version folder"
 ok
 
+# --- FIX 5: a SEALED staging directory left by a cut does not block the retry ----------------------------------
+# A cut between the seal and the rename leaves versions/.staging-<id> at 0555; rm -rf then refuses forever and every
+# later install of that version dies with version_staging_unwritable. The installer must be able to clear it.
+S5="$W/stage5"; I5="$W/install5"; stage "$S5"; install_dir "$I5"
+mkdir -p "$W/share/versions/.staging-$ID/left/lua"
+printf 'half' > "$W/share/versions/.staging-$ID/left/lua/init.lua"
+chmod 0555 "$W/share/versions/.staging-$ID" "$W/share/versions/.staging-$ID/left" "$W/share/versions/.staging-$ID/left/lua" 2>/dev/null || true
+chmod 0444 "$W/share/versions/.staging-$ID/left/lua/init.lua" 2>/dev/null || true
+run_installer "$S5" "$I5" WA_VERSION_MARGIN_BYTES=0 > "$W/i5.log" 2>&1 || { sed -n '1,6p' "$W/i5.log" >&2; fail "fix 5: a sealed staging directory blocked the retry"; }
+[ -d "$W/share/versions/.staging-$ID" ] && fail "fix 5: the stale staging directory is still there after a successful install"
+ok
+[ -f "$W/share/versions/$ID/version.txt" ] || fail "fix 5: the retry did not assemble the version"
+ok
+
 # --- R3: a SIGKILL after each step boundary, then: does the node answer, and can it be installed again? -------
 step=1
 while [ "$step" -le 8 ]; do
