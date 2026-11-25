@@ -201,14 +201,29 @@ local function ago(seconds)
   return string.format("%dd ago", math.floor(seconds / 86400))
 end
 
+-- A RECORD WITH NO COMMIT IS NOT A RECORD NAMING "unknown" (25/11, measured during the rc-cover install): alive-first
+-- writes the record before COMMIT is resolved, so a turn held in that window was told it waited for the install of
+-- "unknown". The word never reaches a person: the sentence says an install is starting.
+local function names_commit(sha)
+  local s = tostring(sha or "")
+  return s ~= "" and s ~= "unknown"
+end
+
 -- The one sentence a reader meets: which commit is coming, which request asked for it, and how long it has
 -- waited. Always starts with M.REASON, so it can be found in a log or matched by a caller.
 function M.say(wait, now)
   wait = wait or {}
   local sha = tostring(wait.to or "")
-  local target = sha ~= "" and sha:sub(1, 12) or "an unnamed commit"
   local since = tonumber(wait.since) or 0
   local waited = since > 0 and ago((tonumber(now) or os.time()) - since) or "for an unrecorded time"
+  if not names_commit(sha) then
+    if tostring(wait.source) == "deploy" then
+      return string.format("waiting for an install that is starting (a deploy has been running %s)", waited)
+    end
+    return string.format("waiting for an install that is starting (deploy request %s, asked %s)",
+      tostring(wait.id or "unnamed"), waited)
+  end
+  local target = sha:sub(1, 12)
   -- A DEPLOY THAT IS RUNNING HAS NO REQUEST FILE TO NAME (r8c 21:15Z): the sentinel moved it to done/ when it started
   -- the script, so the sentence says how long the deploy has been running instead of naming a request id that no box
   -- holds.

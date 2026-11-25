@@ -78,6 +78,13 @@ end
 -- One predicate, so no caller can honour half of it: an install and a waiting request are the same answer
 -- to "must this node start a turn?".
 local request_module
+-- A RECORD WITH NO COMMIT SAYS AN INSTALL IS STARTING (25/11): the alive record is written before COMMIT is resolved,
+-- and "unknown" is not a commit anybody waits for.
+local function no_commit(sha)
+  local s = tostring(sha or "")
+  return s == "" or s == "unknown"
+end
+
 local function request_reader()
   if request_module == nil then
     local loaded, module = pcall(dofile, "lua/core/deploy_wait.lua")
@@ -397,7 +404,8 @@ function M.say_wait(marker, now)
   if marker.source ~= "request" and marker.source ~= "claimed" then return M.say(marker) end
   local module = request_reader()
   local described = module and module.say(marker, now)
-    or ("waiting for the install of " .. tostring(marker.to or "an unnamed commit"))
+    or (no_commit(marker.to) and "waiting for an install that is starting"
+      or ("waiting for the install of " .. tostring(marker.to)))
   return "deploy waiting: " .. described .. "; this turn paused after its step and scheduled a resume, so the"
     .. " node can go idle and the install can start"
     .. string.format(" (the wait is bounded: %ds from the request)", tonumber(marker.bound_seconds) or M.DEFAULT_BOUND)
@@ -482,8 +490,8 @@ function M.refuse(now, opts)
   local module = request_reader()
   local text = module and module.refusal and module.refusal(wait, now) or nil
   if not text then
-    text = "deploy_waiting: waiting for the install of "
-      .. tostring(wait.to and tostring(wait.to):sub(1, 12) or "an unnamed commit")
+    text = no_commit(wait.to) and "deploy_waiting: waiting for an install that is starting"
+      or ("deploy_waiting: waiting for the install of " .. tostring(wait.to):sub(1, 12))
       .. ". This node starts no new turn while a build is waiting for it or being installed - a turn in"
       .. " flight is exactly what keeps the node from going idle - and this turn did not start. Nothing was"
       .. " lost: this is a wait, not a failure. "
@@ -596,7 +604,10 @@ function M.record_pause(marker, now, session_id, user, opts)
   local ok = pcall(writer, path, json.encode({
     session = session_id,
     since = tonumber(now) or os.time(),
-    to = marker.to,
+    -- A RECORD WITH NO COMMIT LEAVES "to" EMPTY (25/11, Fable): alive-first writes the deploy record before COMMIT is
+    -- resolved, its commit reads "unknown", and that string used to land here - so pauses.jsonl said "to":"unknown"
+    -- and every reader repeated it. An empty value is the honest one: the reader says an install is starting.
+    to = no_commit(marker.to) and "" or tostring(marker.to),
     source = marker.source or "install",
     request = marker.id,
     by = tostring(user or marker.owner or ""),

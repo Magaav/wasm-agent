@@ -522,6 +522,13 @@ gate_run bash scripts/test-deploy-fail-verdict.sh                      # a refus
 # and nobody else may take that record over or erase it. scripts/test-deploy-alive-first.sh reads the order off
 # deploy.sh and puts the record's ownership rules through the real functions.
 gate_run bash scripts/test-deploy-alive-first.sh                       # the record is written first, and it is ours
+gate_run bash scripts/test-deploy-guards-before-alive.sh                 # a refused deploy leaves NO running record and pauses nobody (Fable 25/11)
+gate_run bash scripts/test-install-window.sh                             # the web installer picks the exact build it was asked for (orphan check, 25/11)
+# The version window (Fable 25/11, the orphan rule): a fixture feed, so no node, no network, no clock.
+# It lives on the gate rather than in the declared list for the same reason its sibling above does.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$DB.version-window" | grep "version window ok"
+gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
+
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 # NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
 # HOME, ran the real deploy, reported "ok (16 checks, 0 failed)" - and left a wa-sentinel with HOME=/home/victor and
