@@ -1104,7 +1104,7 @@ WA_BIN="$BIN" gate_run bash scripts/test-update-follow.sh | grep 'update follow 
 # deploy already wrote must not wait for a tick, and a command that finished in 200 ms must not pay a sleep.
 # The row proves `inotifywait` fires on a real file write, that the wait is bounded so it cannot hang the
 # command, and that the follower uses it (and that a caller handing a sleep seam still gets its sleep).
-WA_SCRATCH_HOME="$DB.update-wait-home" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-wait.lua" "$BIN" --db "$DB.update-wait" | grep "update wait ok"
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-wait.lua" "$BIN" --db "$DB.update-wait" | grep "update wait ok"
 
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.

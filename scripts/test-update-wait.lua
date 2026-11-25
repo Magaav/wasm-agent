@@ -30,11 +30,23 @@ local function ok(condition, label, detail)
 end
 local function has(text, needle) return tostring(text or ""):find(needle, 1, true) ~= nil end
 
--- ---- the scratch home: refused by name if it is the operator's ------------------------------------
+-- ---- the scratch directory: the SUITE's rule, not one of this row's own ----------------------------
+-- The fast path and the full gate give every lua row its own scratch WASM_AGENT_HOME and a scratch root
+-- (GATE_ROOT, else TMPDIR), and `scripts/lib/test-home-guard.lua` is that rule in one place: an allow-list
+-- (the home must sit under the suite's scratch root) plus two independent refusals (the live node's own
+-- key and ledger). A row that invented its own variable instead was red in the gate on its first run -
+-- correctly: it refused while the runner HAD given it a scratch home, because it asked for a name nobody
+-- exports.
+local guard = dofile('scripts/lib/test-home-guard.lua')
+local suite_root = os.getenv('GATE_ROOT') or os.getenv('TMPDIR') or ''
+local reason = guard.reason({ home = os.getenv('WASM_AGENT_HOME') or '', scratch = suite_root })
+if reason then error('this test refuses to run (' .. reason .. ')') end
+-- This row writes ONLY inside its own directory under that scratch root: no store, no home, no key.
 local scratch = tostring(host.getenv("WA_SCRATCH_HOME") or "")
 if scratch == "" then
-  error("refused(real_node_home): WA_SCRATCH_HOME is not set, so this row cannot prove it is not the operator's home")
+  scratch = suite_root .. "/wa-update-wait-" .. tostring(os.time()) .. "-" .. tostring(math.random(1000000))
 end
+host.exec("mkdir -p '" .. scratch .. "'", "")
 local real = tostring(host.getenv("HOME") or "") .. "/.wasm-agent"
 if scratch == real or scratch:sub(1, #real + 1) == real .. "/" then
   error("refused(real_node_home): " .. scratch .. " is the operator store " .. real)
