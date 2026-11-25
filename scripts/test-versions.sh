@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# THE VERSION FOLDERS (slice (b), Fable's nine requirements - docs/UPDATE-DESIGN.md section 2.0).
+#
+# What this row is about, in one sentence: an install must never edit the install a running process resolves,
+# so a version is a folder made once, "current" is a pointer, and every step that could be cut is either one
+# rename or finished by the node at its next start.
+#
+# It runs on its own scratch root and refuses to run against the operator's home or the real ~/.wasm-agent
+# (measured 11/11: a test took its scratch from WASM_AGENT_HOME and deleted the operator's whole home).
+#
+# THE ROWS (each named in its failure message, so a red says which requirement broke):
+#   R1  one variable names the versions dir, beside ui, in the share root (never the PATH dir, never the data dir)
+#   R2  a version is made once: assembling an existing id is refused and the folder is not touched
+#   R4  installed.txt is a LINK to current's own record and follows a pointer move with no second write
+#   R6  an unchanged member is the SAME inode (hard link) and the new version's real disk is far under a copy
+#   R7  retention keeps 3, never current, the one before it, a live process's version, or a pinned one
+#   R9  no room -> version_no_room by name BEFORE anything is staged
+#   R3/R5 (migration with a kill at every boundary) and R8 (the sentinel) are the next commits: they need the
+#   binary and a unit, and this file says so rather than pretending.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 2
+. scripts/lib/versions.sh
+
+n=0
+ok() { n=$((n+1)); }
+fail() { echo "FAIL test-versions: $*" >&2; exit 1; }
+
+# The scratch root is NEVER inside the data dir: this node TMPDIR is WASM_AGENT_HOME/tmp, and the guard
+# below caught exactly that on the first run (a row that took its scratch from the node own data dir).
+scratch_parent="${TMPDIR:-/tmp}"
+case "$scratch_parent" in */.wasm-agent|*/.wasm-agent/*) scratch_parent=/tmp ;; esac
+W="$(mktemp -d "$scratch_parent/wa-versions-XXXXXX")" || { echo "FAIL test-versions: no scratch dir" >&2; exit 2; }
+case "$W" in */.wasm-agent|*/.wasm-agent/*) echo "FAIL test-versions: scratch is the real data dir" >&2; exit 2;; esac
+LIVE_PID=""
+cleanup() { [ -z "$LIVE_PID" ] || kill "$LIVE_PID" 2>/dev/null; chmod -R u+w "$W" 2>/dev/null; rm -rf "$W"; }
+trap cleanup EXIT
+HOME="$W/home"; export HOME
+mkdir -p "$HOME/.local/share"
+
+# --- R1: ONE VARIABLE, IN THE SHARE ROOT BESIDE ui -----------------------------------------------------------
+( unset WA_SHARE_ROOT XDG_DATA_HOME; [ "$(wa_share_root)" = "$HOME/.local/share/wasm-agent" ] ) || fail "R1: the default share root is the XDG data dir's wasm-agent"
+ok
+( WA_SHARE_ROOT="$W/share" XDG_DATA_HOME="$W/xdg"; [ "$(wa_versions_dir)" = "$W/share/versions" ] ) || fail "R1: WA_SHARE_ROOT names the versions dir, and it wins over XDG_DATA_HOME"
+ok
+case "$(wa_versions_dir)" in */.wasm-agent/*|*/.wasm-agent) fail "R1: the versions dir is in the data dir (state)";; esac
+ok
+WA_SHARE_ROOT="$W/share"; export WA_SHARE_ROOT
+[ "$(wa_version_id abcdef0123456789)" = "abcdef012345" ] || fail "R2: the id is the commit's first 12 hex"
+ok
+wa_version_id zzz >/dev/null 2>&1 && fail "R2: a non-hex id is refused, not truncated"
+ok
+
+# --- the fixture: what an install ships ----------------------------------------------------------------------
+stage1="$W/stage1"
+mkdir -p "$stage1/lua-core/lua/core" "$stage1/scripts" "$stage1/ui"
+printf 'program-v1' > "$stage1/wa"
+head -c 4194304 /dev/urandom > "$stage1/lua-core/lua/core/big.lua"
+printf 'init-v1' > "$stage1/lua-core/lua/core/init.lua"
+printf 'deploy-v1' > "$stage1/scripts/deploy.sh"
+printf 'ui-v1' > "$stage1/ui/index.html"
+printf 'commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbuild_pin=\n' > "$stage1/installed.txt"
+
+WA_VERSION_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+WA_VERSION_BINARY_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  wa_version_assemble "$stage1" aaaaaaaaaaaa "" > "$W/a1.log" 2>&1 || { cat "$W/a1.log" >&2; fail "R2: assembling the first version"; }
+ok
+v1="$(wa_version_dir aaaaaaaaaaaa)"
+[ "$(wa_version_value "$v1" id)" = "aaaaaaaaaaaa" ] || fail "R1: version.txt names the id"
+[ "$(wa_version_value "$v1" binary_commit)" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ] || fail "R1: version.txt names binary_commit (a covering release runs another commit's binary)"
+[ -n "$(wa_version_value "$v1" assembled_utc)" ] || fail "R1: version.txt is dated"
+ok
+if ( : > "$v1/written-by-hand" ) 2>/dev/null; then fail "R2: a version folder is read-only once sealed"; fi
+ok
+
+# --- R2: an id is made once ----------------------------------------------------------------------------------
+wa_version_assemble "$stage1" aaaaaaaaaaaa "" >/dev/null 2>"$W/again.err" && fail "R2: assembling an existing id must refuse"
+grep -q 'version_exists' "$W/again.err" || fail "R2: the refusal names version_exists"
+[ "$(wc -c < "$v1/lua-core/lua/core/big.lua")" = "4194304" ] || fail "R2: the existing version was not touched"
+ok
+
+# --- R6: unchanged members are hard links --------------------------------------------------------------------
+stage2="$W/stage2"
+cp -a "$stage1" "$stage2"
+printf 'program-v2' > "$stage2/wa"
+printf 'deploy-v2' > "$stage2/scripts/deploy.sh"
+printf 'commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nbuild_pin=\n' > "$stage2/installed.txt"
+WA_VERSION_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb wa_version_assemble "$stage2" bbbbbbbbbbbb "$v1" > "$W/a2.log" 2>&1 \
+  || { cat "$W/a2.log" >&2; fail "R6: assembling the second version over the first"; }
+v2="$(wa_version_dir bbbbbbbbbbbb)"
+[ "$(stat -c %i "$v1/lua-core/lua/core/big.lua")" = "$(stat -c %i "$v2/lua-core/lua/core/big.lua")" ] || fail "R6: an unchanged member is the SAME inode (hard link), not a copy"
+ok
+[ "$(stat -c %i "$v1/scripts/deploy.sh")" != "$(stat -c %i "$v2/scripts/deploy.sh")" ] || fail "R6: a changed member is a new file (never a link into the previous version)"
+ok
+# The honest disk number is the PAIR's: du counts an inode once per invocation, so `du v2` alone reports the
+# 4 MiB member even when it is a link. Two copies would be ~8 MiB; a linked pair is ~4 MiB plus the small
+# changed members.
+real_both="$(du -s -c -B1 "$v1" "$v2" 2>/dev/null | tail -1 | awk '{print $1}')"
+[ "${real_both:-0}" -lt 5242880 ] || fail "R6: the pair's REAL disk is under 5 MiB (two 4 MiB copies would show); measured ${real_both:-?}"
+ok
+# R9's two numbers are taken HERE, while both versions exist: retention prunes the first one further down, and a
+# need measured against a pruned version counts every member (the row caught that ordering on its second run).
+need_full="$(wa_version_need_bytes "$stage1" "")"
+need_delta="$(wa_version_need_bytes "$stage2" "$v1")"
+
+# --- R4: one atomic thing names current, and the record follows the pointer ----------------------------------
+wa_version_point bbbbbbbbbbbb >/dev/null || fail "R4: pointing current at a version"
+[ "$(wa_version_current)" = "bbbbbbbbbbbb" ] || fail "R4: current names the version"
+ok
+install="$W/install"; mkdir -p "$install"
+printf 'commit=old\n' > "$install/installed.txt"
+wa_version_link_record "$install" >/dev/null || fail "R4: installed.txt becomes a link to current's record"
+[ -L "$install/installed.txt" ] || fail "R4: installed.txt IS a link, not a second file"
+grep -q '^commit=bbbbbbbbbbbb' "$install/installed.txt" || fail "R4: the link reads current's record"
+ok
+wa_version_point aaaaaaaaaaaa >/dev/null || fail "R4: pointing back"
+grep -q '^commit=aaaaaaaaaaaa' "$install/installed.txt" || fail "R4: after the pointer moves the SAME path reads the new version's record (no second write)"
+ok
+
+# --- legacy paths keep working THROUGH the pointer (requirement 3) -------------------------------------------
+install2="$W/install2"; mkdir -p "$install2/lua-core/lua" "$install2/scripts"
+printf 'old-program' > "$install2/wa"
+printf 'old-init' > "$install2/lua-core/lua/init.lua"
+printf 'old-deploy' > "$install2/scripts/deploy.sh"
+wa_version_link_legacy "$install2" > "$W/legacy.log" 2>&1 || { cat "$W/legacy.log" >&2; fail "R1/3: legacy paths become links through the pointer"; }
+[ -L "$install2/wa" ] && [ -L "$install2/lua-core" ] && [ -L "$install2/scripts" ] || fail "R1/3: wa, lua-core and scripts are links"
+ok
+[ "$(readlink -f "$install2/lua-core")" = "$(readlink -f "$WA_SHARE_ROOT/current/lua-core")" ] || fail "R1/3: the link resolves through current"
+ls "$install2"/lua-core.stale.* >/dev/null 2>&1 || fail "R1/5: the real directory was renamed ASIDE (a cut leaves evidence, nothing is deleted)"
+ok
+[ "$(cat "$install2/lua-core.stale."*/lua/init.lua)" = "old-init" ] || fail "R1/5: the aside copy is the old tree, untouched"
+ok
+
+# --- R7: retention -------------------------------------------------------------------------------------------
+# Five more versions, one of them the version a LIVE process runs from, one pinned.
+sleepbin="$(command -v sleep)"; [ -n "$sleepbin" ] || fail "R7: no sleep binary to keep a version live"
+for id in cccccccccccc dddddddddddd eeeeeeeeeeee; do
+  mkdir -p "$W/stage-$id"
+  cp -a "$stage1/." "$W/stage-$id/"
+  printf 'commit=%s\n' "$id$id$id$id" > "$W/stage-$id/installed.txt"
+done
+mkdir -p "$W/stage-cccccccccccc/live" && cp "$sleepbin" "$W/stage-cccccccccccc/live/sleep" || fail "R7: fixture for a live process"
+WA_VERSION_COMMIT=cccccccccccccccccccccccccccccccccccccccc wa_version_assemble "$W/stage-cccccccccccc" cccccccccccc "" >/dev/null 2>&1 || fail "R7: assembling the live version"
+"$WA_SHARE_ROOT/versions/cccccccccccc/live/sleep" 30 &
+LIVE_PID=$!
+sleep 0.2
+[ -n "$(wa_version_live_ids)" ] || fail "R7: a process running from a version folder is SEEN as live (its /proc/<pid>/exe)"
+grep -qx cccccccccccc <<<"$(wa_version_live_ids)" || fail "R7: the live version is named"
+ok
+WA_VERSION_COMMIT=dddddddddddddddddddddddddddddddddddddddd wa_version_assemble "$W/stage-dddddddddddd" dddddddddddd "" >/dev/null 2>&1 || fail "R7: assembling the pinned version"
+printf 'dddddddddddd\n' > "$WA_SHARE_ROOT/versions/.pinned"
+WA_VERSION_COMMIT=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee wa_version_assemble "$W/stage-eeeeeeeeeeee" eeeeeeeeeeee "" >/dev/null 2>&1 || fail "R7: assembling the newest version"
+wa_version_point eeeeeeeeeeee >/dev/null || fail "R7: pointing current at the newest"
+wa_version_prune 1 > "$W/prune.log" 2>&1 || { cat "$W/prune.log" >&2; fail "R7: prune ran"; }
+[ -d "$WA_SHARE_ROOT/versions/eeeeeeeeeeee" ] || fail "R7: current is never pruned"
+[ -d "$WA_SHARE_ROOT/versions/cccccccccccc" ] || fail "R7: a LIVE version is never pruned"
+[ -d "$WA_SHARE_ROOT/versions/dddddddddddd" ] || fail "R7: a PINNED version is never pruned"
+ok
+[ ! -d "$WA_SHARE_ROOT/versions/aaaaaaaaaaaa" ] || fail "R7: an old, unpinned, unreferenced version IS pruned"
+ok
+kill "$LIVE_PID" 2>/dev/null; LIVE_PID=""
+grep -q 'version_pruned' "$W/prune.log" || fail "R7: the prune says what it removed"
+ok
+
+# --- the legacy copies are not the versions' business --------------------------------------------------------
+printf 'wa.prev-kept' > "$W/install/wa.prev.20261101T000000Z"
+wa_version_prune 1 >/dev/null 2>&1 || true
+[ -f "$W/install/wa.prev.20261101T000000Z" ] || fail "R7: the legacy wa.prev copies are NOT touched by version retention (wa clean lists them)"
+ok
+
+# --- R9: the disk is asked BEFORE anything is staged ---------------------------------------------------------
+free_kb="$(df -P -k "$WA_SHARE_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
+case "$free_kb" in ''|*[!0-9]*) fail "R9: df did not answer";; esac
+free_bytes=$((free_kb * 1024))
+wa_version_refuse_no_room 1 "$free_bytes" 2>"$W/room.err" && fail "R9: no room must refuse"
+grep -q '^version_no_room free=' "$W/room.err" || fail "R9: the refusal is named and carries free/need/margin"
+ok
+[ -z "$(find "$WA_SHARE_ROOT/versions" -maxdepth 1 -name '.staging-*' 2>/dev/null)" ] || fail "R9: a refused install leaves NO staging dir"
+ok
+WA_VERSION_MARGIN_BYTES=$((free_bytes + 1)) wa_version_refuse_no_room 0 2>/dev/null && fail "R9: a margin larger than the free space refuses even a zero-byte version"
+ok
+[ "${need_full:-0}" -gt 4000000 ] || fail "R9: the need is counted in bytes over the members (${need_full:-?})"
+ok
+[ "${need_delta:-999999}" -lt 1000 ] || fail "R9: the need for a scripts-only version counts only the changed members (${need_delta:-?})"
+ok
+
+# --- the report's number: REAL disk, not apparent ------------------------------------------------------------
+wa_version_disk eeeeeeeeeeee | grep -q '^version_disk eeeeeeeeeeee real=[0-9]* apparent=' || fail "report: wa_version_disk names real blocks and apparent bytes"
+ok
+
+echo "version folders ok ($n checks)"
+

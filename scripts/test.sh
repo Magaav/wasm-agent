@@ -1553,6 +1553,12 @@ GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-alive
 # for 60 s with no request, no claimed request and no marker; killed, scripts-only and back-to-back, every resume
 # counted at the loopback model.
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-alive-hold.sh
+# THE VERSION FOLDERS (slice (b), Fable's nine requirements): one variable names versions/ and current in
+# the share root beside ui; a version folder is made once and sealed; an unchanged member is a HARD LINK;
+# installed.txt is a link to current's own record; retention keeps 3 and never current, the one before it, a
+# version a live process runs from, or a pinned one; and a full disk is refused by name before anything is
+# staged. Rows R3/R5 (a kill at every migration boundary) and R8 (the sentinel) come with their commits.
+gate_run bash scripts/test-versions.sh
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.
