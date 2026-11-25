@@ -1693,7 +1693,11 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     .map_err(|e| e.to_string())?;
                 progress_tick(&state, args["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("operation"));
                 if state["settled"] == true { crate::tool_progress::finish(id); return Ok(state); }
-                if crate::host::run_cancel_requested() {
+                // ... and ONLY for a wait this node's own interpreter is making. A RELAYED wait (a peer's
+                // `operation await`, rust/wa-capabilities/src/serve.rs install_relay_context) answers at
+                // its own wait_ms and touches nothing: its caller is another machine's clock, and
+                // ending it here would report an interruption for work nobody asked to stop.
+                if crate::host::run_cancel_requested() && !crate::serve::current_call_is_relayed() {
                     let mut state = state;
                     if let Some(fields) = state.as_object_mut() {
                         fields.insert("interrupted".into(), json!(true));
