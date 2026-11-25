@@ -166,6 +166,15 @@ wa_installer_env_prepare() {
   # never decides what the guard may see.
   [ -n "${WASM_AGENT_IN_TURN+x}" ] && printf 'WASM_AGENT_IN_TURN=%s\n' "$WASM_AGENT_IN_TURN"
   [ -n "${WASM_AGENT_PROVENANCE+x}" ] && printf 'WASM_AGENT_PROVENANCE=%s\n' "$WASM_AGENT_PROVENANCE"
+  # THE RELEASE CHANNEL'S CREDENTIALS TRAVEL WITH THE CHILD (25/11). A row that reads the released channel needs the
+  # same authentication the caller had: without it gh answers anonymously, the machine's 60 requests an hour are spent
+  # in a handful of runs, and the deploy's release walk finds nothing - so it falls back to BUILDING, which on a node
+  # with no toolchain is `refused(cargo_unavailable)` (measured in the runner, rows/20261125T033226Z). These are
+  # names only: a credential reaches the child's environment and nothing else, and no other state is inherited.
+  local pass
+  for pass in GH_TOKEN GITHUB_TOKEN GH_CONFIG_DIR; do
+    [ -n "${!pass+x}" ] && printf '%s=%s\n' "$pass" "${!pass}"
+  done
   # The caller's language and locale, because a row's own output is compared as text.
   [ -n "${LANG+x}" ] && printf 'LANG=%s\n' "$LANG"
   [ -n "${LC_ALL+x}" ] && printf 'LC_ALL=%s\n' "$LC_ALL"
