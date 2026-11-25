@@ -102,7 +102,9 @@ for name in wa lua-core scripts; do
 done
 ok
 # the ORDER: convert before stage before seal before restart before sentinel
-order="$(grep -n 'step [1-5]' "$W/seq1.log" | cut -d: -f2 | tr -d ' ' | tr '\n' ',')"
+# `grep -o`, not `grep -n | cut -d: -f2`: the line-number prefix became the second field, so the first version read
+# the program name five times (rows/20261125T233250Z-24786).
+order="$(grep -o 'step [1-5]' "$W/seq1.log" | tr -d ' ' | tr '\n' ',')"
 case "$order" in 'step1,step2,step3,step4,step5,') ;; *) fail "happy: the steps did not run in order ($order)";; esac
 ok
 
