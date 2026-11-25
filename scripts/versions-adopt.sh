@@ -120,9 +120,18 @@ if ! verify; then
   say "adopt_rollback: putting the in-place install back"
   for name in wa wa-sentinel lua-core scripts installed.txt ui; do
     aside="$(ls -d "$INSTALL/$name".stale.* 2>/dev/null | tail -1)"
-    [ -n "$aside" ] || continue
-    [ -L "$INSTALL/$name" ] && rm -f "$INSTALL/$name"
-    mv "$aside" "$INSTALL/$name" 2>/dev/null && say "adopt_rollback_kept_back $name"
+    if [ -n "$aside" ]; then
+      [ -L "$INSTALL/$name" ] && rm -f "$INSTALL/$name"
+      mv "$aside" "$INSTALL/$name" 2>/dev/null && say "adopt_rollback_kept_back $name"
+      continue
+    fi
+    # NO .stale COPY: the linker does not keep one when the bytes are IDENTICAL to the version folder (a cmp, not a
+    # copy), so the real path has to be restored from the version it was linked to. The row caught this: after the
+    # rollback the program was still a link, because there had never been a copy to move back.
+    if [ -L "$INSTALL/$name" ] && [ -e "$(wa_version_dir "$ID")/$name" ]; then
+      rm -f "$INSTALL/$name"
+      cp -a "$(wa_version_dir "$ID")/$name" "$INSTALL/$name" 2>/dev/null && say "adopt_rollback_restored $name"
+    fi
   done
   say "adopt_failed: the deploy must stop; the in-place install is untouched"
   exit 4
