@@ -165,6 +165,47 @@ first line and leaves no panic text; the CONTROL holds that a reader that STAYS 
 code (so "quiet" is not "prints nothing"); and `wa help` (the Lua print path, which never panicked) is quiet too.
 `broken pipe ok (9 checks)` against this tree's build; RED against the installed binary at the first case.
 
+## Item 7 (orchestrator, 26/11) - the deploy-wait row waits on the record, not on a sleep (94e124db)
+
+MEASURED (Fable 26/11): the release gate failed TWICE under load on `FAIL the held wakes run once the deploy ends:
+still 0`, main-health once, and the row passed alone every time.
+
+THE CAUSE IS A RACE, NOT A SLOW MACHINE. scripts/test-deploy-wait.sh boots a REAL node at its first step, and that
+node has its own tick loop. When the deploy ends, EITHER ticker may perform the held wakes - the node's 2-second loop
+between the row's shell steps, or the `lua tick` the row runs - so `dispatched=0` from the row's own tick can be the
+right answer to the wrong question. The row read that single number, once, as the whole claim.
+
+* scripts/lib/deploy-wait-e2e.lua: `DW_MODE=pending` reads the ledger - how many wakes are due now and still pending
+  (`due=<n> pending=<n>`).
+* scripts/test-deploy-wait.sh: `await_zero <mode> <field>` polls that record with a wall-clock deadline
+  (`WA_DEPLOY_WAIT_DEADLINE`, default 60 s), running the row's own tick FIRST each round, so a node that is not
+  ticking still gets the wakes performed by this row - the assertion cannot pass by waiting for a ticker nobody
+  started. Step 6 reads the record, says which ticker made it true, keeps `each dispatch reached the scheduler`,
+  `exactly once: a second tick dispatches nothing`, and waits for the resume count the same way. A real regression
+  now costs the deadline and fails naming the record's own number (`still N due wake(s) pending after 60s`).
+  NO assertion was dropped or loosened: the same four claims, against the record instead of one process's counter.
+
+FIVE RUNS UNDER LOAD, THROUGH THE RUNNER, each while a full `scripts/fast.sh` was running on the node:
+
+| row | verdict |
+| --- | --- |
+| 20261126T112522Z-17349 | rc=0 - `the held wakes run once the deploy ends (this row's tick dispatched 2; the ledger holds no due wake)` |
+| 20261126T112828Z-8885 | rc=0 - same line |
+| 20261126T113140Z-22378 | rc=0 - same line |
+| 20261126T113422Z-15723 | rc=0 - same line |
+| 20261126T113804Z-9634 | rc=0 - same line |
+
+All five: `leftovers=0 canary_before=green canary_after=green`, 107 `ok:` lines each, `deploy wait ok`.
+
+THE LOAD ITSELF, for honesty: that `scripts/fast.sh` run reported `fast path FAILED (10 of 494 checks, 0 skipped,
+1529s)` - and the deploy-wait row INSIDE it passed (`deploy-wait`, status pass, exit 0, 26 797 ms). The ten are nine
+land rows and one graph row, none of them mine and none of them touched by this branch: their own first causes are
+`host_error: disk_cap_refused_before_launch`, `fake: the sentinel refused (disk floor)` (test-land-sign,
+test-land-resume) and `watchdog: test-graph-quarantine-evidence.lua produced no verdict within 120s`; the other seven
+land rows fail at their first "it lands" check, which is downstream of the same refusals. I did not prove them
+pre-existing on the base (they are outside this brief and the run was the load, not the subject), and I did not
+change anything they touch - `git log --stat` on this branch lists no land or graph file.
+
 ## Rows through the orchestrator's runner (25/11, 22:2x-22:3xZ)
 
 The brief says rows go through the runner, and the runner found four real defects that a direct run had hidden - each
