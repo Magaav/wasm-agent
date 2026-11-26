@@ -14,6 +14,12 @@ function M.run()
     -- THE SERVING NODE ANSWERS (26/11, Fable item 2b): see lua/core/canaries/serving.lua.
     local serving = dofile('lua/core/canaries/serving.lua')
     local answered, answer, how = serving.ask('whatsapp_search', { kind = 'voice', limit = 5 })
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11, Fable item c, kept through the merge): a node that does not hold the
+    -- account answers state = queued while the owner is still being asked. That is not_proven; every other
+    -- refusal keeps the FAIL r4 made it.
+    if type(answer) == "table" and tostring(answer.state or "") == "queued" then
+      return "not_proven", "queued", "the account question is still queued on the serving node"
+    end
     if not answered then return false, tostring(answer.error or 'index_unreadable'), serving.detail(answer, tostring(answer.detail or '')) end
     if not answered then return false, 'index_unreadable', tostring(raw) end
     if type(answer) ~= 'table' then return false, 'index_unreadable', 'the voice search answered nothing' end

@@ -15,6 +15,12 @@ function M.run()
     -- not_proven.
     local serving = dofile('lua/core/canaries/serving.lua')
     local queried, contacts, how = serving.ask('whatsapp_contacts', {})
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11, Fable item c, kept through the merge): a node that does not hold the
+    -- account answers state = queued while the owner is still being asked. That is not_proven; every other
+    -- refusal keeps the FAIL r4 made it.
+    if type(contacts) == "table" and tostring(contacts.state or "") == "queued" then
+      return "not_proven", "queued", "the account question is still queued on the serving node"
+    end
     if not queried then return false, tostring(contacts.error or 'query_failed'), serving.detail(contacts, tostring(contacts.detail or '')) end
     local list = type(contacts) == 'table' and (contacts.chats or contacts.contacts or {}) or {}
     -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers

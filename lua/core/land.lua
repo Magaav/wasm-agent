@@ -4709,6 +4709,9 @@ impl.deploy = function(run, options)
           print("land: deploy: " .. name .. " already installed in this run")
           record({ node = name, mode = entry.mode or "tree", commit = sha, state = "installed", seconds = 0,
             detail = "already installed at this commit in this run" })
+          -- AND THE CANARIES MUST ASK IT (26/11): deployed_nodes is what steps.deploy.nodes carries, and the
+          -- canary step asks exactly that list - a node settled in an earlier round was recorded and never asked.
+          deployed_nodes[#deployed_nodes + 1] = { node = name, mode = entry.mode or "tree", state = "installed" }
         elseif stopped then
           record({ node = name, mode = entry.mode or "tree", commit = sha, state = "not_attempted", seconds = 0,
             detail = "not deployed: the round stopped at " .. tostring(stopped.detail or "an earlier node") })

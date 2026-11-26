@@ -32,8 +32,21 @@ local EMBEDDED = { 'lua/', 'rust/' }
 function M.recorded_commit(config_root)
   local paths = dofile('lua/core/paths.lua')
   local root = config_root or paths.config()
+  -- A RELEASE INSTALL KEEPS ITS RECORD BESIDE THE BINARY (26/11, measured on this laptop: the record is
+  -- ~/.local/bin/installed.txt, and this function looked only under <config>, so a node running a release install
+  -- answered unknown about identity it could prove). The same roots services_cli uses for serve.pid.
+  local roots = { tostring(root) }
+  local env = type(host.getenv) == "function" and host.getenv or function() return "" end
+  local explicit = tostring(env("WA_INSTALL_DIR") or "")
+  if explicit ~= "" then roots[#roots + 1] = explicit end
+  local home = tostring(env("HOME") or "")
+  if home ~= "" then
+    roots[#roots + 1] = home .. "/.local/bin"
+    roots[#roots + 1] = home .. "/AppData/Local/wasm-agent"
+  end
+  for _, base in ipairs(roots) do
   for _, name in ipairs({ '/installed.txt', '/startup/installed.txt' }) do
-    local ok, text = pcall(host.read_file, tostring(root) .. name)
+    local ok, text = pcall(host.read_file, tostring(base) .. name)
     if ok and type(text) == 'string' then
       -- THE NAMED KEY, not the first run of hex (26/11, Fable): scripts/lib/install-record.sh writes this
       -- record and its identity line is commit=<id> - the short form a build reports in its own --build-info,
@@ -42,6 +55,7 @@ function M.recorded_commit(config_root)
       local sha = text:match('^commit=([0-9a-fA-F]+)') or text:match('\ncommit=([0-9a-fA-F]+)')
       if sha then return sha end
     end
+  end
   end
   return nil
 end
