@@ -4127,7 +4127,7 @@ struct ConsoleInput {
     panel: Option<crate::screen::PanelState>,
     /// The output region's last row as this process last set it; 0 = the view's own layout.
     region: usize,
-    /// The chat as blocks (wa_term::transcript), drawn into the output region by this process - or,
+    /// The chat as blocks (the program's transcript), drawn into the output region by this process - or,
     /// by the terminal program across `crate::screen`'s wire - the only path since the last slice.
     transcript: crate::screen::Screen,
     /// When the debounced FULL repaint after a resize is due (item G): a resize sets it to now + the
@@ -4153,7 +4153,7 @@ struct ConsoleInput {
     submitted_images: Vec<usize>,
     /// `host.transcript_hold(true)`: writes are kept, not drawn, until the hold ends (a replay).
     transcript_held: bool,
-    /// The long tool call's line as this process last drew it (`wa_term::tool_progress`, the host's own
+    /// The long tool call's line as this process last drew it (`wa_tool_progress::render`, the host's own
     /// ticker). It lives in that call's **block** in the transcript, never on the
     /// session-status-content row (Victor, 2026-11-10); kept so an unchanged phrase is not redrawn.
     tool_progress: String,
@@ -4613,7 +4613,7 @@ fn refresh_build(state: &mut ConsoleInput) {
     let _ = crate::tty::write(&frame);
 }
 
-/// A long tool call's line (`wa_term::tool_progress`, docs/TOOL-PROGRESS.md) as it reads now, drawn
+/// A long tool call's line (`wa_tool_progress::render`, docs/TOOL-PROGRESS.md) as it reads now, drawn
 /// **inside that call's own block** in the transcript - never on the session-status-content row, which
 /// belongs to the update notice and its loader (Victor, 2026-11-10). Redrawn only when its text
 /// changed, for the same reason `refresh_build` is.
@@ -5651,7 +5651,7 @@ pub extern "C-unwind" fn transcript_expand(l: *mut LuaState) -> c_int {
 /// `host.transcript_card(ranges_json)`: the DIFF BODY of a card in the NEXT `transcript_write` -
 /// `[{"from": <first line of that write>, "to": <last line>}]`, inclusive. A block that carries one is
 /// a card: one blank row above and below it, never folded to three rows, and drawn open up to
-/// `wa_term::transcript::CARD_ROWS` lines per range with ONE row counting what it hid - a press on
+/// `card_rows` lines per range with ONE row counting what it hid - a press on
 /// that row or Ctrl+O on the newest card draws every line. The rows are all written either way: this
 /// is a display bound over a block the transcript already holds, and the frame, the heading and the
 /// counts are never part of what folds (lua/core/diff_view.lua).
