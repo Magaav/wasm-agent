@@ -155,5 +155,38 @@ ok
 grep -q 'wa_lua_part_host_interface' scripts/version-install.sh || fail "R3b: version-install.sh does not ask the staged program"
 ok
 
+# R0: THE PRODUCER, round-tripped through the verifier ----------------------------------------------------------
+# lua-part-build.sh writes the part and prints the lock line. What it produces must verify with the same
+# lua-part.sh the install path uses, and the lock line must be what the lock reader expects - otherwise producing
+# and installing would be two contracts that merely look alike.
+prod="$W/prod/lua"; mkdir -p "$prod/lua/core"
+printf 'init from the producer\n' > "$prod/lua/core/init.lua"
+printf 'vendored\n' > "$prod/lua/core/vendor.lua"
+LOCKLINE="$(bash scripts/lua-part-build.sh --tree "$prod" --commit deadbeefcafe --interface "$HOST_INT" --out "$W/prod" 2>/dev/null | tail -1)"
+case "$LOCKLINE" in "lua-core "*" interface=$HOST_INT") ;; *) fail "R0: the producer did not print a lock line ($LOCKLINE)";; esac
+ok
+PROD_PART="$(ls "$W/prod"/lua-core-*.tar.gz 2>/dev/null | head -1)"
+[ -n "$PROD_PART" ] || fail "R0: the producer wrote no part file"
+printf '%s\n' "$LOCKLINE" > "$W/prod/lua.part.lock"
+wa_lua_part_verify_file "$PROD_PART" "$W/prod/lua.part.lock" || fail "R0: the produced part does not verify against its own lock line"
+ok
+mkdir -p "$W/prod-land/lua-core"
+wa_lua_part_unpack "$PROD_PART" "$W/prod/lua.part.lock" "$W/prod-land/lua-core" || fail "R0: the produced part does not unpack"
+grep -q 'init from the producer' "$W/prod-land/lua-core/lua/core/init.lua" || fail "R0: the unpacked tree is not the produced one"
+ok
+# and it refuses a tree that is not a Lua tree, and an unknown interface
+mkdir -p "$W/notlua"
+bash scripts/lua-part-build.sh --tree "$W/notlua" --interface "$HOST_INT" --out "$W/prod" 2> "$W/pb1" \
+  && fail "R0: a tree with no lua/core must be refused"
+grep -q 'lua_part_no_lua_core' "$W/pb1" || fail "R0: the not-a-Lua-tree refusal is not named"
+ok
+# A tree with NO manifest and no --interface: the producer must refuse rather than invent one. (The tree it just
+# built carries a manifest now, so this uses a fresh copy - the first version of this case read the manifest the
+# producer itself had written and the refusal never happened.)
+cp -a "$prod" "$W/nointf"; rm -f "$W/nointf/manifest.txt"
+bash scripts/lua-part-build.sh --tree "$W/nointf" --out "$W/prod2" 2> "$W/pb2" && fail "R0: an unknown interface must be refused"
+grep -q 'lua_part_interface_unknown' "$W/pb2" || { sed -n 1,2p "$W/pb2" >&2; fail "R0: the unknown-interface refusal is not named"; }
+ok
+
 echo "lua part ok ($n checks)"
 
