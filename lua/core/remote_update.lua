@@ -1197,9 +1197,15 @@ function M.read_status(args, caller)
     contains_target = outcome.contains_target == true,
     server = record.server,
   }
+  -- SETTLE THE STATE TOO (update-requests-settle, Fable 26/11). This block already wrote the OUTCOME - and left
+  -- `state` at `queued` forever, which is why openclaw held 78 records saying queued about installs that worked: a
+  -- reader of the FILE (the cut's wait) reads `state`, and `installed` had no writer at all. The state is now what
+  -- the install proved, and the time it finished under the name a reader asks for.
   if (outcome.state == 'installed' or outcome.state == 'failed' or outcome.state == 'silent') and record.outcome == nil then
+    record.state = outcome.state
     record.outcome = outcome.state
     record.settled_at = math.floor(host.now())
+    record.finished_at = record.settled_at
     record.installed_commit = outcome.installed_commit
     record.detail = outcome.detail
     write_record(record)
