@@ -1464,6 +1464,105 @@ function M.withdraw_wake(op)
   return called and done == true
 end
 
+-- ---------------------------------------------------------------------------- holding the answer
+--
+-- A script that ends with live work used to hand the model a handle, and the wait then cost a model round
+-- trip each time (measured 26/11 over seven days: 8,772 `operation` calls inside 942 runs over two minutes,
+-- 45 % of those runs making six or more, one making 172). The handle still exists for a script that WANTS to
+-- keep working in parallel - blocking is never forced - but when the script has simply ended, there is nothing
+-- for the model to decide: the harness holds the one answer itself, on the same call the model already made,
+-- until an event. One call, one result, no new field on the result: prompt delta 0.
+--
+-- The four events, and why each is what it is (numbers in ready-waiting-costs-no-turns.md):
+--   * settled - reliable for 100 % of jobs, so this is where the saving comes from;
+--   * silence past the job's own norm - only for a job that HAS written output: 29 % of long jobs never
+--     write a byte, and their own norm is silence, so a global silence rule would fire on correct silent
+--     work (a `make -s` is the measured case);
+--   * near its own limit - the only early event a never-speaking job can offer;
+--   * the user - a stop/steer cancels the hold at once and the model gets the facts it has now.
+-- A hold never outlives the operation's own timeout, and never exceeds the ceiling below; a run is never
+-- killed for waiting (the approved rule stands), so the ceiling is a bound on THIS answer, not on the work.
+M.ANSWER_HOLD_MS = 900000   -- 15 min ceiling on holding one answer
+M.HOLD_SILENCE_MS = 30000   -- a job that has spoken and then says nothing for this long is reported, not held
+M.HOLD_DEADLINE_MS = 30000  -- "near its own limit": within this much of the operation's own timeout
+
+local function env_ms(name, fallback)
+  local raw = (host.getenv and host.getenv(name)) or nil
+  local value = tonumber(raw)
+  if value and value >= 0 then return math.floor(value) end
+  return fallback
+end
+
+function M.answer_hold_ms() return env_ms("WASM_AGENT_CODEMODE_ANSWER_HOLD_MS", M.ANSWER_HOLD_MS) end
+function M.hold_silence_ms() return env_ms("WASM_AGENT_CODEMODE_HOLD_SILENCE_MS", M.HOLD_SILENCE_MS) end
+function M.hold_deadline_ms() return env_ms("WASM_AGENT_CODEMODE_HOLD_DEADLINE_MS", M.HOLD_DEADLINE_MS) end
+
+-- Hold this scope's answer until an event. Returns nil when there was nothing live to hold, else the reason
+-- the hold ended and how long it held - for the ledger, never for the model.
+function M.hold_before_answer(dispatch, opts, scope)
+  local index = M.open(scope)
+  if index.count == 0 then return nil end
+  local started = host.now()
+  local limit_ms = M.answer_hold_ms()
+  local silence_ms = M.hold_silence_ms()
+  local deadline_ms = M.hold_deadline_ms()
+  local woke = nil
+  while true do
+    local live, silent, near_limit = 0, false, false
+    local first_live = nil
+    for _, record in pairs(index.ops) do
+      if record.state == "running" or record.state == "unknown" then
+        local executor = executor_of(record)
+        if executor then
+          local state = executor_poll(executor, dispatch, opts, record, 0)
+          if type(state) == "table" and state.settled == true then
+            settle(executor, dispatch, opts, scope, index, record, state)
+          else
+            live = live + 1
+            first_live = first_live or { executor = executor, record = record }
+            if type(state) == "table" then
+              -- Where the silence clock comes from, in order: the field the operation reports when it has
+              -- one, else the two it always reports (23/11 state record: elapsed_ms and
+              -- last_output_elapsed_ms are in every answer, output_idle_ms only in some). A job that has
+              -- never written a byte is NOT silent - its own norm is silence (29 % of long jobs) - so the
+              -- rule needs the `wrote` half and not only the clock.
+              local idle = tonumber(state.output_idle_ms)
+              if idle == nil then
+                local elapsed = tonumber(state.elapsed_ms)
+                local last = tonumber(state.last_output_elapsed_ms)
+                if elapsed and last then idle = math.max(0, elapsed - last) end
+              end
+              local wrote = (tonumber(state.output_bytes) or 0) > 0
+                or (tonumber(state.last_output_elapsed_ms) or 0) > 0
+              if wrote and idle ~= nil and idle >= silence_ms then silent = true end
+              local remaining = tonumber(state.remaining_ms)
+              if remaining ~= nil and remaining <= deadline_ms then near_limit = true end
+            end
+          end
+        end
+      end
+    end
+    if live == 0 then break end
+    if silent then woke = "silent" break end
+    if near_limit then woke = "deadline" break end
+    if cancelled() then woke = "user" break end
+    local spent_ms = math.floor((host.now() - started) * 1000)
+    if spent_ms >= limit_ms then woke = "hold_limit" break end
+    -- One real slice of waiting, so this loop is not a spin: the same 1 s slice `operation_poll` uses, and
+    -- only the FIRST live record is polled per turn of the loop, because the next turn re-reads them all.
+    if first_live then
+      local slice = math.max(1, math.min(M.SLICE_MS, limit_ms - spent_ms))
+      local state = executor_poll(first_live.executor, dispatch, opts, first_live.record, slice)
+      if type(state) == "table" and state.settled == true then
+        settle(first_live.executor, dispatch, opts, scope, index, first_live.record, state)
+      end
+    end
+  end
+  local held_ms = math.floor((host.now() - started) * 1000)
+  M.save(scope, index)
+  return { woke = woke, held_ms = held_ms }
+end
+
 function M.announce(scope)
   local index = M.open(scope)
   if index.count == 0 then return nil end

@@ -1380,6 +1380,14 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
     end
   end
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
+  -- HOLD THE ANSWER, NOT THE RUN (27/11). A script that ended with live work used to hand the model a
+  -- handle, and every further wait was a model round trip (measured: 8,772 `operation` calls inside 942
+  -- runs over two minutes in seven days, one run making 172). Nothing the model could decide is left at
+  -- this point - the script is over - so the harness waits here, on the same call, until an event: the
+  -- work settled, it went silent past its own norm, it is near its own limit, or the user cancelled.
+  -- `announce` below then reports exactly what `invoke` already reports for work that settled during the
+  -- script, so this adds NO field to the answer: prompt bytes stay as they were.
+  pending_calls.hold_before_answer(dispatch,popts,scope)
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
   -- Every handle this script stops waiting for is work nobody is waiting for any more: its CPU
