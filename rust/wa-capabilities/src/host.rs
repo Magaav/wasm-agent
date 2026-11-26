@@ -4119,7 +4119,7 @@ struct ConsoleInput {
     eof: bool,
     stop: bool,
     running: bool,
-    raw: Option<wa_term::terminal_editor::RawMode>,
+    raw: Option<crate::tty::RawMode>,
     editor: Option<wa_term::terminal_editor::Editor>,
     /// An open panel (`host.panel`): it owns the keys and the bottom of the screen until closed.
     panel: Option<wa_term::terminal_editor::Panel>,
@@ -4208,7 +4208,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         .is_some_and(|(top, bottom)| row >= top && row <= bottom);
                     if over_box && state.editor.as_mut().is_some_and(|input| input.wheel(up, 3)) {
                         let frame = layout_frame(state);
-                        let _ = wa_term::terminal_editor::write(&frame);
+                        let _ = crate::tty::write(&frame);
                         return;
                     }
                     clear_selection(state);
@@ -4252,7 +4252,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                             if let Some(index) = hit {
                                 state.box_drag = Some(index);
                                 let frame = layout_frame(state);
-                                let _ = wa_term::terminal_editor::write(&frame);
+                                let _ = crate::tty::write(&frame);
                             }
                             return;
                         }
@@ -4264,7 +4264,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         if !over_transcript { return; }
                         if state.transcript.on_pin(row) && state.transcript.jump_to_pinned(width) {
                             let frame = layout_frame(state);
-                            let _ = wa_term::terminal_editor::write(&frame);
+                            let _ = crate::tty::write(&frame);
                             return;
                         }
                     }
@@ -4273,7 +4273,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         if !over_transcript { return; }
                         if state.transcript.on_notice(row) && state.transcript.clear_notice() {
                             let frame = layout_frame(state);
-                            let _ = wa_term::terminal_editor::write(&frame);
+                            let _ = crate::tty::write(&frame);
                             return;
                         }
                     }
@@ -4285,7 +4285,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                             state.transcript.to_bottom();
                             state.transcript.mark_dirty();
                             let frame = layout_frame(state);
-                            let _ = wa_term::terminal_editor::write(&frame);
+                            let _ = crate::tty::write(&frame);
                             return;
                         }
                     }
@@ -4294,7 +4294,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         if !over_transcript { return; }
                         if state.transcript.expand_at(row) {
                             let frame = layout_frame(state);
-                            let _ = wa_term::terminal_editor::write(&frame);
+                            let _ = crate::tty::write(&frame);
                             return;
                         }
                     }
@@ -4306,11 +4306,11 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                             if let Some(url) = shown.get(row.saturating_sub(1))
                                 .and_then(|line| wa_term::links::at(&wa_term::selection::plain(line), col))
                             {
-                                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&url));
+                                let _ = crate::tty::write(&wa_term::selection::osc52(&url));
                                 let count = url.chars().count();
                                 say(state, format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" }), false);
                                 let frame = layout_frame(state);
-                                let _ = wa_term::terminal_editor::write(&frame);
+                                let _ = crate::tty::write(&frame);
                                 return;
                             }
                         }
@@ -4321,11 +4321,11 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                     Gesture::BlockCopy => {
                         if !over_transcript { return; }
                         if let Some(text) = state.transcript.copy_at(row, col) {
-                            let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                            let _ = crate::tty::write(&wa_term::selection::osc52(&text));
                             let count = text.chars().count();
                             say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
                             let frame = layout_frame(state);
-                            let _ = wa_term::terminal_editor::write(&frame);
+                            let _ = crate::tty::write(&frame);
                             return;
                         }
                     }
@@ -4357,7 +4357,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                     let copy = row <= rows && state.transcript.copy_hover(row, col);
                     if expand || copy {
                         let frame = layout_frame(state);
-                        let _ = wa_term::terminal_editor::write(&frame);
+                        let _ = crate::tty::write(&frame);
                     }
                     return;
                 }
@@ -4376,7 +4376,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         // (the editor borrow ends here; the frame below reads the whole state)
                         if matches!(event, Mouse::Release(..)) { state.box_drag = None; }
                         let frame = layout_frame(state);
-                        let _ = wa_term::terminal_editor::write(&frame);
+                        let _ = crate::tty::write(&frame);
                         return;
                     }
                     // A drag that began on the bar scrolls it, and the button coming up lets the thumb go.
@@ -4401,7 +4401,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
             // finds it there, and Ctrl+C still copies and clears as before.
             if matches!(event, Mouse::Release(..)) {
                 let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
-                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                let _ = crate::tty::write(&wa_term::selection::osc52(&text));
                 let count = text.chars().count();
                 say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
             }
@@ -4415,7 +4415,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
 fn copy_selection(state: &mut ConsoleInput) -> bool {
     let Some(selection) = state.selection.as_ref() else { return false };
     let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
-    let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+    let _ = crate::tty::write(&wa_term::selection::osc52(&text));
     let count = text.chars().count();
     clear_selection(state);
     say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
@@ -4454,11 +4454,11 @@ fn write_at_editor(text: &str) -> std::io::Result<()> {
                 text.replace("{O}", &current_region(&state, editor).to_string())
                     .replace("{S}", &editor.status_row().to_string())
             } else { text.to_string() };
-            if state.panel.is_some() { return wa_term::terminal_editor::write(&text); }
-            wa_term::terminal_editor::write(&format!("\x1b[?25l{}{}\x1b[?25h",
+            if state.panel.is_some() { return crate::tty::write(&text); }
+            crate::tty::write(&format!("\x1b[?25l{}{}\x1b[?25h",
                 text.replace("\x1b[?25h", ""), editor.cursor_frame()))
         }
-        None => wa_term::terminal_editor::write(text),
+        None => crate::tty::write(text),
     }
 }
 
@@ -4544,7 +4544,7 @@ fn expire_notice() {
     if !state.transcript.expire_notice(std::time::Instant::now()) { return }
     if state.editor.as_ref().is_none_or(|editor| editor.row == 0) || state.panel.is_some() { return }
     let frame = layout_frame(&mut state);
-    let _ = wa_term::terminal_editor::write(&frame);
+    let _ = crate::tty::write(&frame);
 }
 
 fn status_visible() -> bool {
@@ -4577,7 +4577,7 @@ fn refresh_build(state: &mut ConsoleInput) {
     if build == editor.build { return; }
     editor.build = build;
     let frame = layout_frame(state);
-    let _ = wa_term::terminal_editor::write(&frame);
+    let _ = crate::tty::write(&frame);
 }
 
 /// A long tool call's line (`wa_term::tool_progress`, docs/TOOL-PROGRESS.md) as it reads now, drawn
@@ -4606,7 +4606,7 @@ fn refresh_tool_progress(state: &mut ConsoleInput) {
     let text = if state.tool_progress.is_empty() { None } else { Some(state.tool_progress.as_str()) };
     state.transcript.live(text);
     let frame = layout_frame(state);
-    let _ = wa_term::terminal_editor::write(&frame);
+    let _ = crate::tty::write(&frame);
 }
 
 /// The framed layout, bottom up (the twin of `cli_view.screen_rows` with an editor):
@@ -4632,7 +4632,7 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
     frame.push_str(&format!("\x1b[1;{}r", want.max(1)));
     state.region = want.max(1);
     frame.push_str(&layout_frame(state));
-    let _ = wa_term::terminal_editor::write(&frame);
+    let _ = crate::tty::write(&frame);
 }
 
 /// The debounced full repaint after a resize (item G): once the burst has been quiet for the
@@ -4664,7 +4664,7 @@ fn repaint_if_due() {
     state.transcript.mark_dirty();
     let rest = layout_frame(&mut state);
     frame.push_str(&rest);
-    let _ = wa_term::terminal_editor::write(&frame);
+    let _ = crate::tty::write(&frame);
 }
 
 #[cfg(test)]
@@ -4737,7 +4737,7 @@ fn console_reader() {
             //
             // While the OPENING owns the screen (host.opening_start) this loop is also its clock: one
             // frame per wait, and a resize ends it. The chat's own rows are not drawn then - every
-            // write is held (wa_term::terminal_editor::write) and goes out when it ends.
+            // write is held (crate::tty::write) and goes out when it ends.
             #[cfg(unix)]
             loop {
                 if byte_ready(opening_wait()) { break; }
@@ -4791,7 +4791,7 @@ fn console_reader() {
                         if wa_term::keymap::console_byte(byte) == Some(wa_term::keymap::HostAct::Pin)
                             && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
                             let frame = layout_frame(&mut state);
-                            let _ = wa_term::terminal_editor::write(&frame);
+                            let _ = crate::tty::write(&frame);
                             continue;
                         }
                         // Ctrl+C with a selection copies it; any other key ends the selection first.
@@ -4904,7 +4904,7 @@ fn console_reader() {
                             // The draft's selection to the clipboard (Ctrl+C / Ctrl+Insert with text selected):
                             // OSC 52, the same write the transcript's copy icon makes.
                             wa_term::terminal_editor::Action::Copy(text) => {
-                                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                                let _ = crate::tty::write(&wa_term::selection::osc52(&text));
                                 let count = text.chars().count();
                                 say(&mut state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
                             }
@@ -5004,7 +5004,7 @@ fn console_reader() {
                     }
                     flush_editor_notice(&mut state);
                     let frame = layout_frame(&mut state);
-                    if !frame.is_empty() { let _ = wa_term::terminal_editor::write(&frame); }
+                    if !frame.is_empty() { let _ = crate::tty::write(&frame); }
                     wake.notify_all();
                     if state.eof { return; }
                 }
@@ -5074,7 +5074,7 @@ pub extern "C-unwind" fn input_start(l: *mut LuaState) -> c_int {
             }
             state.raw = if arg_integer(l, 1) == Some(1) && console_size().is_some()
                 && std::env::var("WASM_AGENT_CLI_EDITOR").unwrap_or_default() != "off" {
-                wa_term::terminal_editor::try_raw()
+                crate::tty::try_raw()
             } else { None };
             state.editor = state.raw.as_ref().map(|_| wa_term::terminal_editor::Editor::default());
             state.running = true;
@@ -5185,7 +5185,7 @@ fn opening_tick(state: &mut ConsoleInput) {
     }
     let painted = state.opening.as_mut().and_then(|opening| opening.step());
     match painted {
-        Some(bytes) => { if !bytes.is_empty() { let _ = wa_term::terminal_editor::write_now(&bytes); } }
+        Some(bytes) => { if !bytes.is_empty() { let _ = crate::tty::write_now(&bytes); } }
         None => finish_opening(state),
     }
 }
@@ -5199,13 +5199,13 @@ fn finish_opening(state: &mut ConsoleInput) {
     state.opening_until = None;
     OPENING_UP.store(false, std::sync::atomic::Ordering::SeqCst);
     if let Some(hook) = state.opening_hook.take() { hook.restore(); }
-    let _ = wa_term::terminal_editor::write_now(&wa_term::opening::leave_bytes());
-    let held = wa_term::terminal_editor::release();
-    if !held.is_empty() { let _ = wa_term::terminal_editor::write_now(&held); }
+    let _ = crate::tty::write_now(&wa_term::opening::leave_bytes());
+    let held = crate::tty::release();
+    if !held.is_empty() { let _ = crate::tty::write_now(&held); }
     state.transcript.mark_dirty();
     if state.editor.as_ref().is_some_and(|editor| editor.row > 0) && state.panel.is_none() {
         let frame = layout_frame(state);
-        if !frame.is_empty() { let _ = wa_term::terminal_editor::write(&frame); }
+        if !frame.is_empty() { let _ = crate::tty::write(&frame); }
     }
 }
 
@@ -5248,18 +5248,18 @@ pub extern "C-unwind" fn opening_start(l: *mut LuaState) -> c_int {
     let mut opening = wa_term::opening::Opening::new(columns as usize, rows as usize, seed);
     let scale = (budget as f32 / opening.planned_ms().max(1) as f32).clamp(0.05, 1.0);
     let frames = opening.frames();
-    wa_term::terminal_editor::hold();
+    crate::tty::hold();
     OPENING_UP.store(true, std::sync::atomic::Ordering::SeqCst);
     register_opening_atexit();
     state.opening_hook = Some(wa_term::scroll::screen::install_panic_restore_with(
         wa_term::scroll::Mode::Fullscreen,
-        |bytes| { let _ = wa_term::terminal_editor::write_now(bytes); }));
-    let _ = wa_term::terminal_editor::write_now(wa_term::opening::enter_bytes());
+        |bytes| { let _ = crate::tty::write_now(bytes); }));
+    let _ = crate::tty::write_now(wa_term::opening::enter_bytes());
     let first = opening.step();
     state.opening_scale = scale;
     state.opening_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(budget));
     state.opening = Some(opening);
-    if let Some(bytes) = first { if !bytes.is_empty() { let _ = wa_term::terminal_editor::write_now(&bytes); } }
+    if let Some(bytes) = first { if !bytes.is_empty() { let _ = crate::tty::write_now(&bytes); } }
     push_json(l, &json!({"started": true, "frames": frames, "budget_ms": budget}));
     1
 }
@@ -5310,7 +5310,7 @@ pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
         editor.width = width;
         editor.height = height;
         let frame = layout_frame(&mut state);
-        wa_term::terminal_editor::write(&format!("\x1b[?2004h{}{frame}", wa_term::selection::ENABLE)).is_ok()
+        crate::tty::write(&format!("\x1b[?2004h{}{frame}", wa_term::selection::ENABLE)).is_ok()
     } else { false };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -5337,7 +5337,7 @@ pub extern "C-unwind" fn panel(l: *mut LuaState) -> c_int {
         state.host_panel = false;
         if state.panel.take().is_some() {
             let frame = layout_frame(&mut state);
-            let _ = wa_term::terminal_editor::write(&frame);
+            let _ = crate::tty::write(&frame);
         }
         drop(state);
         push_json(l, &json!({"action": "closed"}));
@@ -5348,7 +5348,7 @@ pub extern "C-unwind" fn panel(l: *mut LuaState) -> c_int {
     state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
     state.host_panel = false;
     let frame = layout_frame(&mut state);
-    let _ = wa_term::terminal_editor::write(&frame);
+    let _ = crate::tty::write(&frame);
     let answer = loop {
         if let Some(result) = state.panel.as_mut().and_then(|panel| panel.result.take()) { break result; }
         if state.eof || state.stop || state.panel.is_none() { break json!({"action": "cancel"}); }
@@ -5378,7 +5378,7 @@ pub extern "C-unwind" fn editor_footer(l: *mut LuaState) -> c_int {
         if let Some(right) = right { editor.footer_right = right; }
         if editor.row > 0 && state.panel.is_none() {
             let frame = layout_frame(&mut state);
-            wa_term::terminal_editor::write(&frame).is_ok()
+            crate::tty::write(&frame).is_ok()
         } else { true }
     } else { false };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
@@ -5402,7 +5402,7 @@ pub extern "C-unwind" fn editor_wakes(l: *mut LuaState) -> c_int {
     }).unwrap_or(false);
     let ok = if changed {
         let frame = layout_frame(&mut state);
-        frame.is_empty() || wa_term::terminal_editor::write(&frame).is_ok()
+        frame.is_empty() || crate::tty::write(&frame).is_ok()
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -5424,7 +5424,7 @@ pub extern "C-unwind" fn editor_notice(l: *mut LuaState) -> c_int {
     }).unwrap_or(false);
     let ok = if changed {
         let frame = layout_frame(&mut state);
-        frame.is_empty() || wa_term::terminal_editor::write(&frame).is_ok()
+        frame.is_empty() || crate::tty::write(&frame).is_ok()
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -5442,7 +5442,7 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     state.transcript.write_marked(&text, request);
     let ok = if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
         let frame = layout_frame(&mut state);
-        wa_term::terminal_editor::write(&frame).is_ok()
+        crate::tty::write(&frame).is_ok()
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -5488,7 +5488,7 @@ pub extern "C-unwind" fn transcript_hold(l: *mut LuaState) -> c_int {
     if was && !on && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() {
         state.transcript.mark_dirty();
         let frame = layout_frame(&mut state);
-        let _ = wa_term::terminal_editor::write(&frame);
+        let _ = crate::tty::write(&frame);
     }
     unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
     1
@@ -5518,7 +5518,7 @@ pub extern "C-unwind" fn transcript_fold(l: *mut LuaState) -> c_int {
     let ok = state.transcript.fold_code(&summary);
     if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
         let frame = layout_frame(&mut state);
-        let _ = wa_term::terminal_editor::write(&frame);
+        let _ = crate::tty::write(&frame);
     }
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -5536,7 +5536,7 @@ pub extern "C-unwind" fn transcript_rewrite(l: *mut LuaState) -> c_int {
     let ok = state.transcript.rewrite(offset, &text);
     if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
         let frame = layout_frame(&mut state);
-        let _ = wa_term::terminal_editor::write(&frame);
+        let _ = crate::tty::write(&frame);
     }
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -5556,7 +5556,7 @@ pub extern "C-unwind" fn transcript_live(l: *mut LuaState) -> c_int {
     if text.trim().is_empty() { state.transcript.live(None) } else { state.transcript.live(Some(&text)) }
     let ok = if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
         let frame = layout_frame(&mut state);
-        wa_term::terminal_editor::write(&frame).is_ok()
+        crate::tty::write(&frame).is_ok()
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -6166,7 +6166,7 @@ pub extern "C-unwind" fn transcript_head(l: *mut LuaState) -> c_int {
     let ok = state.transcript.head(&text);
     if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
         let frame = layout_frame(&mut state);
-        let _ = wa_term::terminal_editor::write(&frame);
+        let _ = crate::tty::write(&frame);
     }
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -6185,7 +6185,7 @@ pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
             editor.status = on;
             if editor.row > 0 && state.panel.is_none() {
                 let frame = layout_frame(&mut state);
-                let _ = wa_term::terminal_editor::write(&frame);
+                let _ = crate::tty::write(&frame);
             }
         }
         true
@@ -6226,7 +6226,7 @@ fn sync_queued(state: &mut ConsoleInput) -> bool {
 fn redraw_bottom(state: &mut ConsoleInput) {
     if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() {
         let frame = layout_frame(state);
-        if !frame.is_empty() { let _ = wa_term::terminal_editor::write(&frame); }
+        if !frame.is_empty() { let _ = crate::tty::write(&frame); }
     }
 }
 
@@ -6329,7 +6329,7 @@ pub fn restore_input() {
         // flow: a blank alternate screen with no cursor is the one failure a terminal program must not
         // have (docs/TERMINAL.md, "Giving the terminal back").
         finish_opening(&mut state);
-        if state.editor.is_some() { let _ = wa_term::terminal_editor::write(&format!("\x1b[?2004l{}", wa_term::selection::DISABLE)); }
+        if state.editor.is_some() { let _ = crate::tty::write(&format!("\x1b[?2004l{}", wa_term::selection::DISABLE)); }
         state.selection = None;
         state.mouse_pending.clear();
         state.editor = None;
