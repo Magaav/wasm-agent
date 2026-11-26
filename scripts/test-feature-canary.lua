@@ -15,7 +15,11 @@
 if not host then error("this test runs under the node (WA_SCRIPT), not plain Lua") end
 local home_guard = dofile("scripts/lib/test-home-guard.lua")
 local test_home = os.getenv("WASM_AGENT_HOME") or ""
-local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
+-- THE RUNNER DECLARES ITS OWN ROOT: under the orchestrator's runner HOME and WASM_AGENT_HOME are
+-- <root>/home while TMPDIR is <root>/tmp, so a guard that only knows TMPDIR refuses a home the runner
+-- itself made (measured: this row refused under the runner on 25/11). GATE_ROOT first, then the runner's
+-- declared root, then TMPDIR - the same allow-list, with the root the caller actually owns.
+local scratch_root = os.getenv("GATE_ROOT") or os.getenv("WA_ROW_SCRATCH_ROOT") or os.getenv("TMPDIR") or ""
 local guard_reason = home_guard.reason({ home = test_home, scratch = scratch_root })
 if guard_reason then error("this test writes state: it refuses to run (" .. guard_reason .. ")") end
 
@@ -108,6 +112,12 @@ canary_module("raiser", table.concat({
 canary_module("unloadable", "error('this module cannot even be loaded')\n")
 canary_module("malformed", "return 42\n")
 canary_module("passes", "return { mode = 'read', run = function() return true, 'done', 'read-only' end }\n")
+-- THE FOURTH CLASS (25/11): a canary whose question this node cannot answer - an empty index, a cutting node -
+-- answers not_proven, and it is neither a pass nor a failure. The summary counts it, and that count is what
+-- the release step reads when it decides whether a canary was proven anywhere.
+canary_module("notproven", table.concat({
+  "return { mode = 'read', run = function() return 'not_proven', 'no_data', 'no_data: nothing to test here' end }",
+}, "\n"))
 check(host.write_file(canary_dir .. "/sendy.lua", table.concat({
   "local guard = dofile('lua/core/canaries/guard.lua')",
   "return { mode = 'read', run = function()",
@@ -127,6 +137,7 @@ local fixture = { schema = 1, features = {
   { name = "unloadable-one", role = "any", canary = "unloadable", last_success = "fixture: nothing", stale_after_s = 600 },
   { name = "malformed-one", role = "any", canary = "malformed", last_success = "fixture: nothing", stale_after_s = 600 },
   { name = "no-canary", role = "any", canary = "absent", last_success = "fixture: nothing", stale_after_s = 600 },
+  { name = "not-proven", role = "any", canary = "notproven", last_success = "fixture: nothing", stale_after_s = 600 },
   { name = "sends", role = "any", canary = "sendy", last_success = "fixture: nothing", stale_after_s = 600 },
   { name = "elsewhere", role = "component:not-installed-here", canary = "passes", last_success = "fixture: nothing", stale_after_s = 600 },
 } }
@@ -193,6 +204,11 @@ for _, result in ipairs(results or {}) do by_name[result.feature] = result end
 eq(by_name.passing and by_name.passing.ok, true, "the passing canary passes")
 eq(by_name.passing and by_name.passing.recorded, true, "the passing verdict is recorded")
 eq(by_name["broken-child"].ok, false, "the broken canary is red in the run")
+-- not_proven is neither: it did not pass, it did not fail, and it records nothing (like off).
+eq(by_name["not-proven"] and by_name["not-proven"].ok, false, "a not_proven canary is not a pass")
+eq(by_name["not-proven"] and by_name["not-proven"].not_proven, true, "and the result carries the not_proven flag")
+eq(by_name["not-proven"] and by_name["not-proven"].stage, "no_data", "with the stage that says why")
+eq(by_name["not-proven"] and by_name["not-proven"].recorded, nil, "and it records nothing, so a last success keeps its own time")
 eq(by_name.elsewhere and by_name.elsewhere.skipped, true, "a feature whose component is absent is skipped, not failed")
 eq(by_name.elsewhere and by_name.elsewhere.stage, "off-node", "the skip is named off-node")
 
@@ -205,7 +221,12 @@ eq(reported["broken-child"].last_fail_stage, "turn", "the failing stage reaches 
 eq(reported.elsewhere.verdict, "off-node", "an absent component reads off-node")
 
 local lines = feature_canary.lines(results)
-contains(table.concat(lines, "\n"), "canaries: 1 passed, 6 failed, 0 off, 1 off-node", "the summary counts every class")
+contains(table.concat(lines, "\n"), "canaries: 1 passed, 6 failed, 0 off, 1 not proven, 1 off-node", "the summary counts every class")
+-- AND THE LINE ITSELF: a not_proven canary is printed by name with its reason, because a count without a
+-- name is not something an operator can act on.
+contains(table.concat(lines, "\n"), "NOT PROVEN", "a not_proven canary is printed, not folded into a count")
+contains(table.concat(lines, "\n"), "not-proven", "and it is named")
+contains(table.concat(lines, "\n"), "no_data: nothing to test here", "with the reason it gave")
 contains(table.concat(lines, "\n"), "FAIL", "a failure is printed, not hidden")
 -- WHOSE CODE PASSED (r8c item G): the printed line names the mode, because "self-wake PASS delivered" read as
 -- "this node's own loop works" while the node delivered nothing for 2.5 hours on 24/11. The mode is the fact a
