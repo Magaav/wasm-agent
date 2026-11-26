@@ -531,7 +531,19 @@ pub fn call_on(runtime: &Arc<Runtime>, envelope_json: &str, caller: &str) -> Str
             Reply::Refused(refusal)
         }
     };
-    String::from_utf8_lossy(&reply.encode()).to_string()
+    // The reply is the other half of the wire this layer owns: when the seam is routed, the guest
+    // renders it, and a reply it cannot render falls back to the crate with one line.
+    let bytes = match &reply {
+        Reply::Ok(value) if routed() => match crate::stt_host::reply_ok(&value.to_string()) {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                note_fallback("reply", &reason);
+                reply.encode()
+            }
+        },
+        _ => reply.encode(),
+    };
+    String::from_utf8_lossy(&bytes).to_string()
 }
 
 /// Is the seam switched on, and is the component behind it? Asked per call through the feature

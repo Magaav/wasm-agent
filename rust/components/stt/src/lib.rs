@@ -79,24 +79,6 @@ impl Guest for SttComponent {
         }
     }
 
-    async fn encode(op: String, from_node: String, to: String, ts_ms: i64, rid: String, body_json: String) -> Vec<u8> {
-        let body: Value = serde_json::from_str(&body_json).unwrap_or(Value::Null);
-        let wire = match Op::parse(&op) {
-            Some(op) => Wire::new(op, from_node, to, ts_ms, rid, body),
-            // An op this build does not speak is still encoded as its own generation says: the node's
-            // producer composes only ops this crate knows, so this is a guard, not a path.
-            None => return Vec::new(),
-        };
-        wire.encode()
-    }
-
-    async fn signature_message(envelope: Vec<u8>, body_sha256_hex: String) -> Result<String, crate::wa::stt::types::Refusal> {
-        match Wire::decode(&envelope) {
-            Ok(wire) => Ok(wire.signature_message(&body_sha256_hex)),
-            Err(refusal) => Err(refusal_case(&refusal)),
-        }
-    }
-
     async fn reply_ok(body_json: String) -> Vec<u8> {
         let body: Value = serde_json::from_str(&body_json).unwrap_or(Value::Null);
         Reply::ok(body).encode()
@@ -105,6 +87,7 @@ impl Guest for SttComponent {
     fn sanitize(text: String) -> String {
         wire_sanitize(&text)
     }
+
 }
 
 /// The wire reply for a refusal: the bytes the peer reads, produced from the same `Refusal` the native
@@ -114,27 +97,6 @@ fn refused(refusal: &wa_stt_remote::protocol::Refusal) -> Admitted {
         word: refusal.as_str(),
         bytes: Reply::Refused(refusal.clone()).encode(),
     })
-}
-
-/// One refusal, as the record a caller can read (the `signature-message` path names it).
-fn refusal_case(refusal: &wa_stt_remote::protocol::Refusal) -> crate::wa::stt::types::Refusal {
-    use crate::wa::stt::types::Refusal as R;
-    use wa_stt_remote::protocol::Refusal as W;
-    match refusal {
-        W::Version(version) => R::Version(*version),
-        W::WrongTarget => R::WrongTarget,
-        W::UnknownCaller => R::UnknownCaller,
-        W::Stale => R::Stale,
-        W::BadSignature => R::BadSignature,
-        W::Replayed => R::Replayed,
-        W::Malformed(field) => R::Malformed(field.to_string()),
-        W::LeaseLost => R::LeaseLost,
-        W::NotFound => R::NotFound,
-        W::StaleJob => R::StaleJob,
-        W::TooLarge => R::TooLarge,
-        W::NotYet => R::NotYet,
-        W::Failed(reason) => R::Failed(reason.to_string()),
-    }
 }
 
 export!(SttComponent);

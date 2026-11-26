@@ -258,7 +258,11 @@ selfloop 949c657d3dcd365095425133d755e6023ddc3fe7bd5735d87064872346cff0a8 247835
 # rust/wa-kernel-runtime/src/stt_node.rs, which keeps the queue, the worker thread, the clock, the
 # recogniser and the node's key. Built by scripts/build-components.sh stt: rustc 1.99.1, build root
 # /tmp/wa-component-build/src, two builds in two target dirs, same sha256 both times. 152,942 bytes.
-stt 669d2d168cfd2bf304ee2e31852e80de6e0c32e5811a79ade527d0d91a66a6dd 152942
+# 26/11 second pin of stt, same day: the world kept only what this node answers (admit, reply-ok,
+# sanitize) after the first pin carried encode and signature-message, which the producer composes and
+# signs inside wa-stt-remote and which therefore had no caller here. reply-ok is now routed, so every
+# export in the world is one the node actually asks. Two builds, same sha256, 146,696 bytes.
+stt bc7db7b0f63f3187edb02490ba73dca0d655ce70991eda791e14841a10f63d73 146696
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat

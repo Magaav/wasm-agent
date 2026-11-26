@@ -276,47 +276,6 @@ pub fn admit_with(config: &Config, me: &str, owner_nodes: &[String], skew_ms: i6
     })
 }
 
-/// The exact bytes a node sends for one call.
-pub fn encode(op: &str, from: &str, to: &str, ts_ms: i64, rid: &str, body_json: &str) -> Result<Vec<u8>, String> {
-    let config = Config::from_env();
-    with_instance(&config, |served, runtime| {
-        let (op, from, to, rid, body) = (op.to_string(), from.to_string(), to.to_string(), rid.to_string(), body_json.to_string());
-        let timeout = Duration::from_millis(config.timeout_ms);
-        let raced = runtime.block_on(async {
-            let Served { store, bindings, .. } = &mut *served;
-            tokio::time::timeout(
-                timeout,
-                store.run_concurrent(async move |store| {
-                    bindings.wa_stt_stt().call_encode(store, op, from, to, ts_ms, rid, body).await
-                }),
-            )
-            .await
-        });
-        flatten(raced, "encode")
-    })
-}
-
-/// The exact string a node signs for one call, or the refusal's own slug.
-pub fn signature_message(envelope: &[u8], body_sha256_hex: &str) -> Result<Result<String, String>, String> {
-    let config = Config::from_env();
-    with_instance(&config, |served, runtime| {
-        let (envelope, hex) = (envelope.to_vec(), body_sha256_hex.to_string());
-        let timeout = Duration::from_millis(config.timeout_ms);
-        let raced = runtime.block_on(async {
-            let Served { store, bindings, .. } = &mut *served;
-            tokio::time::timeout(
-                timeout,
-                store.run_concurrent(async move |store| {
-                    bindings.wa_stt_stt().call_signature_message(store, envelope, hex).await
-                }),
-            )
-            .await
-        });
-        let answer = flatten(raced, "signature_message")?;
-        Ok(answer.map_err(|refusal| refusal_slug(&refusal)))
-    })
-}
-
 /// One answer the node composed, as the wire carries it.
 pub fn reply_ok(body_json: &str) -> Result<Vec<u8>, String> {
     let config = Config::from_env();
@@ -346,37 +305,6 @@ fn flatten<T>(
     let ran = raced.map_err(|_| format!("component_wedged:{op}:timeout"))?;
     let call = ran.map_err(|error| failure(op, &error))?;
     call.map_err(|error| failure(op, &error))
-}
-
-/// The one refusal word for a case, in the vocabulary the wire already uses
-/// (`Refusal::as_str()`): the host renders the case the guest handed back with the same crate the
-/// guest answered with, so the two paths cannot spell one fault two ways.
-fn refusal_slug(refusal: &seam::Refusal) -> String {
-    use seam::Refusal as R;
-    use wa_stt_remote::protocol::Refusal as W;
-    // The two cases that carry a reason are rendered HERE with the crate's own words
-    // (\`Refusal::as_str\`): a leaked string per call would be a leak in the node's hot path.
-    match refusal {
-        R::Malformed(what) => return W::Malformed("body").as_str().replace("body", what),
-        R::Failed(what) => return format!("failed:{}", wa_stt_remote::protocol::sanitize(what)),
-        _ => {}
-    }
-    let wire = match refusal {
-        R::Version(version) => W::Version(*version),
-        R::WrongTarget => W::WrongTarget,
-        R::UnknownCaller => W::UnknownCaller,
-        R::Stale => W::Stale,
-        R::BadSignature => W::BadSignature,
-        R::Replayed => W::Replayed,
-        R::LeaseLost => W::LeaseLost,
-        R::NotFound => W::NotFound,
-        R::StaleJob => W::StaleJob,
-        R::TooLarge => W::TooLarge,
-        R::NotYet => W::NotYet,
-        // Rendered above.
-        R::Failed(_) | R::Malformed(_) => unreachable!("rendered before the mapping"),
-    };
-    wire.as_str()
 }
 
 #[cfg(test)]

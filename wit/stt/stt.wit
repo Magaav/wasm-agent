@@ -84,9 +84,8 @@ interface types {
 }
 
 /// Every waiting call here is an `async func`: the guest's task suspends and the runtime keeps
-/// running other tasks, short calls included (the async rule, Victor 26/11). The four pure maps that
-/// follow are async too, so a caller has one calling convention; `sanitize` is the one that is not,
-/// and says why under its own name.
+/// running other tasks, short calls included (the async rule, Victor 26/11). `sanitize` is the one
+/// export that is not, and says why under its own name.
 ///
 /// **Cancellation and backpressure, declared.** A caller cancels an `admit` by dropping the future:
 /// this layer starts no task, holds no lock across an await and records nothing for a call that never
@@ -103,30 +102,27 @@ interface stt {
     /// it lives here — the host serialises its calls, so one instance is one ledger.
     admit: async func(me: string, owner-nodes: list<string>, skew-ms: s64, bytes: list<u8>, caller: string, now-ms: s64) -> admitted;
 
-    /// The exact bytes a node sends for one call: the envelope, encoded as the protocol encodes it.
-    encode: async func(op: string, from-node: string, to: string, ts-ms: s64, rid: string, body-json: string) -> list<u8>;
-
-    /// The exact string a node signs for one call — `body-sha256-hex` is the hash of the bytes that
-    /// carry the envelope, which is what the transport's signature covers.
-    signature-message: async func(envelope: list<u8>, body-sha256-hex: string) -> result<string, refusal>;
-
-    /// One answer the node composed, as the wire carries it.
+    /// One answer the node composed, as the wire carries it. The node composes the body; the reply's
+    /// envelope is the wire's, and that is the half this layer owns.
     reply-ok: async func(body-json: string) -> list<u8>;
 
-    /// The one function every log line and every rendered refusal passes through: control characters
-    /// removed, length bounded. The operator's log is the node's, and this is the part of it that is
-    /// a rule.
+    /// The one function every rendered refusal and every view line the node shows passes through: control
+    /// characters removed, length bounded.
     ///
-    /// SYNC ON PURPOSE (the async rule's written reason): this is a pure map over a string — no I/O,
-    /// no clock, no key, nothing to await — and it is called once per log line and once per rendered
-    /// refusal, including inside the loop that renders an answer. A future around it would add a
-    /// suspension point where there is nothing to suspend on, and would make every one of those
-    /// call sites a task. It has no output to stream and no backpressure to declare: the bound is
-    /// the string it is given (`MAX_REASON_CHARS`).
+    /// SYNC ON PURPOSE (the async rule's written reason): a pure map over a string — no I/O, no clock, no
+    /// key, nothing to await — called per refusal and per view line, sometimes in a loop. A future around it
+    /// would add a suspension point where there is nothing to suspend on and make every call site a task.
+    /// It has no output to stream and no backpressure to declare: the bound is the string it is given.
     sanitize: func(text: string) -> string;
 }
 
-/// The component: the wire layer, and nothing to hold but the ids it has answered.
+/// The component: the wire layer this node asks, and nothing to hold but the ids it has answered.
+///
+/// **What is deliberately NOT here**, so a reader does not look for it: the outbound envelope's
+/// composition and its signature message. A producing node does not compose them — the worker inside
+/// **wa-stt-remote** does, in the same process as the signer, and `host.sign` is the interpreter's. And
+/// the sanitizer every log line passes through is `wa-stt-remote`'s, called where the line is composed;
+/// crossing this boundary once per log line would buy nothing and cost a task suspension per line.
 world stt-component {
     export stt;
 }
