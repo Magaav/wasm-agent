@@ -113,6 +113,65 @@ function M.mode_preflight(ring, facts_of)
   table.sort(red)
   return { rows = rows, red = red }
 end
+-- THE TWO INSTALL HAZARDS (26/11, Fable, from the ring-mode answer). Both are consequences of what a RELEASE
+-- install does NOT do, and both are checked here by name so a rehearsal cannot be green while either is true:
+--
+-- 1. lua_core_shadows_release - REFUSE. A release install lays down the binary and nothing else of the Lua tree
+--    (upgrade.sh / release-install.sh never stage lua-core; that is deploy.sh:1566-1831). So an <install>/lua-core
+--    left by an earlier deploy keeps outranking the embedded copy, as long as its manifest verifies against the
+--    new binary (rust/wa-host/src/main.rs:75-100: manifest sha256s + equal capability digest). The node then runs
+--    OLD Lua on NEW bytes - the exact opposite of what "install T5" means.
+--
+-- 2. release_update_reads_tree - WARN, never silent. build_status.relation compares the BINARY with the TREE
+--    whenever a tree is readable; only the tree-less branch (r4) reads the install record. A release-installed
+--    node that still has a checkout therefore answers `stale` in the release-update canary while running exactly
+--    the release it was given. The bytes are right and the JUDGE is wrong, so this is named and listed as a
+--    warning, not a refusal - a rehearsal that went red on the judge would be crying wolf about a healthy node.
+--
+-- A fact the answer does not carry is `unchecked`, and unchecked is never green.
+-- <ring>, <facts_of(node) -> table | nil> -> { rows, red, warned }
+function M.install_checks(ring, facts_of)
+  local rows, red, warned = {}, {}, {}
+  for _, entry in ipairs(type(ring) == "table" and ring or {}) do
+    local node = tostring((type(entry) == "table" and entry.node) or entry or "?")
+    local facts = nil
+    if type(facts_of) == "function" then
+      local ok, answer = pcall(facts_of, node)
+      facts = ok and type(answer) == "table" and answer or nil
+    end
+    local row = { node = node }
+    if not facts then
+      row.verdict, row.detail = "unchecked", "the node answer carried neither its install dir nor its tree"
+    else
+      local lua_core = facts.lua_core
+      local from_release = tostring(facts.installed_from or "") == "release"
+      if lua_core == nil then
+        row.verdict, row.detail = "unchecked", "the node did not say whether <install>/lua-core is present"
+      elseif from_release and (lua_core == true or tostring(lua_core) == "present") then
+        row.verdict, row.error = "refuse", "lua_core_shadows_release"
+        row.detail = "a release install does not stage <install>/lua-core, and the copy left by an earlier deploy"
+          .. " outranks the embedded Lua when its manifest still verifies (main.rs:75-100): this node would run OLD"
+          .. " Lua on the NEW binary. Remove it (deploy.sh keeps lua-core.prev) or stage lua-core from the bundle"
+        red[#red + 1] = node .. " (lua_core_shadows_release)"
+      else
+        row.verdict = "ok"
+        row.detail = from_release and "release install with no <install>/lua-core to outrank the embedded copy"
+          or "this node is not a release install, so the embedded copy is not the one that would be shadowed"
+      end
+      -- hazard 2, only where a tree is readable AND the node was installed from a release
+      local binary = tostring(facts.binary_commit or "")
+      local tree = tostring(facts.tree_commit or "")
+      if from_release and tostring(facts.tree or "") ~= "" and binary ~= "" and tree ~= "" and binary ~= tree then
+        row.canary = "release_update_reads_tree"
+        warned[#warned + 1] = node .. " (release_update_reads_tree: binary " .. binary:sub(1, 12)
+        warned[#warned] = warned[#warned] .. " vs tree " .. tree:sub(1, 12) .. ")"
+      end
+    end
+    rows[#rows + 1] = row
+  end
+  table.sort(red); table.sort(warned)
+  return { rows = rows, red = red, warned = warned }
+end
 -- <options> -> { lines, ok, rows, answers, failed, off, listed, cutting, red, unreachable }
 --   options.ring          the ring to read (default: this node + the roster)
 --   options.read(node)    a status answer for one node (default: remote_update.status)
@@ -215,6 +274,17 @@ function M.rehearse(options)
 
   -- THE MODES ARE JUDGED BEFORE THE DEPLOY STEP (26/11): a node that cannot take the mode the ring names is
   -- named here, not 186 s into a deploy (canonical_busy) or after the node refused a tree it does not have.
+  -- THE TWO INSTALL HAZARDS, by name (26/11, Fable): see M.install_checks.
+  local install = M.install_checks(ring, options.facts_of)
+  for _, row in ipairs(install.rows) do
+    if row.verdict ~= "ok" then
+      lines[#lines + 1] = string.format("  install %-18s %s - %s", row.node, row.verdict, tostring(row.detail or ""))
+    end
+  end
+  if #install.warned > 0 then
+    lines[#lines + 1] = "WARNINGS (named, not red: the bytes are right and the judge is wrong)"
+    for _, entry in ipairs(install.warned) do lines[#lines + 1] = "  " .. entry end
+  end
   local preflight = M.mode_preflight(ring, options.facts_of)
   for _, row in ipairs(preflight.rows) do
     if row.verdict ~= "ok" then
@@ -226,6 +296,7 @@ function M.rehearse(options)
   for _, entry in ipairs(aggregated.failed) do red[#red + 1] = entry end
   for _, entry in ipairs(not_proven.cutting) do red[#red + 1] = entry end
   for _, entry in ipairs(preflight.red) do red[#red + 1] = entry end
+  for _, entry in ipairs(install.red) do red[#red + 1] = entry end
   -- A READ THAT WAS REFUSED IS NOT A GREEN NODE: the rehearsal may not claim a fleet it could not read.
   for _, row in ipairs(rows) do
     if row.error ~= "" then red[#red + 1] = row.node .. " (" .. row.error .. ")" end
