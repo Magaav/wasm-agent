@@ -36,7 +36,9 @@ export WASM_AGENT_LUA_ROOT="$PWD"
 # name is DERIVED, because a test that writes the operator data path is refused by the node own guard.
 # ASKED, NOT ASSUMED: the CLI process decides where its config lives (PATH vs a home, an install dir beside the
 # program), so the row reads the answer from `wa paths` and writes its fixtures THERE.
-CONFIG_DIR="$("$BIN" --db "$W/db.sqlite" paths 2>/dev/null | awk '$1 == "config" { print $2 }')"
+# `wa paths` prints a `config file <path>` row as well, so the field is anchored: only an ABSOLUTE second field is
+# the directory (measured: the first version read "file" and wrote its fixtures to a directory called file/).
+CONFIG_DIR="$("$BIN" --db "$W/db.sqlite" paths 2>/dev/null | awk '$1 == "config" && $2 ~ /^\// { print $2; exit }')"
 [ -n "$CONFIG_DIR" ] || fail "wa paths did not answer a config directory"
 RECORDS="$CONFIG_DIR/remote-update"
 echo "row: config=$CONFIG_DIR records=$RECORDS"
