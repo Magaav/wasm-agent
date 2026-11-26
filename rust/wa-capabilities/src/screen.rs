@@ -35,6 +35,150 @@ impl Bar {
     pub fn scrolling(&self) -> bool { self.total > self.track }
 }
 
+/// The input box's state, as the program's own `Editor` answers it (`editor_state` on the wire):
+/// every number the node used to read off the struct when it held the editor in process.
+#[derive(Clone, Debug, Default)]
+pub struct EditorState {
+    pub row: usize,
+    pub width: usize,
+    pub height: usize,
+    pub status: bool,
+    pub out_bottom: usize,
+    pub status_row: usize,
+    pub footer_row: usize,
+    pub session_row: usize,
+    pub wakes_row: usize,
+    pub bottom: usize,
+    pub box_rows: Option<(usize, usize)>,
+    pub menu_rows: usize,
+    pub draft: String,
+    pub selection: Option<(usize, usize)>,
+    pub empty: bool,
+    pub bash: bool,
+    pub pasting: bool,
+    pub footer: String,
+    pub footer_right: String,
+    pub wakes_content: String,
+    pub session_content: String,
+    pub cursor_frame: String,
+}
+
+/// A key's answer in the node's own words, decoded from the program's `editor_key` reply. The console
+/// loop matches on this exactly where it used to match `wa_term::terminal_editor::Action`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EditorAction {
+    None,
+    Submit(String),
+    SubmitNow(String),
+    Eof,
+    Interrupt,
+    Nav,
+    PageUp,
+    PageDown,
+    Bottom,
+    Copy(String),
+    Paste,
+    Pasted(usize),
+}
+
+/// The state the node SETS on the editor, one call per change: what the console knows and the editor
+/// draws. Absent fields keep what the editor has, so a change sends only what changed (`editor_setup`).
+#[derive(Clone, Debug, Default)]
+pub struct EditorSetup {
+    pub row: Option<usize>,
+    pub width: Option<usize>,
+    pub height: Option<usize>,
+    pub status: Option<bool>,
+    pub bash: Option<bool>,
+    pub queued: Option<Vec<String>>,
+    pub history: Option<Vec<String>>,
+    pub wakes: Option<String>,
+    pub build: Option<String>,
+    pub session_notice: Option<String>,
+    pub footer: Option<String>,
+    pub footer_right: Option<String>,
+    /// The slash menu's commands: `(name, takes args, hint)`.
+    pub commands: Option<Vec<(String, bool, String)>>,
+}
+
+impl EditorSetup {
+    /// The whole object the wire takes, omitting what this change does not touch.
+    fn to_json(&self) -> Value {
+        let mut spec = serde_json::Map::new();
+        if let Some(row) = self.row { spec.insert("row".into(), json!(row)); }
+        if let Some(width) = self.width { spec.insert("width".into(), json!(width)); }
+        if let Some(height) = self.height { spec.insert("height".into(), json!(height)); }
+        if let Some(status) = self.status { spec.insert("status".into(), json!(status)); }
+        if let Some(bash) = self.bash { spec.insert("bash".into(), json!(bash)); }
+        if let Some(queued) = &self.queued { spec.insert("queued".into(), json!(queued)); }
+        if let Some(history) = &self.history { spec.insert("history".into(), json!(history)); }
+        if let Some(value) = &self.wakes { spec.insert("wakes".into(), json!(value)); }
+        if let Some(value) = &self.build { spec.insert("build".into(), json!(value)); }
+        if let Some(value) = &self.session_notice { spec.insert("session_notice".into(), json!(value)); }
+        if let Some(value) = &self.footer { spec.insert("footer".into(), json!(value)); }
+        if let Some(value) = &self.footer_right { spec.insert("footer_right".into(), json!(value)); }
+        if let Some(commands) = &self.commands {
+            let list: Vec<Value> = commands.iter()
+                .map(|(name, args, hint)| json!({ "name": name, "args": args, "hint": hint }))
+                .collect();
+            spec.insert("commands".into(), json!(list));
+        }
+        Value::Object(spec)
+    }
+}
+
+/// An action decoded from the wire: the tag the program sent, never a guess.
+fn editor_action(value: &Value) -> EditorAction {
+    let text = || value.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+    match value.get("kind").and_then(Value::as_str).unwrap_or("none") {
+        "submit" => EditorAction::Submit(text()),
+        "submit_now" => EditorAction::SubmitNow(text()),
+        "eof" => EditorAction::Eof,
+        "interrupt" => EditorAction::Interrupt,
+        "nav" => EditorAction::Nav,
+        "page_up" => EditorAction::PageUp,
+        "page_down" => EditorAction::PageDown,
+        "bottom" => EditorAction::Bottom,
+        "copy" => EditorAction::Copy(text()),
+        "paste" => EditorAction::Paste,
+        "pasted" => EditorAction::Pasted(value.get("from").and_then(Value::as_u64).unwrap_or(0) as usize),
+        _ => EditorAction::None,
+    }
+}
+
+fn editor_state_of(value: &Value) -> EditorState {
+    let number = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
+    let boolean = |key: &str| value.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let line = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    let pair = |key: &str| value.get(key).and_then(Value::as_array).and_then(|pair| {
+        Some((pair.first()?.as_u64()? as usize, pair.get(1)?.as_u64()? as usize))
+    });
+    EditorState {
+        row: number("row"),
+        width: number("width"),
+        height: number("height"),
+        status: boolean("status"),
+        out_bottom: number("out_bottom"),
+        status_row: number("status_row"),
+        footer_row: number("footer_row"),
+        session_row: number("session_row"),
+        wakes_row: number("wakes_row"),
+        bottom: number("bottom"),
+        box_rows: pair("box_rows"),
+        menu_rows: number("menu_rows"),
+        draft: line("draft"),
+        selection: pair("selection"),
+        empty: boolean("empty"),
+        bash: boolean("bash"),
+        pasting: boolean("pasting"),
+        footer: line("footer"),
+        footer_right: line("footer_right"),
+        wakes_content: line("wakes_content"),
+        session_content: line("session_content"),
+        cursor_frame: line("cursor_frame"),
+    }
+}
+
 /// The console's transcript, answered by the terminal program.
 pub struct Screen {
     remote: Remote,
@@ -178,6 +322,63 @@ impl Screen {
     pub fn render(&mut self, width: usize, rows: usize) -> String {
         self.remote.want_frame("render", json!([width, rows]))
     }
+
+    // ---- the input box: the program owns the editor, the node sets its state, sends the key bytes
+    // and draws what it answers (part 2 of `wa-term-own-program`). ----
+
+    /// A fresh editor: the console starts a session with an empty box.
+    pub fn editor_open(&mut self) { self.remote.nothing("editor_open", json!([])) }
+
+    /// The state the node sets: one call per change, absent fields keeping what the editor has.
+    pub fn editor_setup(&mut self, setup: &EditorSetup) {
+        self.remote.nothing("editor_setup", json!([setup.to_json()]))
+    }
+
+    /// One key byte, answered as an `EditorAction`. A refused call answers `None`, never a guess.
+    pub fn editor_key(&mut self, byte: u8) -> EditorAction {
+        self.remote.want("editor_key", json!([byte])).ok()
+            .map(|value| editor_action(&value))
+            .unwrap_or(EditorAction::None)
+    }
+
+    /// Everything the console lays out from: the editor's own numbers, not the node's copy of them.
+    pub fn editor_state(&mut self) -> EditorState {
+        self.remote.want("editor_state", json!([])).ok()
+            .map(|value| editor_state_of(&value))
+            .unwrap_or_default()
+    }
+
+    /// The box's frame, drawn by the editor that owns it.
+    pub fn editor_render(&mut self) -> String { self.remote.want_frame("editor_render", json!([])) }
+
+    pub fn editor_paste(&mut self, text: &str) -> EditorAction {
+        self.remote.want("editor_paste", json!([text])).ok()
+            .map(|value| editor_action(&value))
+            .unwrap_or(EditorAction::None)
+    }
+    pub fn editor_insert(&mut self, text: &str) { self.remote.nothing("editor_insert", json!([text])) }
+    pub fn editor_replace(&mut self, from: usize, to: usize, text: &str) {
+        self.remote.nothing("editor_replace", json!([from, to, text]))
+    }
+    pub fn editor_select(&mut self, anchor: usize, cursor: usize) {
+        self.remote.nothing("editor_select", json!([anchor, cursor]))
+    }
+    pub fn editor_slice(&mut self, from: usize, to: usize) -> String {
+        self.remote.want("editor_slice", json!([from, to])).ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+    pub fn editor_selection(&mut self) -> Option<String> {
+        self.remote.want("editor_selection", json!([])).ok()
+            .filter(|value| !value.is_null())
+            .and_then(|value| value.as_str().map(str::to_string))
+    }
+    pub fn editor_click(&mut self, index: usize) { self.remote.nothing("editor_click", json!([index])) }
+    pub fn editor_wheel(&mut self, up: bool, rows: usize) -> bool {
+        self.remote.want_bool("editor_wheel", json!([up, rows]))
+    }
+    pub fn editor_escape(&mut self) -> bool { self.remote.want_bool("editor_escape", json!([])) }
+
     pub fn bar_frame(&self, width: usize) -> String {
         self.remote.want_frame("bar_frame", json!([width]))
     }

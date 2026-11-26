@@ -197,6 +197,55 @@ fn the_wire_draws_the_golden_the_in_process_path_recorded() {
 
 #[cfg(unix)]
 #[test]
+fn the_input_box_answers_the_node_over_the_wire_with_its_own_geometry() {
+    // The editor the node used to hold is now the program's: the node sets the state, sends the key
+    // bytes and lays out from the numbers that come back. This drives the real binary through the
+    // node's own client and requires the box it draws to be the editor's own frame.
+    let mut screen = Screen::remote_at(program());
+    assert!(screen.attach_error().is_none(), "the program answers the handshake");
+    screen.editor_open();
+    let setup = wa_capabilities::screen::EditorSetup {
+        row: Some(23),
+        width: Some(80),
+        height: Some(24),
+        status: Some(false),
+        wakes: Some("wakes".into()),
+        footer: Some("model".into()),
+        footer_right: Some("opus".into()),
+        commands: Some(vec![("/login".into(), false, "sign in".into())]),
+        ..Default::default()
+    };
+    screen.editor_setup(&setup);
+    let state = screen.editor_state();
+    assert_eq!(state.row, 23);
+    assert_eq!(state.width, 80);
+    assert!(state.status_row < state.out_bottom.saturating_add(1), "the status line sits above the chat's bottom");
+    assert_eq!(state.draft, "");
+
+    // Keys: typed bytes answer none, Enter answers the line, and the draft is emptied by the submit.
+    for byte in b"hello" {
+        assert_eq!(screen.editor_key(*byte), wa_capabilities::screen::EditorAction::None);
+    }
+    assert_eq!(screen.editor_state().draft, "hello");
+    assert_eq!(screen.editor_key(13), wa_capabilities::screen::EditorAction::Submit("hello".into()));
+    assert_eq!(screen.editor_state().draft, "");
+
+    // The frame is the editor's, not an empty string: the box draws its dividers.
+    let frame = screen.editor_render();
+    assert!(frame.len() > 40, "the box drew {} bytes", frame.len());
+    assert!(frame.contains('\u{2500}') || frame.contains('-'), "the box has a divider");
+
+    // The slash menu opens on the commands the node handed over, and it costs the chat a row.
+    let before = screen.editor_state();
+    assert_eq!(screen.editor_key(47), wa_capabilities::screen::EditorAction::None);
+    let after = screen.editor_state();
+    assert_eq!(after.menu_rows, 1, "one command offered");
+    assert_eq!(after.out_bottom, before.out_bottom.saturating_sub(1));
+}
+
+
+#[cfg(unix)]
+#[test]
 fn a_missing_program_is_refused_by_name_and_names_the_path() {
     let mut screen = Screen::remote_at("/nonexistent/wa-term-program");
     let failure = screen.attach_error().expect("a refusal");
