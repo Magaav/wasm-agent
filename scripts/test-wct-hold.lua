@@ -49,7 +49,7 @@ local function run(code,name)
   local function dispatch(tool,params) return tools.dispatch(memory,tool,params,'master',ctx) end
   local started=host.now()
   local result=codemode.run(memory,{code=code},'master',ctx,catalog,function()return catalog end,dispatch,execution)
-  return result,host.now()-started
+  return result,host.now()-started,sid
 end
 
 -- ROW 1: settle. A 3-second job, the script ends with it live; one call answers with its output.
@@ -122,18 +122,43 @@ check(stillQueued,'row 5: the hold consumed the message instead of leaving it fo
 print('ROW5 secs='..string.format('%.2f',secs5))
 
 
--- ROW 6: an install waiting ends the hold (item 4). A turn pauses at its next STEP boundary and a hold is one
--- step, so a hold can spend the deploy's whole idle bound - and the numbers coincide: deploy_pause.DEFAULT_BOUND
--- is 900 s and the hold ceiling is the same 900 s. With a real marker on disk the hold must end at once and
--- leave the turn to pause, rather than making the operator's install wait out the job.
+-- ROW 6: a waiting install does NOT end the hold (Fable 27/11, correcting my first read). The job is the
+-- turn's work: waking the model would not free the node any sooner, because the job keeps running either way.
+-- The install waits for it exactly as it waits for any running turn, and its own line says what it waits for
+-- ("waiting for <job> of session X, up to m:ss" - wa-sentinel's hold announcement). So: a marker on disk while
+-- a 3 s job runs, and the hold must still take the job to settle rather than returning early.
 local deploy=dofile('lua/core/deploy_pause.lua')
 local marker_path=deploy.path()
 assert(marker_path,'row 6: no pause marker path on this node')
 assert(host.write_file(marker_path, json.encode({since=os.time(), bound_seconds=deploy.DEFAULT_BOUND, state='deploy_pending'})),
   'row 6: could not write the marker')
-local r6,secs6=run([[const h = await tools.bash({command:'sleep 30', wait_s: 0}); return h;]], 'deploy')
+local r6,secs6=run([[const h = await tools.bash({command:'sleep 3; echo wct-deploy-kept', wait_s: 0}); return h;]], 'deploy')
 os.remove(marker_path)
-check(secs6<10,'row 6: an install waited '..string.format('%.2f',secs6)..'s for a held answer')
+local body6=json.encode(r6)
+check(secs6>=2.5,'row 6: a waiting install cut the hold short ('..string.format('%.2f',secs6)..'s for a 3 s job)')
+check(body6:find('wct%-deploy%-kept')~=nil,'row 6: the answer lost the job it was holding for')
 print('ROW6 secs='..string.format('%.2f',secs6))
+
+
+-- ROW 7: what the INSTALL's own line names (Fable 27/11: "waiting for <job> of session X, up to m:ss"). The
+-- hold publishes one flat record per held job while it waits, so wa-sentinel can say what an install is waiting
+-- for instead of "a turn is running". The job captures the record itself at 1 s (a reader outside the hold, the
+-- way the sentinel is), and the test asserts it is gone once the hold ends - a record nobody removes would
+-- leave every later install naming a job that finished.
+local dir7=(host.getenv and host.getenv('WASM_AGENT_HOME')) or ''
+local capture7='/tmp/wct-hold-record.txt'
+os.remove(capture7)
+local r7,secs7,sid7=run("const h = await tools.bash({command:'sleep 1; cat "..dir7.."/.wasm-agent/codemode-hold-*.json > "..capture7.." 2>/dev/null; sleep 2', wait_s: 0}); return h;", 'record')
+local record7=host.read_file(capture7) or ''
+check(#record7>0,'row 7: the hold published no record for the install line to read')
+local decoded7={}
+pcall(function() decoded7=json.decode(record7) end)
+check(type(decoded7.op)=='string' and decoded7.op:find('op%-')~=nil,'row 7: the record does not name the job')
+check(decoded7.session==sid7,'row 7: the record does not name the session')
+check(type(decoded7.limit_ms)=='number','row 7: the record does not say up to when')
+os.remove(capture7)
+local leftover=host.read_file(dir7..'/.wasm-agent/codemode-hold-'..tostring(decoded7.op)..'.json')
+check(leftover==nil or leftover==false,'row 7: the record outlived the hold')
+print('ROW7 record_bytes='..#record7)
 
 print('wct-hold: '..checks..' checks passed')

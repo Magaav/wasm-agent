@@ -1495,23 +1495,6 @@ M.HOLD_DEADLINE_MS = 30000  -- "near its own limit": within this much of the ope
 -- queued mid-turn sat in `steering_inbox` until the turn was over, so a held answer could delay the
 -- operator's own words by up to the hold ceiling. The probe is the session's queued row, read once per
 -- slice; a store this process cannot read answers "nothing waiting", which is the pre-existing behaviour.
--- AN INSTALL OUTRANKS A HELD ANSWER. A turn pauses at its next STEP boundary (lua/core/deploy_pause.lua), and a
--- hold IS one step: so a hold can spend the deploy's whole idle bound - and the two numbers coincide, because
--- the bound is M.DEFAULT_BOUND = 900 s and the hold ceiling is the same 900 s. When a deploy is waiting,
--- requested or already installing, the hold ends here and the boundary pauses the turn, which is the notice an
--- operator expects. A module this process cannot read answers "no deploy", the pre-existing behaviour.
-local deploy_module
-local function deploy_waiting()
-  if deploy_module == nil then
-    local ok, module = pcall(dofile, "lua/core/deploy_pause.lua")
-    deploy_module = (ok and type(module) == "table") and module or false
-  end
-  local deploy_pause = deploy_module or nil
-  if not deploy_pause or type(deploy_pause.waiting) ~= "function" then return false end
-  local called, marker = pcall(deploy_pause.waiting, host.now())
-  return called and marker ~= nil
-end
-
 local function message_waiting(opts)
   local sid = tostring((opts and (opts.session or (opts.ctx and opts.ctx.session_id))) or "")
   if sid == "" then return false end
@@ -1596,6 +1579,45 @@ local function hold_facts(dispatch, records)
   return facts
 end
 
+-- WHAT THE INSTALL'S OWN LINE NAMES (Fable 27/11). The sentinel announces a held install with the reason it
+-- is held, and until now the reason could only be "a turn is running": the node never said WHICH work. A hold
+-- is the one case where that is knowable and worth saying - the job is the turn's work, waking the model
+-- would not free the node any sooner, and the operator deserves to see what the wait is for. So the hold
+-- publishes one small record per live job while it waits and removes it after; wa-sentinel reads the directory
+-- and its line becomes "waiting for <job> of session X, up to m:ss". Nothing here is model-facing.
+-- One flat file per held job in the node's own data directory (no new directory: `host.write_file` is the only
+-- create this layer has, and a directory nobody removes on a crash is a worse neighbour than a file).
+M.HOLD_PREFIX = "codemode-hold-"
+
+local function hold_path(op)
+  return paths.data() .. "/" .. M.HOLD_PREFIX .. tostring(op) .. ".json"
+end
+
+local function hold_publish(records, opts)
+  local ok, err = pcall(function()
+    local session = tostring((opts and opts.session) or "")
+    for _, item in ipairs(records) do
+      local state = item.state or {}
+      local record = {
+        op = item.record.op,
+        session = session,
+        tool = tostring(item.record.tool or ""),
+        started_at = os.time(),
+        elapsed_ms = tonumber(state.elapsed_ms),
+        limit_ms = tonumber(state.timeout_ms) or tonumber(state.remaining_ms),
+      }
+      pcall(host.write_file, hold_path(item.record.op), json.encode(record))
+    end
+  end)
+  return ok
+end
+
+local function hold_withdraw(records)
+  for _, item in ipairs(records) do
+    pcall(os.remove, hold_path(item.record.op))
+  end
+end
+
 function M.hold_before_answer(dispatch, opts, scope)
   local index = M.open(scope)
   if index.count == 0 then return nil end
@@ -1605,6 +1627,7 @@ function M.hold_before_answer(dispatch, opts, scope)
   local deadline_ms = M.HOLD_DEADLINE_MS
   local woke = nil
   local last_state = {}
+  local published = nil
   while true do
     local live, silent, near_limit = 0, false, false
     local first_live = nil
@@ -1642,12 +1665,23 @@ function M.hold_before_answer(dispatch, opts, scope)
       end
     end
     if live == 0 then break end
+    if not published then
+      local snapshot = {}
+      for _, record in pairs(index.ops) do
+        if record.state == "running" or record.state == "unknown" then
+          snapshot[#snapshot + 1] = { record = record, state = last_state[record.op] }
+        end
+      end
+      if #snapshot > 0 then
+        published = snapshot
+        hold_publish(snapshot, opts)
+      end
+    end
     if silent then woke = "silent" break end
     if near_limit then woke = "deadline" break end
     -- The operator's own words end the wait before a stop does: a queued message is a person asking for the
     -- turn to end, and a hold that ignores it is the harness talking over them.
     if message_waiting(opts) then woke = "user" break end
-    if deploy_waiting() then woke = "deploy" break end
     if cancelled() then woke = "cancelled" break end
     local spent_ms = math.floor((host.now() - started) * 1000)
     if spent_ms >= limit_ms then woke = "hold_limit" break end
@@ -1662,6 +1696,7 @@ function M.hold_before_answer(dispatch, opts, scope)
     end
   end
   local held_ms = math.floor((host.now() - started) * 1000)
+  if published then hold_withdraw(published) end
   M.save(scope, index)
   -- The refresh, for the two wakes that report a job still running. A settle needs none (announce carries the
   -- work's own result) and a user cancel needs none (the person who cancelled knows what they did).
