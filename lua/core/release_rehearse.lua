@@ -71,10 +71,13 @@ function M.rehearse(options)
     return { ok = false, lines = { "rehearse: RED - " .. tostring(why) }, red = { tostring(why) },
       failed = {}, listed = {}, cutting = {}, rows = {} }
   end
+  -- THE MESH SEAM (one place a fixture replaces, as land does for the deploy step): the default read and the
+  -- default canary ask both go through it, so a row can drive the REAL default path against a scratch ring.
+  local mesh = options.remote_call or M.remote_call
   local read = options.read
   if type(read) ~= "function" then
     local remote_update = dofile("lua/core/remote_update.lua")
-    local call = options.call
+    local call = options.call or mesh
     if type(call) ~= "function" then
       local ok, nodes = pcall(dofile, "lua/core/nodes.lua")
       call = ok and nodes.remote_call or nil
@@ -86,7 +89,8 @@ function M.rehearse(options)
     ask = function(node)
       local ok, nodes = pcall(dofile, "lua/core/nodes.lua")
       if not ok or type(nodes.remote_call) ~= "function" then return nil end
-      local answer = nodes.remote_call(node, "bash", { command = "wa features canary json" }, {})
+      local caller = mesh or nodes.remote_call
+      local answer = caller(node, "bash", { command = "wa features canary json" }, {})
       if type(answer) ~= "table" then return nil end
       local text = answer.stdout or answer.output or answer.text
       if type(text) ~= "string" then return nil end
