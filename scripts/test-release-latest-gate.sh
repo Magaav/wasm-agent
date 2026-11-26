@@ -11,6 +11,8 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=/dev/null
 . "$ROOT/scripts/lib/release-latest.sh"
+T=$(mktemp -d "${TMPDIR:-/tmp}/latest-gate.XXXXXX")
+trap 'rm -rf "$T"' EXIT
 checks=0; failed=0
 ok()  { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }
 bad() { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$*"; }
@@ -53,6 +55,42 @@ has 'a rehearsal tag stays a prerelease' "$d" 'skip:not_full_version'
 d=$(wa_release_latest_decision v0.1.0 '' "$LINUX" "$BOTH")
 has 'a first release is promoted' "$d" 'take'
 has 'and the missing current Latest is stated' "$d" 'none'
+
+# 7b. COULD NOT ASK IS NOT NOTHING PUBLISHED (Fable 26/11): a 403, a rate limit or a dead network makes
+# `gh api .../releases/latest` fail, and reading that as `none` would let a patch of an older line take the badge.
+d=$(wa_release_latest_decision v0.1.1 unknown "$LINUX" "$BOTH")
+has 'an unanswered question about the current Latest skips the promotion' "$d" 'skip:latest_unknown'
+has 'and says the question went unanswered' "$d" 'could not ask GitHub which release is Latest'
+has 'and says how to take the badge by hand' "$d" 'gh release edit v0.1.1'
+d=$(wa_release_latest_decision v0.2.0 unknown "$LINUX" "$BOTH")
+has 'and it does so even for a NEWER version: an unanswered question never hands out the badge' "$d" 'skip:latest_unknown'
+
+# 7c. THE TARGETS ARE THE ONES THE CUT BUILT - read from the release index and this run, never from an env var
+IDX=$T/index.json
+cat > "$IDX" <<JSON
+{ "releases": [
+  { "tag": "v0.9.9", "target": "x86_64-unknown-linux-musl" },
+  { "tag": "v0.2.0", "target": "x86_64-unknown-linux-musl" },
+  { "tag": "v0.2.0", "target": "aarch64-unknown-linux-musl" }
+] }
+JSON
+same 'the built targets are the ones this tag carries in the index' "$(wa_release_built_targets "$IDX" v0.2.0 '' | tr ' ' '
+' | sed '/^$/d' | sort | tr '
+' ' ')" 'aarch64-unknown-linux-musl x86_64-unknown-linux-musl '
+same 'another tag is not mixed in' "$(wa_release_built_targets "$IDX" v0.9.9 '' | tr ' ' '
+' | sed '/^$/d' | sort | tr '
+' ' ')" 'x86_64-unknown-linux-musl '
+same 'the target of this run is added' "$(wa_release_built_targets "$IDX" v0.2.0 'x86_64-unknown-linux-gnu' | tr ' ' '
+' | sed '/^$/d' | sort | tr '
+' ' ')" 'aarch64-unknown-linux-musl x86_64-unknown-linux-gnu x86_64-unknown-linux-musl '
+same 'and nothing is answered for a tag the index does not carry' "$(wa_release_built_targets "$IDX" v0.3.0 '')" ''
+# a cut that built two targets and published one asset: NOT Latest, and the missing target is named
+d=$(wa_release_latest_decision v0.2.0 v0.1.2 "$(wa_release_built_targets "$IDX" v0.2.0 '' | sed 's/ $//')" "$X64")
+has 'a cut missing a target it built skips the promotion' "$d" 'skip:missing_target'
+has 'and names the target it did not publish' "$d" 'aarch64-unknown-linux-musl'
+# and the product carries no environment override for it
+case "$(cat "$ROOT/scripts/release-linux.sh")" in *WA_RELEASE_EXPECTED_TARGETS*) bad 'the release script still reads an EXPECTED_TARGETS environment override' ;; *) ok 'no environment override decides the expected targets' ;; esac
+grep -q 'wa_release_built_targets' "$ROOT/scripts/release-linux.sh" && ok 'the targets come from the build record (wa_release_built_targets)' || bad 'release-linux.sh does not read the built targets'
 
 # 8. the shipped script promotes LAST, and creates without the badge
 sh=$(cat "$ROOT/scripts/release-linux.sh")

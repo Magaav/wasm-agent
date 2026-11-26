@@ -348,12 +348,26 @@ reason: ${reason:-none stated}"
     || fail 'publish_failed: gh release create'
 fi
 # ---- the badge, LAST ----------------------------------------------------------------------------------
-# Every target is uploaded before this runs, so the asset list can be checked against the targets this release is
-# expected to carry (WA_RELEASE_EXPECTED_TARGETS overrides the Linux pair). A missing target, an older version or a
-# suffixed tag each SKIP the promotion by name; the release simply stays a prerelease.
-EXPECTED_TARGETS=${WA_RELEASE_EXPECTED_TARGETS:-x86_64-unknown-linux-musl aarch64-unknown-linux-musl}
+# Every target is uploaded before this runs, so the asset list is checked against the targets THIS CUT BUILT - read
+# from releases/index-linux.json plus the triple of this invocation, never from an environment variable. A missing
+# target, an older version, an unanswered question about the current Latest or a suffixed tag each SKIP the promotion
+# by name; the release simply stays a prerelease.
+EXPECTED_TARGETS=$(wa_release_built_targets "$INDEX" "$tag" "$triple")
+[ -n "$EXPECTED_TARGETS" ] || fail "no_built_targets: nothing in $INDEX names $tag, and this run built no triple"
+say "targets this cut built: $EXPECTED_TARGETS"
 assets=$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null) || assets=
-current_latest=$(gh api "repos/$REPO/releases/latest" --jq '.tag_name' 2>/dev/null) || current_latest=
+# WHICH RELEASE HOLDS THE BADGE, AND WHETHER WE COULD ASK: a 404 means no Latest exists (a first release); any other
+# failure means the question went unanswered, and an unanswered question must not hand out the badge.
+latest_err="$out/latest-api.err"
+if current_latest=$(gh api "repos/$REPO/releases/latest" --jq '.tag_name' 2>"$latest_err"); then
+  [ -n "$current_latest" ] || current_latest=none
+elif grep -q '404' "$latest_err" 2>/dev/null; then
+  current_latest=none
+  say "latest: no release holds the badge (API 404)"
+else
+  current_latest=unknown
+  say "latest: could not ask GitHub which release is Latest ($(head -1 "$latest_err" 2>/dev/null))"
+fi
 decision=$(wa_release_latest_decision "$tag" "$current_latest" "$EXPECTED_TARGETS" "$assets")
 case "$decision" in
   take*)
