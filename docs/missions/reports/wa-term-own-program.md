@@ -259,6 +259,33 @@ One line on stderr, always `wa: <code>: <message>`:
   the coupling to `lua/core/cli_view.lua` and `host.rs` is what makes the churn expensive, not the
   isolation of the crate (it is already a leaf).
 
+## 8b. The last slice, part 1: the wire is the only path (94b1e800)
+
+`Screen::Local`, the `WA_TERM_REMOTE` switch and `term_switch_invalid` are deleted: the node's
+transcript is a wire client, one call per method. The parity proof is now a GOLDEN recorded from the
+path that was deleted (quality rule 14): `rust/wa-capabilities/tests/golden/term_log.txt`, 29 lines
+of the in-process `Transcript`'s own answers to one event log, compared byte for byte against the
+real program by `tests/term_remote.rs` (4 tests, 4 pass). `scripts/fast.sh` now builds `wa-term`
+beside the binary under test BEFORE any row runs (it used to be built only in the Rust section, which
+a Lua-only change skips - every chat row would have refused by name).
+
+Three cold pairs, alternating order, fresh target dir each (`cargo build --release -p wa-host`,
+before = e990b71c, after = 94b1e800):
+
+| pair | before | after |
+| --- | --- | --- |
+| 1 (before first) | 514,980 ms / 78,524,304 B | 407,157 ms / 78,381,240 B |
+| 2 (after first) | 266,942 ms / 78,524,040 B | 451,697 ms / 78,380,664 B |
+| 3 (before first) | 315,275 ms / 78,523,888 B | 223,498 ms / 78,380,704 B |
+
+**Bytes: -143,300 B (-0.18%) in every pair** - the node stops instantiating `Transcript` and the
+linker drops it. **Build time: no change that survives the noise** (223-515 s on this machine; pair 2
+is the one where "after" is slower). It cannot move until the node stops compiling `wa-term`, which
+is part 2: 110 call sites left in `rust/wa-capabilities/src` (editor/panel 37, keymap 10, selection
+22, opening 8, transcript 8, rows 10, scroll 5, links 3), listed with their destination in
+`ready-wa-term-last-slice.md`. And a landing blocker for Fable: an install must ship `wa-term` beside
+`wa` (`scripts/deploy.sh`), or every chat refuses by name.
+
 ## 9. What this branch does NOT do
 
 - It does not delete the in-process path and does not unpin `wa-term` from the node: the node still
