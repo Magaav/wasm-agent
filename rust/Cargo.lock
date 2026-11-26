@@ -2155,6 +2155,7 @@ dependencies = [
  "tokio",
  "ureq",
  "wa-cli-views",
+ "wa-disk",
  "wa-email-index",
  "wa-email-outbox",
  "wa-features",
@@ -2198,6 +2199,18 @@ dependencies = [
  "wa-capabilities",
  "wa-host-support",
  "wa-kernel-runtime",
+]
+
+[[package]]
+name = "wa-disk"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ring",
+ "serde_json",
+ "wa-features",
+ "wa-host-support",
+ "wa-operation",
 ]
 
 [[package]]

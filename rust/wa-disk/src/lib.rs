@@ -451,8 +451,8 @@ fn pinned(root: &Path, path: &Path, pins: &[PathBuf]) -> Option<String> {
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut command = std::process::Command::new("git");
     command.arg("-C").arg(cwd).args(args).env("GIT_TERMINAL_PROMPT", "0");
-    // This reads the worktree it names, whatever the node itself inherited (see wa_operations_runner::wa_operation::scrub_git_env).
-    wa_operations_runner::wa_operation::scrub_git_env(&mut command);
+    // This reads the worktree it names, whatever the node itself inherited (see wa_operation::scrub_git_env).
+    wa_operation::scrub_git_env(&mut command);
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;
@@ -1062,7 +1062,7 @@ fn remove(path: &Path) -> Result<(), String> {
             command.arg("-C").arg(&canonical).args(["worktree", "remove", "--force"]).arg(path)
                 .env("GIT_TERMINAL_PROMPT", "0");
             // The one that could REMOVE another worktree's registration if the node inherited a GIT_DIR.
-            wa_operations_runner::wa_operation::scrub_git_env(&mut command);
+            wa_operation::scrub_git_env(&mut command);
             let output = command
                 .output()
                 .map_err(|error| format!("git_worktree_remove_failed: {error}"))?;
@@ -1326,3 +1326,6 @@ pub extern "C-unwind" fn capability(l: *mut LuaState) -> std::ffi::c_int {
 #[cfg(test)]
 #[path = "disk_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod disk_tests;

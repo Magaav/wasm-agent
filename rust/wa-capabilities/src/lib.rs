@@ -32,7 +32,9 @@ pub mod core_pool;
 /// One root, one `wa clean`, one disk cap (`docs/ONEROOT.md`): the layout inside the node's existing
 /// state root, the retention rules, the pins, and the refusal that stops a full disk instead of
 /// letting a build die on `os error 112`.
-pub mod disk;
+/// The disk subsystem (docs/ONEROOT.md) is a crate of its own now, shared with the operations
+/// supervisor so both enforce one cap. Re-exported here so every caller keeps the same path.
+pub use wa_disk as disk;
 pub mod file_search;
 /// `host.features` (docs/FEATURES.md): the one door the Lua gates ask "is this feature on, and which
 /// path is live" through. The rule lives in `wa-features`; this crate only routes to it.
