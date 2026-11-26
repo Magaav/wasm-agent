@@ -12,6 +12,7 @@ ring = "0.17"
 wa-operation = { path = "../wa-operation" }
 wa-host-support = { path = "../wa-host-support" }
 wa-features = { path = "../wa-features" }
+wa-tool-progress = { path = "../wa-tool-progress" }
 wa-kernel-runtime = { path = "../wa-kernel-runtime" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

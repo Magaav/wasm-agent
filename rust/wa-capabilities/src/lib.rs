@@ -76,7 +76,18 @@ pub mod stt;
 pub mod fabric;
 /// The live facts behind a long tool call's row (docs/TOOL-PROGRESS.md): fed by the operation wait
 /// loops, read by every renderer.
-pub mod tool_progress;
+/// The node's own tty: the funnel every screen byte goes through, the launch animation's hold and raw
+/// mode (moved out of `wa-term` in its last slice: it is I/O, not display).
+pub mod links;
+pub mod screen_guard;
+pub mod selection;
+pub mod tty;
+/// The tool-progress rows belong to the runner now (it is the one that waits on the child); the host
+/// re-exports the module so every reader keeps the same path.
+pub use wa_operations_runner::tool_progress;
+/// The tool-progress rows belong to the runner now (it is the one that waits on the child); the host
+/// re-exports the module so every reader keeps the same path.
+pub use wa_operations_runner::tool_progress;
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.

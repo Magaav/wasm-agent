@@ -6,6 +6,9 @@
 //! process that embeds it through `node::NodeFacts`.
 
 pub mod node;
+/// The live facts behind a long tool call's row (docs/TOOL-PROGRESS.md): written here, beside the wait
+/// loops that produce them, and read by every surface through `wa_tool_progress`.
+pub mod tool_progress;
 pub mod operations;
 
 /// The library the runner itself is built on. Re-exported so the embedding process has ONE edge to

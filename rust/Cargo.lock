@@ -2470,6 +2470,7 @@ dependencies = [
  "wa-host-support",
  "wa-kernel-runtime",
  "wa-operation",
+ "wa-tool-progress",
 ]
 
 [[package]]

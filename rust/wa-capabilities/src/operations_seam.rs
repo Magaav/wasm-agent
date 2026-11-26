@@ -35,6 +35,10 @@ impl NodeFacts for HostFacts {
         crate::tool_progress::tick(id, tool, started_at, stdout_path, stderr_path, owner)
     }
     fn progress_finish(&self, id: &str) { crate::tool_progress::finish(id) }
+    fn publish_progress(&self, owner: &str, facts: &serde_json::Value) {
+        let _ = wa_term::tool_progress::publish(owner, facts);
+    }
+    fn finish_progress(&self, owner: &str) { wa_term::tool_progress::finish(owner) }
     fn now_epoch(&self) -> f64 { crate::tool_progress::now_epoch() }
     fn current_owner(&self) -> Option<String> { crate::subagents::current_owner() }
     fn current_provenance(&self) -> Option<&'static str> { crate::subagents::current_provenance() }

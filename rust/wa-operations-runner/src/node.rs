@@ -56,6 +56,9 @@ pub trait NodeFacts: Send + Sync {
     fn beat(&self);
     fn progress_tick(&self, id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_path: &str, owner: &str) -> Option<Value>;
     fn progress_finish(&self, id: &str);
+    /// The node's live view of a running tool (the terminal's own row), separate from the durable file.
+    fn publish_progress(&self, owner: &str, facts: &serde_json::Value);
+    fn finish_progress(&self, owner: &str);
     fn now_epoch(&self) -> f64;
     fn current_owner(&self) -> Option<String>;
     fn current_provenance(&self) -> Option<&'static str>;
@@ -95,6 +98,8 @@ impl NodeFacts for Defaults {
     fn beat(&self) {}
     fn progress_tick(&self, _id: &str, _tool: &str, _started_at: f64, _stdout: &str, _stderr: &str, _owner: &str) -> Option<Value> { None }
     fn progress_finish(&self, _id: &str) {}
+    fn publish_progress(&self, _owner: &str, _facts: &serde_json::Value) {}
+    fn finish_progress(&self, _owner: &str) {}
     fn now_epoch(&self) -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -151,6 +156,8 @@ pub fn progress_tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, s
     node().progress_tick(id, tool, started_at, stdout_path, stderr_path, owner)
 }
 pub fn progress_finish(id: &str) { node().progress_finish(id) }
+pub fn publish_progress(owner: &str, facts: &serde_json::Value) { node().publish_progress(owner, facts) }
+pub fn finish_progress(owner: &str) { node().finish_progress(owner) }
 pub fn now_epoch() -> f64 { node().now_epoch() }
 pub fn current_owner() -> Option<String> { node().current_owner() }
 pub fn current_provenance() -> Option<&'static str> { node().current_provenance() }
