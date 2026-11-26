@@ -51,6 +51,9 @@ pub mod registry_scan;
 pub mod resources;
 pub mod ripgrep;
 pub mod serve;
+/// The door's static tier (slice 1 of `ready-serve-own-program.md`): the UI file bytes served by their own
+/// program when `WASM_AGENT_SERVE_STATIC` names it, and the guard that travels with them.
+pub mod serve_static;
 /// `wa vault ...` (`docs/VAULT.md`): the command table entry that belongs to this crate, kept ready for
 /// the one line `rust/wa-host/src/main.rs` has to add.
 pub mod vault_cli;

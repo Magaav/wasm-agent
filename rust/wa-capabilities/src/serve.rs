@@ -4295,24 +4295,10 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     }
 }
 
-/// The UI file a request names, or `None` if the name could leave the UI directory. Every component
-/// must be a plain name: no `..`, and no root or prefix, because on Windows `ui.join("C:/Users/..")` or a
-/// `\\server\share` path *replaces* the base instead of extending it. A file that exists must also
-/// resolve inside the UI directory, so a link inside it cannot point elsewhere.
-fn ui_file(ui: &std::path::Path, relative: &str) -> Option<std::path::PathBuf> {
-    use std::path::Component;
-    let candidate = std::path::Path::new(relative);
-    if relative.contains("..") || relative.contains('\\') || relative.contains(':')
-        || !candidate.components().all(|part| matches!(part, Component::Normal(_)))
-    {
-        return None;
-    }
-    let file = ui.join(candidate);
-    match (file.canonicalize(), ui.canonicalize()) {
-        (Ok(real), Ok(root)) if !real.starts_with(&root) => None,
-        _ => Some(file),
-    }
-}
+// The static tier (`serve_static`): the guard below, `content_type`, and the program that serves the same
+// bytes all live there now, so the door and the program cannot disagree about what a path may name.
+use crate::serve_static::ui_file;
+// refuses a traversal travels with the answer, so the program and the door cannot disagree about it.
 
 /// Answered on the accept thread, without the interpreter: the two facts a node is
 /// asked for when it looks unwell, and the files the window needs to redraw itself.
@@ -4351,6 +4337,21 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     } else {
         route.trim_start_matches('/').to_string()
     };
+    // THE STATIC TIER, WHEN AN OPERATOR NAMED ITS PROGRAM (ready-serve-own-program.md): the bytes answer
+    // from the process that owns them. An unset switch is today's path, unchanged, below.
+    if let Some(answer) = crate::serve_static::fetch(&relative) {
+        return match answer {
+            // The program's own answer, with its status: a refusal it made leaves as the same refusal.
+            Ok(Some((status, bytes))) => Some((
+                status,
+                if status == 200 { crate::serve_static::content_type(&relative) } else { "text/plain" },
+                bytes,
+            )),
+            // Not held by the program: the agent thread decides, exactly as when the file is absent here.
+            Ok(None) => None,
+            Err(error) => Some((503, "application/json", format!("{{\"error\":{}}}", json_escape(&error)).into_bytes())),
+        };
+    }
     let Some(file) = ui_file(ui, &relative) else {
         return Some((400, "text/plain", b"bad path".to_vec()));
     };
@@ -4358,7 +4359,7 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     // handled by `dispatch`), so absence is not a 404 here - it means "ask the
     // agent thread". That keeps the route table in exactly one place.
     match std::fs::read(&file) {
-        Ok(bytes) => Some((200, content_type(&relative), bytes)),
+        Ok(bytes) => Some((200, crate::serve_static::content_type(&relative), bytes)),
         Err(_) => None,
     }
 }
@@ -4663,11 +4664,22 @@ fn dispatch(
             } else {
                 route.trim_start_matches('/').to_string()
             };
+            if let Some(answer) = crate::serve_static::fetch(&relative) {
+                return match answer {
+                    Ok(Some((status, bytes))) => Some((
+                        status,
+                        if status == 200 { crate::serve_static::content_type(&relative) } else { "text/plain" },
+                        bytes,
+                    )),
+                    Ok(None) => Some((404, "text/plain; charset=utf-8", b"not found".to_vec())),
+                    Err(error) => Some((503, "application/json", format!("{{\"error\":{}}}", json_escape(&error)).into_bytes())),
+                };
+            }
             let Some(file) = ui_file(ui, &relative) else {
                 return Some((400, "text/plain", b"bad path".to_vec()));
             };
             return match std::fs::read(&file) {
-                Ok(bytes) => Some((200, content_type(&relative), bytes)),
+                Ok(bytes) => Some((200, crate::serve_static::content_type(&relative), bytes)),
                 Err(_) => Some((404, "text/plain; charset=utf-8", b"not found".to_vec())),
             };
         }
@@ -4781,29 +4793,10 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     stream.flush()
 }
 
-fn content_type(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
-        "js" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "webmanifest" => "application/manifest+json; charset=utf-8",
-        "wasm" => "application/wasm",
-        // wa's two faces are served from the ui dir (ui/fonts/), as the .ttf files the installer copies.
-        // A font served as application/octet-stream still loads in most browsers, but the type is what
-        // the page asked for and a wrong one is a silent cost (no font MIME handling, no cache
-        // partitioning by type): the node says what the bytes are.
-        "ttf" => "font/ttf",
-        "woff2" => "font/woff2",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        _ => "application/octet-stream",
-    }
-}
 
 #[cfg(test)]
 mod content_type_tests {
-    use super::content_type;
+    use crate::serve_static::content_type;
     #[test]
     fn inline_csp_hashes_browser_normalized_line_endings() {
         assert_eq!(super::content_security_policy(b"<script>one\r\ntwo\rthree</script>"),
