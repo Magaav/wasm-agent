@@ -1733,6 +1733,50 @@ pub async fn set_subject<S: Store>(store: &S, chat: &str, subject: &str) -> Resu
     store.set(key_card(chat).as_bytes(), &json).await
 }
 
+/// Fill in group subjects from what this NODE already holds (the legacy journal's chat titles), and say
+/// what the index did: `(applied, kept, unknown)` - applied for a group that had no subject, kept for one
+/// whose subject this node already fetched (a fetched subject is newer and is never overwritten by an
+/// older journal), unknown for a chat the index has never seen (nothing to attach it to).
+///
+/// It is the healing half of P2.1: the sync asks `subjects_missing` which groups have no name, and this
+/// is what a reader for the journal (or an operator) calls with what it found. Counts only in the answer's
+/// caller; no title is ever logged here.
+pub async fn seed_subjects<S: Store>(store: &S, pairs: &[(String, String)]) -> Result<(usize, usize, usize), String> {
+    let (mut applied, mut kept, mut unknown) = (0, 0, 0);
+    for (chat, subject) in pairs {
+        let title = subject.replace(['\n', '\r'], " ");
+        let title = title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let Some(card) = card_of(store, chat).await? else {
+            unknown += 1;
+            continue;
+        };
+        if !card.subject.is_empty() {
+            kept += 1;
+            continue;
+        }
+        set_subject(store, chat, title).await?;
+        applied += 1;
+    }
+    Ok((applied, kept, unknown))
+}
+
+/// The groups this index knows with NO subject: what a sync has to fetch, in a stable order so two runs
+/// schedule the same work. A group is named by its subject and nothing else (a guess would point a reader
+/// at the wrong chat), so this list is the honest answer to "which names are still missing".
+pub async fn subjects_missing<S: Store>(store: &S) -> Result<Vec<String>, String> {
+    let mut missing: Vec<String> = cards(store)
+        .await?
+        .into_iter()
+        .filter(|card| card.group && card.subject.is_empty())
+        .map(|card| card.chat)
+        .collect();
+    missing.sort();
+    Ok(missing)
+}
+
 /// One candidate chat, as `whatsapp_contacts` lists it.
 fn candidate_json(score: u8, card: &ChatCard, matched: &str, matched_source: &'static str) -> serde_json::Value {
     let (name, source) = card.best_name();

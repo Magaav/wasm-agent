@@ -3116,3 +3116,39 @@ fn search_narrows_by_a_group_subject_and_never_picks_among_several() {
     assert_eq!(answer["error"], "whatsapp_search_chat_ambiguous", "never a silent pick: {answer}");
     assert_eq!(answer["candidates"].as_array().map(Vec::len), Some(2));
 }
+
+/// P2.1 of whatsapp-index-heals-itself, the index half: subjects come from what the node already holds,
+/// a subject this node fetched is never overwritten, a chat the index has not seen is counted instead of
+/// invented, and the groups still nameless are listed for the sync to fetch.
+#[test]
+fn subjects_seed_from_what_the_node_holds_and_the_rest_are_listed() {
+    let store = Memory::new();
+    let nameless = "120363000000000011@g.us";
+    let fetched = "120363000000000012@g.us";
+    block_on(put(&store, &direct(nameless, "", "G11", base(), "oi"))).unwrap();
+    block_on(put(&store, &direct(fetched, "", "G12", base(), "oi"))).unwrap();
+    block_on(set_subject(&store, fetched, "Família")).unwrap();
+    block_on(put(&store, &direct(LAURA, "Laura", "S1", base(), "oi"))).unwrap();
+
+    // One group with no subject, one with a fetched subject, one chat the index has never seen.
+    let pairs = vec![
+        (nameless.to_string(), "Condomínio".to_string()),
+        (fetched.to_string(), "Um Nome Antigo".to_string()),
+        ("120363000000000099@g.us".to_string(), "Desconhecido".to_string()),
+    ];
+    let (applied, kept, unknown) = block_on(seed_subjects(&store, &pairs)).unwrap();
+    assert_eq!((applied, kept, unknown), (1, 1, 1), "one filled, one kept, one the index never saw");
+
+    let named = block_on(card_of(&store, nameless)).unwrap().expect("the card");
+    assert_eq!(named.subject, "Condomínio", "the journal's title filled the nameless group");
+    let kept_card = block_on(card_of(&store, fetched)).unwrap().expect("the card");
+    assert_eq!(kept_card.subject, "Família", "a fetched subject is never overwritten by an older title");
+
+    // A person chat is never given a subject, and the missing list is only groups.
+    let missing = block_on(subjects_missing(&store)).unwrap();
+    assert!(missing.is_empty(), "every group has a name now: {missing:?}");
+
+    let other = "120363000000000013@g.us";
+    block_on(put(&store, &direct(other, "", "G13", base(), "oi"))).unwrap();
+    assert_eq!(block_on(subjects_missing(&store)).unwrap(), vec![other.to_string()], "what a sync must fetch");
+}
