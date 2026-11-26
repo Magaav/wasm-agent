@@ -70,16 +70,19 @@ Nothing in this mission was built from a guess: every line below was read in thi
 
 ### 2.1 The program
 
-`rust/wa-operations-supervisor`, bin `wa-operations-supervisor` (a crate name that cannot be confused with
-the `wa-operation` library). It hosts exactly one thing: `Manager` + the verb surface, built with the same
-`policy.json` allow-list and the same `$HOME/.wasm-agent/operations` root as the host uses today. It is a
+**As built (slice 1, commit f94e6d56): `wa operations-supervisor`** — this binary in a second mode, so a
+supervisor is a process with its own lifetime, its own ledger lease and its own process groups, while
+nothing is installed and no release hunk is touched (a second **artifact** would be a release change, and
+those go to Fable). It hosts exactly one thing: `Manager` + the verb surface, built with the same
+`policy.json` allow-list and the same `$HOME/.wasm-agent/operations` root the node uses today. It is a
 program, not a component, because 43 WIT worlds offer no process control (§1.3) and because ownership must
 outlive an interpreter and a node restart.
 
-**Slice 1 (this mission)** links `wa-capabilities` for the verb glue; **slice 2** moves `operations.rs`
-into the supervisor's own library crate so the host stops depending on `wa-operation` — that is the commit
-that pays the build-time claim ("5 of 42 wa-capabilities commits kept out", ready-carve.md §2). Stated here
-so slice 1 is not read as the move being done.
+The crate split that makes the supervisor a *smaller* artifact, and lets the host stop depending on
+`wa-operation`, is **slice 2**: it moves `operations.rs` into the supervisor's own library crate and gives
+`health()`, `foreground` and the node-wide listing the same owner. That is the commit that pays the
+build-time claim ("5 of 42 wa-capabilities commits kept out", ready-carve.md §2); slice 1 pays nothing there
+and is not to be read as the move being done.
 
 ### 2.2 The protocol (a named gap, and why)
 
@@ -147,7 +150,12 @@ consequences the review must hold me to:
    admission would have refused — slice 1 gets that for free by reusing `operations::control`
    (admission *and* execution in the same code); slice 2 must keep it when the glue moves.
 
-## 3. First slice (this mission)
+## 3. First slice (this mission) — **landed in f94e6d56**
+
+Measured result: the row is green 4 of 4 consecutive runs (42 checks) and fails on the base binary;
+five unit rows green; `cargo build --release -p wa-host` warm with `operations.rs` touched: origin/main
+23.45 s / 79,712,792 bytes, this branch 28.40 s / 79,717,928 bytes. The report is
+`docs/missions/reports/operations-own-program.md`.
 
 One switch, one forwarder, one program, and rows that prove the three properties the brief names.
 
