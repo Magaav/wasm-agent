@@ -4167,7 +4167,8 @@ struct ConsoleInput {
     balloon: bool,
     /// The opening (`wa_term::opening`), while it is playing: its frames are this thread's, on the
     /// alternate screen, and every other write is held until it ends.
-    opening: Option<wa_term::opening::Opening>,
+    /// The launch animation while it plays: the program draws its frames, this thread writes them.
+    opening: Option<crate::screen::OpeningView>,
     /// When the opening must be over whatever frame it is on, and how far its own pacing is stretched
     /// to land on it (`WA_OPENING_MS` is a test's knob; it can shorten the opening, never lengthen it).
     opening_until: Option<std::time::Instant>,
@@ -4602,7 +4603,7 @@ fn set_editor(state: &mut ConsoleInput, setup: crate::screen::EditorSetup) {
     sync_editor(state);
 }
 
-/// The rebuild row (wa_term::build_status) as it reads now; redrawn only when its text changed - a
+/// The rebuild row (wa_tool_progress::build) as it reads now; redrawn only when its text changed - a
 /// row coming or going moves the status line and the chat's last row, which `layout_frame` applies.
 fn refresh_build(state: &mut ConsoleInput) {
     let Some(editor) = state.editor.as_ref() else { return };
@@ -5160,7 +5161,7 @@ static OPENING_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 #[cfg(unix)]
 extern "C" fn opening_atexit() {
     if !OPENING_UP.load(std::sync::atomic::Ordering::SeqCst) { return; }
-    let bytes = wa_term::opening::leave_bytes();
+    let bytes = crate::screen_guard::leave_bytes(crate::screen_guard::Mode::Fullscreen);
     unsafe { libc::write(1, bytes.as_ptr() as *const libc::c_void, bytes.len()); }
 }
 
@@ -5172,11 +5173,17 @@ fn register_opening_atexit() {
     ONCE.call_once(|| {});
 }
 
+/// The opening's own facts that this side needs without asking: how long it may run (a constant of
+/// the animation, not of this process) - the frames themselves come from the program.
+mod opening {
+    pub const TOTAL_MS: u64 = 2000;
+}
+
 /// How long the opening may take: `opening::TOTAL_MS`, or `WA_OPENING_MS` for a test. Clamped to the
 /// same ceiling, because a knob that makes the CLI slower to start is not a knob this offers.
 fn opening_budget_ms() -> u64 {
     std::env::var("WA_OPENING_MS").ok().and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(wa_term::opening::TOTAL_MS).clamp(100, wa_term::opening::TOTAL_MS)
+        .unwrap_or(opening::TOTAL_MS).clamp(100, opening::TOTAL_MS)
 }
 
 /// How long the reader thread waits before the next frame: the opening's own pacing, stretched to its
@@ -5186,7 +5193,7 @@ fn opening_wait() -> i32 {
     let state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let Some(opening) = state.opening.as_ref() else { return 150 };
     let scale = if state.opening_scale > 0.0 { state.opening_scale } else { 1.0 };
-    let mut wait = opening.delay() as f32 * scale;
+    let mut wait = opening.delay_ms as f32 * scale;
     if let Some(until) = state.opening_until {
         wait = wait.min(until.saturating_duration_since(std::time::Instant::now()).as_secs_f32() * 1000.0);
     }
@@ -5209,7 +5216,7 @@ fn opening_region_bottom(state: &ConsoleInput) -> Option<usize> {
 /// otherwise one frame is drawn.
 fn opening_tick(state: &mut ConsoleInput) {
     let Some(opening) = state.opening.as_ref() else { return };
-    let (width, height) = (opening.width(), opening.height());
+    let (width, height) = (opening.width, opening.height);
     // A RESIZE RETARGETS (Victor, 23/11: the star must land where the chat prints it). The sequence keeps
     // playing on the new screen, and the star's cell is recomputed for the new window - the same block,
     // wrapped at the new width, hanging from the new output region's last row. A window that no longer
@@ -5226,17 +5233,17 @@ fn opening_tick(state: &mut ConsoleInput) {
                 resize_console(state, columns as usize, rows as usize);
             }
             let bottom = opening_region_bottom(state);
-            if let Some(opening) = state.opening.as_mut() {
-                opening.resize(columns as usize, rows as usize);
-                if let Some(bottom) = bottom { opening.region_bottom(bottom); }
+            if let Some(view) = state.transcript.opening_resize(columns as usize, rows as usize) {
+                state.opening = Some(view);
             }
+            if let Some(bottom) = bottom { state.transcript.opening_region_bottom(bottom); }
         }
     }
     if state.opening_until.is_some_and(|until| std::time::Instant::now() >= until) {
         finish_opening(state);
         return;
     }
-    let painted = state.opening.as_mut().and_then(|opening| opening.step());
+    let painted = state.transcript.opening_step();
     match painted {
         Some(bytes) => { if !bytes.is_empty() { let _ = crate::tty::write_now(&bytes); } }
         None => finish_opening(state),
@@ -5249,10 +5256,11 @@ fn opening_tick(state: &mut ConsoleInput) {
 /// the animation goes, and the screen behind it is exactly what a start without an opening shows.
 fn finish_opening(state: &mut ConsoleInput) {
     if state.opening.take().is_none() { return; }
+    state.transcript.opening_close();
     state.opening_until = None;
     OPENING_UP.store(false, std::sync::atomic::Ordering::SeqCst);
     if let Some(hook) = state.opening_hook.take() { hook.restore(); }
-    let _ = crate::tty::write_now(&wa_term::opening::leave_bytes());
+    let _ = crate::tty::write_now(&crate::screen_guard::leave_bytes(crate::screen_guard::Mode::Fullscreen));
     let held = crate::tty::release();
     if !held.is_empty() { let _ = crate::tty::write_now(&held); }
     state.transcript.mark_dirty();
@@ -5298,20 +5306,25 @@ pub extern "C-unwind" fn opening_start(l: *mut LuaState) -> c_int {
     let budget = opening_budget_ms();
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_nanos() as u64).unwrap_or(1);
-    let mut opening = wa_term::opening::Opening::new(columns as usize, rows as usize, seed);
-    let scale = (budget as f32 / opening.planned_ms().max(1) as f32).clamp(0.05, 1.0);
-    let frames = opening.frames();
+    // The animation is the PROGRAM's from here on: it owns the frames, this thread writes them.
+    let view = state.transcript.opening_start(columns as usize, rows as usize, seed);
+    if view.frames == 0 {
+        push_json(l, &json!({"started": false, "reason": "program"}));
+        return 1;
+    }
+    let scale = (budget as f32 / view.planned_ms.max(1) as f32).clamp(0.05, 1.0);
+    let frames = view.frames;
     crate::tty::hold();
     OPENING_UP.store(true, std::sync::atomic::Ordering::SeqCst);
     register_opening_atexit();
     state.opening_hook = Some(crate::screen_guard::install_panic_restore_with(
         crate::screen_guard::Mode::Fullscreen,
         |bytes| { let _ = crate::tty::write_now(bytes); }));
-    let _ = crate::tty::write_now(wa_term::opening::enter_bytes());
-    let first = opening.step();
+    let _ = crate::tty::write_now(&crate::screen_guard::enter_bytes(crate::screen_guard::Mode::Fullscreen));
+    let first = state.transcript.opening_step();
     state.opening_scale = scale;
     state.opening_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(budget));
-    state.opening = Some(opening);
+    state.opening = Some(view);
     if let Some(bytes) = first { if !bytes.is_empty() { let _ = crate::tty::write_now(&bytes); } }
     push_json(l, &json!({"started": true, "frames": frames, "budget_ms": budget}));
     1
@@ -5335,9 +5348,9 @@ pub extern "C-unwind" fn opening_header(l: *mut LuaState) -> c_int {
     // from the output region's last row, so the last frame of the opening is the first frame of the chat.
     let bottom = opening_region_bottom(&state);
     let ok = match state.opening.as_mut() {
-        Some(opening) if !lines.is_empty() => {
-            opening.header(&lines);
-            if let Some(bottom) = bottom { opening.region_bottom(bottom); }
+        Some(_) if !lines.is_empty() => {
+            state.transcript.opening_header(&lines);
+            if let Some(bottom) = bottom { state.transcript.opening_region_bottom(bottom); }
             true
         }
         _ => false,

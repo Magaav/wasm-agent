@@ -148,6 +148,27 @@ fn panel_state_of(value: &Value) -> PanelState {
     }
 }
 
+/// The launch animation as the program describes it: its size, its plan, and its current frame's delay.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpeningView {
+    pub width: usize,
+    pub height: usize,
+    pub planned_ms: u64,
+    pub frames: usize,
+    pub delay_ms: u64,
+}
+
+fn opening_view(value: &Value) -> OpeningView {
+    let number = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
+    OpeningView {
+        width: number("width"),
+        height: number("height"),
+        planned_ms: value.get("planned_ms").and_then(Value::as_u64).unwrap_or(0),
+        frames: number("frames"),
+        delay_ms: value.get("delay_ms").and_then(Value::as_u64).unwrap_or(0),
+    }
+}
+
 /// The chat's own key, as the transcript names it (`wa_term::transcript::NavKey`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NavKey { None, Up, Down, Right, Left, Pin, PageUp, PageDown, Exit, Bottom, Other(Vec<u8>) }
@@ -597,6 +618,38 @@ impl Screen {
             .map(|n| n as usize)
             .unwrap_or(1)
     }
+
+    // ---- the launch animation: the program draws the frames, the node writes them on its tty ----
+
+    /// Start the animation at a size; answers its shape (planned milliseconds, how many frames, and
+    /// the current frame's delay).
+    pub fn opening_start(&mut self, width: usize, height: usize, seed: u64) -> OpeningView {
+        self.remote.want("opening_start", json!([width, height, seed])).ok()
+            .map(|value| opening_view(&value))
+            .unwrap_or_default()
+    }
+    pub fn opening_size(&mut self) -> Option<OpeningView> {
+        self.remote.want("opening_size", json!([])).ok()
+            .filter(|value| !value.is_null())
+            .map(|value| opening_view(&value))
+    }
+    pub fn opening_resize(&mut self, width: usize, height: usize) -> Option<OpeningView> {
+        self.remote.want("opening_resize", json!([width, height])).ok()
+            .filter(|value| !value.is_null())
+            .map(|value| opening_view(&value))
+    }
+    pub fn opening_region_bottom(&mut self, row: usize) { self.remote.nothing("opening_region_bottom", json!([row])) }
+    /// The welcome block the view painted, for the animation's last beat: it draws exactly those
+    /// bytes, so the last frame of the alternate screen and the first of the chat are one picture.
+    pub fn opening_header(&mut self, lines: &[String]) { self.remote.nothing("opening_header", json!([lines])) }
+    /// The next frame, or `None` when the animation is over.
+    pub fn opening_step(&mut self) -> Option<String> {
+        let value = self.remote.want("opening_step", json!([])).ok()?;
+        if value.get("finished").and_then(Value::as_bool).unwrap_or(true) { return None }
+        let frame = value.get("frame").and_then(Value::as_str)?;
+        Some(String::from_utf8(proto::unbytes(frame).unwrap_or_default()).unwrap_or_default())
+    }
+    pub fn opening_close(&mut self) { self.remote.nothing("opening_close", json!([])) }
 
     /// The keybindings table as JSON, for `/keybindings`: printed from the one that decoded the keys.
     pub fn keymap_json(&mut self) -> String {

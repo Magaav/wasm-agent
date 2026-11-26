@@ -29,6 +29,9 @@ pub struct Session {
     /// The transcript's key decoder while the chat has focus (Up on an empty draft): the escape
     /// buffer lives with the transcript, so the node does not carry a copy of it.
     nav: crate::transcript::NavDecoder,
+    /// The launch animation while it plays: its frames are the program's, drawn on the node's terminal
+    /// by the node (the node owns the tty; the animation owns the picture).
+    opening: Option<crate::opening::Opening>,
 }
 
 impl Default for Session {
@@ -36,7 +39,7 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new() -> Self { Session { transcript: Transcript::default(), editor: Editor::default(), panel: None, nav: Default::default() } }
+    pub fn new() -> Self { Session { transcript: Transcript::default(), editor: Editor::default(), panel: None, nav: Default::default(), opening: None } }
 
     /// The flag the node gates its frames on.
     pub fn dirty(&self) -> bool { self.transcript.dirty }
@@ -217,6 +220,51 @@ impl Session {
             }
             "page_step" => json!(crate::transcript::page_step(count(a, 0)?)),
             "card_rows" => json!(crate::transcript::CARD_ROWS),
+            // ---- the launch animation: the program draws the frames, the node writes them ----
+            "opening_start" => {
+                let (width, height) = (count(a, 0)?, count(a, 1)?);
+                let seed = a.get(2).and_then(Value::as_u64).unwrap_or(1);
+                let opening = crate::opening::Opening::new(width, height, seed);
+                let mut answer = json!({
+                    "planned_ms": opening.planned_ms(),
+                    "frames": opening.frames(),
+                    "width": width,
+                    "height": height,
+                    "delay_ms": opening.delay(),
+                });
+                self.opening = Some(opening);
+                answer
+            }
+            "opening_size" => match self.opening.as_ref() {
+                Some(opening) => json!({"width": opening.width(), "height": opening.height(), "delay_ms": opening.delay()}),
+                None => Value::Null,
+            },
+            "opening_resize" => {
+                let (width, height) = (count(a, 0)?, count(a, 1)?);
+                if let Some(opening) = self.opening.as_mut() { opening.resize(width, height); }
+                match self.opening.as_ref() {
+                    Some(opening) => json!({"width": opening.width(), "height": opening.height(), "delay_ms": opening.delay()}),
+                    None => Value::Null,
+                }
+            }
+            "opening_header" => {
+                let lines: Vec<String> = a.first().and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+                if let Some(opening) = self.opening.as_mut() { opening.header(&lines); }
+                Value::Null
+            }
+            "opening_region_bottom" => {
+                let row = count(a, 0)?;
+                if let Some(opening) = self.opening.as_mut() { opening.region_bottom(row); }
+                Value::Null
+            }
+            "opening_step" => match self.opening.as_mut() {
+                Some(opening) => match opening.step() {
+                    Some(frame) => json!({"frame": proto::bytes(frame.as_bytes()), "finished": false}),
+                    None => json!({"finished": true}),
+                },
+                None => json!({"finished": true}),
+            },
+            "opening_close" => { self.opening = None; Value::Null }
             _ => return Err(unknown()),
         })
     }
