@@ -14,6 +14,9 @@ trap cleanup EXIT
 export GATE_ROOT="$WORK"
 export TMPDIR="$WORK/tmp"
 export WASM_AGENT_HOME="$WORK/home"
+# the TREE under test, not the installed binary embedded modules (measured: without this the row asked for
+# scripts/lib/test-home-guard.lua and the embedded copy has none)
+export WASM_AGENT_LUA_ROOT="$ROOT"
 mkdir -p "$TMPDIR" "$WASM_AGENT_HOME"
 cd "$ROOT"
 OUT="$WORK/out.log"
