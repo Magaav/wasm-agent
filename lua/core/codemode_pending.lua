@@ -1486,27 +1486,95 @@ M.ANSWER_HOLD_MS = 900000   -- 15 min ceiling on holding one answer
 M.HOLD_SILENCE_MS = 30000   -- a job that has spoken and then says nothing for this long is reported, not held
 M.HOLD_DEADLINE_MS = 30000  -- "near its own limit": within this much of the operation's own timeout
 
-local function env_ms(name, fallback)
-  local raw = (host.getenv and host.getenv(name)) or nil
-  local value = tonumber(raw)
-  if value and value >= 0 then return math.floor(value) end
-  return fallback
-end
-
-function M.answer_hold_ms() return env_ms("WASM_AGENT_CODEMODE_ANSWER_HOLD_MS", M.ANSWER_HOLD_MS) end
-function M.hold_silence_ms() return env_ms("WASM_AGENT_CODEMODE_HOLD_SILENCE_MS", M.HOLD_SILENCE_MS) end
-function M.hold_deadline_ms() return env_ms("WASM_AGENT_CODEMODE_HOLD_DEADLINE_MS", M.HOLD_DEADLINE_MS) end
+-- THE LIMITS ARE FIELDS, NOT ENVIRONMENT (Fable's standing rule: no env override in product code, ever).
+-- A row that has to prove a 15-minute rule in seconds sets M.HOLD_SILENCE_MS on this module - the one
+-- instance the node uses, registered in `package.loaded` below - instead of changing the environment
+-- under a running process. Production never touches them.
 
 -- Hold this scope's answer until an event. Returns nil when there was nothing live to hold, else the reason
 -- the hold ended and how long it held - for the ledger, never for the model.
+-- WHAT A WAKE CARRIES BESIDE THE HANDLE (Fable 27/11): a job that has been quiet for minutes must not be
+-- reported as a bare op id. The facts are bounded on purpose - 20 lines and 2 KB - because they ride in the
+-- tool RESULT of a call the model already made, never in the prompt: the byte delta is stated in the build's
+-- table and is 0 for the prompt itself.
+M.HOLD_TAIL_BYTES = 2048
+M.HOLD_TAIL_LINES = 20
+
+local function hold_tail(dispatch, record, state)
+  -- A tail cannot be read without knowing where the output ends, and a RUNNING operation's status does not
+  -- carry a byte count (measured 27/11: the row lists elapsed/remaining/last_output_elapsed_ms and no
+  -- stdout_bytes; the read answer is what names it, `available_bytes`). So: one bounded read, and a second
+  -- only when the output is longer than the window - both on the wake path alone, never in the wait loop.
+  local function read(offset)
+    local ok, page = pcall(dispatch, "operation", { action = "read", id = record.op, stream = "stdout",
+      offset = offset, limit = M.HOLD_TAIL_BYTES })
+    if not ok or type(page) ~= "table" then return nil end
+    return page
+  end
+  local page = read(math.max(0, (tonumber(state and state.stdout_bytes) or 0) - M.HOLD_TAIL_BYTES))
+  if not page then return nil end
+  local available = tonumber(page.available_bytes)
+  if available and available > M.HOLD_TAIL_BYTES then
+    page = read(available - M.HOLD_TAIL_BYTES) or page
+  end
+  local text = page.content or page.stdout
+  if type(text) ~= "string" or text == "" then return nil end
+  -- The last N lines within the byte ceiling, so a file of one enormous line cannot push the answer past
+  -- the bound either.
+  local lines = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+  while #lines > 0 and #lines[#lines] == 0 do lines[#lines] = nil end
+  local from = math.max(1, #lines - M.HOLD_TAIL_LINES + 1)
+  local kept = {}
+  local bytes = 0
+  for index = from, #lines do
+    local line = lines[index]
+    if bytes + #line + 1 > M.HOLD_TAIL_BYTES then break end
+    kept[#kept + 1] = line
+    bytes = bytes + #line + 1
+  end
+  if #kept == 0 then return nil end
+  return table.concat(kept, "\n")
+end
+
+-- The same facts the design asks for at every wake: what it is doing, how long, against which limit, how
+-- long since it last spoke, and the last lines. Only for the wakes that need them - a settle answers with
+-- the work's own result, and a cancelled hold answers with the user's own action.
+local function hold_facts(dispatch, records)
+  local facts = {}
+  for _, item in ipairs(records) do
+    local state = item.state or {}
+    -- How long since it last spoke: the operation reports `output_idle_ms` when it has one, and always the
+    -- pair the difference comes from (the same two fields the silence rule itself reads).
+    local silent = tonumber(state.output_idle_ms)
+    if silent == nil then
+      local elapsed = tonumber(state.elapsed_ms)
+      local last = tonumber(state.last_output_elapsed_ms)
+      if elapsed and last then silent = math.max(0, elapsed - last) end
+    end
+    facts[#facts + 1] = {
+      op = item.record.op,
+      state = tostring(state.state or "running"),
+      elapsed_ms = tonumber(state.elapsed_ms),
+      -- ITS OWN LIMIT, which is the number the model needs to judge `near its timeout` against: the
+      -- operation's timeout when it reports one, else what is left of it.
+      limit_ms = tonumber(state.timeout_ms) or tonumber(state.remaining_ms),
+      silent_ms = silent,
+      tail = hold_tail(dispatch, item.record, state),
+    }
+  end
+  return facts
+end
+
 function M.hold_before_answer(dispatch, opts, scope)
   local index = M.open(scope)
   if index.count == 0 then return nil end
   local started = host.now()
-  local limit_ms = M.answer_hold_ms()
-  local silence_ms = M.hold_silence_ms()
-  local deadline_ms = M.hold_deadline_ms()
+  local limit_ms = M.ANSWER_HOLD_MS
+  local silence_ms = M.HOLD_SILENCE_MS
+  local deadline_ms = M.HOLD_DEADLINE_MS
   local woke = nil
+  local last_state = {}
   while true do
     local live, silent, near_limit = 0, false, false
     local first_live = nil
@@ -1521,6 +1589,7 @@ function M.hold_before_answer(dispatch, opts, scope)
             live = live + 1
             first_live = first_live or { executor = executor, record = record }
             if type(state) == "table" then
+              last_state[record.op] = state
               -- Where the silence clock comes from, in order: the field the operation reports when it has
               -- one, else the two it always reports (23/11 state record: elapsed_ms and
               -- last_output_elapsed_ms are in every answer, output_idle_ms only in some). A job that has
@@ -1560,7 +1629,19 @@ function M.hold_before_answer(dispatch, opts, scope)
   end
   local held_ms = math.floor((host.now() - started) * 1000)
   M.save(scope, index)
-  return { woke = woke, held_ms = held_ms }
+  -- The refresh, for the two wakes that report a job still running. A settle needs none (announce carries the
+  -- work's own result) and a user cancel needs none (the person who cancelled knows what they did).
+  local facts = nil
+  if woke == "silent" or woke == "deadline" or woke == "hold_limit" then
+    local live_records = {}
+    for _, record in pairs(index.ops) do
+      if record.state == "running" or record.state == "unknown" then
+        live_records[#live_records + 1] = { record = record, state = last_state[record.op] }
+      end
+    end
+    if #live_records > 0 then facts = hold_facts(dispatch, live_records) end
+  end
+  return { woke = woke, held_ms = held_ms, facts = facts }
 end
 
 function M.announce(scope)
@@ -1685,5 +1766,7 @@ M.CANCEL_HELP = {
   description = "Stop one pending call, or up to 20, by its op handle. Answers {op, cancelled:true, state:\"cancelled\"} when the work was stopped, {op, cancelled:false, error:\"finished\"} when it had finished first, and {op, cancelled:false, error:\"not_cancellable\", why:…} when the effect cannot be stopped - a sent message stays sent, a landed deploy stays landed. A cancelled call is never re-run.",
   code = "const started = await tools.bash({command:'sleep 300', wait_s:0});\nconst stopped = await cancel(started.op);\nreturn {op: started.op, cancelled: stopped.cancelled};",
 }
+
+package.loaded['codemode_pending'] = package.loaded['codemode_pending'] or M
 
 return M

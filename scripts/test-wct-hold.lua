@@ -14,16 +14,21 @@
 -- production takes seconds here without touching a constant.
 local json=dofile('lua/vendor/json.lua')
 local env=host.getenv
-local SILENCE=800
 host.getenv=function(k)
   if k=='WASM_AGENT_CODEMODE' then return 'native' end
-  if k=='WASM_AGENT_CODEMODE_HOLD_SILENCE_MS' then return tostring(SILENCE) end
-  if k=='WASM_AGENT_CODEMODE_ANSWER_HOLD_MS' then return '60000' end
   return env(k)
 end
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
 local codemode=dofile('lua/core/codemode.lua')
+-- THE LIMITS ARE THE MODULE'S FIELDS, not the environment (Fable's rule: no env override in product code).
+-- `package.loaded['codemode_pending']` is the one table the node runs, so these are the real limits with a
+-- row-sized number in them: a rule about minutes proved in seconds, and nothing about production changed.
+local pending=package.loaded['codemode_pending']
+assert(type(pending)=='table','codemode_pending did not register itself; the node would run another copy')
+pending.HOLD_SILENCE_MS=800
+pending.HOLD_DEADLINE_MS=800
+pending.ANSWER_HOLD_MS=60000
 local checks=0
 local function check(value,label)assert(value,label);checks=checks+1 end
 local ready=false
@@ -65,6 +70,20 @@ check(secs2<10,'row 2: a silent job held the answer for '..string.format('%.2f',
 -- to decide, without a byte of the job's stdout in this answer (that is `pending_settled`'s job when it
 -- settles, and the tail-refresh of a running handle is a named limit of this change, not a promise).
 check(body2:find('op%-')~=nil,'row 2: the answer did not name the job it is still holding')
+-- ROW 2b, the refresh (Fable 27/11): a job that has been quiet for minutes is not reported as a bare op
+-- id. The wake carries what it is doing, how long, against which limit, how long since it last spoke, and
+-- the last lines - on the RESULT, never in the prompt.
+local held2=type(r2)=='table' and r2.pending_held or nil
+check(type(held2)=='table' and #held2>=1,'row 2b: the wake carried no facts beside the handle')
+local facts2=held2[1]
+check(facts2.state=='running','row 2b: the wake did not say what the job is doing')
+check(type(facts2.elapsed_ms)=='number','row 2b: the wake did not say how long it has run')
+check(type(facts2.limit_ms)=='number','row 2b: the wake did not say its own limit')
+check(type(facts2.silent_ms)=='number','row 2b: the wake did not say how long since it last spoke')
+check(type(facts2.tail)=='string' and facts2.tail:find('wct%-spoken')~=nil,'row 2b: the last lines were not carried')
+check(#facts2.tail<=2048,'row 2b: the tail is past its own 2 KB bound')
+-- The bytes this costs, measured rather than guessed: the note is on a WAKE only.
+print('ROW2B tail_bytes='..#facts2.tail..' note_bytes='..#json.encode(held2))
 
 -- ROW 3: a kept handle is untouched. Start the job, do other work beside it, then read it: the other work
 -- answers on its own and the handle is still the same handle.
