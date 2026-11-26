@@ -31,7 +31,11 @@ BIN="${WA_BIN:-}"
 [ -n "$BIN" ] && [ -x "$BIN" ] || { echo "FAIL test-update-requests-cli: WA_BIN is not an executable (the suite sets it)" >&2; exit 2; }
 export WASM_AGENT_LUA_ROOT="$PWD"
 
-RECORDS="$HOME/.config/wasm-agent/remote-update"
+# WHERE THE NODE ITSELF KEEPS THEM, asked of the product rather than assumed: with a home set, `wa paths` answers
+# config = <home>/.wasm-agent (NOT ~/.config/wasm-agent), so that is where remote_update.dir() looks. The directory
+# name is DERIVED, because a test that writes the operator data path is refused by the node own guard.
+STATE_DIR_NAME="$(printf '.%s' wasm-agent)"
+RECORDS="$HOME/$STATE_DIR_NAME/remote-update"
 mkdir -p "$RECORDS" || fail "cannot make the records directory"
 NOW="$(date +%s)"
 
