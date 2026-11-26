@@ -125,7 +125,7 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, id = args.id, max_bytes = args.max_bytes } end,
   },
   {
-    verb = 'backfill', capability = 'whatsapp_backfill', effect = 'write',
+    verb = 'backfill', capability = 'whatsapp_request', effect = 'write',
     description = 'Ask the primary phone for older WhatsApp messages, so the index covers the account history and not only the live stream. Name one exact chat JID to reach back into that conversation, or name none to ask for the chats the index already knows (at most 20, newest first). The messages arrive through the normal protocol and are indexed as history, so a later whatsapp_search finds them. This is a request to the phone, not an answer: the result is the ids and counts that were asked for, plus a note when it stopped early.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160 }, count = { type = 'integer', minimum = 1, maximum = 500 },
@@ -186,6 +186,12 @@ for _, tool in ipairs(M.TOOLS) do
   tool.name = 'mcp_whatsapp_' .. tool.verb
   M.by_verb[tool.verb] = tool
 end
+
+--- The generic doors: a capability that carries WHICH question in the request (`{op, ...args}`)
+--- instead of one row per op. `M.invoke` hands the word from this catalogue row, never from the caller's
+--- arguments, so a model cannot reach an op its tool does not name. One per effect class: reads ride the
+--- read-only door, the questions that reach the phone ride the network one.
+M.GENERIC = { whatsapp_index = true, whatsapp_request = true }
 
 --- The exact name one verb is offered as (`mcp_whatsapp_read`).
 function M.name(verb) local tool = M.by_verb[verb]; return tool and tool.name or nil end
@@ -804,7 +810,7 @@ function M.invoke(tool, args)
   -- A generic row is told WHICH question: the word comes from this catalogue row, never from the
   -- caller's arguments, so `whatsapp_index` (every read-only op a component knows) cannot be talked
   -- into reaching one the tool does not name.
-  if tool.capability == 'whatsapp_index' then request.op = tool.verb end
+  if M.GENERIC[tool.capability] then request.op = tool.verb end
   local ok, answer = pcall(capability, json.encode(request))
   if not ok then return { ok = false, error = tool.name .. '_failed', detail = tostring(answer):sub(1, 160), effect = 'none' } end
   local decode_ok, decoded = pcall(json.decode, tostring(answer or ''))

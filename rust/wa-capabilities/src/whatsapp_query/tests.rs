@@ -575,3 +575,30 @@ fn the_generic_door_carries_only_the_reads_and_refuses_a_network_or_file_op() {
         }
     }
 }
+
+/// The network door carries the question that reaches the phone, and only that: `backfill` answers
+/// through it byte for byte as through its named row, a read is refused by name, and nothing is queued
+/// for the op the door does not declare.
+#[test]
+fn the_network_door_carries_backfill_and_refuses_a_read() {
+    let (_h1, named_q) = queue("network-named");
+    let (_h2, door_q) = queue("network-door");
+    let args = serde_json::json!({"count": 5});
+    let named = ask_in(&named_q, seam::Op::Backfill, &args, 1, BUILD);
+    let mut with_op = args.clone();
+    with_op["op"] = serde_json::json!("backfill");
+    let through_door = ask_class_in(&door_q, &with_op, "request", seam::Effect::Network, 1, BUILD);
+    assert_eq!(named["error"], "whatsapp_backfill_slow");
+    assert_eq!(json_text(&named), json_text(&through_door), "the same answer bytes");
+    let named_job = named_q.job(wa_queue::JobId(named["id"].as_u64().expect("named id"))).unwrap().unwrap();
+    let door_job = door_q.job(wa_queue::JobId(through_door["id"].as_u64().expect("door id"))).unwrap().unwrap();
+    assert_eq!(named_job.payload, door_job.payload, "the component is asked the same bytes");
+
+    // A read through this door is refused by name, and queues nothing.
+    let ready_before = door_q.stats(seam::QUEUE).unwrap().ready;
+    let mut read_args = serde_json::json!({"q": "boleto"});
+    read_args["op"] = serde_json::json!("search");
+    let refused = ask_class_in(&door_q, &read_args, "request", seam::Effect::Network, 1, BUILD);
+    assert_eq!(refused["error"], "whatsapp_search_use_its_own_door");
+    assert_eq!(door_q.stats(seam::QUEUE).unwrap().ready, ready_before, "a read queued nothing through the network door");
+}

@@ -271,6 +271,10 @@ pub const REGISTRY: &[Capability] = &[
     // components directory (`docs/WHATSAPP-ARCHIVE.md`).
     plain!("whatsapp_archive", WritesFiles, crate::whatsapp_archive::capability, "WhatsApp index archives: cut a month that left the window into one sealed file, list, push with its sha256 verified, restore, unload, expire"),
     plain!("whatsapp_backfill", Network, crate::whatsapp_query::backfill, "Ask the primary phone for WhatsApp messages older than the index holds, so a search can reach the account's past"),
+    // The same generic door as `whatsapp_index`, declaring the other effect: the ops that ASK THE PHONE
+    // ({op, ...args}, today `backfill`). A read must not ride it and a phone request must not ride the
+    // read door - `seam::Op::effect` decides, and the refusal names the right row (2026-11-25).
+    plain!("whatsapp_request", Network, crate::whatsapp_query::request, "Ask the wa-whatsapp component one question that reaches the phone: {op, ...args}, op being backfill; the answer is the one whatsapp_<op> gives"),
     // ---- Email (docs/EMAIL-CONNECTOR.md) -------------------------------------------------------
     // The same two shapes as the WhatsApp tools: an effect (`email_send`) is a job on `email.outbox`
     // after the node's `email.send` policy check, a question (`email_search`/`email_read`) is a job on

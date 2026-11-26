@@ -101,6 +101,23 @@ for _, case in ipairs(OPS) do
   end
 end
 
+-- The NETWORK door (`whatsapp_request`): the op that asks the primary phone rides it, with the bytes its
+-- named row answers, and a read is refused by name and queues nothing. Two doors, one per effect class,
+-- so a sandbox that joins a read as a read cannot cause a phone request.
+local backfill_args = { count = 5 }
+local named_backfill = tostring(host.whatsapp_backfill(json.encode(backfill_args)))
+local door_backfill = tostring(host.whatsapp_request(json.encode({ op = "backfill", count = 5 })))
+ok(named_backfill == door_backfill, "backfill: the network door answers the named row's bytes")
+local backfill_tool = whatsapp.tool("mcp_whatsapp_backfill")
+ok(backfill_tool ~= nil and backfill_tool.capability == "whatsapp_request",
+  "the backfill tool row points at the network door")
+local via_backfill_tool = whatsapp.invoke(backfill_tool, backfill_args)
+local bfine, bwhy = same(json.decode(named_backfill), via_backfill_tool)
+ok(bfine, "backfill: the tool door answers the named row's document (" .. tostring(bwhy) .. ")")
+local read_on_network = json.decode(tostring(host.whatsapp_request(json.encode({ op = "search", q = "x" }))))
+ok(read_on_network.error == "whatsapp_search_use_its_own_door", "a read is refused by the network door")
+ok(read_on_network.ok == false and read_on_network.effect == "none", "and changes nothing")
+
 -- The generic door is a READ door: an op that asks the phone or writes a file is refused by name and
 -- queues nothing, so a sandbox that joined it as a read cannot be made to cause an effect through it.
 for _, case in ipairs({ { op = "backfill", detail = "count" }, { op = "download" } }) do

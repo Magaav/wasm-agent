@@ -952,6 +952,7 @@ whatsapp_read        read-only
 whatsapp_message     read-only
 whatsapp_search      read-only
 whatsapp_backfill    network
+whatsapp_request     network
 whatsapp_contacts    read-only
 whatsapp_archive     writes files
 email_send           network
