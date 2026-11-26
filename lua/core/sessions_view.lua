@@ -103,6 +103,18 @@ function M.page(opts)
   local started = os.clock()
   local rows, total, now = M.rows(opts)
   local options = {}
+  -- The session the reader came from, marked and FIRST: one key (Enter) goes back to it.
+  if opts.back and opts.back ~= "" and opts.back ~= opts.session_id then
+    local from = memory.session(opts.back)
+    local from_name = from and tostring(from.title or "") or ""
+    if from_name == "" then from_name = "(unnamed) " .. M.short_id(opts.back) end
+    options[#options + 1] = {
+      label = "\u{2190} back to " .. clip(from_name, 40),
+      hint = "where you came from",
+      session = opts.back,
+      back = true,
+    }
+  end
   for _, entry in ipairs(rows) do
     if entry.worker_heading then
       options[#options + 1] = { label = string.format("  %d mission session%s", entry.worker_heading,

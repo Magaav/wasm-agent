@@ -1014,6 +1014,47 @@ function M.run(argv)
   -- from the same renderer. No arm below calls `print`, `host.panel` or `io.write` itself, and
   -- `scripts/test-cli-balloon.lua` fails when one does.
   local balloon = reload.require("lua/core/balloon.lua")
+  -- SWITCHING THREADS IN THIS PROCESS (sessions-is-a-balloon, Victor + Fable 26/11).
+  --
+  -- A thread is entered at start and used to be left only by starting the CLI again: `/session` prints
+  -- the id and the resume line because there was nothing else it could do. A switch is that boot's
+  -- last third - take the id, remember where we came from, replay that thread's newest messages under
+  -- a line that says whose they are - without a new process. Nothing is stopped: a turn running in
+  -- another process (a served session, a worker) keeps running, which is why the row says its state.
+  local switched_from = nil
+  local function switch_to(target)
+    target = tostring(target or "")
+    if target == "" then return false, "no session given" end
+    if target == tostring(agent.session_id) then return true end
+    local session = memory.session(target)
+    if not session then return false, "no such session: " .. target end
+    local parked_hold = dofile("lua/core/selfloop.lua").hold(target)
+    if parked_hold and parked_hold.kind == "park" then
+      return false, "session " .. target .. " is parked (wa session release " .. target .. ")"
+    end
+    local came_from = tostring(agent.session_id)
+    agent.session_id = target
+    switched_from = came_from
+    local name = tostring(session.title or "")
+    if name == "" then name = "(unnamed) " .. target:sub(1, 8) .. "\u{2026}" end
+    print(cli_view.paint("  \u{2192} switched to " .. redact.text(name) .. "  " .. target:sub(1, 8)
+      .. "\u{2026}", "dim", view.live))
+    -- The thread's newest messages, drawn once (the resume path's replay, with its own window).
+    local REPLAY = tonumber(host.getenv("WASM_AGENT_CLI_REPLAY")) or 400
+    if REPLAY > 0 then
+      local total = memory.message_count(target)
+      local rows = memory.session_messages(target, { limit = REPLAY }) or {}
+      local skipped = math.max(0, total - #rows)
+      local hold = host.transcript_hold
+      if hold then pcall(hold, true) end
+      local replayed, problem = pcall(view.replay, view, rows, { skipped = skipped })
+      if hold then pcall(hold, false) end
+      if not replayed then view:warn(redact.text("could not draw the thread: " .. tostring(problem))) end
+    end
+    refresh_model()
+    return true
+  end
+
   local ui = balloon.for_view(view, { print = print, redact = redact })
 
 
@@ -1208,14 +1249,13 @@ function M.run(argv)
       -- with its state and age. Picking one switches (the switch itself is the REPL's, below); a pipe
       -- gets the plain list.
       local sessions = reload.require("lua/core/sessions_view.lua")
-      local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200 })
+      local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
+        back = switched_from })
       if type(answer) == "table" and answer.action == "select" then
         local chosen = tostring(answer.session or "")
-        if chosen ~= "" and chosen ~= tostring(agent.session_id) then
-          -- Until the in-process switch lands, the row names what today already works: the resume
-          -- line, printed. The switch replaces this block.
-          ui.say("  switch: wa --resume " .. chosen)
-        end
+        local ok, problem = switch_to(chosen)
+        if ok and answer.back then switched_from = nil end
+        if not ok then ui.say("  " .. tostring(problem)) end
       end
         elseif line == "/login" or line == "/provider" then
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
