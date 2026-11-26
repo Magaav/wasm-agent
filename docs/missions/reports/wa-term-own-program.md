@@ -150,6 +150,33 @@ two-process test finds `wa-term` in the same target dir) and runs `term-remote-p
 `WA_TERM_REMOTE=banana` and starts the chat, so `term_switch_invalid` never appears (measured,
 30.3 s).
 
+### Through the runner (the fast path), with `WA_FAST_ROWS` narrowed to the rows this change touches
+
+`bash scripts/fast.sh` with `WA_FAST_ROWS` naming `scripts/test-cli-view.lua` and
+`scripts/test-cli-notice.lua` (the two console rows this change is on the path of): **156 checks, 154
+passed, 2 failed, 0 skipped, 1,585 s**. The two failures are the two Rust rows, and neither is this
+branch's:
+
+- `rust wa-capabilities` (exit 101) - the five pre-existing tests named in section 5. The same row
+  fails with exit 101 in fast runs of branches that do not contain this change (e.g. `wt69`
+  2026-11-24T14:41, `wt86` 2026-11-24T23:11, read from their own `wa-fast-result.json`).
+- `rust wa-term` (exit 101) - **NOT REPRODUCIBLE here**: the same command the runner runs
+  (`cargo test --release -p wa-term`, scratch `HOME`, the runner's own target dir) was run ten times
+  in a row on this branch and failed none: 225 + 1 + 1 + 4 + 7 + 1 tests green, ten times. It also
+  fails with exit 101 in fast runs of branches that predate this one (`wt81` 2026-11-25T10:29, `wt90`
+  2026-11-25T22:20), under the same heavy load (that run built `wa-host` for 225.8 s while another
+  mission compiled on the same machine). The runner keeps no log for a Rust row, so the failing test
+  name is not recorded - stated rather than guessed. If it recurs at the gate it should be treated as
+  a flaky row of the machine, not as this branch's, and it can be named then.
+
+The runner's build-time table also shows the row this branch wired in: **`wa-term (program)` 8.8 s,
+14 units compiled** (a warm build in that run), beside `wa-term` 4.7 s and `wa-capabilities` 22.4 s.
+
+Its module report flags one co-change pair: `crate:wa-term + crate:wa-term-proto` (2 of 2 commits
+touch both, 100%). That is by design and not an accident to be merged away: the wire is a separate
+leaf precisely so the node can keep speaking it after it stops linking `wa-term` (section 3), and
+every commit of this slice necessarily touches both until that day.
+
 ## 6. How the tests keep their promises
 
 - **two real processes, one machine**: the equivalence test spawns the real program binary (no stub,
