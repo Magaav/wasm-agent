@@ -16,7 +16,16 @@ local json = dofile('lua/vendor/json.lua')
 local M = {}
 
 local function mcp_module() return dofile('lua/core/mcp.lua') end
-local function federation() return dofile('lua/core/federation.lua') end
+-- The federation module, loaded ONCE for the life of this file's copy. It used to be a `dofile` per
+-- call, and it is called once per peer tool (`local_name`) while a catalogue is composed: MEASURED on avell
+-- 25/11, 34 peer tools cost ~45 ms of file loading for a table that never changed. Live reload swaps this
+-- file (`lua/core/reload.lua`), so the memo is per version of the module, which is the same rule the page
+-- builder above follows.
+local federation_module
+local function federation()
+  if federation_module == nil then federation_module = dofile('lua/core/federation.lua') end
+  return federation_module
+end
 
 -- A connector's state, from what the registry already recorded: enabled, or the last thing that failed.
 -- `probe` is the handshake, `last_call` the last tool call; either failing is the error the reader needs,
@@ -296,7 +305,11 @@ function M.peer_connectors(opts)
     end
   end
   table.sort(silent)
-  return list, { ok = true, at = cache.at, silent = silent }
+  -- `cache` rides along with the rows: a paint asks for the catalogue ONCE and hands the same answer to
+  -- the WhatsApp row below (`owner_catalog`), which used to ask the store for it twice more - MEASURED on
+  -- avell 25/11, one `meta_get` on the operator's 2 GB store is 47 ms, so 150 ms of a 3.5 s `wa mcp list`
+  -- was the same catalogue queried three times.
+  return list, { ok = true, at = cache.at, silent = silent, cache = cache }
 end
 
 -- The list `/mcp` prints and the window renders. `read_only` is the guest's answer: the same inventory,
@@ -315,6 +328,75 @@ local function builtin_services(opts)
   return { row }
 end
 
+-- An age, in the words a reader can act on: the list never asks another node, so the rows it shows for
+-- other nodes are the last answer this node kept, and how old that answer is decides whether to trust it.
+function M.age_phrase(at)
+  local seconds = (tonumber(host.now()) or 0) - (tonumber(at) or 0)
+  if seconds < 0 then seconds = 0 end
+  if seconds < 60 then return 'less than a minute' end
+  local minutes = math.floor(seconds / 60)
+  if minutes < 60 then return string.format('%d min', minutes) end
+  local hours = math.floor(minutes / 60)
+  if hours < 24 then return string.format('%d h %d min', hours, minutes % 60) end
+  return string.format('%d days', math.floor(hours / 24))
+end
+
+-- Ask every online peer for its catalogue, NOW, and say what came back.
+--
+-- This is the only path of this file that waits on another node, and only because a reader asked for it:
+-- `/mcp refresh` in a chat, `wa mcp list --refresh` from a shell. Every paint (`M.list` with
+-- `opts.cache_only`, which is what the chat, the mid-run snapshot and `wa mcp list` do) reads the cache
+-- and prints its age instead. The refresh itself keeps `federation.refresh`'s own budget and roster rule -
+-- nothing about WHO is asked changes here, only WHEN.
+function M.refresh_peers()
+  local ok, cache = pcall(function() return federation().refresh() end)
+  if not ok or type(cache) ~= 'table' then
+    return { ok = false, error = 'federation_refresh_failed', detail = tostring(cache) }
+  end
+  local answered, silent, tools, connectors = {}, {}, 0, 0
+  for _, peer in pairs(cache.peers or {}) do
+    local name = tostring(peer.name or peer.node_id or '?')
+    -- The same rule `peer_connectors` draws its rows by: a peer that answered with no tool and an error did
+    -- not answer, and is named rather than counted.
+    if #(peer.tools or {}) == 0 and peer.error then
+      -- The NAME only: the registry's error code (`refresh_budget_spent`, `no_answer`) is not a word to put in
+      -- a sentence a person reads (Fable, 25/11) - the catalogue's own page names it where a reader is
+      -- diagnosing, and this line says the one thing the reader needs: who did not answer in time.
+      silent[#silent + 1] = name
+    else
+      answered[#answered + 1] = name
+      tools = tools + #(peer.tools or {})
+      connectors = connectors + #(peer.connectors or {})
+    end
+  end
+  table.sort(answered)
+  table.sort(silent)
+  return { ok = true, at = cache.at, peers = answered, silent = silent, tools = tools, connectors = connectors,
+    total = #answered + #silent }
+end
+
+-- What a refresh did, in one line a reader can check against the rows below it.
+function M.refresh_text(answer)
+  answer = type(answer) == 'table' and answer or {}
+  if answer.ok ~= true then
+    -- The reason first, the code in brackets after it (Fable, 25/11): a reader gets the sentence, and a
+    -- person diagnosing gets the exact code without it being the sentence.
+    return 'the other nodes were not asked again: ' .. tostring(answer.detail or 'no reason given')
+      .. ' (' .. tostring(answer.error or 'unknown') .. ')'
+  end
+  if (tonumber(answer.total) or 0) == 0 then
+    return 'catalogue re-read: this node has no online peer to ask'
+  end
+  local text = string.format('catalogue re-read: %d of %d peer%s answered · %d connector%s · %d tool%s',
+    #(answer.peers or {}), answer.total, answer.total == 1 and '' or 's',
+    tonumber(answer.connectors) or 0, (tonumber(answer.connectors) or 0) == 1 and '' or 's',
+    tonumber(answer.tools) or 0, (tonumber(answer.tools) or 0) == 1 and '' or 's')
+  if type(answer.silent) == 'table' and #answer.silent > 0 then
+    text = text .. ' · no answer in time: ' .. table.concat(answer.silent, ', ')
+  end
+  return text
+end
+
 function M.list(ctx, opts)
   opts = opts or {}
   local role = type(ctx) == 'table' and ctx.role or 'guest'
@@ -324,7 +406,15 @@ function M.list(ctx, opts)
   local connectors = {}
   -- The built-in services first, then this node's registry, then the peers'. One list: every row says
   -- which node it lives on, so nothing needs a heading over a group of them.
-  for _, entry in ipairs(builtin_services(opts)) do connectors[#connectors + 1] = entry end
+  -- The catalogue is handed down rather than re-read: `service_row` asks it twice (who owns the account,
+  -- and the "is it up" check), and `opts.owner_catalog` is the seam it already has for a caller that has
+  -- the answer. Absent a peer read at all (the cache was unreadable), it falls back to its own read.
+  local builtin_opts = opts
+  if type(peers_meta) == 'table' and type(peers_meta.cache) == 'table' then
+    local shared = peers_meta.cache
+    builtin_opts = setmetatable({ owner_catalog = function() return shared end }, { __index = opts })
+  end
+  for _, entry in ipairs(builtin_services(builtin_opts)) do connectors[#connectors + 1] = entry end
   for _, entry in ipairs(local_list) do connectors[#connectors + 1] = entry end
   for _, entry in ipairs(peer_list) do connectors[#connectors + 1] = entry end
   local enabled, tools, built_in = 0, 0, 0
@@ -333,10 +423,26 @@ function M.list(ctx, opts)
     tools = tools + (tonumber(entry.tool_count) or 0)
     if entry.type == 'built-in' then built_in = built_in + 1 end
   end
+  -- HOW OLD THE PEER HALF IS, worked out HERE and not in the renderer: `list` is the one place that knows
+  -- when the cache was written (`peers_meta.at`) and whether it holds anything worth dating. Absent when this
+  -- node holds no peer answer at all, because "read never ago" is noise on a node with no peers.
+  local peers_age
+  if type(peers_meta) == 'table' and tonumber(peers_meta.at) and tonumber(peers_meta.at) > 0
+    and (#peer_list > 0 or (type(peers_meta.silent) == 'table' and #peers_meta.silent > 0)) then
+    peers_age = M.age_phrase(peers_meta.at)
+  end
+  -- NEVER READ IS NOT "NO PEER CONNECTORS" (25/11). A cache with no `at` means this node has not asked
+  -- anybody yet - a node bound a minute ago, or one whose first read is still ahead. Without a word on the
+  -- page that reads exactly like "there is nothing on the other nodes", which is the one thing this list
+  -- cannot know from an empty cache. Only a master's view carries peers at all (`read_only` is the guest's),
+  -- so only a master is told.
+  local peers_never = type(peers_meta) == 'table' and peers_meta.ok == true
+    and not (tonumber(peers_meta.at) and tonumber(peers_meta.at) > 0) and read_only == false
   return {
     ok = true, connectors = connectors, read_only = read_only, role = role,
     revision = registry and registry.revision, registry_error = registry and registry.error,
     peers_at = peers_meta and peers_meta.at, peers_silent = peers_meta and peers_meta.silent,
+    peers_age = peers_age, peers_never = peers_never or nil,
     counts = { connectors = #connectors, services = #connectors, built_in = built_in,
       mcp = #connectors - built_in, here = #local_list, from_peers = #peer_list,
       enabled = enabled, tools = tools },
@@ -665,11 +771,15 @@ function M.views(view, opts)
   -- A panel stack has a cap (`max_pages`, the client's MAX_VIEWS = 64 for the mid-run snapshot): over it,
   -- the per-tool pages go and each Tools page still names every tool (17/11, work: 72 panels were refused
   -- whole, so mid-run /mcp never showed and was rebuilt at every round).
+  -- `list_only`: the caller prints the list and nothing else (`wa mcp list`, which renders the first
+  -- page as text). Building the 130 pages a full stack holds - every connector's detail, its tools and every
+  -- tool's page - cost 60 ms of the 3.5 s `wa mcp list` for pages that were never read; the rows are the
+  -- same, only the links to them are absent. `--all` and every in-chat walk build the whole stack.
   local total = 1
   for _, entry in ipairs(view.connectors or {}) do total = total + 2 + #(entry.tools or {}) end
   local compact = tonumber(opts.max_pages) ~= nil and total > tonumber(opts.max_pages)
   local index = 1
-  for _, entry in ipairs(view.connectors or {}) do
+  for _, entry in ipairs(opts.list_only and {} or view.connectors or {}) do
     index = index + 1
     local detail_index = index
     index = index + 1
@@ -692,7 +802,7 @@ function M.views(view, opts)
   -- list above. A row here links to the SAME detail page, so the two spellings of one connector are one
   -- connector.
   local fold_page = {}
-  for _, fold in ipairs(plan.folded) do
+  for _, fold in ipairs(opts.list_only and {} or plan.folded) do
     index = index + 1
     local options = {}
     for _, row in ipairs(fold.rows) do
@@ -717,6 +827,18 @@ function M.views(view, opts)
   pages[1] = list
   if #(view.connectors or {}) == 0 then
     list.lines[#list.lines + 1] = 'no MCP servers: none on this node and none shared by another node.'
+  end
+  -- HOW OLD THE PEER HALF IS (25/11). The list never asks another node, so its peer rows are the last
+  -- answer this node kept; the age is the one fact that says whether to trust them, and the verb that
+  -- re-reads them is the CALLER's (`opts.refresh_verb`): the same builder draws a chat balloon and
+  -- `wa mcp list`, and a reader has to be told the spelling their own surface answers to.
+  if view.peers_age then
+    push(list.lines, string.format('other nodes: read %s ago · %s re-reads them',
+      tostring(view.peers_age), tostring(opts.refresh_verb or '/mcp refresh')))
+  elseif view.peers_never then
+    -- The verb is the same one; it is "reads" here because there is nothing yet to re-read.
+    push(list.lines, string.format('other nodes: not read yet · %s reads them',
+      tostring(opts.refresh_verb or '/mcp refresh')))
   end
   -- Peers that did not answer the last refresh: one line, not rows posing as connectors.
   if type(view.peers_silent) == 'table' and #view.peers_silent > 0 then

@@ -228,8 +228,14 @@ function M.page_text(page, width, opts)
       rows[#rows + 1] = string.format("     %u more - the terminal list scrolls", #page.options - shown)
     end
   end
-  rows[#rows + 1] = ""
-  rows[#rows + 1] = M.fit(M.hint_for(page), width)
+  -- A PIPE HAS NO KEYS. `opts.keys == false` (the plain-text renderer a command prints to stdout,
+  -- `wa mcp list`) leaves the key hint row out: "Enter opens a connector - Esc closes" is advice to a
+  -- reader who has no Enter to press, and it is the last line of a page nobody can walk. The page keeps its
+  -- `hint` - the panel drawn in a chat still shows it (mcp-list-80x24.txt).
+  if opts.keys ~= false then
+    rows[#rows + 1] = ""
+    rows[#rows + 1] = M.fit(M.hint_for(page), width)
+  end
   return rows
 end
 
@@ -256,7 +262,7 @@ function M.text(pages, width, opts)
         lines[#lines + 1] = ""
         lines[#lines + 1] = string.rep("\u{2500}", math.min(width, 40))
       end
-      for _, row in ipairs(M.page_text(page, width)) do lines[#lines + 1] = row end
+      for _, row in ipairs(M.page_text(page, width, opts)) do lines[#lines + 1] = row end
     end
   end
   return table.concat(lines, "\n")
