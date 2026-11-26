@@ -127,6 +127,26 @@ is one small crate and 471 lines, and the binary's +0.19% is the honest size ans
 is stable and that the mission is about is the row above: **21 s of node rebuild per display change
 becomes 3.3 s of program rebuild.**
 
+## 4b. What it saves, in the numbers the move list asks for
+
+Asked for by the running "SAVINGS" table (`~/Work/missions/_orch/move-list.md`); the same text is in
+`savings.txt` in the mission directory.
+
+| | before | after |
+| --- | --- | --- |
+| cold `cargo build --release -p wa-host` (fresh target each, one build after the other) | 204,438 ms (3.4 min) | 173,052 ms (2.9 min) |
+| the same pair, run in the opposite order | 166,210 ms | 242,146 ms - so the cold number moves by tens of seconds either way and **the cold build time does not change**: the node still links `wa-term` |
+| ONE display-only change (touch `rust/wa-term/src/transcript.rs`, rebuild `-p wa-host`), three runs each | 21.0 s / 22.0 s / 22.2 s | 21.1 s / 21.8 s / 25.6 s |
+| the same change with the wire on (`WA_TERM_REMOTE=1`) | - | **3.3 s to rebuild the program, and 0 s of node** |
+| bytes a node takes for a display-only change | the whole `wa`: 78,372,976 B | **`wa-term`: 905,320 B (1.15% of the node)** |
+| bytes the node's own binary moves by, this branch | 78,372,976 B | 78,520,024 B (+147,048, +0.19%) |
+| 30-day commits it applies to | - | **16 touched ONLY `rust/wa-term`** of 104 that touched it at all (`transcript.rs` alone: 52) |
+
+The caveat is part of the number: with the switch defaulting to the in-process path, a landing still
+ships the whole node, so **0 B are saved per landing today**. The 905,320 B artifact exists now, and
+it is the only thing a display change needs once the last slice deletes the in-process path and the
+node drops its `wa-term` dependency.
+
 ## 5. Rows
 
 | row | verdict | ms | what it proves |
