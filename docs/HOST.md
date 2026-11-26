@@ -772,11 +772,15 @@ model is not charged for it, and a Lua that never returns fails that item and re
 
 ## The capability inventory
 
-What this node can do is **data**, not prose. The live registry is
-`rust/wa-capabilities/src/capabilities.rs`, and the interpreter is booted from it: a `host.*` function
-that is not in that list cannot be called, and one that is in it is a row below. Each entry
-carries a name, a one-line description and an effect class (`read-only`, `writes files`,
-`runs a process`, `network`, `device`), stably ordered by name so two nodes can be diffed.
+What this node can do is **data**, not prose. A capability's registration is one row - a name, a
+one-line description, an effect class and a handler - in a file under
+`rust/wa-capabilities/src/capability_rows/`, one file per area beside the module that implements the
+handler. `rust/wa-capabilities/src/capabilities.rs` collects those files (`build.rs` lists the
+directory, so a new row file is collected without an edit there) and the interpreter is booted from
+the collected rows: a `host.*` function that is not in a row cannot be called, and one that is in a
+row is a row below. Each entry carries a name, a one-line description and an effect class
+(`read-only`, `writes files`, `runs a process`, `network`, `device`), stably ordered by name so two
+nodes can be diffed.
 
 Four surfaces read the same registry, which is why none of them can disagree with what is
 actually registered:
@@ -802,11 +806,11 @@ capability that is registered but undocumented, documented but absent, or docume
 wrong effect class fails `cargo test -p wa-capabilities capabilities::tests` with the exact names. A generated
 block would only prove that the generator ran.
 
-Adding a capability is two edits: one entry in the registry, one row here.
+Adding a capability is two edits: one row in its area's file under `capability_rows/`, one row here.
 
 <!-- capability-inventory:begin -->
 ; One line per capability: name, then effect class. Hand-maintained; checked against the live registry in
-; rust/wa-capabilities/src/capabilities.rs by the drift test in that module (cargo test -p wa-capabilities capabilities::tests).
+; the row files under rust/wa-capabilities/src/capability_rows/ by the drift test in capabilities.rs (cargo test -p wa-capabilities capabilities::tests).
 ; Lines starting with ";" and blank lines are ignored by the checker.
 append_file          writes files
 audio                device
@@ -1219,7 +1223,8 @@ counts.
 ## Adding a capability
 
 Where the code for one lives, after the host was split into crates (docs/KERNEL.md, "The crate
-split"): the row goes in `rust/wa-capabilities/src/capabilities.rs` and the function itself in
+split"): the row goes in an area's file under `rust/wa-capabilities/src/capability_rows/` (a row file
+added there is collected with no edit anywhere else) and the function itself in
 `rust/wa-capabilities/src/host.rs`; a capability that answers on the console draws through `wa-term`, one
 that asks the policy or records telemetry through `wa-governance`, one that runs a component through
 `wa-kernel-runtime`, and one that signs or reaches the network identity through `wa-rendezvous`. The
