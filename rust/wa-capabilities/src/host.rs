@@ -4173,7 +4173,7 @@ struct ConsoleInput {
     opening_until: Option<std::time::Instant>,
     opening_scale: f32,
     /// The restore-on-panic hook armed for the opening, put back when it ends.
-    opening_hook: Option<wa_term::scroll::PanicRestore>,
+    opening_hook: Option<crate::screen_guard::PanicRestore>,
 }
 
 /// A mouse selection over the chat area: where the drag started and where it is, in screen cells, the
@@ -5304,8 +5304,8 @@ pub extern "C-unwind" fn opening_start(l: *mut LuaState) -> c_int {
     crate::tty::hold();
     OPENING_UP.store(true, std::sync::atomic::Ordering::SeqCst);
     register_opening_atexit();
-    state.opening_hook = Some(wa_term::scroll::screen::install_panic_restore_with(
-        wa_term::scroll::Mode::Fullscreen,
+    state.opening_hook = Some(crate::screen_guard::install_panic_restore_with(
+        crate::screen_guard::Mode::Fullscreen,
         |bytes| { let _ = crate::tty::write_now(bytes); }));
     let _ = crate::tty::write_now(wa_term::opening::enter_bytes());
     let first = opening.step();
@@ -6245,18 +6245,17 @@ pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
 
 /// `host.input_commands(json)`: what the slash menu offers, `[{name, args, hint}]`.
 pub extern "C-unwind" fn input_commands(l: *mut LuaState) -> c_int {
-    let list: Vec<wa_term::terminal_editor::Command> = arg_string(l, 1)
+    let commands: Vec<(String, bool, String)> = arg_string(l, 1)
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|value| value.as_array().cloned()).unwrap_or_default().iter()
-        .filter_map(|item| Some(wa_term::terminal_editor::Command {
-            name: item.get("name")?.as_str()?.to_string(),
-            args: item.get("args").and_then(|v| v.as_bool()).unwrap_or(false),
-            hint: item.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        })).collect();
+        .filter_map(|item| Some((
+            item.get("name")?.as_str()?.to_string(),
+            item.get("args").and_then(|v| v.as_bool()).unwrap_or(false),
+            item.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        ))).collect();
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let ok = if state.editor.is_some() {
-        let commands = list.iter().map(|command| (command.name.clone(), command.args, command.hint.clone())).collect();
         set_editor(&mut state, crate::screen::EditorSetup { commands: Some(commands), ..Default::default() });
         true
     } else { false };
