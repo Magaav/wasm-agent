@@ -153,6 +153,9 @@ if (!HAVE_TMUX) {
 const {tmux} = tmuxSession('wa-sessions-switch');
 const SESSION = 'sw';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// One mouse report, written to the pane as the terminal would send it (1-based column and row).
+const click = (col, row) => `\x1b[<0;${col};${row}M`;
+
 const screen = () => String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');
 async function waitFor(predicate, label, timeout = 90000) {
   const deadline = Date.now() + timeout;
@@ -171,6 +174,8 @@ try {
   const launch = tmux(['new-session', '-d', '-s', SESSION, '-x', '100', '-y', '44', '-c', WORK, command]);
   if (launch.status !== 0) throw new Error('tmux could not start the session: ' + launch.stderr);
   started = true;
+  // tmux records an OSC 52 copy in its own buffer only when it is told to - set before the first copy.
+  tmux(['set-option', '-t', SESSION, 'set-clipboard', 'on']);
   await waitFor(() => screen().includes('Type a message'), 'the prompt');
   await waitFor(() => screen().includes('alpha one'), 'the resumed thread', 30000);
   check('the chat opens on alpha and draws its row', true);
@@ -231,6 +236,19 @@ try {
   const switches_after = (screen().match(/switched to/g) || []).length;
   check('and a copy does not switch', switches_after === switches_before,
     'switch lines ' + switches_before + ' -> ' + switches_after);
+  // ---- 6b. a CLICK on a row copies it, the way the mouse is meant to -----------------------------
+  const row_here = screen().split(String.fromCharCode(10)).findIndex(line => line.includes('* alpha'));
+  check('the row of this session is on the screen', row_here > 0, 'row ' + row_here);
+  const copies_before = (screen().match(/Copied \(/g) || []).length;
+  tmux(['send-keys', '-t', SESSION, '-l', click(6, row_here + 1)]);
+  await waitFor(() => (screen().match(/Copied \(/g) || []).length > copies_before, 'the click to copy', 20000);
+  check('a click on a row copies it', true);
+  // WHAT was copied, not just that something was: the notice counts the characters it sent, and an id is
+  // 36 of them. (tmux keeps an OSC 52 copy in no buffer this test can read - measured: save-buffer is
+  // empty with set-clipboard on - so the count and the Lua row's own encode/decode check carry it.)
+  check('and the text it copied is a whole id', screen().includes('Copied (36 characters)'),
+    'the notice must count the id it sent');
+
   // The panel's cancel is a DOUBLE Esc (one is the first byte of a sequence): one would leave the page
   // drawn and swallow the next command. Pressed twice, and waited for, before the next step.
   tmux(['send-keys', '-t', SESSION, 'Escape', 'Escape']);

@@ -75,5 +75,12 @@ check(#by_id.options == 1 and by_id.options[1].session == here, 'the start of an
 local nothing = view.page({ session_id = here, user_id = 'master', limit = 200, filter = 'zzz-nothing' })
 check(#nothing.options == 0, 'a name nothing has is an empty list, not the whole one: ' .. #nothing.options)
 
+-- ---- what a copy puts on the clipboard --------------------------------------------------------
+-- `c` and a click write OSC 52 with the base64 of the id (`copy_id` in chat.lua, `copy_at` in the panel):
+-- the bytes are the id, so decoding them gives it back unchanged.
+local encoded = memory.base64_encode(here)
+check(memory.base64_decode(encoded) == here, 'a copied id decodes back to itself')
+check(#here == 36, 'and an id is 36 characters, whatever the terminal says it copied')
+
 if failed > 0 then error(string.format('sessions page: %d of %d failed, first: %s', failed, checks, tostring(first)), 0) end
 print(string.format('sessions page ok (%d checks, %.1f ms for %d sessions)', checks, elapsed_ms, #page.options))

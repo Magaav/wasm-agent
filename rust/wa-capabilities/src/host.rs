@@ -4189,7 +4189,22 @@ fn clear_selection(state: &mut ConsoleInput) {
 fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
     use wa_term::keymap::{self, Gesture, Pose};
     use wa_term::selection::Mouse;
-    if state.panel.is_some() { return; }
+    // AN OPEN PANEL OWNS ITS OWN ROWS (sessions-is-a-balloon): a click on a row that carries a copy
+    // payload puts that text on the clipboard - the full id behind a shortened row. Everything else a
+    // pointer does while a panel is open is still ignored, as before: the panel is the reader's, and a
+    // click on the transcript beneath it is not a command to it.
+    if let Some(panel) = state.panel.as_ref() {
+        if let Mouse::Press(row, _) = event {
+            if let Some(text) = panel.copy_at(row) {
+                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                let count = text.chars().count();
+                say(state, format!("Copied ({count} character{})", if count == 1 { "" } else { "s" }), false);
+                let frame = layout_frame(state);
+                let _ = wa_term::terminal_editor::write(&frame);
+            }
+        }
+        return;
+    }
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
     let (width, rows) = (editor.width, output_rows(None, editor));
     // Which gestures a pointer event means, and in which order they are tried, is the table's answer

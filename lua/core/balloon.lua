@@ -334,7 +334,10 @@ function M.panel_spec(page, selected, opts)
     options[#options + 1] = { label = tostring(option.label or ""), hint = tostring(option.hint or ""),
       -- The group a row starts, drawn by the renderer above it: `wa_term`'s panel takes it as a row of its
       -- own that no key selects (`Panel::from_spec`, `heading`), the same way the plain rendering does.
-      heading = option.heading ~= nil and tostring(option.heading) or nil }
+      heading = option.heading ~= nil and tostring(option.heading) or nil,
+      -- WHAT A CLICK ON THIS ROW COPIES (`c` does the same from the keyboard): the full id behind a
+      -- shortened label. A row that names none is a row a click does not touch.
+      copy = option.copy ~= nil and tostring(option.copy) or nil }
   end
   local spec = {
     title = page.title, lines = page.lines, options = options, selected = selected or page.selected or 1,
