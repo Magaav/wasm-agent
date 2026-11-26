@@ -62,6 +62,10 @@ So `start` and `cancel` must cross together, and adoption is already solved by t
   `test-operation-control.cjs`).
 - `ready-operations-own-program.md` (new, the plan the brief asked for).
 
+`lib.rs` and `main.rs` are touched only to place the mode (`pub mod operations_supervisor;` and the
+subcommand block); the capability registration — `capabilities.rs:178` and `host.rs:1772` — is untouched,
+so this cannot collide with the capability-registration-is-data worker.
+
 ## 4. Proof, and what each row actually ran
 
 `scripts/test-operation-supervisor.cjs` starts **two real processes on one machine**: `wa
@@ -107,6 +111,14 @@ rust/wa-capabilities/src/operations.rs` first, then the build, each tree warm.
 |---|---|---|
 | origin/main (`/tmp/base-ops`, warm) | 23.45 s | 79,712,792 |
 | this branch (warm) | 28.40 s | 79,717,928 (+5,136) |
+
+**The request bytes of a healthy call, measured before and after** (the rule the brief names first):
+a dump script builds the model-facing catalogue through the product's own `tools.all('master', ctx,
+memory)` with `WASM_AGENT_LUA_ROOT` fixed to this tree, canonically encodes it and hashes it. Both the
+base binary (`~/.local/bin/wa`) and this branch answer **66 tools**, canonical sha256
+`a79260f6af9bcb2cf1fcafd24572f61ae1ccf71e121d626dd06a324659d6ad85`, and the `operation` tool's own spec
+`210b6b65484295d41cbb1e9306f1b831ae1deaea8c501fe26168faa863d0f5b7`. Identical: nothing this move did is
+visible to the model's prompt.
 
 One measurement each, so the +5 s is within the noise of a link plus one module; the +5,136 bytes is the
 module. **Nothing moved out of the host in slice 1**, so this is the expected shape — the build win is

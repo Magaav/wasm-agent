@@ -8,6 +8,22 @@ inside `rust/wa-operation` (`Manager::snapshot`'s disk fallback, `lib.rs:1090-11
 (a) a program that hosts the manager, (b) a wire, (c) the forwarder. This file measures all three premised
 facts again, plans the program, and defines the first slice.
 
+## 0a. Progress — **BRIEF DONE** (items 1-3 of the job, and every rule of the move)
+
+| item | state |
+|---|---|
+| 1. measure the surface with file:line, callers, needs | done — §1, two premises corrected (44 commits, not 39; 43 worlds, not 15) |
+| 2. plan in this file | done — §2 (program, protocol as a named gap, what the host keeps, restart/adoption, security line) |
+| 3. first slice behind a switch defaulting to in-process, with rows | **landed in f94e6d56** — `start`/`status`/`cancel`/`await` cross; 42 checks green 4/4; fails on the base binary; 5 unit rows green |
+| request bytes of a healthy call identical | measured: 66 tools, canonical sha256 `a79260f6…d6ad85` on both the base binary and this branch, `operation`'s own spec `210b6b65…d0f5b7` on both |
+| host build before/after | warm, `operations.rs` touched: 23.45 s / 79,712,792 B → 28.40 s / 79,717,928 B |
+| report | docs/missions/reports/operations-own-program.md (commit 42462e02) |
+
+**Left for the orchestrator:** (a) review of f94e6d56 and 42462e02, then landing in order; (b) the
+pre-existing `scripts/test-operation-control.cjs` failure on this node, proved against the installed base
+binary and not fixed here; (c) slice 2 (the crate move that pays the build claim) is planned, not started;
+(d) a second artifact for the supervisor is a release hunk and belongs to Fable.
+
 ## 0. Premises re-measured (the brief's numbers, checked)
 
 | premise | brief | measured (this tree, 522e12ae) | ok? |
