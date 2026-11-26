@@ -323,6 +323,8 @@ say "checksums $sums ($(wc -l < "$sums" | tr -d ' ') asset(s))"
 # bundle release without a signature is not installable and must not be published: this is a refusal.
 [ -f "$ROOT/scripts/lib/release-signing.sh" ] || fail "release_signing_lib_missing: $ROOT/scripts/lib/release-signing.sh"
 . "$ROOT/scripts/lib/release-signing.sh"
+[ -f "$ROOT/scripts/lib/release-latest.sh" ] || fail "release_latest_lib_missing: $ROOT/scripts/lib/release-latest.sh"
+. "$ROOT/scripts/lib/release-latest.sh"
 wa_release_sign_sums "$sums" "$out/SHA256SUMS.sig" \
   || fail 'release_not_signed: the sums were not signed by wa-vault, so this bundle release is not published (WA_VAULT_ADMIN_URL/WA_VAULT_ADMIN_TOKEN where the vault reads them; the release-signing key is created on its admin page)'
 say "signature $out/SHA256SUMS.sig ($(sed -n 's/^key //p' "$out/SHA256SUMS.sig"))"
@@ -336,21 +338,37 @@ Install a node on a fresh Linux machine - one command, no checkout and no toolch
 The same command updates it. Verification: ./SHA256SUMS, and inside the bundle bundle.manifest ->
 files.sha256 -> every member (the installer checks all of it before anything is installed).
 reason: ${reason:-none stated}"
-  # A FULL VERSION IS A FULL RELEASE AND TAKES LATEST (26/11, Fable; proven by the two-shape row in
-  # release-rows-real/latest.md). MEASURED: v0.1.2 was published as a prerelease, and then a v0.1.1 node AND a v0.1.2
-  # node both answered unknown - nobody could move (lua/core/release.lua:268-270 returns /releases/latest first for a
-  # stable node, and a prerelease never wins the window). A tag carrying a suffix (v0.2.0-rc1, a rehearsal) stays a
-  # prerelease: only v<digits>.<digits>.<digits> is published as Latest.
-  if printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-    latest_flags="--latest --prerelease=false"
-    say "release $tag: full version, published as the Latest release"
-  else
-    latest_flags="--prerelease"
-    say "release $tag: version suffix, published as a prerelease (never Latest)"
-  fi
-  gh release create "$tag" "$out/$asset" "$sums" "$out/SHA256SUMS.sig" --repo "$REPO" --target "$commit" --title "$tag" $latest_flags --notes "$notes" \
+  # CREATED WITHOUT THE BADGE (Fable 26/11, correction to my first hunk). `gh release create --latest` marks the
+  # release Latest at CREATE time, and a release has two or more targets: a node of the other target would see a
+  # Latest with no asset for it, and a failed later upload would leave a half release wearing the badge. So this
+  # creates it as a PRERELEASE (never Latest), uploads, then promotes at the END, under the rule in
+  # scripts/lib/release-latest.sh - only a full version, only with every expected target present, only when it is
+  # newer than the release that currently holds Latest.
+  gh release create "$tag" "$out/$asset" "$sums" "$out/SHA256SUMS.sig" --repo "$REPO" --target "$commit" --title "$tag" --prerelease --notes "$notes" \
     || fail 'publish_failed: gh release create'
 fi
+# ---- the badge, LAST ----------------------------------------------------------------------------------
+# Every target is uploaded before this runs, so the asset list can be checked against the targets this release is
+# expected to carry (WA_RELEASE_EXPECTED_TARGETS overrides the Linux pair). A missing target, an older version or a
+# suffixed tag each SKIP the promotion by name; the release simply stays a prerelease.
+EXPECTED_TARGETS=${WA_RELEASE_EXPECTED_TARGETS:-x86_64-unknown-linux-musl aarch64-unknown-linux-musl}
+assets=$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null) || assets=
+current_latest=$(gh api "repos/$REPO/releases/latest" --jq '.tag_name' 2>/dev/null) || current_latest=
+decision=$(wa_release_latest_decision "$tag" "$current_latest" "$EXPECTED_TARGETS" "$assets")
+case "$decision" in
+  take*)
+    say "latest: $decision"
+    gh release edit "$tag" --repo "$REPO" --prerelease=false --latest \
+      || fail 'latest_failed: gh release edit did not take the badge'
+    say "release $tag is now the Latest release"
+    ;;
+  skip:*)
+    say "latest: ${decision#skip:} (the release stays a prerelease)"
+    ;;
+  *)
+    say "latest: no decision ('$decision'); the release stays a prerelease"
+    ;;
+esac
 url="https://github.com/$REPO/releases/download/$tag/$asset"
 say "published $url"
 
