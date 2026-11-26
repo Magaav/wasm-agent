@@ -713,6 +713,44 @@ pub fn refusal(op: Op, code: &str, detail: impl AsRef<str>) -> serde_json::Value
     refusal_text(op.as_str(), code, detail)
 }
 
+/// One line per op for an operator reading the registry: what the question asks, in the provider's own
+/// words. It is NOT the host's capability description (`capabilities.rs` owns those and this crate must
+/// not duplicate them): it says what the op IS, on the side that answers it.
+pub fn summary(op: Op) -> &'static str {
+    match op {
+        Op::Search => "search the index by text, chat, kind, sender or time window",
+        Op::Read => "read one chat newest-first, with reactions folded on and a cursor",
+        Op::Message => "one exact message by chat and id, with its full stored text",
+        Op::Reactions => "who reacted to one message, with which emoji",
+        Op::Media => "the media metadata of one message, never the bytes",
+        Op::Download => "decrypt one message's media into the caller's bounded folder",
+        Op::Backfill => "ask the primary phone for messages older than the index holds",
+        Op::Contacts => "which chats the index knows, by the name it observed",
+    }
+}
+
+/// The `ops.registry` answer: every op this build answers, with its effect class, as the document the
+/// world returns (`ready-whatsapp-world.md`, package `wa:whatsapp@0.2.0`).
+///
+/// It is the one place the op set and its effect classes are said out loud, and it is built from
+/// [`Op::ALL`] and [`Op::effect`] - so a new op appears here by being a variant, never by a second list
+/// kept in step by hand. The host gates a door on the class it reads here (today it reads the same
+/// `effect()` directly, until the registry is served over the wire).
+pub fn registry() -> serde_json::Value {
+    let ops: Vec<serde_json::Value> = Op::ALL
+        .iter()
+        .map(|op| {
+            let effect = match op.effect() {
+                Effect::ReadOnly => "read-only",
+                Effect::Network => "network",
+                Effect::WritesFiles => "writes-files",
+            };
+            serde_json::json!({"name": op.as_str(), "effect": effect, "summary": summary(*op)})
+        })
+        .collect();
+    serde_json::json!({"ok": true, "op": "ops", "ops": ops})
+}
+
 /// [`refusal`] for a caller that carries the op as the word on the wire instead of the enum.
 ///
 /// The bytes are the enum version's by construction: `refusal` is this function plus `op.as_str()`, and
@@ -1291,5 +1329,33 @@ mod tests {
         assert_eq!(answer["id"], 42);
         assert_eq!(answer["retry"], true);
         assert_eq!(state_word("done"), "done");
+    }
+
+    /// The registry is the op set and its effect classes said out loud, built from `Op::ALL` and
+    /// `Op::effect` - so it cannot disagree with either, and a new variant appears in it by existing.
+    /// This is the document the `wa:whatsapp@0.2.0` world's `ops.registry` returns.
+    #[test]
+    fn the_registry_lists_every_op_with_its_effect_class() {
+        let doc = registry();
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["op"], "ops");
+        let ops = doc["ops"].as_array().expect("a list of ops");
+        assert_eq!(ops.len(), Op::ALL.len(), "one entry per op, no more, no fewer");
+        for (entry, op) in ops.iter().zip(Op::ALL.iter()) {
+            assert_eq!(entry["name"], op.as_str(), "the order and the words are `Op::ALL`'s");
+            let expected = match op.effect() {
+                Effect::ReadOnly => "read-only",
+                Effect::Network => "network",
+                Effect::WritesFiles => "writes-files",
+            };
+            assert_eq!(entry["effect"], expected, "{} carries its own class", op.as_str());
+            assert!(!summary(*op).is_empty(), "{} has a line for an operator", op.as_str());
+            assert_eq!(entry["summary"], summary(*op));
+        }
+        // The classes the doors rely on, counted: a change here is a change to what a sandbox joins.
+        let count = |want: &str| ops.iter().filter(|e| e["effect"] == want).count();
+        assert_eq!(count("read-only"), 6, "six index reads ride the read-only door");
+        assert_eq!(count("network"), 1, "backfill is the one that asks the phone");
+        assert_eq!(count("writes-files"), 1, "download is the one whose answer is a file");
     }
 }
