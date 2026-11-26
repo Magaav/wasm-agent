@@ -31,7 +31,11 @@ function M.ring(options)
   for _, entry in ipairs(type(listed) == "table" and listed or {}) do
     local name = tostring((type(entry) == "table" and (entry.name or entry.node)) or entry or "")
     if trim(name) ~= "" and trim(name) ~= "this node" then
-      ring[#ring + 1] = { node = name, mode = tostring((type(entry) == "table" and entry.mode) or "peer") }
+      -- A ROSTER ENTRY CARRIES NO DEPLOY MODE. MEASURED 26/11 on the first live run: the ring labelled peers
+      -- "peer" and this node "local", and the preflight refused both as mode_unknown - the rehearsal judged its OWN
+      -- labels as if they were ring modes. A peer the roster lists is deployed in tree mode unless the caller
+      -- says otherwise (the release step passes a mode per entry); this node is not a deploy target at all.
+      ring[#ring + 1] = { node = name, mode = "tree" }
     end
   end
   return ring
@@ -81,7 +85,11 @@ function M.mode_preflight(ring, facts_of)
     end
     local row = { node = node, mode = tostring(facts and facts.mode or mode) }
     local allowed = { tree = true, release = true, binary = true, rollback = true }
-    if not allowed[row.mode] then
+    if row.mode == "local" then
+      -- THIS NODE IS NOT A DEPLOY TARGET: a rehearsal reads it, the ring never moves the node it runs on.
+      row.verdict = "skipped"
+      row.detail = "this node is where the rehearsal runs; it is read, never deployed by the ring"
+    elseif not allowed[row.mode] then
       row.verdict, row.error = "refuse", "mode_unknown"
       row.detail = "the ring names mode " .. row.mode .. " and a node accepts only tree, binary, release or rollback"
     elseif row.mode == "release" then

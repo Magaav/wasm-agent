@@ -49,6 +49,14 @@ ok(#blind.red == 0, 'unchecked is not silently red either - it is printed and ne
 -- 6. an unknown mode is refused by name
 local odd = rehearse.mode_preflight({ { node = 'x', mode = 'relase' } }, function() return {} end)
 ok(tostring(odd.rows[1].error) == 'mode_unknown', 'a typo mode is mode_unknown')
+-- 6b. THIS NODE IS NOT A DEPLOY TARGET (measured on the first LIVE run, 26/11: the rehearsal refused its own
+--     ring labels - this node came out as mode local, peers as mode peer, and both are not modes a node accepts).
+local own = rehearse.mode_preflight({ { node = 'this node', mode = 'local' } }, function() return nil end)
+ok(own.rows[1].verdict == 'skipped', 'this node is skipped, not judged (' .. tostring(own.rows[1].verdict) .. ')')
+has(own.rows[1].detail, 'never deployed', 'and says the ring never moves the node it runs on')
+ok(#own.red == 0, 'so it adds nothing to the red list')
+local peer = rehearse.mode_preflight({ { node = 'p', mode = 'tree' } }, function() return nil end)
+ok(peer.rows[1].verdict == 'unchecked', 'a peer with no facts is unchecked, never judged from a label')
 -- 7. the red list is the deploy step's early warning
 local reds = table.concat(preflight.red, ' | ')
 has(reds, 'tree-behind (canonical_busy)', 'the red names the node and the refusal')
