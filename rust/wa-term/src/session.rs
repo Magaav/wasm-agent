@@ -131,11 +131,60 @@ impl Session {
             "editor_escape" => json!(self.editor.escape()),
             "editor_index_at" => match self.editor.index_at(count(a, 0)?, count(a, 1)?) { Some(index) => json!(index), None => Value::Null },
             "editor_take_notice" => json!(std::mem::take(&mut self.editor.notice)),
+            // ---- the keymap: the table the console, the editor, the menu and the transcript share.
+            // The node asks, so there is one table and it lives where the keys are decoded. ----
+            "keymap_console" => {
+                let byte = u8::try_from(count(a, 0)?).map_err(|_| proto::Failure::new(proto::code::BAD_MESSAGE, "a key byte must be 0..=255"))?;
+                match crate::keymap::console_byte(byte) { Some(act) => json!(host_act(act)), None => Value::Null }
+            }
+            "keymap_escape" => match crate::keymap::console_escape() { Some(byte) => json!(byte), None => Value::Null },
+            "keymap_gestures" => {
+                let pose = match text(a, 0)? {
+                    "press" => crate::keymap::Pose::Press,
+                    "drag" => crate::keymap::Pose::Drag,
+                    "release" => crate::keymap::Pose::Release,
+                    "wheel" => crate::keymap::Pose::Wheel,
+                    "motion" => crate::keymap::Pose::Motion,
+                    other => return Err(proto::Failure::new(proto::code::BAD_MESSAGE, format!("no pointer event called '{other}'"))),
+                };
+                json!(crate::keymap::gestures(pose).iter().filter_map(|gesture| gesture_name(*gesture)).collect::<Vec<_>>())
+            }
+            "keymap_json" => json!(crate::keymap::json()),
             _ => return Err(unknown()),
         })
     }
 }
 
+
+
+/// A console act's name, as the node decodes it.
+fn host_act(act: crate::keymap::HostAct) -> &'static str {
+    match act {
+        crate::keymap::HostAct::Pin => "pin",
+        crate::keymap::HostAct::CopySelection => "copy_selection",
+        crate::keymap::HostAct::Escape => "escape",
+    }
+}
+
+/// A gesture's name, as the node decodes it; `None` for a gesture this protocol does not carry (the
+/// node then ignores it - a newer program's gesture is not the node's to invent).
+fn gesture_name(gesture: crate::keymap::Gesture) -> Option<&'static str> {
+    use crate::keymap::Gesture as G;
+    Some(match gesture {
+        G::BarJump => "bar_jump",
+        G::DraftPress => "draft_press",
+        G::ExpandToggle => "expand_toggle",
+        G::LinkCopy => "link_copy",
+        G::BlockCopy => "block_copy",
+        G::PinJump => "pin_jump",
+        G::JumpBottom => "jump_bottom",
+        G::NoticeDismiss => "notice_dismiss",
+        G::TranscriptSelection => "transcript_selection",
+        G::SelectDrag => "select_drag",
+        G::Wheel => "wheel",
+        G::Hover => "hover",
+    })
+}
 
 /// An Action as the node reads it: a tag and, where the tag carries one, its text or index. The
 /// node's console loop matches on `kind` exactly where it used to match the enum.

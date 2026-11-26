@@ -123,6 +123,48 @@ pub enum EditorAction {
     Pasted(usize),
 }
 
+/// A console act, as the program's keymap table names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostAct { Pin, CopySelection, Escape }
+
+fn host_act_of(name: &str) -> Option<HostAct> {
+    Some(match name {
+        "pin" => HostAct::Pin,
+        "copy_selection" => HostAct::CopySelection,
+        "escape" => HostAct::Escape,
+        _ => return None,
+    })
+}
+
+/// The pointer event a gesture belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pose { Press, Drag, Release, Wheel, Motion }
+
+/// A pointer gesture, as the program's keymap table names it: what a press or a drag means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gesture {
+    BarJump, DraftPress, ExpandToggle, LinkCopy, BlockCopy, PinJump, JumpBottom,
+    NoticeDismiss, TranscriptSelection, SelectDrag, Wheel, Hover,
+}
+
+fn gesture_of(name: &str) -> Option<Gesture> {
+    Some(match name {
+        "bar_jump" => Gesture::BarJump,
+        "draft_press" => Gesture::DraftPress,
+        "expand_toggle" => Gesture::ExpandToggle,
+        "link_copy" => Gesture::LinkCopy,
+        "block_copy" => Gesture::BlockCopy,
+        "pin_jump" => Gesture::PinJump,
+        "jump_bottom" => Gesture::JumpBottom,
+        "notice_dismiss" => Gesture::NoticeDismiss,
+        "transcript_selection" => Gesture::TranscriptSelection,
+        "select_drag" => Gesture::SelectDrag,
+        "wheel" => Gesture::Wheel,
+        "hover" => Gesture::Hover,
+        _ => return None,
+    })
+}
+
 /// The state the node SETS on the editor, one call per change: what the console knows and the editor
 /// draws. Absent fields keep what the editor has, so a change sends only what changed (`editor_setup`).
 #[derive(Clone, Debug, Default)]
@@ -428,6 +470,32 @@ impl Screen {
     /// The draft index a click lands on: the editor's own wrap arithmetic, not the node's guess.
     pub fn editor_index_at(&mut self, row: usize, col: usize) -> Option<usize> {
         self.remote.want("editor_index_at", json!([row, col])).ok().filter(|value| !value.is_null()).and_then(|value| value.as_u64()).map(|n| n as usize)
+    }
+    /// The console's own key, as the program's table answers it: the node decides nothing about which
+    /// byte is "pin" - the table the editor and the transcript share does.
+    pub fn keymap_console(&mut self, byte: u8) -> Option<HostAct> {
+        let value = self.remote.want("keymap_console", json!([byte])).ok()?;
+        value.as_str().and_then(host_act_of)
+    }
+    /// The byte that is a lone Esc (what the reader waits on to tell the key from a sequence's start).
+    pub fn keymap_escape(&mut self) -> Option<u8> {
+        self.remote.want("keymap_escape", json!([])).ok().and_then(|value| value.as_u64()).map(|n| n as u8)
+    }
+    /// Which gestures a pointer event means, in the table's own order.
+    pub fn keymap_gestures(&mut self, pose: Pose) -> Vec<Gesture> {
+        let name = match pose {
+            Pose::Press => "press", Pose::Drag => "drag", Pose::Release => "release",
+            Pose::Wheel => "wheel", Pose::Motion => "motion",
+        };
+        self.remote.want("keymap_gestures", json!([name])).ok()
+            .and_then(|value| value.as_array().map(|items| items.iter().filter_map(Value::as_str).filter_map(gesture_of).collect()))
+            .unwrap_or_default()
+    }
+    /// The keybindings table as JSON, for `/keybindings`: printed from the one that decoded the keys.
+    pub fn keymap_json(&mut self) -> String {
+        self.remote.want("keymap_json", json!([])).ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
     }
     /// The editor's one-keystroke note (`Interrupting…`), taken: read, then cleared, as the console's
     /// notice row used to.

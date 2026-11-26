@@ -4190,7 +4190,7 @@ fn clear_selection(state: &mut ConsoleInput) {
 
 /// One mouse report from the terminal. Ignored while a panel is open (it owns the screen's bottom).
 fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
-    use wa_term::keymap::{self, Gesture, Pose};
+    use crate::screen::{Gesture, Pose};
     use crate::selection::Mouse;
     if state.panel.is_some() { return; }
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
@@ -4201,7 +4201,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
     match event {
         Mouse::WheelUp(row, _) | Mouse::WheelDown(row, _) => {
             let up = matches!(event, Mouse::WheelUp(..));
-            for gesture in keymap::gestures(Pose::Wheel) {
+            for gesture in state.transcript.keymap_gestures(Pose::Wheel) {
                 if let Gesture::Wheel = gesture {
                     // The pointer is over the input box and its draft has more rows than it shows:
                     // the wheel is the box's (Victor 21/11). Anywhere else, or a draft that fits,
@@ -4237,7 +4237,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
             // no longer land on a row some other frame put somewhere else.
             let _ = state.transcript.view(width, rows);
             let over_transcript = row <= rows && state.nav.is_none();
-            for gesture in keymap::gestures(Pose::Press) {
+            for gesture in state.transcript.keymap_gestures(Pose::Press) {
                 match gesture {
                     // The scrollbar's own gesture, before the selection's: a press in the bar's column
                     // (the screen's last one, while the bar is drawn there) jumps the view there and
@@ -4350,7 +4350,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
         // Motion with no button down (SGR 35, which 1003 reports): the pointer is on the bar or it is
         // not. Only that flip sets dirty, so a moving pointer costs no frame.
         Mouse::Motion(row, col) => {
-            for gesture in keymap::gestures(Pose::Motion) {
+            for gesture in state.transcript.keymap_gestures(Pose::Motion) {
                 if let Gesture::Hover = gesture {
                     state.transcript.bar_hover(row, col, width);
                     let expand = row <= rows && state.transcript.expand_hover(row);
@@ -4366,7 +4366,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
         Mouse::Drag(row, col) | Mouse::Release(row, col) => {
             // The draft's own drag comes first (it began in the box), then the bar's thumb; anything
             // else is the transcript's selection, which is the gesture that always applies.
-            for gesture in keymap::gestures(if matches!(event, Mouse::Release(..)) { Pose::Release } else { Pose::Drag }) {
+            for gesture in state.transcript.keymap_gestures(if matches!(event, Mouse::Release(..)) { Pose::Release } else { Pose::Drag }) {
                 match gesture {
                     Gesture::SelectDrag if state.box_drag.is_some() => {
                         let anchor = state.box_drag.unwrap_or(0);
@@ -4817,7 +4817,7 @@ fn console_reader() {
                         // collapse it (and the same key lets it go). It is the transcript's key: the
                         // draft has no row for it, so it is taken here before the editor. Which byte
                         // that is, is the keymap's answer (Console surface), not this loop's.
-                        if wa_term::keymap::console_byte(byte) == Some(wa_term::keymap::HostAct::Pin)
+                        if state.transcript.keymap_console(byte) == Some(crate::screen::HostAct::Pin)
                             && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
                             let frame = layout_frame(&mut state);
                             let _ = crate::tty::write(&frame);
@@ -4825,7 +4825,7 @@ fn console_reader() {
                         }
                         // Ctrl+C with a selection copies it; any other key ends the selection first.
                         if state.selection.is_some() {
-                            if wa_term::keymap::console_byte(byte) == Some(wa_term::keymap::HostAct::CopySelection)
+                            if state.transcript.keymap_console(byte) == Some(crate::screen::HostAct::CopySelection)
                                 && copy_selection(&mut state) { continue; }
                             clear_selection(&mut state);
                         }
@@ -4977,7 +4977,7 @@ fn console_reader() {
                     // that is really the start of its end marker would leave the draft stuck in paste mode.
                     let pasting = state.panel.as_ref().map(|panel| panel.pasting())
                         .or_else(|| state.editor.as_ref().map(|input| input.pasting())).unwrap_or(false);
-                    let escape = wa_term::keymap::console_escape();
+                    let escape = state.transcript.keymap_escape();
                     // Esc interrupts the run, as Ctrl+C does, and it does so as ONE act (see
                     // raise_cli_interrupt): the flag, the stamp and the socket shutdown.
                     let mut escape_interrupt = false;
@@ -6167,7 +6167,9 @@ pub extern "C-unwind" fn link_span(l: *mut LuaState) -> c_int {
 /// from the settings it obeys (`WA_TUI_KEYS`) - so the list a reader is shown is generated from the
 /// behaviour, never written beside it.
 pub extern "C-unwind" fn keybindings(l: *mut LuaState) -> c_int {
-    let answer = wa_term::keymap::json();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let answer = state.transcript.keymap_json();
     unsafe { lua_pushlstring(l, answer.as_ptr() as *const c_char, answer.len()) };
     1
 }
