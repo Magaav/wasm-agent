@@ -26,7 +26,10 @@ rehearse.remote_call = function(node, tool, args)
 end
 
 -- 1. the default path, over a scratch ring
-local report = rehearse.rehearse({ ring = RING })
+-- THIS NODE S OWN canaries are pinned: the row tests the WIRING, not this machine s health - measured 26/11:
+-- the laptop mail/whatsapp canaries refuse, which turned a wiring row red for an unrelated reason.
+local LOCAL = { results = { { feature = 'release-update', ok = true, stage = 'identity' }, { feature = 'mail', ok = true, stage = 'answered' } } }
+local report = rehearse.rehearse({ ring = RING, local_results = LOCAL })
 ok(#report.rows == 3, 'three nodes were read (' .. #report.rows .. ')')
 local status_reads, canary_asks = 0, 0
 for _, one in ipairs(asked) do
@@ -47,7 +50,7 @@ rehearse.remote_call = function(node, tool, args)
   end
   return { ok = true, state = 'installed', installed_commit = '6b6afc72f188' }
 end
-local partial = rehearse.rehearse({ ring = RING })
+local partial = rehearse.rehearse({ ring = RING, local_results = LOCAL })
 ok(partial.ok == false, 'a peer that did not answer its canaries is RED')
 has(table.concat(partial.red, '\n'), 'scratch-b', 'named')
 
@@ -57,7 +60,7 @@ rehearse.remote_call = function(node, tool, args)
   if node == 'scratch-a' then return { ok = false, error = 'node_no_answer' } end
   return { ok = true, state = 'installed', installed_commit = '6b6afc72f188' }
 end
-local refused = rehearse.rehearse({ ring = RING })
+local refused = rehearse.rehearse({ ring = RING, local_results = LOCAL })
 ok(refused.ok == false, 'a refused record read is RED')
 has(table.concat(refused.red, '\n'), 'node_no_answer', 'with the refusal named')
 
