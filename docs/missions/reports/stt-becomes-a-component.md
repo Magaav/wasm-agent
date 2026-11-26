@@ -24,8 +24,11 @@ not belong to the host or the component… no wasmtime, no threads and no I/O"*;
 * **`wit/stt/stt.wit`** — package `wa:stt@0.1.0`; `types` carries the `envelope` record
   (`op/from-node/to/ts-ms/rid/body-json`), the thirteen-case `refusal` variant mirroring the crate's
   `Refusal`, the `refusal-word` record (a refusal's own word plus the wire bytes) and `admitted`
-  (`call | refused`); `interface stt` exports `admit`, `encode`, `signature-message`, `reply-ok`,
-  `sanitize`; `world stt-component` exports `stt` and **imports nothing**.
+  (`call | refused`); `interface stt` exports `admit` (async), `reply-ok` (async) and `sanitize` (sync, with its reason
+  line); `world stt-component` exports `stt` and **imports nothing**. It carried `encode` and
+  `signature-message` at first; both are gone, because a producing node neither composes nor signs an
+  outbound envelope (the worker inside `wa-stt-remote` does, beside the signer) - dead surface, removed
+  with the reason written where a reader would look for it.
 * **Async, per Victor 26/11** — the four waiting calls are `async func` (short calls included) and the
   guest impl is `async fn`; `sanitize` is sync with its reason line in the file. Cancellation (drop the
   future), backpressure (nothing to declare, and why) and the absence of a stream of its own (the queue owns
@@ -48,9 +51,9 @@ not belong to the host or the component… no wasmtime, no threads and no I/O"*;
 * **`wa-stt-remote`** — three additions and nothing else: `Admission::me()`, `Admission::owner_nodes()`,
   `Metrics::record_refusal_word()` (the host must not reconstruct a case to count it).
 * **`components.lock`** — first `stt` pin:
-  `stt 669d2d168cfd2bf304ee2e31852e80de6e0c32e5811a79ade527d0d91a66a6dd 152942`, two builds by
+  `stt bc7db7b0f63f3187edb02490ba73dca0d655ce70991eda791e14841a10f63d73 146696`, two builds by
   `scripts/build-components.sh stt` at rustc 1.99.1 / `/tmp/wa-component-build/src`, same sha256 both
-  times.
+  times (the first pin, 152,942, carried the two exports later removed).
 
 ## Numbers (measured)
 
@@ -58,7 +61,7 @@ not belong to the host or the component… no wasmtime, no threads and no I/O"*;
 |---|---|---|
 | `target/release/wa` | 79,722,024 B | **81,135,888 B** (**+1,413,864**, +1.8%) |
 | cold `cargo build --release -p wa-host` | 192 s | 192 s |
-| `stt.wasm` | — (no component) | **152,942 B** pinned (161,480 B in the dev-toolchain build) |
+| `stt.wasm` | — (no component) | **146,696 B** pinned |
 | `stt_node.rs` | 1,362 lines | 1,424 |
 
 The +1.8% is the async rule's price and it is the host's, not the seam's: wasmtime 50 with
@@ -94,9 +97,10 @@ microseconds of work per call. Reported rather than hidden, because it is the la
   reaching a successful admission through `server.lua`): a scratch home has no identity, so there the seam
   is asked, answers `component_not_configured`, and the native rule runs — logged once. The row that would
   give a node an identity is the two-node row, which fails on the base binary too.
-* **`encode`, `signature-message`, `reply-ok` are declared but not routed.** Routing them moves
-  `wa-stt-remote`'s producer loop (how an envelope is composed and signed on the way out), which is a
-  change to make with the two-node row green under it.
+* **`reply-ok` is routed** (the reply is the other half of the wire this layer owns); **`encode` and
+  `signature-message` are not in the world at all**, because the producer composes and signs inside
+  `wa-stt-remote` where the signer is - routing those would move that loop, a change to make with the
+  two-node row green under it.
 * `submit`, `admin`, `pending`, `deliver` stay native: they are the queue's own operations (kv, leases,
   the audio store, the worker thread) and cannot enter a guest — the same measured line as mesh's transport.
 
