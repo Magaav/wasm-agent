@@ -6637,7 +6637,7 @@ mod terminal_tests {
         let mut action = Action::None;
         for byte in b"\x1b[5~" { action = keys.transcript.editor_key(*byte); }
         assert!(matches!(action, Action::PageUp), "the sequence is PageUp's, not another key's");
-        let page = super::page_rows(&keys);
+        let page = super::page_rows(&mut keys);
         assert_eq!(page, 12, "an 80x40 terminal pages twelve chat rows");
         keys.transcript.page(page);
         let from_key = first(&mut keys);
