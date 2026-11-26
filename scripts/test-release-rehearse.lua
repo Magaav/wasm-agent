@@ -78,6 +78,18 @@ ok(i_branch ~= nil, 'the release branch exists')
 ok(i_rehearse ~= nil, 'and dispatches the rehearse verb')
 ok(i_rehearse ~= nil and i_trust ~= nil and i_rehearse < i_trust, 'before the trust door, so the verb is reachable')
 ok(init:find('elseif command == ' .. string.char(34) .. 'release' .. string.char(34), 1, true) == nil, 'and there is no second release branch')
+
+-- 6c. AND THE BINARY MUST LET IT THROUGH (measured 26/11: it did not). `wa release` is answered by the binary
+--     before the interpreter boots, and an unknown verb there exits 2 - so `rehearse`, like `cut`, has to say
+--     "not mine" in rust/wa-host/src/release.rs or the Lua verb can never run in a shipped node.
+local host_rs = host.read_file('rust/wa-host/src/release.rs') or ''
+ok(host_rs:find('Some("rehearse")', 1, true) ~= nil, 'the binary knows the verb')
+local i_cut = host_rs:find('Some("cut")', 1, true)
+local i_reh = host_rs:find('Some("rehearse")', 1, true)
+local i_unknown = host_rs:find('eprintln!(\"release_unknown_verb', 1, true)
+ok(i_cut ~= nil and i_reh ~= nil and i_unknown ~= nil, 'both fleet verbs and the refusal are present')
+ok(i_cut < i_reh and i_reh < i_unknown, 'rehearse declines before the unknown-verb refusal is reached')
+ok(host_rs:find('if args.first().map(String::as_str) == Some("rehearse")', 1, true) ~= nil, 'and it declines on the verb word, not on an option')
 -- 7. the exit code a caller sees
 ok(type(rehearse.run) == 'function', 'M.run is the CLI door')
 
