@@ -461,7 +461,7 @@ pub async fn heal_asks<S: Store>(store: &S) -> Result<Vec<Anchor>, String> {
 }
 
 /// A store's failure as one word for a log line: never a path, never a value.
-fn one_word(reason: &str) -> String {
+pub(crate) fn one_word(reason: &str) -> String {
     reason
         .chars()
         .take(64)

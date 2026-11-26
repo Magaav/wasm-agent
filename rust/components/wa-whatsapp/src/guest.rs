@@ -2333,6 +2333,46 @@ async fn history_tick(cfg: &IndexConfig) -> bool {
     true
 }
 
+/// How often a heal round runs. A hole is minutes to days old, so a minute is fast enough to matter and
+/// far too slow to be a storm of requests to the phone (the query lane ticks every 200 ms; healing must
+/// not).
+const HEAL_EVERY: Duration = Duration::from_secs(60);
+
+/// One heal round: take the holes the index recorded (`index::gaps`), turn at most
+/// `history::HEAL_PER_ROUND` of them into asks (`history::heal_asks`), and make each ask the call the
+/// backfill lane already makes. A hole is cleared by the drain when the fetched range arrives, so this
+/// does not track answers: it asks, and the index says when it is healed.
+async fn heal_tick(state: &mut Instant) -> bool {
+    if Instant::now() < *state {
+        return false;
+    }
+    *state = Instant::now() + HEAL_EVERY;
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else { return false };
+    let asks = match history::heal_asks(&IndexKv).await {
+        Ok(asks) => asks,
+        Err(reason) => {
+            say!("heal: cannot read the holes: {}", history::one_word(&reason));
+            return false;
+        }
+    };
+    let (mut asked, mut refused) = (0usize, 0usize);
+    for ask in &asks {
+        let Ok(jid) = crate::chat::jid(&ask.chat) else {
+            refused += 1;
+            continue;
+        };
+        match client.fetch_message_history(&jid, &ask.id, ask.from_me, ask.ts, ask.count as i32).await {
+            Ok(_request_id) => asked += 1,
+            Err(_) => refused += 1,
+        }
+    }
+    if asked + refused > 0 {
+        // Counts only, as the backfill lane logs it: one request per chat, and how far back it reaches.
+        say!("heal: asked the phone for {asked} chat(s) x {}, refused={refused}", history::HEAL_PER_CHAT);
+    }
+    asked > 0
+}
+
 /// `whatsapp_backfill`: ask the primary phone for messages older than the index holds.
 ///
 /// The answer is what was *asked for* - chat, anchor, count - never a message: the phone answers
@@ -2932,6 +2972,8 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut names_announced = false;
     // Where the address-book <-> `@lid` join stands (`alias_tick`).
     let mut aliases = AliasRun::new();
+    // When the next heal round may ask the phone (heal_tick).
+    let mut heal_at = Instant::now();
     loop {
         for notice in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_notice(notice).await;
@@ -2970,6 +3012,11 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // Then the past: one history sync per tick, bounded by its budget (`history.rs`), so a relink
         // cannot starve the pipeline it arrived in.
         history_tick(index).await;
+        // Then the holes a reconnect left (`heal_tick`, once a minute): the drain above just recorded
+        // them, and the ask is the same call the backfill lane makes. Nothing new crosses to the phone.
+        if index.enabled {
+            heal_tick(&mut heal_at).await;
+        }
         settle_completions().await;
         // The drain (`wa:kernel/drain@0.2.0`, `wit/wa.wit`): a hot swap is replacing this instance, so
         // take no new work. Everything is settled here - `outbox_tick` and `query_tick` settle the job
