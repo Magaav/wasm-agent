@@ -1097,7 +1097,16 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     end
     return started.result
   end
-  local record = { op = started.op, tool = name, kind = executor.kind or "operation", scope = scope,
+  -- THE WORDS A PERSON RECOGNISES (Fable 27/11): the first 40 characters of the command, or the tool's own
+  -- name for a job that is not a shell. The operation's own record never carries its command text (only
+  -- `waiting_for: command|descendants`), so the call that starts it is the only place this can be captured -
+  -- and it is captured here, once, rather than reconstructed by a reader.
+  local what = tostring((type(params) == "table" and params.command) or name or "")
+  what = what:gsub("%s+", " "):gsub("^%s+", "")
+  -- 40 BYTES, because the row's own bound is bytes and the ellipsis is three of them: clipping to 39
+  -- characters and appending the ellipsis made 42 bytes, which is what row 7 caught.
+  if #what > 40 then what = what:sub(1, 37) .. "…" end
+  local record = { op = started.op, tool = name, what = what, kind = executor.kind or "operation", scope = scope,
     started_at = started_at, state = "running", reported = false, id = started.id,
     -- The shell command's before-snapshot, kept with the handle it belongs to and read once, when
     -- that handle settles (watch_settle). It is this call's own evidence: a map of path -> porcelain
@@ -1602,6 +1611,7 @@ local function hold_publish(records, opts)
         op = item.record.op,
         session = session,
         tool = tostring(item.record.tool or ""),
+        what = tostring(item.record.what or ""),
         started_at = os.time(),
         elapsed_ms = tonumber(state.elapsed_ms),
         limit_ms = tonumber(state.timeout_ms) or tonumber(state.remaining_ms),

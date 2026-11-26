@@ -164,6 +164,11 @@ pcall(function() decoded7=json.decode(record7) end)
 check(type(decoded7.op)=='string' and decoded7.op:find('op%-')~=nil,'row 7: the record does not name the job')
 check(decoded7.session==sid7,'row 7: the record does not name the session')
 check(type(decoded7.limit_ms)=='number','row 7: the record does not say up to when')
+-- and the words a person recognises, never a bare op id (Fable 27/11): the job's own command, clipped.
+check(type(decoded7.what)=='string' and decoded7.what:find('sleep')~=nil,
+  'row 7: the record does not carry the job in words a person recognises: '..tostring(decoded7.what))
+-- (debug line removed)
+check(#tostring(decoded7.what)<=40,'row 7: the words are longer than 40 characters')
 os.remove(capture7)
 local leftover=host.read_file(dir7..'/.wasm-agent/codemode-hold-'..tostring(decoded7.op)..'.json')
 check(leftover==nil or leftover==false,'row 7: the record outlived the hold')
