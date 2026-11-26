@@ -1,18 +1,18 @@
 //! THE TRANSCRIPT ACROSS THE WIRE: the same calls, the same screen bytes.
 //!
-//! `WA_TERM_REMOTE=1` puts the transcript behind a boundary (`rust/wa-capabilities/src/screen.rs`): the
-//! state and the painting live in the terminal program (`rust/wa-term/src/bin/wa-term.rs`, its own
-//! process) and the node speaks `wa-term-proto` to it. This file is the proof that the move changed
-//! WHERE the work happens and nothing about what the reader sees:
+//! The transcript lives in the terminal program (`rust/wa-term/src/bin/wa-term.rs`, its own process)
+//! and the node speaks `wa-term-proto` to it (`rust/wa-capabilities/src/screen.rs`); there is no
+//! in-process path any more. This file is the proof that the move changed WHERE the work happens and
+//! nothing about what the reader sees:
 //!
-//! 1. ONE event log is driven through both paths - a fresh `Screen::Local` (today's in-process
-//!    `Transcript`) and a fresh `Screen::Remote` attached to the REAL program binary, two real
+//! 1. ONE event log is driven through the handle attached to the REAL program binary - two real
 //!    processes on this machine - and every answer, every row and every frame is compared byte for
-//!    byte. Not a stub: the binary is the one `cargo build -p wa-term --bin wa-term` makes.
+//!    byte against `tests/golden/term_log.txt`, which the in-process `Transcript` recorded before
+//!    the last slice deleted it. Not a stub: the binary is the one
+//!    `cargo build -p wa-term --bin wa-term` makes.
 //! 2. The refusals are named, not silent: a program that is not there (`term_program_missing`), one
 //!    that speaks another protocol (`term_protocol_mismatch`, both numbers), one that dies mid-session
-//!    (`term_call_failed`, and no frame is drawn from it afterwards), and a switch value the node does
-//!    not know (`term_switch_invalid`).
+//!    (`term_call_failed`, and no frame is drawn from it afterwards).
 //!
 //! Why the test names the program instead of setting `WA_TERM_BIN`: an environment set for the whole
 //! test process is shared by every test in it, and a refusal test would race the equivalence one.
@@ -164,24 +164,35 @@ fn drive(screen: &mut Screen) -> Vec<String> {
     log
 }
 
+/// THE GOLDEN IS THE DELETED PATH'S OWN OUTPUT.
+///
+/// `tests/golden/term_log.txt` was recorded by the in-process `Transcript` on 26/11, before the last
+/// slice of `wa-term-own-program` deleted it: one event log - the chat, a notice, a pinned request, a
+/// folded code block, 40 rows, bar hover/press/drag, a page, the bottom, a resize, a hold, a rewrite -
+/// and every answer and frame it gave. The wire is compared against that file, answer for answer and
+/// byte for byte, so the move is still judged by what it replaced (quality rule 14).
+fn golden() -> Vec<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/term_log.txt");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("the golden at {}: {error}", path.display()));
+    text.lines().map(str::to_string).collect()
+}
+
 #[test]
-fn the_wire_draws_the_same_bytes_as_the_in_process_path() {
-    let mut local = Screen::Local(wa_term::transcript::Transcript::default());
+fn the_wire_draws_the_golden_the_in_process_path_recorded() {
+    let reference = golden();
     let mut remote = Screen::remote_at(program());
     assert!(remote.attach_error().is_none(), "the program answered the handshake");
-
-    let in_process = drive(&mut local);
     let across_the_wire = drive(&mut remote);
 
-    assert_eq!(in_process.len(), across_the_wire.len(), "the same log has the same length");
-    for (step, (left, right)) in in_process.iter().zip(across_the_wire.iter()).enumerate() {
-        assert_eq!(left, right, "step {step} differs between the in-process path and the terminal program");
+    assert_eq!(reference.len(), across_the_wire.len(), "the same log has the same length");
+    for (step, (left, right)) in reference.iter().zip(across_the_wire.iter()).enumerate() {
+        assert_eq!(left, right, "step {step} differs from the in-process path's recorded answer");
     }
     // A log of two empty strings would pass the comparison above and prove nothing.
-    let frames: Vec<&String> = in_process.iter().filter(|step| step.starts_with("frame") && step.len() > 400).collect();
-    assert!(frames.len() >= 5, "the log carries real frames ({} found)", frames.len());
+    let frames: Vec<&String> = reference.iter().filter(|step| step.starts_with("frame") && step.len() > 400).collect();
+    assert!(frames.len() >= 5, "the golden carries real frames ({} found)", frames.len());
     assert!(frames.iter().any(|frame| frame.contains("\\u{1b}[")), "a frame carries the escape sequences the tty needs");
-    assert!(in_process.iter().any(|step| step.starts_with("bar=Some")), "the long chat drew a scrollbar to compare");
+    assert!(reference.iter().any(|step| step.starts_with("bar=Some")), "the long chat drew a scrollbar to compare");
 }
 
 #[cfg(unix)]
@@ -221,20 +232,4 @@ fn a_program_that_dies_mid_session_is_a_named_failure_and_never_a_stale_frame() 
     forget(&script);
 }
 
-#[test]
-fn the_switch_refuses_a_value_it_does_not_know() {
-    // One test touches the process's environment, and it puts it back: nothing else in this file
-    // reads it, because the others name their program with `Screen::remote_at`.
-    std::env::set_var("WA_TERM_REMOTE", "banana");
-    let mut screen = Screen::for_console();
-    std::env::remove_var("WA_TERM_REMOTE");
-    let failure = screen.attach_error().expect("a refusal");
-    assert_eq!(failure.code, "term_switch_invalid");
-    assert!(failure.message.contains("banana"), "{}", failure.message);
-    // And the default: unset, and 0, are today's in-process path.
-    assert!(matches!(Screen::for_console(), Screen::Local(_)), "unset is the in-process path");
-    std::env::set_var("WA_TERM_REMOTE", "0");
-    let as_zero = matches!(Screen::for_console(), Screen::Local(_));
-    std::env::remove_var("WA_TERM_REMOTE");
-    assert!(as_zero, "0 is the in-process path");
-}
+

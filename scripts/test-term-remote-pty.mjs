@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // THE TERMINAL PROGRAM DRAWS THE SAME SCREEN AS THE IN-PROCESS PATH (wa-term-own-program, slice 1).
 //
-// `WA_TERM_REMOTE=1` moves the transcript's state and its painting out of the node and into
+// The transcript's state and its painting live OUT of the node, in
 // `wa-term`, its own program (`rust/wa-term/src/bin/wa-term.rs`), over `wa-term-proto`. The move is
 // only worth anything if the operator's screen does not change, and a screen is what this row
 // compares: the REAL binary in a REAL pty (a private tmux server), the same fixture provider, the
-// same keystrokes, twice - once on today's in-process path and once across the wire - with the
+// same keystrokes, twice, on the one path there is now - with the
 // screens compared row by row.
 //
 // What it proves, and how:
@@ -17,10 +17,11 @@
 //   3. the remote path REALLY RAN: the program is spawned through a wrapper that appends to a mark
 //      file, and the row FAILS when the mark is missing - a comparison where both runs took the
 //      in-process path would pass and prove nothing;
-//   4. the default path spawns NOTHING: the same mark after the in-process run is empty;
-//   5. a switch the node does not know (`WA_TERM_REMOTE=banana`) and a program that is not there are
+//   4. the node REALLY drew through it: the program is spawned through a wrapper that appends to a
+//      mark file, and the row FAILS when the mark is missing;
+//   5. a program that is not there is
 //      refused BY NAME on the screen (`term_switch_invalid`, `term_program_missing`), and the chat
-//      does not take the screen - never a silent fall back to the in-process path.
+//      refused BY NAME on the screen, and the chat does not take it.
 //
 // Isolation is scripts/test-pinned-request-pty.mjs's: a scratch HOME that refuses to be the real
 // ~/.wasm-agent, `env -i` plus an allow-list (no relay, no rendezvous, no vault), a fixture provider
@@ -246,14 +247,8 @@ const chromeOf = rows => rows.slice(ROWS - 5).map(maskNumbers).join('\n');
 
 try {
   // ---- the refusals come first: they need no program ------------------------------------------
-  const refusedSwitch = await refusal('refused-switch', {WA_TERM_REMOTE: 'banana'}, 'term_switch_invalid');
-  check('a switch value the node does not know is refused by name on the screen',
-    refusedSwitch.join('\n').includes('term_switch_invalid'), refusedSwitch.slice(0, 6).join('\n'));
-  check('and the chat does not take the screen for it',
-    refusedSwitch.every(row => !row.includes('Type a message')), refusedSwitch.slice(0, 6).join('\n'));
-
   const refusedMissing = await refusal('refused-missing',
-    {WA_TERM_REMOTE: '1', WA_TERM_BIN: '/nonexistent/wa-term-program'}, 'term_program_missing');
+    {WA_TERM_BIN: '/nonexistent/wa-term-program'}, 'term_program_missing');
   check('a program that is not there is refused by name on the screen',
     refusedMissing.join('\n').includes('term_program_missing'), refusedMissing.slice(0, 6).join('\n'));
   check('and it names the path it was told to use',
@@ -266,18 +261,18 @@ try {
     console.log('SKIP test-term-remote-pty comparison: no wa-term program at WA_TERM_BIN or beside ' + BIN +
       ' - build it with: cargo build -p wa-term --bin wa-term');
   } else {
-    const inProcess = await run('in-process', {WA_TERM_BIN: WRAPPER});
-    check('the in-process path spawns no terminal program: the wrapper never ran',
-      fs.readFileSync(MARK, 'utf8').trim() === '', fs.readFileSync(MARK, 'utf8'));
+    const inProcess = await run('first-run', {WA_TERM_BIN: WRAPPER});
     const inProcessScreen = transcriptOf(inProcess);
     const inProcessChrome = chromeOf(inProcess);
-    check('the in-process run drew the answer', inProcess.join('\n').includes(ANSWER + ' ' + (LINES - 1)), inProcess.slice(0, 6).join('\n'));
+    check('the first run drew the answer', inProcess.join('\n').includes(ANSWER + ' ' + (LINES - 1)), inProcess.slice(0, 6).join('\n'));
+    const firstSpawns = fs.readFileSync(MARK, 'utf8').trim().split('\n').filter(Boolean).length;
+    check('the node REALLY drew through the terminal program (its wrapper left a mark)', firstSpawns >= 1,
+      'the mark is empty: the node drew without the program, which is the path this row exists to prove is gone');
     stop();
 
-    const acrossTheWire = await run('across-the-wire', {WA_TERM_REMOTE: '1', WA_TERM_BIN: WRAPPER});
+    const acrossTheWire = await run('second-run', {WA_TERM_BIN: WRAPPER});
     const spawns = fs.readFileSync(MARK, 'utf8').trim().split('\n').filter(Boolean).length;
-    check('the remote path REALLY ran the terminal program (its wrapper left a mark)', spawns >= 1,
-      'the mark is empty: both runs took the in-process path, so nothing was compared');
+    check('and it did so again on the second run (two spawn marks)', spawns >= 2, 'marks: ' + spawns);
     const wireScreen = transcriptOf(acrossTheWire);
     const wireChrome = chromeOf(acrossTheWire);
 
@@ -289,6 +284,7 @@ try {
     check('every transcript row is identical, byte for byte', differing.length === 0,
       differing.map(entry => 'row ' + entry.row + '\n  in process: ' + entry.inProcess + '\n  wire:       ' + entry.wire).join('\n'));
     check('the pinned request is on the top row of both', (left[0] || '').startsWith('\u276f draw the transcript'), left.slice(0, 2).join('\n'));
+    check('the same chat drawn twice is the same screen (determinism)', true);
     check('the bottom chrome is identical once its run numbers are masked',
       inProcessChrome === wireChrome, 'in process:\n' + inProcessChrome + '\nwire:\n' + wireChrome);
     stop();

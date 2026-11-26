@@ -4126,8 +4126,7 @@ struct ConsoleInput {
     /// The output region's last row as this process last set it; 0 = the view's own layout.
     region: usize,
     /// The chat as blocks (wa_term::transcript), drawn into the output region by this process - or,
-    /// with `WA_TERM_REMOTE=1`, by the terminal program across `crate::screen`'s wire. Same calls
-    /// either way; the default is the in-process path, unchanged.
+    /// by the terminal program across `crate::screen`'s wire - the only path since the last slice.
     transcript: crate::screen::Screen,
     /// When the debounced FULL repaint after a resize is due (item G): a resize sets it to now + the
     /// debounce, and a later call that finds it passed clears the screen and the scrollback and draws
@@ -4428,10 +4427,9 @@ static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = Once
 fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
     CONSOLE_INPUT.get_or_init(|| {
         let mut state = ConsoleInput::default();
-        // The transcript is this process's (the default) or the terminal program's
-        // (`WA_TERM_REMOTE=1`, crate::screen). The switch is read ONCE, here, and an unknown value
-        // is refused by name rather than read as "today's path".
-        state.transcript = crate::screen::Screen::for_console();
+        // The transcript in `state` is the terminal program's (`crate::screen`, the wire): it has no
+        // in-process path any more (the last slice of `wa-term-own-program` deleted it), and the first
+        // call attaches - refusing by name if the program is missing or speaks another protocol.
         // The inline transcript's scrollbar obeys the same knob as the fullscreen console's
         // (`WA_TUI_SCROLLBAR`, docs/TERMINAL.md, #115): one setting, one meaning, in both layouts.
         if let Ok(value) = std::env::var("WA_TUI_SCROLLBAR") {

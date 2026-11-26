@@ -231,6 +231,20 @@ case "${FAST_BIN_CODEMODE:-unknown}" in
   unknown) echo "fast: this binary does not report code-mode assets; a row that needs them says so by name" ;;
 esac
 bin="$FAST_BIN"
+# THE TERMINAL PROGRAM (mission wa-term-own-program, the last slice). The node DRAWS THROUGH IT: since
+# the in-process transcript was deleted, every `wa chat` in every row below attaches to `wa-term`, and a
+# row that cannot find it refuses by name instead of drawing. So it is built here, unconditionally,
+# beside the binary under test - the pair an install ships - and BEFORE any row runs: the Rust section
+# below builds it too, but that section is skipped when a change touches no Rust file, which would leave
+# every chat row on a stale or missing program.
+if [ "${WA_FAST_IN_DOCKER:-}" != 1 ] && command -v cargo >/dev/null 2>&1; then
+  program_dir=$(dirname "$bin")
+  if [ ! -x "$program_dir/wa-term" ] || [ "$program_dir/wa-term" -ot "$ROOT/rust/wa-term/src/transcript.rs" ]; then
+    echo "fast: building the terminal program (wa-term) beside $bin"
+    ( cd "$ROOT/rust" && WA_CODEMODE_ALLOW_EMPTY=1 CARGO_TARGET_DIR="$(dirname "$program_dir")" cargo build --release --offline -p wa-term --bin wa-term ) >"${work:-${TMPDIR:-/tmp}}/build-wa-term-early.log" 2>&1 \
+      || echo "fast: the terminal program did not build; the rows that need it say so by name (${work:-${TMPDIR:-/tmp}}/build-wa-term-early.log)"
+  fi
+fi
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 # Milliseconds, portably. `date +%s%N` is a GNU extension: on BSD/macOS it prints a literal 'N', and
 # inside $(( )) that is a shell error rather than a duration, so every row time in this file was wrong
