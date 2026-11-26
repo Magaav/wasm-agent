@@ -432,7 +432,7 @@ impl Store {
             return Ok(inventory);
         }
         if action=="quarantine_validate" {
-            return wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,args,field(args,"kind")?,field(args,"id")?,&args["expected"]).map_err(err);
+            return wa_operations_runner::wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,args,field(args,"kind")?,field(args,"id")?,&args["expected"]).map_err(err);
         }
         let run = field(args, "run")?;
         let principal = field(args, "principal")?;
@@ -462,7 +462,7 @@ impl Store {
                 let archived:Option<String>=tx.query_row("SELECT evidence FROM history WHERE action='operator_risk_quarantine' AND json_extract(claim,'$.key')=? ORDER BY id DESC LIMIT 1",[key],|r|r.get(0)).optional().map_err(err)?;
                 if let Some(raw)=archived {
                     let receipt:Value=serde_json::from_str(&raw).map_err(err)?;
-                    wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,&receipt,"claim",key,&receipt["expected"]).map_err(|_|"quarantine_claim_archive_unverifiable".to_string())?;
+                    wa_operations_runner::wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,&receipt,"claim",key,&receipt["expected"]).map_err(|_|"quarantine_claim_archive_unverifiable".to_string())?;
                 }
                 let previous = tx
                     .query_row(
@@ -647,8 +647,8 @@ impl Store {
             let lease=Connection::open_with_flags(self.root.join(format!("{boot}.lease.sqlite")),rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(err)?;
             lease.busy_timeout(Duration::ZERO).map_err(err)?;lease.execute_batch("BEGIN EXCLUSIVE").map_err(|_|"quarantine_claim_owner_live_or_unavailable")?;
             let raw:Option<String>=state.db.query_row("SELECT identity FROM claim_identity WHERE key=? AND boot=?",params![key,boot],|r|r.get(0)).optional().map_err(err)?;
-            if let Some(raw)=raw {let identity:Value=serde_json::from_str(&raw).map_err(err)?;if let Some(pid)=identity["process_id"].as_u64(){let probe=json!({"owner_process_id":pid});wa_operation::quarantine::check_owner(&self.root,&probe,"claim").map_err(err)?;}}
-            let receipt=wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,args,"claim",key,&current).map_err(err)?;
+            if let Some(raw)=raw {let identity:Value=serde_json::from_str(&raw).map_err(err)?;if let Some(pid)=identity["process_id"].as_u64(){let probe=json!({"owner_process_id":pid});wa_operations_runner::wa_operation::quarantine::check_owner(&self.root,&probe,"claim").map_err(err)?;}}
+            let receipt=wa_operations_runner::wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,args,"claim",key,&current).map_err(err)?;
             let tx=state.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(err)?;
             if tx.query_row("SELECT key,principal,session,run,boot,uncertain FROM claims WHERE key=?",[key],row).map_err(err)?!=current{return Err("quarantine_claim_moved".into());}
             tx.execute("INSERT INTO history(action,evidence,claim) VALUES('operator_risk_quarantine',?,?)",params![receipt.to_string(),current.to_string()]).map_err(err)?;

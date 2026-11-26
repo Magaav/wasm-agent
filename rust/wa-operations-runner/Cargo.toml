@@ -1,0 +1,17 @@
+[package]
+name = "wa-operations-runner"
+version = "0.1.0"
+edition = "2021"
+
+# The process runner, out of the host: one supervised external execution with an identity, an owner, an
+# absolute budget, output cursors, cancellation and a terminal outcome. It owns no interpreter and no UI;
+# the facts it cannot own travel through `node::NodeFacts`.
+[dependencies]
+serde_json = "1"
+ring = "0.17"
+wa-operation = { path = "../wa-operation" }
+wa-host-support = { path = "../wa-host-support" }
+wa-features = { path = "../wa-features" }
+wa-kernel-runtime = { path = "../wa-kernel-runtime" }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

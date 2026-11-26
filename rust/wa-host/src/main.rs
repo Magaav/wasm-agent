@@ -454,6 +454,8 @@ fn main() {
     let node_name = node::local_name(&state_dir.to_string_lossy());
     let node_id = node::existing_node_id().unwrap_or_default();
     let identity = build_info::install_label(&state_dir, &install_dir, &node_name, &node_id);
+    // The runner asks this process for its run state, progress rows and disk cap (`operations_seam`).
+    wa_capabilities::operations_seam::install();
     wa_capabilities::host::set_build_identity(&identity, build_info::COMMIT, build_info::DIRTY);
     // AND THE RECIPE FOR ASKING AGAIN, for the surfaces that must not report a stale install (fonts-install item
     // 4): /health is answered by a process that was started BEFORE scripts/upgrade.sh wrote the record naming
