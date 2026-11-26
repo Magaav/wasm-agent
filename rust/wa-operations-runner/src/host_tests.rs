@@ -6,11 +6,11 @@
 //! assertion is the one the runner carried, and each test installs the host's own facts first.
 #![cfg(test)]
 
-use wa_operations_runner::operations as runner;
+use crate::operations as runner;
 
 #[cfg(test)]
 mod vault_approval_tests {
-    use wa_operations_runner::operations::{approval_problem, approval_text, is_absolute_path, is_script_path, looks_like_path,
+    use crate::operations::{approval_problem, approval_text, is_absolute_path, is_script_path, looks_like_path,
                 platform_root, request_server_problem, seal_request, sha256_hex, APPROVAL_FORM};
     use serde_json::{json, Value};
 
@@ -28,8 +28,8 @@ mod vault_approval_tests {
         let source = ["/usr/bin/env", "/bin/env", "/usr/bin/true", "/bin/true"]
             .into_iter()
             .find(|candidate| {
-                wa_operations_runner::operations::file_magic(candidate).as_deref() == Some("elf")
-                    || wa_operations_runner::operations::file_magic(candidate).as_deref() == Some("macho")
+                crate::operations::file_magic(candidate).as_deref() == Some("elf")
+                    || crate::operations::file_magic(candidate).as_deref() == Some("macho")
             })
             .expect("a native binary to copy for the fixtures");
         let dir = std::env::temp_dir().join(format!("wa-vault-approval-{}", std::process::id()));
@@ -43,7 +43,7 @@ mod vault_approval_tests {
     /// families: the one shape in which a native binary runs a vault connector (round 8).
     fn approval_native(program: &std::path::Path, files: &[&std::path::Path], vault: &[&str]) -> Value {
         let mut document = approval(&program.to_string_lossy(), "", &[], &[], files, vault);
-        let real = wa_operations_runner::operations::real_path(&program.to_string_lossy());
+        let real = crate::operations::real_path(&program.to_string_lossy());
         let sha = sha256_hex(&std::fs::read(program).expect("the vouched binary"));
         // The console SORTS the file list before hashing it (lua/core/mcp.lua, M.vault_manifest:
         // `table.sort(files, ...)`), and approval_problem sorts it too - so a helper that handed the list
@@ -81,8 +81,8 @@ mod vault_approval_tests {
         path
     }
 
-    fn spec(program: &str, args: &[String]) -> wa_operations_runner::wa_operation::Spec {
-        wa_operations_runner::wa_operation::Spec::command(program.to_string(), args.to_vec())
+    fn spec(program: &str, args: &[String]) -> wa_operation::Spec {
+        wa_operation::Spec::command(program.to_string(), args.to_vec())
     }
 
     /// An approval as the console records one (lua/core/mcp.lua, M.vault_manifest): the form, the digest
@@ -117,7 +117,7 @@ mod vault_approval_tests {
     // scripts/test-mcp-vault-approval.lua).
     #[test]
     fn the_canonical_text_escapes_fields_and_matches_the_lua_side() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let env: Vec<(String, String)> = vec![("MAIL_USER".into(), "MAIL_USER".into()),
             ("LANG".into(), "LC_ALL".into())];
         let text = approval_text(
@@ -140,7 +140,7 @@ mod vault_approval_tests {
 
     #[test]
     fn an_approved_launch_is_accepted_and_an_edited_script_is_not() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let script = scratch("plain.mjs", "export const ok = 1;\n");
         let client = scratch("client.mjs", "import './plain.mjs';\n");
         let args = vec![client.to_string_lossy().to_string(), "--request-file".into(), "/tmp/request.json".into()];
@@ -181,7 +181,7 @@ mod vault_approval_tests {
 
     #[test]
     fn a_launch_running_a_script_the_approval_does_not_name_is_refused() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let client = scratch("uncovered-client.mjs", "export const c = 1;\n");
         let smuggled = scratch("smuggled.sh", "echo value\n");
         let approved_args = vec![client.to_string_lossy().to_string()];
@@ -197,7 +197,7 @@ mod vault_approval_tests {
 
     #[test]
     fn a_missing_approval_or_a_missing_script_reads_nothing() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let running = spec("/usr/bin/node", &["/tmp/client.mjs".to_string()]);
         for empty in [Value::Null, json!({}), json!({"sha256": "  "})] {
             let refused = approval_problem(&empty, &running).unwrap_err();
@@ -213,7 +213,7 @@ mod vault_approval_tests {
     // digest, so it is refused by name and the operator approves again.
     #[test]
     fn an_approval_that_predates_the_form_is_refused() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let mut old = json!({"sha256": "ab".repeat(32), "program": "/usr/bin/node", "args": [],
             "files": [], "vault": []});
         let refused = approval_problem(&old, &spec("/usr/bin/node", &[])).unwrap_err();
@@ -228,7 +228,7 @@ mod vault_approval_tests {
     // must be a file the digest names, or the launch reads no value.
     #[test]
     fn a_program_the_platform_does_not_own_must_be_in_the_digest() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         // Round 8 judges the program BEFORE its coverage: a file that is not node or a POSIX shell is
         // refused by the allow-list, whatever the digest says about it. A user-owned node is the shape
         // that reaches the coverage rule - allowed as a program, and still a file this launch runs.
@@ -257,7 +257,7 @@ mod vault_approval_tests {
 
     #[test]
     fn a_relative_path_or_a_package_runner_cannot_be_approved() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let bare = approval("node", "", &[], &[], &[], &["TOKEN"]);
         assert!(approval_problem(&bare, &spec("/usr/bin/node", &[])).unwrap_err()
             .starts_with("vault_approval_program_not_absolute:node:"), "a name is resolved through PATH");
@@ -277,7 +277,7 @@ mod vault_approval_tests {
 
     #[test]
     fn only_absolute_script_paths_are_covered_by_the_launch_cross_check() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         assert!(is_script_path("/home/agent/scripts/mcp-client.mjs"));
         assert!(is_script_path("C:\\Users\\agent\\scripts\\connector.py"));
         assert!(!is_script_path("mcp-client.mjs"), "a bare name is resolved by PATH, not by us");
@@ -290,7 +290,7 @@ mod vault_approval_tests {
     // command must be the one the operator approved.
     #[test]
     fn the_request_the_child_reads_must_name_the_approved_command() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let client = scratch("request-client.mjs", "export const c = 1;\n");
         let client_path = client.to_string_lossy().to_string();
         let approved_args = vec![client_path.clone()];
@@ -357,7 +357,7 @@ mod vault_approval_tests {
     // after that check is refused in the child (scripts/test-mcp-request-seal.mjs proves the child side).
     #[test]
     fn the_request_seal_is_the_sha256_of_the_bytes_the_kernel_read() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let dir = std::env::temp_dir().join(format!("wa-request-seal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join("request.json");
@@ -396,21 +396,21 @@ mod vault_approval_tests {
     /// owns it.
     #[test]
     fn the_interpreter_the_launch_spawns_is_the_platforms_own_or_in_the_digest() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         // Round 8: this fixture is a REAL native node, because the allow-list judges the spawned
         // interpreter by what the file IS - a shell script called `node` is refused by it, one step
         // before the coverage rule this test is about.
         let owned = scratch_native("node");
-        let ours = wa_operations_runner::operations::real_path(&owned.to_string_lossy());
+        let ours = crate::operations::real_path(&owned.to_string_lossy());
         // A file this user owns is never the platform's, and a platform prefix cannot make it so.
-        assert!(!wa_operations_runner::operations::owned_by_root(&ours), "a file this user owns is not root-owned: {ours}");
-        assert!(!wa_operations_runner::operations::platform_owned(&ours), "and a path the platform does not own is not platform_owned");
+        assert!(!crate::operations::owned_by_root(&ours), "a file this user owns is not root-owned: {ours}");
+        assert!(!crate::operations::platform_owned(&ours), "and a path the platform does not own is not platform_owned");
         // The real thing is: a root-owned, not group/other-writable system program and its directories.
-        assert!(wa_operations_runner::operations::owned_by_root("/usr/bin"), "/usr/bin is root-owned and not writable by us");
-        assert!(wa_operations_runner::operations::platform_owned("/usr/bin/env"), "/usr/bin/env is the platform's own");
-        assert!(!wa_operations_runner::operations::platform_owned("/usr/local/bin/wasm-agent-nothing-here"),
+        assert!(crate::operations::owned_by_root("/usr/bin"), "/usr/bin is root-owned and not writable by us");
+        assert!(crate::operations::platform_owned("/usr/bin/env"), "/usr/bin/env is the platform's own");
+        assert!(!crate::operations::platform_owned("/usr/local/bin/wasm-agent-nothing-here"),
             "a path that is not there is not the platform's");
-        assert!(wa_operations_runner::operations::PLATFORM_ROOTS.contains(&"/System/"), "the Lua and Rust lists agree (/System/)");
+        assert!(crate::operations::PLATFORM_ROOTS.contains(&"/System/"), "the Lua and Rust lists agree (/System/)");
 
         // The definition names the platform's node; the launch is told to spawn a file this user owns,
         // which nobody hashed - the WA_NODE shape, and <data>/node after it.
@@ -432,7 +432,7 @@ mod vault_approval_tests {
     /// the first thing such a host hits.
     #[test]
     fn the_interpreter_the_launch_spawns_is_held_to_the_allow_list() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         // A native binary whose REALPATH is an interpreter: it is native, it is in the digest, and it is
         // still refused, because what it IS (python3) is not one of the two families.
         let interpreter = native_copy("python3");
@@ -460,7 +460,7 @@ mod vault_approval_tests {
     /// is the source of both, and both compare case-insensitively.
     #[test]
     fn the_refused_name_lists_are_the_shared_table_and_case_insensitive() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/mcp-refused-names.json");
         let table: Value = serde_json::from_slice(&std::fs::read(&path).expect("the shared table"))
@@ -470,11 +470,11 @@ mod vault_approval_tests {
                 .map(|entry| entry.as_str().expect("a name").to_string()).collect()
         };
         let mut rust_interpreters: Vec<String> =
-            wa_operations_runner::operations::REFUSED_INTERPRETERS.iter().map(|name| name.to_string()).collect();
+            crate::operations::REFUSED_INTERPRETERS.iter().map(|name| name.to_string()).collect();
         let mut rust_wrappers: Vec<String> =
-            wa_operations_runner::operations::REFUSED_WRAPPERS.iter().map(|name| name.to_string()).collect();
+            crate::operations::REFUSED_WRAPPERS.iter().map(|name| name.to_string()).collect();
         let mut rust_allowed: Vec<String> =
-            wa_operations_runner::operations::ALLOWED_PROGRAMS.iter().map(|name| name.to_string()).collect();
+            crate::operations::ALLOWED_PROGRAMS.iter().map(|name| name.to_string()).collect();
         let mut wanted_interpreters = listed("refused_interpreters");
         let mut wanted_wrappers = listed("refused_wrappers");
         let mut wanted_allowed = listed("allowed_programs");
@@ -489,35 +489,35 @@ mod vault_approval_tests {
         assert_eq!(rust_allowed, wanted_allowed, "the allow-list is the shared table");
         // Case-insensitive on BOTH sides: "Rscript" (as macOS spells it) is the same name as "rscript".
         for spelling in ["Rscript", "RSCRIPT", "rscript"] {
-            let found = wa_operations_runner::operations::refused_interpreter_or_wrapper(spelling)
+            let found = crate::operations::refused_interpreter_or_wrapper(spelling)
                 .unwrap_or_else(|| panic!("{spelling} is a refused interpreter"));
             assert_eq!(found.0, "interpreter", "{spelling}");
         }
         for spelling in ["Env", "TIMEOUT", "timeout"] {
-            let found = wa_operations_runner::operations::refused_interpreter_or_wrapper(spelling)
+            let found = crate::operations::refused_interpreter_or_wrapper(spelling)
                 .unwrap_or_else(|| panic!("{spelling} is a refused wrapper"));
             assert_eq!(found.0, "wrapper", "{spelling}");
         }
         // A versioned name is the same interpreter, and the allowed families are not in either list.
-        assert_eq!(wa_operations_runner::operations::refused_interpreter_or_wrapper("python3.11").map(|found| found.0), Some("interpreter"));
-        assert!(wa_operations_runner::operations::refused_interpreter_or_wrapper("node").is_none());
-        assert!(wa_operations_runner::operations::refused_interpreter_or_wrapper("bash").is_none());
+        assert_eq!(crate::operations::refused_interpreter_or_wrapper("python3.11").map(|found| found.0), Some("interpreter"));
+        assert!(crate::operations::refused_interpreter_or_wrapper("node").is_none());
+        assert!(crate::operations::refused_interpreter_or_wrapper("bash").is_none());
     }
 
     /// Round 8: the allow-list, judged by REALPATH and by what the file IS, and the voucher that is the
     /// one way a native binary outside the two families runs a vault connector.
     #[test]
     fn an_interpreter_or_a_wrapper_is_refused_whatever_its_name_or_voucher() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         // Every refused family, under a versioned name and with its own argument list: refused as a
         // PROGRAM, whether or not the operator recorded a --native voucher for it.
         for program in ["/usr/bin/python3.11", "/usr/bin/perl5.36", "/usr/bin/env", "/usr/bin/timeout",
                         "/usr/bin/nohup", "/usr/bin/xargs"] {
-            let refused = wa_operations_runner::operations::program_refusal(program, None)
+            let refused = crate::operations::program_refusal(program, None)
                 .unwrap_or_else(|| panic!("{program} is refused"));
             assert!(refused.starts_with("vault_approval_program_not_allowed:")
                 || refused.starts_with("vault_approval_program_wrapper:"), "{program}: {refused}");
-            let vouched = wa_operations_runner::operations::program_refusal(program, Some(program));
+            let vouched = crate::operations::program_refusal(program, Some(program));
             assert!(vouched.is_some(), "--native must not approve {program}");
         }
         // A native binary under another name is NOT allowed without a voucher (its basename is not one
@@ -525,19 +525,19 @@ mod vault_approval_tests {
         let copy = scratch("native-copy", "#!/bin/sh
 exit 0
 ");
-        let copied = wa_operations_runner::operations::real_path(&copy.to_string_lossy());
-        let refused = wa_operations_runner::operations::program_refusal(&copied, None).expect("a name outside the two families");
+        let copied = crate::operations::real_path(&copy.to_string_lossy());
+        let refused = crate::operations::program_refusal(&copied, None).expect("a name outside the two families");
         assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
         // The voucher covers a NATIVE executable only: this fixture is a script, so even vouched for it
         // is refused by name rather than approved on a name the operator trusted.
-        let vouched = wa_operations_runner::operations::program_refusal(&copied, Some(copied.as_str())).expect("a script is not native");
+        let vouched = crate::operations::program_refusal(&copied, Some(copied.as_str())).expect("a script is not native");
         assert!(vouched.starts_with("vault_approval_program_native_not_executable:"), "{vouched}");
         // A script wearing an ALLOWED name is refused too: /bin/sh copied to ./node is not node.
         let fake = scratch("fake-node", "#!/bin/sh
 exit 0
 ");
-        let fake_path = wa_operations_runner::operations::real_path(&fake.to_string_lossy());
-        let refused = wa_operations_runner::operations::program_refusal(&fake_path, None).unwrap_or_default();
+        let fake_path = crate::operations::real_path(&fake.to_string_lossy());
+        let refused = crate::operations::program_refusal(&fake_path, None).unwrap_or_default();
         assert!(refused.starts_with("vault_approval_program_native_not_executable:")
             || refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
         let _ = std::fs::remove_file(&copy);
@@ -548,8 +548,8 @@ exit 0
     /// "--eval=code" and "-pe" are the inline code a whole-string comparison let through.
     #[test]
     fn an_inline_flag_is_matched_before_its_value_and_through_a_cluster() {
-        crate::operations_seam::install();
-        let inline = |program: &str, value: &str| wa_operations_runner::operations::inline_flag(program, value);
+        crate::test_facts::install();
+        let inline = |program: &str, value: &str| crate::operations::inline_flag(program, value);
         assert_eq!(inline("/usr/bin/node", "--eval=process.exit(0)").as_deref(), Some("--eval"));
         assert_eq!(inline("/usr/bin/node", "--print=1").as_deref(), Some("--print"));
         assert_eq!(inline("/usr/bin/node", "-pe").as_deref(), Some("-p (in -pe)"));
@@ -567,7 +567,7 @@ exit 0
     /// looks_like_path saw nothing because "server" has no slash and no extension.
     #[test]
     fn an_argument_is_resolved_from_the_connectors_own_directory() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let dir = std::env::temp_dir().join(format!("wa-vault-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let script = dir.join("server.js");
@@ -611,7 +611,7 @@ exit 0
     /// one file answers to is refused rather than resolved by node's priority.
     #[test]
     fn a_name_is_resolved_in_nodes_own_order_and_an_ambiguous_one_is_refused() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let dir = std::env::temp_dir().join(format!("wa-vault-order-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let cwd = dir.to_string_lossy().to_string();
@@ -668,16 +668,16 @@ exit 0
     /// code option given to a program the digest cannot classify is refused as inline code.
     #[test]
     fn an_interpreter_this_digest_cannot_follow_is_refused_by_name() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         for program in ["/usr/bin/python3", "/usr/bin/python3.11", "/usr/bin/perl", "/usr/bin/ruby3.2",
                         "/usr/local/bin/deno", "/opt/bun", "/usr/bin/php8.2", "/usr/bin/lua5.4"] {
-            let refused = wa_operations_runner::operations::program_shape_problem(program).expect("an unfollowed interpreter");
+            let refused = crate::operations::program_shape_problem(program).expect("an unfollowed interpreter");
             assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{program}: {refused}");
             assert!(refused.contains("/mcp <id> probe"), "the way to approve it again is in it: {refused}");
         }
         // The two families the digest DOES follow stay approvable as programs.
-        assert!(wa_operations_runner::operations::program_shape_problem("/usr/bin/node").is_none());
-        assert!(wa_operations_runner::operations::program_shape_problem("/bin/sh").is_none());
+        assert!(crate::operations::program_shape_problem("/usr/bin/node").is_none());
+        assert!(crate::operations::program_shape_problem("/bin/sh").is_none());
         // A code option given to a program the digest cannot classify is still code, not a value, and
         // round 8 decides that from the FAMILY: a program outside node and the shells has no family of
         // its own, so every one of CODE_FLAGS is code. A native binary is the only such program the
@@ -685,9 +685,9 @@ exit 0
         let runner_path = scratch_native("runner");
         let runner = runner_path.to_string_lossy().to_string();
         let inline = vec!["-c".to_string(), "print(1)".to_string()];
-        assert_eq!(wa_operations_runner::operations::interpreter_family(&runner), "unknown", "no family: every code flag is code");
-        assert_eq!(wa_operations_runner::operations::inline_flag(&runner, "-c").as_deref(), Some("-c"), "a code flag, no family");
-        assert_eq!(wa_operations_runner::operations::inline_flag(&runner, "-m").as_deref(), Some("-m"), "and so is -m");
+        assert_eq!(crate::operations::interpreter_family(&runner), "unknown", "no family: every code flag is code");
+        assert_eq!(crate::operations::inline_flag(&runner, "-c").as_deref(), Some("-c"), "a code flag, no family");
+        assert_eq!(crate::operations::inline_flag(&runner, "-m").as_deref(), Some("-m"), "and so is -m");
         // Unvouched, the allow-list answers first: a native binary outside the two families needs the
         // operator's own voucher before its command line is even read.
         let coded = approval(&runner, "", &[], &inline, &[], &["TOKEN"]);
@@ -724,15 +724,15 @@ exit 0
     /// edit that softens it fails this test.
     #[test]
     fn a_change_after_the_check_names_the_value_as_exposed() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let script = scratch("exposed.mjs", "export const ok = 1;
 ");
-        let verified = vec![(wa_operations_runner::operations::real_path(&script.to_string_lossy()),
+        let verified = vec![(crate::operations::real_path(&script.to_string_lossy()),
             sha256_hex(&std::fs::read(&script).expect("the script")))];
         std::fs::write(&script, "export const ok = 2;
 ").expect("rewrite");
-        let refused = wa_operations_runner::operations::recheck_after_spawn(&verified).expect("a rewrite is a mismatch");
-        let expected = format!("vault_approval_changed_since_check:{}: a file this connector runs changed between the check and the launch, so the operation was killed - the value had already been put in its environment at launch, so treat it as exposed and rotate it if this change was not yours. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on", wa_operations_runner::operations::real_path(&script.to_string_lossy()));
+        let refused = crate::operations::recheck_after_spawn(&verified).expect("a rewrite is a mismatch");
+        let expected = format!("vault_approval_changed_since_check:{}: a file this connector runs changed between the check and the launch, so the operation was killed - the value had already been put in its environment at launch, so treat it as exposed and rotate it if this change was not yours. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on", crate::operations::real_path(&script.to_string_lossy()));
         assert_eq!(refused, expected);
         let _ = std::fs::remove_file(&script);
     }
@@ -742,17 +742,17 @@ exit 0
     /// the spawn, and a mismatch kills the operation.
     #[test]
     fn a_rewrite_between_the_check_and_the_spawn_is_caught() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let script = scratch("recheck.mjs", "export const ok = 1;\n");
-        let verified = vec![(wa_operations_runner::operations::real_path(&script.to_string_lossy()),
+        let verified = vec![(crate::operations::real_path(&script.to_string_lossy()),
             sha256_hex(&std::fs::read(&script).expect("the script")))];
-        assert!(wa_operations_runner::operations::recheck_after_spawn(&verified).is_none(), "the approved bytes are still there");
+        assert!(crate::operations::recheck_after_spawn(&verified).is_none(), "the approved bytes are still there");
         std::fs::write(&script, "export const ok = 2;\n").expect("rewrite");
-        let refused = wa_operations_runner::operations::recheck_after_spawn(&verified).expect("a rewrite is a mismatch");
+        let refused = crate::operations::recheck_after_spawn(&verified).expect("a rewrite is a mismatch");
         assert!(refused.starts_with("vault_approval_changed_since_check:"), "{refused}");
         // Not reading it is not passing it: a file that vanished is a mismatch too.
         std::fs::remove_file(&script).expect("remove");
-        assert!(wa_operations_runner::operations::recheck_after_spawn(&verified).is_some(), "a file that cannot be read is a mismatch");
+        assert!(crate::operations::recheck_after_spawn(&verified).is_some(), "a file that cannot be read is a mismatch");
     }
 
     /// Item 1 of round 9: `--native` works END TO END. The kernel has two judgements about a program -
@@ -763,7 +763,7 @@ exit 0
     /// judgement with the same voucher.
     #[test]
     fn a_vouched_native_binary_passes_the_approval_and_the_request_check() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let binary = scratch_native("vouched-node");
         let path = binary.to_string_lossy().to_string();
         // The launch as the console really builds it (lua/core/mcp.lua: `program=node_program()`): the
@@ -813,7 +813,7 @@ exit 0
     /// spawn, so a changed binary never runs.
     #[test]
     fn a_native_binary_that_changed_or_vanished_or_was_not_named_is_refused() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         // Changed after the approval: the bytes on disk are not the bytes the operator vouched for.
         // Host-independent: a fixture interpreter named node stands in for the platform's.
         let runtime = scratch_native("node");
@@ -866,8 +866,8 @@ exit 0
 /// run unless HOME is a scratch/temp directory, and scripts/test.sh runs it with HOME=$GATE_HOME.
 #[cfg(test)]
 mod adoption_survives_the_relay_deadline {
-    use wa_operations_runner::operations::*;
-    use crate::host::shell_config;
+    use crate::operations::*;
+    use crate::node::shell_config;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -886,7 +886,7 @@ mod adoption_survives_the_relay_deadline {
 
     #[test]
     fn an_adopted_operation_survives_the_relay_deadline_and_runs_once() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let home = scratch_home_or_refuse();
         let marker = home.join("adoption-marker.txt");
         std::fs::write(&marker, "").expect("marker");
@@ -900,30 +900,30 @@ mod adoption_survives_the_relay_deadline {
         // call the serve layer makes for a relayed request (serve.rs, install_relay_context with the
         // job's cancel flag and deadline). Using it here means the test would still hold if the test-only
         // seam it used to call were removed.
-        wa_operations_runner::node::set_run_cancel_probe(wa_operations_runner::node::serve_run_cancel_requested);
+        crate::node::set_run_cancel_probe(crate::node::serve_run_cancel_requested);
         let flag = Arc::new(AtomicBool::new(true));
-        wa_operations_runner::node::install_relay_context(Some(flag.clone()), None, "relay:review-test".into());
+        crate::node::install_relay_context(Some(flag.clone()), None, "relay:review-test".into());
 
         // 1. The flag is LIVE in this process: the foreground path cancels its own operation (the bug this
         // mission exists for). A test that did not prove this could pass while flipping nothing.
-        let foreground = wa_operations_runner::operations::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}), None);
+        let foreground = crate::operations::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}), None);
         assert!(foreground.is_err() || foreground.as_ref().map(|v| v["error"] == "run_cancelled"
                 || v["ok"] == false).unwrap_or(false),
             "with the run cancelled, the foreground shell must be stopped, not reported done: {:?}",
             foreground.as_ref().map(|v| v["error"].clone()));
 
         // 2. Adoption: the same flag is still set, and this start must NOT be cancelled by it.
-        let started = wa_operations_runner::operations::control("start", &serde_json::json!({
+        let started = crate::operations::control("start", &serde_json::json!({
             "command": format!("printf 'run\\n' >> '{marker_text}'; sleep 3; echo adopted-done"),
             "cwd": "", "timeout_seconds": 60, "session": session, "background": true,
         }), &shell).expect("adopted start");
         let id = started["operation_id"].as_str().expect("operation id").to_string();
 
         // 3. It settles on its own, with the command's own result - not by the deadline.
-        let settled = wa_operations_runner::operations::control("wait", &serde_json::json!({
+        let settled = crate::operations::control("wait", &serde_json::json!({
             "id": id, "wait_ms": 20000, "session": session,
         }), &shell).expect("wait");
-        wa_operations_runner::node::install_relay_context(None, None, String::new());
+        crate::node::install_relay_context(None, None, String::new());
         assert_eq!(settled["settled"], serde_json::json!(true),
             "the adopted operation must settle by finishing, not by the run's cancel: {settled}");
         assert_ne!(settled["error"], serde_json::json!("cancelled"),
@@ -946,8 +946,8 @@ mod adoption_survives_the_relay_deadline {
 /// OnceLock, so this refuses to run outside a scratch/temp HOME.
 #[cfg(test)]
 mod await_returns_at_its_own_wait {
-    use wa_operations_runner::operations::*;
-    use crate::host::shell_config;
+    use crate::operations::*;
+    use crate::node::shell_config;
 
     fn scratch_home_or_refuse() -> std::path::PathBuf {
         let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
@@ -963,11 +963,11 @@ mod await_returns_at_its_own_wait {
 
     #[test]
     fn a_relayed_await_answers_at_wait_ms_and_never_holds_the_relay() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         let _home = scratch_home_or_refuse();
         let shell = shell_config();
         let session = "relay:await-test".to_string();
-        let started = wa_operations_runner::operations::control("start", &serde_json::json!({
+        let started = crate::operations::control("start", &serde_json::json!({
             "command": "sleep 4; echo waited", "cwd": "", "timeout_seconds": 60,
             "session": session, "background": true,
         }), &shell).expect("start");
@@ -976,7 +976,7 @@ mod await_returns_at_its_own_wait {
         // The caller asked for 700 ms and the command runs 4 s: the answer must be the STATE, at about
         // 700 ms, not the command result at about 4 s.
         let began = std::time::Instant::now();
-        let first = wa_operations_runner::operations::control("await", &serde_json::json!({
+        let first = crate::operations::control("await", &serde_json::json!({
             "id": id, "wait_ms": 700, "session": session,
         }), &shell).expect("await");
         let took = began.elapsed();
@@ -990,14 +990,14 @@ mod await_returns_at_its_own_wait {
         // wait_ms is clamped to the tool documented maximum (10 s): a caller naming an hour is answered
         // inside 10 s, not held until the relay gives up.
         let began2 = std::time::Instant::now();
-        let _ = wa_operations_runner::operations::control("await", &serde_json::json!({
+        let _ = crate::operations::control("await", &serde_json::json!({
             "id": id, "wait_ms": 3_600_000, "session": session,
         }), &shell).expect("await");
         assert!(began2.elapsed() < std::time::Duration::from_millis(12_000),
             "a huge wait_ms is clamped to 10 s, took {:?}", began2.elapsed());
 
         // The work is still there and still runs: the await did not cancel or re-run it.
-        let settled = wa_operations_runner::operations::control("wait", &serde_json::json!({
+        let settled = crate::operations::control("wait", &serde_json::json!({
             "id": id, "wait_ms": 10000, "session": session,
         }), &shell).expect("wait");
         assert_eq!(settled["settled"], serde_json::json!(true), "and it settles on its own: {settled}");
@@ -1019,19 +1019,19 @@ mod await_returns_at_its_own_wait {
     /// A stop that waited would answer cleanup: "settled" and would have spent the wait on the prompt.
     #[test]
     fn a_cancelled_shell_returns_before_its_settle_finishes() {
-        crate::operations_seam::install();
+        crate::test_facts::install();
         use std::sync::{Arc, atomic::AtomicBool};
         let _home = scratch_home_or_refuse();
         let shell = shell_config();
         // The production probe, and the same relay context the serve layer installs - flipped to
         // cancelled before the shell starts, which is exactly the state Esc leaves behind.
-        wa_operations_runner::node::set_run_cancel_probe(wa_operations_runner::node::serve_run_cancel_requested);
+        crate::node::set_run_cancel_probe(crate::node::serve_run_cancel_requested);
         let flag = Arc::new(AtomicBool::new(true));
-        wa_operations_runner::node::install_relay_context(Some(flag), None, "relay:cancel-settle-test".into());
+        crate::node::install_relay_context(Some(flag), None, "relay:cancel-settle-test".into());
         let started = std::time::Instant::now();
         // The seventh argument is the stdin the foreground path now carries (change/run-bodies-without-
         // quoting); this stop test sends none, and the signature is the one that has to be called.
-        let receipt = wa_operations_runner::operations::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}), None)
+        let receipt = crate::operations::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}), None)
             .expect("a cancelled shell is a receipt, not an error");
         let elapsed = started.elapsed();
         assert_eq!(receipt["error"], serde_json::json!("run_cancelled"), "receipt: {receipt}");
@@ -1043,7 +1043,7 @@ mod await_returns_at_its_own_wait {
         let id = receipt["operation_id"].as_str().expect("operation id").to_string();
         let mut settled = false;
         for _ in 0..60 {
-            let state = wa_operations_runner::operations::manager().wait(&id, std::time::Duration::from_millis(50))
+            let state = crate::operations::manager().wait(&id, std::time::Duration::from_millis(50))
                 .expect("operation state");
             if state["settled"] == serde_json::json!(true) { settled = true; break; }
         }
@@ -1064,15 +1064,15 @@ mod await_returns_at_its_own_wait {
 /// is a scratch/temp directory - the same guard the adopted-tree tests beside it use.
     #[test]
     fn child_shell_is_marked_in_turn_and_cannot_request_installation() {
-        crate::operations_seam::install();
-        use crate::subagents::{TaskContext,Provenance,SocketSlot};
+        crate::test_facts::install();
+        use crate::node::{TaskContext,Provenance,SocketSlot};
         use std::sync::{Arc,atomic::AtomicBool};
         // The HOST installs the task context; the runner reads it back through the seam, so this exercises
         // the real pair (host enter_task + runner's current_owner/current_provenance) and not a stand-in.
-        crate::subagents::enter_task(TaskContext{cancel:Arc::new(AtomicBool::new(false)),deadline:None,
+        crate::node::enter_task(TaskContext{cancel:Arc::new(AtomicBool::new(false)),deadline:None,
             sockets:SocketSlot::default(),owner:"child-fixture".into(),provenance:Provenance::Child});
-        let spec=wa_operations_runner::operations::configure_spec(wa_operations_runner::wa_operation::Spec::command("fixture",vec![]),"",1,"".into(),false,false);
-        crate::subagents::leave_task();
+        let spec=crate::operations::configure_spec(wa_operation::Spec::command("fixture",vec![]),"",1,"".into(),false,false);
+        crate::node::leave_task();
         assert!(spec.env.contains(&("WASM_AGENT_IN_TURN".into(),"1".into())));
         assert!(spec.env.contains(&("WASM_AGENT_PROVENANCE".into(),"child".into())));
         assert_eq!(spec.owner,"child-fixture");

@@ -3,7 +3,7 @@
 //! These are the only things the Lua agent cannot do by itself. Everything the
 //! agent *decides* lives in Lua; everything it *needs from the platform* lives
 //! here, so the same Lua can later run as a WASM component with these imports.
-pub(crate) use wa_operations_runner::files::{file_digest, file_magic_value, which_on_path};
+pub(crate) use wa_files::{file_digest, file_magic_value, which_on_path};
 use wa_host_support::lua::{arg_integer, arg_string, cstr, lua_createtable, lua_pushinteger,
     lua_pushlstring, lua_pushnil, lua_pushnumber, lua_rawseti, lua_setfield, lua_touserdata,
     upvalue_index, LuaState};

@@ -454,8 +454,6 @@ fn main() {
     let node_name = node::local_name(&state_dir.to_string_lossy());
     let node_id = node::existing_node_id().unwrap_or_default();
     let identity = build_info::install_label(&state_dir, &install_dir, &node_name, &node_id);
-    // The runner asks this process for its run state, progress rows and disk cap (`operations_seam`).
-    wa_capabilities::operations_seam::install();
     wa_capabilities::host::set_build_identity(&identity, build_info::COMMIT, build_info::DIRTY);
     // AND THE RECIPE FOR ASKING AGAIN, for the surfaces that must not report a stale install (fonts-install item
     // 4): /health is answered by a process that was started BEFORE scripts/upgrade.sh wrote the record naming
@@ -784,24 +782,7 @@ fn main() {
             eprintln!("serve-static: {error}");
     // THE OPERATIONS SUPERVISOR (slice 1 of ready-operations-own-program.md): this binary in a second
     // mode, owning the process groups the node's tools start. Its own process, its own lifetime and its
-    // own ledger lease - which is what lets a supervised child outlive the node that launched it.
-    if command == "operations-supervisor" {
-        if lua_args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h") {
-            println!("usage: wa operations-supervisor [--port 8791] [--rendezvous <file>]\n  own this node's supervised operations (blocks until stopped)\n  the node reaches it through WASM_AGENT_OPERATIONS_SUPERVISOR=<the rendezvous file>");
-            return;
-        }
-        let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8791);
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let rendezvous = flag(&lua_args, "--rendezvous").map(PathBuf::from).unwrap_or_else(|| {
-            PathBuf::from(home).join(".wasm-agent/operations-supervisor.json")
-        });
-        if let Err(error) = wa_capabilities::operations_supervisor::serve(rendezvous, port) {
-            eprintln!("operations-supervisor: {error}");
->>>>>>> 38bfda24 (operations-supervisor: the runner's first verbs cross a process boundary (ready-operations-own-program.md, slice 1))
-            std::process::exit(1);
-        }
-        return;
-    }
+<>>>>>>> 5ca2149 (operations: the node stops carrying the runner (slice 2 complete - the commit that pays))
 
 >>>>>>> 38bfda24 (operations-supervisor: the runner's first verbs cross a process boundary (ready-operations-own-program.md, slice 1))
     if command == "serve" {

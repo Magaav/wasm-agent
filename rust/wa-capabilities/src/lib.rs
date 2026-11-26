@@ -35,6 +35,9 @@ pub mod core_pool;
 /// The disk subsystem (docs/ONEROOT.md) is a crate of its own now, shared with the operations
 /// supervisor so both enforce one cap. Re-exported here so every caller keeps the same path.
 pub use wa_disk as disk;
+/// The operations runner as this node speaks to it: a wire client to `wa-operations-supervisor`
+/// (`ready-operations-slice-2.md`, stage B). Same functions, same JSON, the runner itself is not here.
+pub mod operations;
 pub mod file_search;
 /// `host.features` (docs/FEATURES.md): the one door the Lua gates ask "is this feature on, and which
 /// path is live" through. The rule lives in `wa-features`; this crate only routes to it.
@@ -54,6 +57,9 @@ mod operations_host_tests;
 /// The operations supervisor (slice 1 of `ready-operations-own-program.md`): the node's supervised
 /// children owned by their own process, reached through `WASM_AGENT_OPERATIONS_SUPERVISOR`.
 pub mod operations_supervisor;
+=======
+pub mod limits;
+>>>>>>> faa4327 (operations: the node stops carrying the runner (slice 2 complete - the commit that pays))
 pub mod plugins;
 pub mod quickjs;
 /// The build-time scan behind the capability registry (`src/capability_rows/`): which files declare
@@ -84,12 +90,8 @@ pub mod links;
 pub mod screen_guard;
 pub mod selection;
 pub mod tty;
-/// The tool-progress rows belong to the runner now (it is the one that waits on the child); the host
-/// re-exports the module so every reader keeps the same path.
-pub use wa_operations_runner::tool_progress;
-/// The tool-progress rows belong to the runner now (it is the one that waits on the child); the host
-/// re-exports the module so every reader keeps the same path.
-pub use wa_operations_runner::tool_progress;
+/// The tool-progress rows are the runner's now (it waits on the child); the node reads the same store
+/// through `wa_tool_progress`, which both processes link.
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.

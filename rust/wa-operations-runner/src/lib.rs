@@ -5,7 +5,8 @@
 //! node's run/cancel state, its tool-progress rows, its subagent context, its disk cap) is asked of the
 //! process that embeds it through `node::NodeFacts`.
 
-pub mod files;
+/// The pure file questions live in `wa-files` (a leaf both this runner and the node link).
+pub use wa_files as files;
 pub mod node;
 /// The live facts behind a long tool call's row (docs/TOOL-PROGRESS.md): written here, beside the wait
 /// loops that produce them, and read by every surface through `wa_tool_progress`.
@@ -16,3 +17,8 @@ pub mod operations;
 /// this area (wa-capabilities uses quarantine for claims and scrub_git_env for child builds); stage B
 /// cuts that edge by giving those two callers their own home.
 pub use wa_operation;
+
+#[cfg(test)]
+mod test_facts;
+#[cfg(test)]
+mod host_tests;

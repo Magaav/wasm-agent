@@ -108,7 +108,11 @@ function runRow(name, home, extraEnv) {
     fs.mkdirSync(supervisorHome, { recursive: true });
     const rendezvous = path.join(root, 'rendezvous.json');
     const log = fs.openSync(path.join(root, 'supervisor.log'), 'a');
-    supervisor = spawn(wa, ['operations-supervisor', '--port', '0', '--rendezvous', rendezvous], {
+    // The supervisor is its own program now (ready-operations-slice-2.md): a binary beside wa, not a
+    // mode of it - which is what makes a landing here stop shipping the node.
+    const supervisorBin = path.join(path.dirname(wa), process.platform === 'win32' ? 'wa-operations-supervisor.exe' : 'wa-operations-supervisor');
+    check(fs.existsSync(supervisorBin), 'the supervisor is its own binary: ' + supervisorBin);
+    supervisor = spawn(supervisorBin, ['--port', '0', '--rendezvous', rendezvous], {
       cwd: repo,
       env: {
         ...process.env,

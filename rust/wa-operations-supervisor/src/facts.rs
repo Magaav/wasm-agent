@@ -86,9 +86,9 @@ impl NodeFacts for SupervisorFacts {
     fn disk_build_island(&self, tree: &Path) -> Option<PathBuf> { wa_disk::build_island(tree) }
     // No nested supervision: this IS the supervisor.
     fn forward(&self, _action: &str, _args: &Value) -> Option<Result<Value, String>> { None }
-    fn file_digest(&self, path: &str) -> Result<String, String> { wa_operations_runner::files::file_digest(path) }
-    fn file_magic_value(&self, path: &str) -> Value { wa_operations_runner::files::file_magic_value(path) }
-    fn which_on_path(&self, name: &str) -> Option<String> { wa_operations_runner::files::which_on_path(name) }
+    fn file_digest(&self, path: &str) -> Result<String, String> { wa_files::file_digest(path) }
+    fn file_magic_value(&self, path: &str) -> Value { wa_files::file_magic_value(path) }
+    fn which_on_path(&self, name: &str) -> Option<String> { wa_files::which_on_path(name) }
     fn epoch_millis(&self) -> u64 { now_ms() }
     fn cli_interrupt_millis(&self) -> u64 { 0 }
 }

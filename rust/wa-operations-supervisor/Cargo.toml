@@ -15,3 +15,4 @@ ring = "0.17"
 wa-operations-runner = { path = "../wa-operations-runner" }
 wa-disk = { path = "../wa-disk" }
 wa-tool-progress = { path = "../wa-tool-progress" }
+wa-files = { path = "../wa-files" }

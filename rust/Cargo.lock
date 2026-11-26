@@ -2159,6 +2159,7 @@ dependencies = [
  "wa-email-index",
  "wa-email-outbox",
  "wa-features",
+ "wa-files",
  "wa-governance",
  "wa-grant-policy",
  "wa-host-support",
@@ -2168,7 +2169,7 @@ dependencies = [
  "wa-kv",
  "wa-local-tz",
  "wa-mesh",
- "wa-operations-runner",
+ "wa-operation",
  "wa-queue",
  "wa-rendezvous",
  "wa-sqlite",
@@ -2261,6 +2262,14 @@ dependencies = [
  "tempfile",
  "wa-grant-policy",
  "wa-host-support",
+]
+
+[[package]]
+name = "wa-files"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde_json",
 ]
 
 [[package]]
@@ -2479,7 +2488,9 @@ dependencies = [
  "libc",
  "ring",
  "serde_json",
+ "wa-disk",
  "wa-features",
+ "wa-files",
  "wa-host-support",
  "wa-kernel-runtime",
  "wa-operation",
@@ -2493,6 +2504,7 @@ dependencies = [
  "ring",
  "serde_json",
  "wa-disk",
+ "wa-files",
  "wa-operations-runner",
  "wa-tool-progress",
 ]
