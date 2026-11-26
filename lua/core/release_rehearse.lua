@@ -57,6 +57,62 @@ function M.record_row(node, status)
   return row
 end
 
+-- THE MODE PREFLIGHT (26/11, Fable, from the v0.1.2 (c) stop). Two refusals a cut meets AFTER the deploy step has
+-- started are decided BEFORE it starts, from the node own facts and never from a guess:
+--
+--   no_runtime_tree  a tree-less node asked for tree mode (lua/core/remote_update.lua:578): it must be asked
+--                    for release mode - the published binary - or the deploy refuses before doing anything.
+--   canonical_busy   a tree node whose HEAD is not exactly origin/main (scripts/deploy.sh:600): a tree deploy
+--                    refuses until the checkout IS main, which is exactly what stopped v0.1.2 (c) while a train
+--                    landing moved main to ec7525e0 under a cut that targets T5 4c6557f4. Release mode does not
+--                    read the checkout at all, so it is the answer for that node.
+--
+-- A fact the node answer does not carry is `unchecked`, and unchecked is never green.
+-- <ring>, <facts_of(node) -> { mode, tree, head, origin_main } | nil> -> { rows, red }
+function M.mode_preflight(ring, facts_of)
+  local rows, red = {}, {}
+  for _, entry in ipairs(type(ring) == "table" and ring or {}) do
+    local node = tostring((type(entry) == "table" and entry.node) or entry or "?")
+    local mode = tostring((type(entry) == "table" and entry.mode) or "tree")
+    local facts = nil
+    if type(facts_of) == "function" then
+      local ok, answer = pcall(facts_of, node)
+      facts = ok and type(answer) == "table" and answer or nil
+    end
+    local row = { node = node, mode = tostring(facts and facts.mode or mode) }
+    local allowed = { tree = true, release = true, binary = true, rollback = true }
+    if not allowed[row.mode] then
+      row.verdict, row.error = "refuse", "mode_unknown"
+      row.detail = "the ring names mode " .. row.mode .. " and a node accepts only tree, binary, release or rollback"
+    elseif row.mode == "release" then
+      row.verdict = "ok"
+      row.detail = "release install: the published binary, no checkout read, no tree moved"
+    elseif not facts then
+      row.verdict = "unchecked"
+      row.detail = "the node answer did not carry its tree and HEAD, so the " .. row.mode .. " mode was not judged"
+    elseif not facts.tree or tostring(facts.tree) == "" then
+      row.verdict, row.error = "refuse", "no_runtime_tree"
+      row.detail = "this node has no tree, so tree mode cannot deploy it; ask it for release mode (wa update " .. node .. " --release --commit <sha>)"
+      red[#red + 1] = node .. " (no_runtime_tree)"
+    elseif tostring(facts.head or "") ~= "" and tostring(facts.origin_main or "") ~= "" then
+      if tostring(facts.head) ~= tostring(facts.origin_main) then
+        row.verdict, row.error = "refuse", "canonical_busy"
+        row.detail = "its HEAD is " .. tostring(facts.head):sub(1, 12) .. ", not origin/main " .. tostring(facts.origin_main):sub(1, 12)
+          .. " - a tree deploy refuses (scripts/deploy.sh:600); release mode does not read the checkout"
+        red[#red + 1] = node .. " (canonical_busy)"
+      else
+        row.verdict = "ok"
+        row.detail = "its HEAD is origin/main, so tree mode can deploy it"
+      end
+    else
+      row.verdict = "unchecked"
+      row.detail = "its HEAD and origin/main were not both reported, so canonical_busy was not judged"
+    end
+    rows[#rows + 1] = row
+  end
+  table.sort(red)
+  return { rows = rows, red = red }
+end
 -- <options> -> { lines, ok, rows, answers, failed, off, listed, cutting, red, unreachable }
 --   options.ring          the ring to read (default: this node + the roster)
 --   options.read(node)    a status answer for one node (default: remote_update.status)
@@ -157,10 +213,19 @@ function M.rehearse(options)
     for _, line in ipairs(not_proven.listed) do lines[#lines + 1] = "  " .. line end
   end
 
+  -- THE MODES ARE JUDGED BEFORE THE DEPLOY STEP (26/11): a node that cannot take the mode the ring names is
+  -- named here, not 186 s into a deploy (canonical_busy) or after the node refused a tree it does not have.
+  local preflight = M.mode_preflight(ring, options.facts_of)
+  for _, row in ipairs(preflight.rows) do
+    if row.verdict ~= "ok" then
+      lines[#lines + 1] = string.format("  mode %-8s %-18s %s - %s", row.mode, row.node, row.verdict, tostring(row.detail or ""))
+    end
+  end
   local red = {}
   for _, entry in ipairs(unreachable) do red[#red + 1] = entry end
   for _, entry in ipairs(aggregated.failed) do red[#red + 1] = entry end
   for _, entry in ipairs(not_proven.cutting) do red[#red + 1] = entry end
+  for _, entry in ipairs(preflight.red) do red[#red + 1] = entry end
   -- A READ THAT WAS REFUSED IS NOT A GREEN NODE: the rehearsal may not claim a fleet it could not read.
   for _, row in ipairs(rows) do
     if row.error ~= "" then red[#red + 1] = row.node .. " (" .. row.error .. ")" end
