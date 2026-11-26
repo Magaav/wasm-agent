@@ -4124,7 +4124,7 @@ struct ConsoleInput {
     /// out from these numbers (`Some` exactly while the box is open). Refreshed by `sync_editor`.
     editor: Option<crate::screen::EditorState>,
     /// An open panel (`host.panel`): it owns the keys and the bottom of the screen until closed.
-    panel: Option<wa_term::terminal_editor::Panel>,
+    panel: Option<crate::screen::PanelState>,
     /// The output region's last row as this process last set it; 0 = the view's own layout.
     region: usize,
     /// The chat as blocks (wa_term::transcript), drawn into the output region by this process - or,
@@ -4471,9 +4471,9 @@ fn current_region(state: &ConsoleInput, editor: &crate::screen::EditorState) -> 
 
 /// The rows the chat occupies on screen now (`1..=` this): the terminal minus the bottom - the
 /// input box with its status, menu and footer rows, or an open panel.
-fn output_rows(panel: Option<&wa_term::terminal_editor::Panel>, editor: &crate::screen::EditorState) -> usize {
+fn output_rows(panel: Option<&crate::screen::PanelState>, editor: &crate::screen::EditorState) -> usize {
     match panel {
-        Some(panel) => (editor.row + 1).saturating_sub(panel.height().max(7)),
+        Some(panel) => (editor.row + 1).saturating_sub(panel.height.max(7)),
         None => editor.out_bottom(),
     }
 }
@@ -4512,8 +4512,8 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
         state.transcript.clean();
     }
     let Some(editor) = state.editor.as_ref() else { return frame };
-    let frame = frame + &match state.panel.as_mut() {
-        Some(panel) => panel.render(),
+    let frame = frame + &match state.panel {
+        Some(_) => state.transcript.panel_render(),
         None => state.transcript.editor_render(),
     };
     state.region = want.max(1);
@@ -4655,7 +4655,10 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
     let mut frame = String::from("\x1b[?25l");
     for row in (state.region + 1).max(1)..=old_rows.min(rows) { frame.push_str(&format!("\x1b[{row};1H\x1b[2K")); }
     set_editor(state, crate::screen::EditorSetup { row: Some(rows - 1), width: Some(columns), ..Default::default() });
-    if let Some(panel) = state.panel.as_mut() { panel.width = columns; panel.rows = rows; }
+    if state.panel.is_some() {
+        let sized = state.transcript.panel_size(columns, rows);
+        state.panel = Some(sized);
+    }
     state.transcript.mark_dirty();
     let want = output_rows(state.panel.as_ref(), state.editor.as_ref().expect("just set"));
     frame.push_str(&format!("\x1b[1;{}r", want.max(1)));
@@ -4812,7 +4815,11 @@ fn console_reader() {
                     if !keys.is_empty() && state.transcript.clear_notice() { state.transcript.mark_dirty(); }
                     for event in mice { handle_mouse(&mut state, event); }
                     for &byte in &keys {
-                        if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
+                        if state.panel.is_some() {
+                            let after = state.transcript.panel_key(byte);
+                            state.panel = Some(after);
+                            continue;
+                        }
                         // Ctrl+O pins a block expanded, so the code-mode block that follows cannot
                         // collapse it (and the same key lets it go). It is the transcript's key: the
                         // draft has no row for it, so it is taken here before the editor. Which byte
@@ -4887,7 +4894,7 @@ fn console_reader() {
                                 if running && text.trim() == "/status" {
                                     let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
                                     if let (Some(spec), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
-                                        state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                        state.panel = Some(state.transcript.panel_open(&spec, width, rows));
                                         state.host_panel = true;
                                         continue;
                                     }
@@ -4901,7 +4908,7 @@ fn console_reader() {
                                     if let wa_cli_views::Route::Local(spec) = route {
                                         let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
                                         if let Some((width, rows)) = dims {
-                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                            state.panel = Some(state.transcript.panel_open(&spec, width, rows));
                                             state.host_panel = true;
                                             state.balloon = true;
                                             continue;
@@ -4914,7 +4921,8 @@ fn console_reader() {
                                     wa_cli_views::dismiss();
                                     state.balloon = false;
                                     state.host_panel = false;
-                                    state.panel = None;
+                                    state.transcript.panel_close();
+state.panel = None;
                                 }
                                 // A queued Enter never ends anything; a send-now line raises the run's
                                 // interrupt exactly while a run is in flight (a Ctrl+Enter at an idle
@@ -4975,14 +4983,14 @@ fn console_reader() {
                     // A lone Esc: the terminal sent nothing after it.
                     // Never inside a paste: `docker exec` and slow links split a paste anywhere, and an Esc
                     // that is really the start of its end marker would leave the draft stuck in paste mode.
-                    let pasting = state.panel.as_ref().map(|panel| panel.pasting())
+                    let pasting = state.panel.as_ref().map(|panel| panel.pasting)
                         .or_else(|| state.editor.as_ref().map(|input| input.pasting())).unwrap_or(false);
                     let escape = state.transcript.keymap_escape();
                     // Esc interrupts the run, as Ctrl+C does, and it does so as ONE act (see
                     // raise_cli_interrupt): the flag, the stamp and the socket shutdown.
                     let mut escape_interrupt = false;
                     if !state.eof && escape.is_some() && keys.last().copied() == escape && !pasting && !byte_ready(120) {
-                        if let Some(panel) = state.panel.as_mut() { panel.escape(); }
+                        if state.panel.is_some() { let after = state.transcript.panel_escape(); state.panel = Some(after); }
                         else if let Some(nav) = state.nav.as_mut() {
                             if nav.lone_escape() { state.transcript.sync(); state.nav = None; }
                         }
@@ -5004,8 +5012,8 @@ fn console_reader() {
                     // An answer to a panel this thread owns. `/status` closes on it; a published
                     // balloon walks its stack - draw the next page, go back, close, or queue the
                     // chosen action for the interpreter's next turn.
-                    if state.host_panel && state.panel.as_ref().map_or(true, |panel| panel.result.is_some()) {
-                        let answer = state.panel.as_mut().and_then(|panel| panel.result.take());
+                    if state.host_panel && state.panel.as_ref().map_or(true, |panel| panel.done) {
+                        let answer = state.transcript.panel_take();
                         let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
                         let mut closed = true;
                         if state.balloon {
@@ -5013,7 +5021,7 @@ fn console_reader() {
                                 Some(answer) => match wa_cli_views::answer(&answer, wa_cli_views::now_seconds()) {
                                     wa_cli_views::Answer::Draw(spec) => {
                                         if let Some((width, rows)) = dims {
-                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                            state.panel = Some(state.transcript.panel_open(&spec, width, rows));
                                             closed = false;
                                         }
                                     }
@@ -5031,7 +5039,8 @@ fn console_reader() {
                             }
                         }
                         if closed {
-                            state.panel = None;
+                            state.transcript.panel_close();
+state.panel = None;
                             state.host_panel = false;
                             state.balloon = false;
                             state.transcript.mark_dirty();
@@ -5383,12 +5392,12 @@ pub extern "C-unwind" fn panel(l: *mut LuaState) -> c_int {
     };
     let deadline = spec.get("timeout_ms").and_then(|v| v.as_u64())
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-    state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+    state.panel = Some(state.transcript.panel_open(&spec, width, rows));
     state.host_panel = false;
     let frame = layout_frame(&mut state);
     let _ = crate::tty::write(&frame);
     let answer = loop {
-        if let Some(result) = state.panel.as_mut().and_then(|panel| panel.result.take()) { break result; }
+        if let Some(result) = state.transcript.panel_take() { break result; }
         if state.eof || state.stop || state.panel.is_none() { break json!({"action": "cancel"}); }
         match deadline {
             Some(at) => {
@@ -6376,7 +6385,8 @@ pub fn restore_input() {
         state.selection = None;
         state.mouse_pending.clear();
         state.editor = None;
-        state.panel = None;
+        state.transcript.panel_close();
+state.panel = None;
         state.region = 0;
         state.transcript = Default::default();
         state.nav = None;
@@ -6686,7 +6696,7 @@ mod terminal_tests {
         assert!(state.selection.is_some(), "text is still selected with the mouse");
         // An open panel owns the screen's bottom, and its mouse.
         state.selection = None;
-        state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&json!({"title": "balloon"}), 80, rows));
+        state.panel = Some(state.transcript.panel_open(&json!({"title": "balloon"}), 80, rows));
         super::handle_mouse(&mut state, Mouse::Press(3, 80));
         super::handle_mouse(&mut state, Mouse::Motion(5, 80));
         assert!(state.selection.is_none() && !state.transcript.bar_active(), "the open panel kept the mouse");

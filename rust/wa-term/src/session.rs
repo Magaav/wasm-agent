@@ -13,7 +13,7 @@ use wa_term_proto as proto;
 
 use crate::scroll::bar::Bar;
 use crate::scroll::settings::Scrollbar;
-use crate::terminal_editor::{Action, Command, Editor};
+use crate::terminal_editor::{Action, Command, Editor, Panel};
 use crate::transcript::Transcript;
 
 /// One terminal program's transcript, and the calls it answers.
@@ -23,6 +23,9 @@ pub struct Session {
     /// wire (`editor_setup`), sends the key bytes (`editor_key`) and draws what `editor_render`
     /// and `editor_state` answer. The node holds no Editor and links none.
     pub editor: Editor,
+    /// The open panel, if any: `panel_open` creates it, `panel_key`/`panel_escape` drive it, and the
+    /// node draws what `panel_render` answers. It owns the screen's bottom while it is open.
+    panel: Option<Panel>,
 }
 
 impl Default for Session {
@@ -30,7 +33,7 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new() -> Self { Session { transcript: Transcript::default(), editor: Editor::default() } }
+    pub fn new() -> Self { Session { transcript: Transcript::default(), editor: Editor::default(), panel: None } }
 
     /// The flag the node gates its frames on.
     pub fn dirty(&self) -> bool { self.transcript.dirty }
@@ -150,12 +153,62 @@ impl Session {
                 json!(crate::keymap::gestures(pose).iter().filter_map(|gesture| gesture_name(*gesture)).collect::<Vec<_>>())
             }
             "keymap_json" => json!(crate::keymap::json()),
+            // ---- the panel: /status, a balloon page, the slash menus' box. It owns the keys and the
+            // bottom of the screen while it is open, and answers what the reader chose. ----
+            "panel_open" => {
+                let width = count(a, 1)?;
+                let rows = count(a, 2)?;
+                self.panel = Some(Panel::from_spec(&a[0], width, rows));
+                json!(panel_state(self.panel.as_ref().expect("just set")))
+            }
+            "panel_size" => {
+                let (width, rows) = (count(a, 0)?, count(a, 1)?);
+                match self.panel.as_mut() {
+                    Some(panel) => { panel.width = width; panel.rows = rows; }
+                    None => return Err(proto::Failure::new(proto::code::BAD_MESSAGE, "no panel is open")),
+                }
+                json!(panel_state(self.panel.as_ref().expect("just sized")))
+            }
+            "panel_key" => {
+                let byte = u8::try_from(count(a, 0)?).map_err(|_| proto::Failure::new(proto::code::BAD_MESSAGE, "a key byte must be 0..=255"))?;
+                let Some(panel) = self.panel.as_mut() else {
+                    return Err(proto::Failure::new(proto::code::BAD_MESSAGE, "no panel is open"))
+                };
+                panel.feed(byte);
+                json!(panel_state(self.panel.as_ref().expect("just fed")))
+            }
+            "panel_escape" => {
+                let Some(panel) = self.panel.as_mut() else {
+                    return Err(proto::Failure::new(proto::code::BAD_MESSAGE, "no panel is open"))
+                };
+                panel.escape();
+                json!(panel_state(self.panel.as_ref().expect("just escaped")))
+            }
+            "panel_state" => json!(panel_state(self.panel.as_ref().expect("a panel is open"))),
+            "panel_render" => json!({ "frame": proto::bytes(self.panel.as_ref().expect("a panel is open").render().as_bytes()) }),
+            "panel_take" => match self.panel.as_mut().and_then(|panel| panel.result.take()) {
+                Some(result) => json!(result),
+                None => Value::Null,
+            },
+            "panel_close" => { self.panel = None; Value::Null }
             _ => return Err(unknown()),
         })
     }
 }
 
 
+
+/// A panel as the node reads it: its size and what it costs the chat, never its lines (those are the
+/// frame's business).
+fn panel_state(panel: &Panel) -> Value {
+    json!({
+        "width": panel.width,
+        "rows": panel.rows,
+        "height": panel.height(),
+        "pasting": panel.pasting(),
+        "done": panel.result.is_some(),
+    })
+}
 
 /// A console act's name, as the node decodes it.
 fn host_act(act: crate::keymap::HostAct) -> &'static str {

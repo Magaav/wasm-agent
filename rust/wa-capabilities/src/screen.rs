@@ -123,6 +123,31 @@ pub enum EditorAction {
     Pasted(usize),
 }
 
+/// The open panel, as the program answers it: its size and what it costs the chat. Its lines are the
+/// frame's business and never cross the wire as state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PanelState {
+    pub width: usize,
+    pub rows: usize,
+    /// The rows it takes at the bottom of the screen (`Panel::height`).
+    pub height: usize,
+    /// Inside a paste: an Esc there is the paste's end marker.
+    pub pasting: bool,
+    /// The reader answered: `panel_take` has something to give.
+    pub done: bool,
+}
+
+fn panel_state_of(value: &Value) -> PanelState {
+    let number = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
+    PanelState {
+        width: number("width"),
+        rows: number("rows"),
+        height: number("height"),
+        pasting: value.get("pasting").and_then(Value::as_bool).unwrap_or(false),
+        done: value.get("done").and_then(Value::as_bool).unwrap_or(false),
+    }
+}
+
 /// A console act, as the program's keymap table names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostAct { Pin, CopySelection, Escape }
@@ -491,6 +516,44 @@ impl Screen {
             .and_then(|value| value.as_array().map(|items| items.iter().filter_map(Value::as_str).filter_map(gesture_of).collect()))
             .unwrap_or_default()
     }
+    // ---- the panel: /status, a balloon page, the slash menus' box. ----
+
+    /// Open the panel Lua described: it owns the keys and the bottom of the screen until closed.
+    pub fn panel_open(&mut self, spec: &serde_json::Value, width: usize, rows: usize) -> PanelState {
+        self.remote.want("panel_open", json!([spec, width, rows])).ok()
+            .map(|value| panel_state_of(&value))
+            .unwrap_or_default()
+    }
+    /// The panel's size after a resize.
+    pub fn panel_size(&mut self, width: usize, rows: usize) -> PanelState {
+        self.remote.want("panel_size", json!([width, rows])).ok()
+            .map(|value| panel_state_of(&value))
+            .unwrap_or_default()
+    }
+    /// One key byte: a move, a choice, a typed character.
+    pub fn panel_key(&mut self, byte: u8) -> PanelState {
+        self.remote.want("panel_key", json!([byte])).ok()
+            .map(|value| panel_state_of(&value))
+            .unwrap_or_default()
+    }
+    pub fn panel_escape(&mut self) -> PanelState {
+        self.remote.want("panel_escape", json!([])).ok()
+            .map(|value| panel_state_of(&value))
+            .unwrap_or_default()
+    }
+    pub fn panel_state(&mut self) -> PanelState {
+        self.remote.want("panel_state", json!([])).ok()
+            .map(|value| panel_state_of(&value))
+            .unwrap_or_default()
+    }
+    /// The panel's frame: the rows it draws over the chat.
+    pub fn panel_render(&mut self) -> String { self.remote.want_frame("panel_render", json!([])) }
+    /// What the reader chose, taken: read, then cleared, exactly as the in-process result was.
+    pub fn panel_take(&mut self) -> Option<serde_json::Value> {
+        self.remote.want("panel_take", json!([])).ok().filter(|value| !value.is_null())
+    }
+    pub fn panel_close(&mut self) { self.remote.nothing("panel_close", json!([])) }
+
     /// The keybindings table as JSON, for `/keybindings`: printed from the one that decoded the keys.
     pub fn keymap_json(&mut self) -> String {
         self.remote.want("keymap_json", json!([])).ok()
