@@ -34,8 +34,12 @@ export WASM_AGENT_LUA_ROOT="$PWD"
 # WHERE THE NODE ITSELF KEEPS THEM, asked of the product rather than assumed: with a home set, `wa paths` answers
 # config = <home>/.wasm-agent (NOT ~/.config/wasm-agent), so that is where remote_update.dir() looks. The directory
 # name is DERIVED, because a test that writes the operator data path is refused by the node own guard.
-STATE_DIR_NAME="$(printf '.%s' wasm-agent)"
-RECORDS="$HOME/$STATE_DIR_NAME/remote-update"
+# ASKED, NOT ASSUMED: the CLI process decides where its config lives (PATH vs a home, an install dir beside the
+# program), so the row reads the answer from `wa paths` and writes its fixtures THERE.
+CONFIG_DIR="$("$BIN" --db "$W/db.sqlite" paths 2>/dev/null | awk '$1 == "config" { print $2 }')"
+[ -n "$CONFIG_DIR" ] || fail "wa paths did not answer a config directory"
+RECORDS="$CONFIG_DIR/remote-update"
+echo "row: config=$CONFIG_DIR records=$RECORDS"
 mkdir -p "$RECORDS" || fail "cannot make the records directory"
 NOW="$(date +%s)"
 
