@@ -86,13 +86,30 @@ function M.rows(opts)
   if #workers > 0 then rows[#rows + 1] = { worker_heading = #workers } end
   for _, row in ipairs(workers) do rows[#rows + 1] = { row = row, worker = true } end
   if opts.filter and opts.filter ~= "" then
+    -- A name, or the beginning of an id (`wa --resume` lines carry those): the reader types what they
+    -- have. Case-blind, and plain text - a name with a % or a - in it is a name, not a pattern.
     local needle = tostring(opts.filter):lower()
     local kept = {}
     for _, entry in ipairs(rows) do
-      if entry.worker_heading then kept[#kept + 1] = entry
-      elseif tostring(entry.row.title or ""):lower():find(needle, 1, true) then kept[#kept + 1] = entry end
+      if entry.worker_heading then
+        kept[#kept + 1] = entry
+      else
+        local name = tostring(entry.row.title or ""):lower()
+        local id = tostring(entry.row.id or ""):lower()
+        if name:find(needle, 1, true) or id:sub(1, #needle) == needle then kept[#kept + 1] = entry end
+      end
     end
-    rows = kept
+    -- A heading whose group the filter emptied is a line about nothing.
+    local filtered = {}
+    for index, entry in ipairs(kept) do
+      if entry.worker_heading then
+        local below = kept[index + 1]
+        if below and (below.worker or below.row) then filtered[#filtered + 1] = entry end
+      else
+        filtered[#filtered + 1] = entry
+      end
+    end
+    rows = filtered
   end
   return rows, #listed, now
 end
@@ -135,16 +152,17 @@ function M.page(opts)
     end
   end
   local page = {
-    title = string.format("Sessions (%d%s)", #options, total > #options and (" of " .. total) or ""),
+    title = string.format("Sessions (%d%s)%s", #options, total > #options and (" of " .. total) or "",
+      (opts.filter and opts.filter ~= "") and ("  filtered: " .. clip(tostring(opts.filter), 40)) or ""),
     options = options,
     per = 14,
     -- Enter switches; these two act on the row the reader is on, without picking it: `c` puts the id on
     -- the clipboard, `r` renames the thread. The panel carries them (`keys_action`) and the caller does
     -- the work, so the list stays open for the next pick.
-    keys_action = { c = "copy", r = "rename" },
+    keys_action = { c = "copy", r = "rename", f = "filter" },
     -- Where the cursor was, when the list comes back after an action: the reader keeps their place.
     selected = tonumber(opts.selected) or 1,
-    hint = "Enter switches \u{b7} c copies the id \u{b7} r renames \u{b7} Esc closes",
+    hint = "Enter switches \u{b7} c copies \u{b7} r renames \u{b7} f filters \u{b7} Esc closes",
   }
   return page, os.clock() - started
 end

@@ -219,7 +219,7 @@ try {
 
   // ---- 6. c copies the id of the row the cursor is on, and does not switch --------------------
   tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
-  await waitFor(() => screen().includes('c copies the id'), 'the page with its keys', 30000);
+  await waitFor(() => screen().includes('f filters'), 'the page with its keys', 30000);
   check('the page names its keys', true);
   await sleep(800);
   // The transcript above the page already says "switched to beta" from step 2, so the count is what
@@ -234,12 +234,12 @@ try {
   // The panel's cancel is a DOUBLE Esc (one is the first byte of a sequence): one would leave the page
   // drawn and swallow the next command. Pressed twice, and waited for, before the next step.
   tmux(['send-keys', '-t', SESSION, 'Escape', 'Escape']);
-  await waitFor(() => !screen().includes('c copies the id'), 'the page to close', 15000);
+  await waitFor(() => !screen().includes('f filters'), 'the page to close', 15000);
   check('a double Esc closes the page', true);
 
   // ---- 7. r renames the thread, and the ledger agrees ---------------------------------------
   tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
-  await waitFor(() => screen().includes('c copies the id'), 'the page again', 30000);
+  await waitFor(() => screen().includes('f filters'), 'the page again', 30000);
   await sleep(800);
   tmux(['send-keys', '-t', SESSION, 'r']);
   await waitFor(() => screen().includes('Enter saves'), 'the rename field', 30000);
@@ -255,6 +255,29 @@ try {
   tmux(['send-keys', '-t', SESSION, 'Escape', 'Escape']);
   await sleep(600);
 
+  // ---- 8. the filter: a name from the key, and a name on the command line -------------------------
+  tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
+  await waitFor(() => screen().includes('f filters'), 'the page with its keys', 30000);
+  await sleep(700);
+  tmux(['send-keys', '-t', SESSION, 'f']);
+  await waitFor(() => screen().includes('Filter sessions'), 'the filter field', 30000);
+  check('f opens the filter field', true);
+  await sleep(400);
+  tmux(['send-keys', '-t', SESSION, 'beta']);
+  await sleep(300);
+  tmux(['send-keys', '-t', SESSION, 'Enter']);
+  await waitFor(() => screen().includes('filtered: beta'), 'the narrowed list', 30000);
+  check('the list comes back narrowed, and says so', true);
+  check('and the row the filter kept is beta', screen().includes('beta'), 'the narrowed page must show beta');
+  tmux(['send-keys', '-t', SESSION, 'Escape', 'Escape']);
+  await sleep(600);
+  // The command line carries the same filter, which is the pipe's own spelling.
+  tmux(['send-keys', '-t', SESSION, '/sessions alpha', 'Enter']);
+  await waitFor(() => screen().includes('filtered: alpha'), 'the narrowed list from the line', 30000);
+  check('/sessions <name> narrows it without a key', true);
+  tmux(['send-keys', '-t', SESSION, 'Escape', 'Escape']);
+  await sleep(600);
+
   // ---- 8. switching away from a RUNNING turn leaves it running, and it lands where it started -------
   const before3 = counts();
   // The prompt must be its own before a line is typed into it: a key sent while the arm above is still
@@ -267,7 +290,7 @@ try {
   await waitFor(() => completions >= 3, 'the held model call', 60000);
   // The turn is in flight now (its answer is held). The reader opens the list and leaves for beta.
   tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
-  await waitFor(() => screen().includes('c copies the id'), 'the page mid-run', 30000);
+  await waitFor(() => screen().includes('f filters'), 'the page mid-run', 30000);
   await sleep(600);
   tmux(['send-keys', '-t', SESSION, 'Down']);
   await sleep(300);

@@ -1274,7 +1274,7 @@ function M.run(argv)
       })
       refresh_model()
       if not done then ui.say(redact.text(tostring(problem))) end
-    elseif line == "/sessions" then
+    elseif line == "/sessions" or line:sub(1, 10) == "/sessions " then
       -- The sessions on this node, as a balloon (lua/core/sessions_view.lua): one row per session,
       -- with its state and age. Picking one switches (the switch itself is the REPL's, below); a pipe
       -- gets the plain list.
@@ -1282,16 +1282,30 @@ function M.run(argv)
       -- The list comes back after an action: `c` and `r` finish the panel (a page whose answer has gone to
       -- the caller reads keys and does nothing), so the reader gets the list again, on the same row.
       local focus = nil
+      local filter = line:sub(11):gsub("^%s+", ""):gsub("%s+$", "")
+      if filter == "" then filter = nil end
       while true do
         local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
-          back = switched_from, selected = focus })
+          back = switched_from, selected = focus, filter = filter })
         if type(answer) ~= "table" then break end
         if answer.action == "key" then
           local option = (sessions.page({ session_id = agent.session_id, user_id = USER, limit = 200,
-            back = switched_from })).options[tonumber(answer.index) or 0] or {}
+            back = switched_from, filter = filter })).options[tonumber(answer.index) or 0] or {}
           if answer.key == "copy" then copy_id(option.copy or option.session)
-          elseif answer.key == "rename" then rename_session(option.session) end
-          focus = tonumber(answer.index)
+          elseif answer.key == "rename" then rename_session(option.session)
+          elseif answer.key == "filter" then
+            -- A field of its own: a name typed into the list would be read as letters (they are keys
+            -- there), so the filter is asked for on a page that has an input.
+            local asked = ui.show({ { title = "Filter sessions",
+              lines = { filter and ("now: " .. filter) or "the whole list" },
+              input = "line", placeholder = "a name, or the start of an id",
+              hint = "Enter filters \u{b7} Esc cancels" } })
+            local text = type(asked) == "table" and asked.action == "submit"
+              and (tostring(asked.text or ""):gsub("^%s+", ""):gsub("%s+$", "")) or nil
+            if text ~= nil then filter = (text ~= "") and text or nil end
+            focus = nil
+          end
+          focus = focus or tonumber(answer.index)
         elseif answer.action == "select" then
           -- { action = "select", page, index, option = <the chosen row> }: the id and the origin flag
           -- live on the ROW, not on the answer.

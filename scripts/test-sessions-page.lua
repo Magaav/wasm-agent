@@ -60,5 +60,20 @@ view.run({ print = function(text) printed[#printed + 1] = text end },
 check(#printed >= 199, 'a pipe prints the plain list: ' .. #printed)
 check(tostring(printed[1]):sub(1, 36) == here, 'the first line is this session id: ' .. tostring(printed[1]))
 
+-- ---- the filter -------------------------------------------------------------------------------
+-- A name narrows the list to it; the title says so, and a heading with nothing under it goes away.
+local narrowed = view.page({ session_id = here, user_id = 'master', limit = 200, filter = 'chat 7' })
+check(#narrowed.options < #page.options, 'a name narrows the list: ' .. #narrowed.options .. ' of ' .. #page.options)
+local every_match = true
+for _, option in ipairs(narrowed.options) do
+  if option.session and not tostring(option.label):lower():find('chat 7', 1, true) then every_match = false end
+end
+check(every_match, 'and every row left matches it')
+check(tostring(narrowed.title):find('filtered: chat 7', 1, true) ~= nil, 'the title says what it is narrowed to: ' .. tostring(narrowed.title))
+local by_id = view.page({ session_id = here, user_id = 'master', limit = 200, filter = here:sub(1, 8) })
+check(#by_id.options == 1 and by_id.options[1].session == here, 'the start of an id finds that session')
+local nothing = view.page({ session_id = here, user_id = 'master', limit = 200, filter = 'zzz-nothing' })
+check(#nothing.options == 0, 'a name nothing has is an empty list, not the whole one: ' .. #nothing.options)
+
 if failed > 0 then error(string.format('sessions page: %d of %d failed, first: %s', failed, checks, tostring(first)), 0) end
 print(string.format('sessions page ok (%d checks, %.1f ms for %d sessions)', checks, elapsed_ms, #page.options))
