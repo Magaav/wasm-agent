@@ -3231,3 +3231,25 @@ fn a_group_message_teaches_the_index_its_subject() {
     assert_eq!(best["chat"], group);
     assert_eq!(best["matched_source"], "group_subject", "the answer says the subject matched: {answer}");
 }
+
+/// P1.2's rule at the seam where it is decided: a RECORDED hole is catching up even when nothing is waiting
+/// to be written, and it names the chat that fell silent and the instant the index stopped.
+#[test]
+fn a_recorded_hole_is_catching_up_even_with_an_empty_inbox() {
+    let gap = Gap { chat: "120363000000000099@g.us".into(), from_ms: 1_760_000_000_000, to_ms: 1_760_086_400_000 };
+
+    let (catching_up, behind) = fold_gaps(false, Vec::new(), std::slice::from_ref(&gap));
+    assert!(catching_up, "a known hole is being behind, not current");
+    assert_eq!(behind, vec![(gap.chat.clone(), gap.from_ms)], "the chat and the instant it stopped");
+
+    // No holes and nothing pending: current, and nobody named.
+    let (catching_up, behind) = fold_gaps(false, Vec::new(), &[]);
+    assert!(!catching_up);
+    assert!(behind.is_empty());
+
+    // A chat already named (a record waiting) is not named twice: one entry per chat.
+    let (catching_up, behind) = fold_gaps(true, vec![(gap.chat.clone(), gap.to_ms)], std::slice::from_ref(&gap));
+    assert!(catching_up);
+    assert_eq!(behind.len(), 1, "one entry per chat: {behind:?}");
+    assert_eq!(behind[0].1, gap.to_ms, "the waiting record keeps its instant");
+}

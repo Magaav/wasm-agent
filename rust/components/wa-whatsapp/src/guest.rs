@@ -2044,7 +2044,7 @@ const PACE_PENDING: usize = 8;
 /// It reads the lanes, never a guess: `INDEX_INBOX` is exactly the records this component has accepted
 /// and a later tick will write, so its length and its newest time are the gap between the wire and the
 /// index. A history sync still queued is a catch-up the component knows it is behind on.
-fn pace() -> index::Pace {
+async fn pace() -> index::Pace {
     let mut pending: Vec<(String, String)> = Vec::new();
     let mut total = 0usize;
     let mut newest_seen = 0i64;
@@ -2070,6 +2070,10 @@ fn pace() -> index::Pace {
     let mut behind: Vec<(String, i64)> = oldest.into_iter().collect();
     behind.sort_by_key(|(_, since)| *since);
     behind.truncate(PACE_PENDING);
+    // A HOLE the index recorded (a reconnect's gap, `heal_tick`'s work list) is being behind, even with
+    // nothing in the inbox: an answer must not say `current` while one is open.
+    let gaps = index::gaps(&IndexKv).await.unwrap_or_default();
+    let (catching_up, behind) = index::fold_gaps(catching_up, behind, &gaps);
     index::Pace { pending, pending_total: total, newest_seen, catching_up, behind }
 }
 
@@ -2153,8 +2157,8 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         // Both answer with how caught up the writer is (`index::Pace`): the records this component has
         // accepted and not written yet, and whether a catch-up is running. A read that cannot show a
         // message it already has says so (`pending`) instead of answering with the picture from before it.
-        seam::Op::Search => index::search_paced(&IndexKv, &request, &pace()).await,
-        seam::Op::Read => index::read_paced(&IndexKv, &request, &pace()).await,
+        seam::Op::Search => index::search_paced(&IndexKv, &request, &pace().await).await,
+        seam::Op::Read => index::read_paced(&IndexKv, &request, &pace().await).await,
         seam::Op::Message => index::message(&IndexKv, &request).await,
         seam::Op::Reactions => index::reactions(&IndexKv, &request).await,
         seam::Op::Media => index::media(&IndexKv, &request).await,

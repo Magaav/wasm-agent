@@ -1815,6 +1815,33 @@ pub async fn oldest_at_or_after<S: Store>(store: &S, chat: &str, ms: i64) -> Res
     Ok(best)
 }
 
+/// How many chats one answer names as behind: the count is exact elsewhere, this is the tail.
+const GAPS_LISTED: usize = 8;
+
+/// Fold the holes the index recorded into what an answer says about being behind: a KNOWN hole means the
+/// index is catching up, whether or not a write is waiting right now - the item's own rule, "it never says
+/// current while catching up", and a recorded gap is the case where "catching up" is a fact rather than a
+/// guess. The chat named is the one that fell silent, and since when is where the index stopped.
+pub(crate) fn fold_gaps(
+    mut catching_up: bool,
+    mut behind: Vec<(String, i64)>,
+    gaps: &[Gap],
+) -> (bool, Vec<(String, i64)>) {
+    if gaps.is_empty() {
+        return (catching_up, behind);
+    }
+    catching_up = true;
+    for gap in gaps {
+        // One entry per chat: an unwritten record already names the instant, and it is the newer one.
+        if !behind.iter().any(|(chat, _)| *chat == gap.chat) {
+            behind.push((gap.chat.clone(), gap.from_ms));
+        }
+    }
+    behind.sort_by_key(|(_, since)| *since);
+    behind.truncate(GAPS_LISTED);
+    (catching_up, behind)
+}
+
 /// Every hole the index still has to heal, oldest first, so a healer asks for the longest-waiting first.
 pub async fn gaps<S: Store>(store: &S) -> Result<Vec<Gap>, String> {
     let mut out = Vec::new();
