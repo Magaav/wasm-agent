@@ -62,6 +62,13 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// A fake terminal program: a shell script that answers in the protocol's own words.
+/// Take the scratch directory a fake program lived in away: a test that leaves files in /tmp is a test
+/// the next run has to guess about.
+#[cfg(unix)]
+fn forget(program: &std::path::Path) {
+    if let Some(dir) = program.parent() { let _ = std::fs::remove_dir_all(dir); }
+}
+
 #[cfg(unix)]
 fn fake(name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -195,6 +202,7 @@ fn a_program_that_speaks_another_protocol_is_refused_by_name_with_both_numbers()
     let failure = screen.attach_error().expect("a refusal");
     assert_eq!(failure.code, "term_protocol_mismatch");
     assert!(failure.message.contains("protocol 2") && failure.message.contains("speaks 1"), "both numbers: {}", failure.message);
+    forget(&script);
 }
 
 #[cfg(unix)]
@@ -209,6 +217,8 @@ fn a_program_that_dies_mid_session_is_a_named_failure_and_never_a_stale_frame() 
     let failure = screen.attach_error().expect("the failure sticks");
     assert_eq!(failure.code, "term_call_failed");
     assert_eq!(screen.render(40, 10), "", "and a later frame still draws nothing");
+    drop(screen);
+    forget(&script);
 }
 
 #[test]
