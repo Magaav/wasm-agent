@@ -1,4 +1,9 @@
 -- THE SPEED BOARD ITSELF: one line per commit, the load guard, the RED row, and never a zero for a row it
+-- CANNOT MEASURE (27/11): every scenario that is not testing the guard PINS WA_SPEED_LOAD, because the board
+-- reads the machine load from the environment and a loaded main-health run turned this row red on its own
+-- fixtures ("the start row says it had no binary", "a measurement with records still writes"). Reproduced at
+-- normal machine load by running this row with WA_SPEED_LOAD=34: the same six checks failed. The guard scenarios
+-- (12, 99) pin their own load already.
 -- could not measure (change/speed-board, 22/11).
 --
 -- This drives scripts/speed-board.sh through the SAME path main-health and status.sh take, with probes of
@@ -120,7 +125,7 @@ check(print_table('c0001c'):find('no_baseline: 2 of 3 comparable points', 1, tru
 local second = measure('c0002', ' --bin /bin/true')
 check(second.code == 3, 'a RED row makes --measure exit 3 (' .. tostring(second.code) .. ')')
 check((second.stdout or ''):find('RED start', 1, true) ~= nil, 'the RED row is named: ' .. tostring((second.stdout or ''):match('RED [^\n]*')))
-local check_run = sh(env_pin .. board .. ' --check --history "' .. history .. '" 2>&1')
+local check_run = sh(env_pin .. 'WA_SPEED_LOAD=2 ' .. board .. ' --check --history "' .. history .. '" 2>&1')
 check(check_run.code == 3, '--check exits 3 while a row is red')
 
 -- 3. the same row taken at load 12 is NOT a regression: the commit did not get slower, the machine did.
@@ -154,7 +159,7 @@ local refused_table = print_table('c0005')
 check(refused_table:find('the fixture said no', 1, true) ~= nil, 'the table carries the probe own reason')
 
 -- 6. no binary: every live row says so, by name.
-local no_bin = sh(env_pin .. board .. ' --measure --probes "' .. work .. '/probes" --history "' .. history .. '" --sha c0006 --samples 3 2>&1')
+local no_bin = sh(env_pin .. 'WA_SPEED_LOAD=2 ' .. board .. ' --measure --probes "' .. work .. '/probes" --history "' .. history .. '" --sha c0006 --samples 3 2>&1')
 -- A BOARD WITH NO NUMBERS IS NOT FINE (23/11): it records its line, and every live row is a RED row named
 -- with its reason - the thing that made main read green with four 'unavailable' rows.
 check(no_bin.code == 3, 'a board with no binary still records its line, and it is RED (' .. tostring(no_bin.code) .. ')')
@@ -171,7 +176,7 @@ land:write('{"branch":"change/x","sha":"abc","seconds":42,"load":1.1,"kind":"lua
 land:close()
 local release_dir = work .. '/home/.wasm-agent/land/release-20261122T000000Z-test'
 sh('mkdir -p "' .. release_dir .. '" && printf \'{"result":"done","created_at":1000,"updated_at":1150}\\n\' > "' .. release_dir .. '/journal.json"')
-local recorded = sh(env_pin .. board
+local recorded = sh(env_pin .. 'WA_SPEED_LOAD=2 ' .. board
   .. ' --measure --probes "' .. work .. '/probes" --history "' .. history .. '" --sha c0007 --bin /bin/true --samples 3 2>&1')
 check(recorded.code == 0, 'a measurement with records still writes (' .. tostring(recorded.code) .. ')')
 check((recorded.stdout or ''):find('landing=42000ms@1.1/lua', 1, true) ~= nil,
@@ -197,7 +202,7 @@ local by_hand_journal = '{"created_at":1000,"updated_at":1150,"linux":{"by_hand"
 local hand_file = assert(io.open(release_dir .. '/journal.json', 'w'))
 hand_file:write(by_hand_journal .. '\n')
 hand_file:close()
-local hand = sh('HOME="' .. work .. '/home" WA_SPEED_LANDINGS="' .. landings .. '" ' .. board
+local hand = sh('HOME="' .. work .. '/home" WA_SPEED_LANDINGS="' .. landings .. '" WA_SPEED_LOAD=2 ' .. board
   .. ' --measure --probes "' .. work .. '/probes" --history "' .. history .. '" --sha c0011 --bin /bin/true --samples 3 2>&1')
 check(hand.code == 0, 'a measurement over a by-hand release still writes (' .. tostring(hand.code) .. ')')
 local hand_row = last_row()
