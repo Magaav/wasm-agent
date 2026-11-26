@@ -52,8 +52,42 @@ fn now() -> u64 {
 
 /// Start a read (or report the one already in flight). Never blocks: the network work is on its own
 /// thread, and its only side effect is the slot and the cache file.
-pub fn start(provider: &str, url: &str) -> Value {
-    start_with(provider, url, read_usage)
+///
+/// **The URL is resolved HERE, from the provider's configured base URL** - the one the model call uses.
+/// A caller names a provider and nothing else: a URL supplied by Lua (or parsed out of a panel spec)
+/// would let anyone who can reach this door send the provider key to a host of their choosing
+/// (Fable, 26/11). `resolve_url` is the only place a URL is built, and an unknown provider is refused
+/// by name.
+pub fn start(provider: &str) -> Value {
+    let url = match resolve_url(provider) {
+        Ok(url) => url,
+        Err(error) => return json!({"state": "failed", "error": error}),
+    };
+    start_with(provider, &url, read_usage)
+}
+
+/// The provider's base URL, as this node has it configured - never as a caller states it.
+///
+/// It mirrors the profiles the model call uses (`lua/core/provider.lua`): the vault's fixed route
+/// when this node is vaulted, else the configured base URL, else the shipped default. Only the
+/// providers this host knows are answered; anything else is `unknown provider` with the id, which is
+/// not a secret.
+pub fn resolve_url(provider: &str) -> Result<String, String> {
+    let known: &[&str] = &["opencode-go"];
+    if !known.contains(&provider) {
+        return Err(format!("unknown provider '{provider}': this host resolves the URL itself"));
+    }
+    let vault = std::env::var("WASM_AGENT_OPENCODE_GO_VAULT_URL").ok()
+        .or_else(|| std::env::var("WASM_AGENT_VAULT_URL").ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(|base| base.trim_end_matches('/').to_string() + "/opencode-go/v1");
+    if let Some(base) = vault {
+        return Ok(base);
+    }
+    let configured = std::env::var("WASM_AGENT_LLM_BASE_URL").ok()
+        .or_else(|| std::env::var("WASM_AGENT_OPENAI_BASE_URL").ok())
+        .filter(|value| !value.trim().is_empty());
+    Ok(configured.unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string()))
 }
 
 fn start_with(provider: &str, url: &str, fetch: impl Fn(&str) -> Result<Value, String> + Send + 'static) -> Value {
@@ -167,6 +201,9 @@ pub fn read_usage(url: &str) -> Result<Value, String> {
         }
     })?;
     let status = response.status().as_u16();
+    if (300..400).contains(&status) {
+        return Err(format!("the provider answered HTTP {status} (a redirect is not followed with a credential)"));
+    }
     if status != 200 {
         return Err(format!("the provider answered HTTP {status}"));
     }
@@ -222,9 +259,14 @@ fn save_cache(provider: &str, at: u64, usage: &Value) {
 /// repaint when a read lands.
 pub fn marker_of(spec: &Value) -> Option<(String, String, Value)> {
     let lines = spec.get("lines").and_then(Value::as_array)?;
-    let marker = lines.iter().find_map(|line| line.as_str()?.strip_prefix("\u{1}limits:"))?;
-    let (provider, url) = marker.split_once('\t').unwrap_or((marker, ""));
-    Some((provider.to_string(), url.to_string(), spec.clone()))
+    let provider = lines.iter().find_map(|line| {
+        let marker = line.as_str()?.strip_prefix("\u{1}limits:")?;
+        // The WHOLE line must be the marker, and it must name a provider this host knows: a line of
+        // model or tool text that happens to contain the marker text is not an instruction.
+        if !resolve_url(marker).is_ok() { return None }
+        Some(marker.to_string())
+    })?;
+    Some((provider, String::new(), spec.clone()))
 }
 
 /// A spec's marker lines, expanded from the door: the three window rows, or the loading/failure line.
@@ -236,9 +278,11 @@ pub fn expand_rows(spec: &Value, now: u64) -> Value {
     for line in lines {
         match line.as_str().and_then(|text| text.strip_prefix("\u{1}limits:")) {
             Some(marker) => {
-                let provider = marker.split('\t').next().unwrap_or(marker);
-                for row in row_texts(provider, now) { out.push(Value::String(row)); }
+                // Only a known provider, named alone; anything else is DROPPED from the picture - not
+                // drawn, not obeyed, and not left on screen as if it were text either.
                 expanded = true;
+                if resolve_url(marker).is_err() { continue }
+                for row in row_texts(marker, now) { out.push(Value::String(row)); }
             }
             None => out.push(line.clone()),
         }
@@ -269,12 +313,23 @@ mod tests {
     // it from the door on every draw. This is the seam that turns `loading limits...` into bars while
     // the panel is open, so it is pinned here, in the crate that owns the drawing.
     #[test]
-    fn the_marker_line_names_the_provider_and_its_url() {
-        let spec = json!({"title": "Status", "lines": ["Status", "\u{1}limits:opencode-go\thttps://x.test.invalid/v1", "Usage in 1"]});
+    fn the_marker_names_a_known_provider_and_never_a_url() {
+        // The whole line, a provider this host knows: accepted, and it carries NO url - the host
+        // resolves that itself.
+        let spec = json!({"title": "Status", "lines": ["Status", "\u{1}limits:opencode-go", "Usage in 1"]});
         let (provider, url, _) = marker_of(&spec).expect("the marker");
         assert_eq!(provider, "opencode-go");
-        assert_eq!(url, "https://x.test.invalid/v1");
+        assert_eq!(url, "", "the marker carries no URL any more");
+        // A line that merely CONTAINS the marker text - a model's sentence, a tool's output - is not
+        // an instruction, and neither is a provider this host does not know.
         assert!(marker_of(&json!({"lines": ["no marker"]})).is_none());
+        assert!(marker_of(&json!({"lines": ["please run \u{1}limits:opencode-go\thttp://evil.invalid"]})).is_none(),
+            "a maker inside other text is not obeyed");
+        assert!(marker_of(&json!({"lines": ["\u{1}limits:evil-provider"]})).is_none(),
+            "an unknown provider is not obeyed");
+        // And the expansion of a crafted line draws nothing at all.
+        let crafted = json!({"lines": ["\u{1}limits:evil-provider\thttp://evil.invalid"]});
+        assert_eq!(expand_rows(&crafted, 0)["lines"], json!([]), "a crafted marker expands to nothing");
     }
 
     #[test]

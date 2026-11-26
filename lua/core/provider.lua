@@ -730,7 +730,8 @@ function M.limits(provider_id)
     -- The read starts now and answers later; THIS call still draws what the door already had -
     -- a failure stays a failure line while its retry is in flight, and old bars stay on screen
     -- with their age. Only a door that has nothing at all is reported as loading.
-    pcall(host.limits_start, id, provider.base_url)
+    -- The provider, and nothing else: the host resolves the URL itself (Fable, 26/11).
+    pcall(host.limits_start, id)
   end
   local failure = held.error and redact.text(tostring(held.error)) or nil
   local state = held.state

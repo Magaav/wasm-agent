@@ -2246,6 +2246,10 @@ pub(crate) fn limits_agent(url: &str) -> Result<ureq::Agent, String> {
     let (connect, _, _) = http_timeouts();
     let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // NO redirects: a limits read carries the provider key, and a redirect is exactly how that key
+        // would leave for another origin. ureq's default drops the Authorization header on a redirect
+        // (`redirect_auth_headers = Never`), but following none is the rule that needs no trust.
+        .max_redirects(0)
         .timeout_connect(Some(std::time::Duration::from_secs(connect.min(read))))
         .timeout_recv_response(Some(std::time::Duration::from_secs(read)))
         .timeout_recv_body(Some(std::time::Duration::from_secs(read)));
@@ -2259,8 +2263,15 @@ pub(crate) fn limits_agent(url: &str) -> Result<ureq::Agent, String> {
 /// The read happens on a thread of the host program's own; a turn never waits for it.
 pub extern "C-unwind" fn limits_start(l: *mut LuaState) -> c_int {
     let provider = arg_string(l, 1).unwrap_or_default();
-    let url = arg_string(l, 2).unwrap_or_default();
-    push_json(l, &crate::limits::start(&provider, &url));
+    // A URL from the caller is refused, by name, and NOT repeated in the answer: the host resolves
+    // the provider's base URL itself, so no caller can aim the provider key at another host.
+    let supplied = arg_string(l, 2).unwrap_or_default();
+    if !supplied.trim().is_empty() {
+        push_json(l, &json!({"state": "failed",
+            "error": "limits_url_refused: this host resolves the provider's URL itself; a caller-given URL is refused"}));
+        return 1;
+    }
+    push_json(l, &crate::limits::start(&provider));
     1
 }
 
@@ -4916,9 +4927,11 @@ fn console_reader() {
                                         // without the reader closing anything.
                                         state.panel_limits = crate::limits::marker_of(&snapshot);
                                         state.panel_lines = spec_lines(&spec);
-                                        if let Some((provider, url, _)) = state.panel_limits.clone() {
-                                            // The panel opens the read now, off the turn, at once.
-                                            let _ = crate::limits::start(&provider, &url);
+                                        if let Some((provider, _url, _)) = state.panel_limits.clone() {
+                                            // The panel opens the read now, off the turn, at once. The
+                                            // URL is the host's to resolve; the snapshot names only the
+                                            // provider.
+                                            let _ = crate::limits::start(&provider);
                                         }
                                         continue;
                                     }
@@ -4935,17 +4948,16 @@ fn console_reader() {
                                             // The same live-rows contract as the mid-run snapshot: a
                                             // published /status carries the marker, and the console
                                             // fills it from the door on every draw.
+                                            // A published view is drawn AS IT IS: its lines can carry a
+                                            // model's or a tool's text, so a limits marker inside one
+                                            // is not the host's to obey (Fable, 26/11). Only the /status
+                                            // snapshot - written by this host from Lua's own status
+                                            // lines - can name a provider.
                                             let drawn = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
                                             state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&drawn, width, rows));
                                             state.host_panel = true;
                                             state.balloon = true;
-                                            if let Some(live) = crate::limits::marker_of(&spec) {
-                                                state.panel_limits = Some(live);
-                                                state.panel_lines = spec_lines(&drawn);
-                                            }
-                                            if let Some((provider, url, _)) = state.panel_limits.clone() {
-                                                let _ = crate::limits::start(&provider, &url);
-                                            }
+
                                             continue;
                                         }
                                     }
