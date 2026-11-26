@@ -547,8 +547,9 @@ pub fn call_on(runtime: &Arc<Runtime>, envelope_json: &str, caller: &str) -> Str
 }
 
 /// Is the seam switched on, and is the component behind it? Asked per call through the feature
-/// resolver (policy.json features.stt, WA_STT_COMPONENT as its override, the pin verified) — never an
-/// environment read of this module's own, and never a value cached for the life of the process.
+/// resolver (policy.json features.stt decides, the pin verified) — the switch is the feature, there is no
+/// env override in product code, never an environment read of this module's own, and never a value
+/// cached for the life of the process.
 fn routed() -> bool {
     matches!(wa_features::status("stt").map(|status| status.active), Some(wa_features::ActivePath::Component))
 }
