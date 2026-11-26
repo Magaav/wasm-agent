@@ -23,12 +23,45 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 import {parseCheckLog, baselineRecord, judgeRun} from './lib/landing-baseline.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(REPO, 'scripts', 'landing-queue.mjs');
+
+// THE ROW JUDGES THE LANE FROM OUTSIDE A SESSION (Fable 26/11), exactly as scripts/test-landing-queue.mjs does: `land`
+// refuses a process under a `wa` CLI, so a run started from a chat detaches once with `setsid` rather than having every
+// landing it judges refused before it begins. The gate starts it from plain bash and never reaches this branch.
+function underWaCli() {
+  let pid = process.pid;
+  for (let hops = 0; hops < 40 && pid > 1; hops++) {
+    let status;
+    try { status = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch { return null; }
+    const ppid = Number(status.slice(status.lastIndexOf(')') + 2).split(' ')[1]);
+    if (!Number.isFinite(ppid) || ppid <= 1) return null;
+    let cmdline = '';
+    try { cmdline = fs.readFileSync(`/proc/${ppid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' '); } catch { return null; }
+    const argv = cmdline.split(' ').filter(Boolean);
+    const base = path.basename(argv[0] || '');
+    if (base === 'wa' || base === 'wa.exe') {
+      const subcommand = argv.slice(1).find(arg => !arg.startsWith('-')) || '';
+      return subcommand === 'serve' ? null : `wa ${subcommand}`.trim();
+    }
+    pid = ppid;
+  }
+  return null;
+}
+if (!process.env.WA_LANE_TEST_DETACHED) {
+  const ancestor = underWaCli();
+  if (ancestor) {
+    console.log(`landing baseline: this run is under ${ancestor}, and a land refuses that; detaching once`);
+    const detached = spawnSync('setsid', ['--fork', process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+      {stdio: 'inherit', env: {...process.env, WA_LANE_TEST_DETACHED: '1'}});
+    process.exit(detached.status === null ? 1 : detached.status);
+  }
+}
 const SESSION = '33333333-4444-5555-6666-777777777777';
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-landing-baseline-'));
 const ORIGIN = path.join(WORK, 'origin.git');
@@ -40,6 +73,14 @@ const ENV = {...process.env, WA_LANDING_QUEUE_LEDGER: LEDGER};
 delete ENV.WASM_AGENT_SESSION_ID;
 delete ENV.WA_SESSION_ID;
 delete ENV.WA_LANDING_QUEUE_DIR;
+// THE FIXTURE IS THE LANE (Fable 26/11): `land` now requires the lane token (scripts/landing-queue.mjs), so this row's
+// home holds one - what a real lane's home holds - or every landing it judges would be refused before it began.
+const HOME_DIR = path.join(WORK, 'home');
+const LANE_TOKEN = path.join(HOME_DIR, '.wasm-agent', 'lane', 'land.token');
+ENV.WASM_AGENT_HOME = HOME_DIR;
+fs.mkdirSync(path.dirname(LANE_TOKEN), {recursive: true});
+fs.writeFileSync(LANE_TOKEN, crypto.randomBytes(32).toString('base64'));
+fs.chmodSync(LANE_TOKEN, 0o600);
 
 let passed = 0;
 const started = Date.now();
