@@ -1,0 +1,376 @@
+//! The speech queue's wire layer, served: `wa:stt` in a component, the queue and the key in the kernel.
+//!
+//! The seam loads the installed `stt` component, keeps **one** instance for the process, and calls the
+//! five exports. One instance, not one per thread: the component holds the `rid` ledger that refuses a
+//! replayed call, and two instances would be two ledgers — the node had one. Every `stt_node` call
+//! already serialises on its own runtime mutex, so the instance sits behind a mutex of its own and the
+//! calls queue there exactly as they queued before.
+//!
+//! The world is **async** (the rule of 26/11: a future for each result), so this seam is the first in the
+//! tree that calls a guest on wasmtime's async path — the one `service_components_v2` uses for a
+//! service's `run`, on the same pinned wasmtime 50 with `component-model-async`. That needs its own
+//! engine (`async_support(true)`), because `components::engine` is the sync one every other seam shares;
+//! the cost is one more engine and its epoch ticker, which is stated in the mission's report rather than
+//! hidden.
+//!
+//! Three rules this module is the place for:
+//!
+//! 1. **A refusal is an answer, not a failure.** A call the component refuses comes back as the wire
+//!    bytes the peer reads (`admitted.refused`), and the router hands them on unchanged. Only a guest
+//!    that cannot answer at all is a `component_*` failure, and then the native path runs.
+//! 2. **A wedged guest never takes the node with it.** Every call re-arms an epoch deadline, and a
+//!    future that parks past the seam's own timeout is dropped: a dead guest is a fallback, not a hang.
+//! 3. **The answer is the same bytes.** The refusal reply and the envelope record are what the native
+//!    path produces, so `scripts/test-stt-*.lua` and the two-node row can compare them.
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+use serde_json::Value;
+use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::{Config as WasmConfig, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+use crate::components::{component_dir, load_in, Installed};
+
+/// The installed name this seam is served from (`<components>/stt.wasm`, `stt.json`).
+pub const COMPONENT: &str = "stt";
+/// How long one seam call may take. The layer is a decode, a hash and a signature check over a
+/// kilobyte of envelope: a guest that has not answered by then is wedged.
+const DEFAULT_TIMEOUT_MS: u64 = 2_000;
+/// The component's own memory cap, from `limits.memory_mb` in its manifest when present.
+const DEFAULT_MEMORY_MB: u64 = 32;
+const TICK: Duration = Duration::from_millis(10);
+
+wasmtime::component::bindgen!({
+    path: "../../wit/stt",
+    world: "stt-component",
+});
+
+use wa::stt::types as seam;
+
+/// Where one call gets what it needs: the components directory (or an explicit artifact) and the
+/// call's deadline — a value, not ambient environment, so a test can point two calls at two artifacts.
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub components_dir: std::path::PathBuf,
+    /// `WA_STT_COMPONENT_WASM`: an artifact from this checkout instead of the pinned install.
+    pub wasm: Option<std::path::PathBuf>,
+    pub timeout_ms: u64,
+}
+
+impl Config {
+    pub fn from_env() -> Config {
+        let env_path = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
+        Config {
+            components_dir: component_dir(),
+            wasm: env_path("WA_STT_COMPONENT_WASM"),
+            timeout_ms: std::env::var("WA_STT_COMPONENT_TIMEOUT_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_TIMEOUT_MS),
+        }
+    }
+
+    pub fn with_components(mut self, dir: impl Into<std::path::PathBuf>) -> Config {
+        self.components_dir = dir.into();
+        self
+    }
+}
+
+/// The store's data: a WASI view (a `cdylib` still imports `wasi:cli`/`io`/`clocks`) and its limits.
+struct State {
+    wasi: WasiCtx,
+    limits: StoreLimits,
+    table: ResourceTable,
+}
+
+impl WasiView for State {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+    }
+}
+
+impl wasmtime::component::HasData for State {
+    type Data<'a> = &'a mut State;
+}
+
+/// The one live instance: the store it runs in, its bindings, and which artifact it came from (a pin
+/// change is a new instance rather than a stale one answering with yesterday's bytes).
+struct Served {
+    store: Store<State>,
+    bindings: SttComponent,
+    sha256: String,
+}
+
+static SERVED: Mutex<Option<Served>> = Mutex::new(None);
+
+/// The async engine, its epoch ticker, and the runtime the calls park on. One of each for the process:
+/// a runtime per call would cost more than the call.
+fn engine() -> Result<Engine, String> {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    if let Some(engine) = ENGINE.get() {
+        return Ok(engine.clone());
+    }
+    let mut config = WasmConfig::new();
+    config.wasm_component_model(true);
+    config.async_support(true);
+    config.epoch_interruption(true);
+    let engine = Engine::new(&config).map_err(|error| format!("component_engine:{error}"))?;
+    if ENGINE.set(engine.clone()).is_ok() {
+        std::thread::Builder::new()
+            .name("wa-stt-epoch".into())
+            .spawn(move || loop {
+                std::thread::sleep(TICK);
+                engine.increment_epoch();
+            })
+            .map_err(|error| format!("epoch_ticker:{error}"))?;
+    }
+    Ok(ENGINE.get().expect("engine initialized").clone())
+}
+
+fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(1).enable_time();
+            builder.build().map_err(|error| format!("runtime_failed:{error}"))
+        })
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
+/// The component this call runs: the pinned install, or the artifact `WA_STT_COMPONENT_WASM` names.
+fn component(config: &Config) -> Result<Installed, String> {
+    let Some(path) = config.wasm.clone() else {
+        return load_in(&config.components_dir, COMPONENT).map_err(|error| error.to_string());
+    };
+    let bytes = std::fs::read(&path).map_err(|error| format!("component_not_installed:{}:{error}", path.display()))?;
+    let manifest: Value = std::fs::read_to_string(path.with_file_name(format!("{COMPONENT}.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    Ok(Installed { name: COMPONENT.to_string(), sha256: hex_of(&bytes), bytes, manifest })
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    use ring::digest::{digest, SHA256};
+    digest(&SHA256, bytes).as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Whether the component is installed and loadable — what the router asks once, with a reason.
+pub fn available() -> Result<String, String> {
+    component(&Config::from_env())
+        .map_err(|error| format!("component_unavailable:{error}"))
+        .map(|installed| installed.sha256)
+}
+
+/// One answer the wire carries: the admitted envelope's fields, or the reply bytes for a refusal.
+pub enum Admit {
+    Call { op: String, from: String, to: String, ts_ms: i64, rid: String, body_json: String },
+    Refused { word: String, bytes: Vec<u8> },
+}
+
+fn failure(op: &str, error: &wasmtime::Error) -> String {
+    let detail = error.to_string().lines().next().unwrap_or_default().to_string();
+    let chain = format!("{error:?}").to_ascii_lowercase();
+    let wedged = chain.contains("interrupt")
+        || chain.contains("epoch deadline")
+        || chain.contains("deadline reached")
+        || chain.contains("timeout")
+        || chain.contains("elapsed");
+    let kind = if wedged { "component_wedged" } else { "component_failed" };
+    format!("{kind}:{op}:{detail}")
+}
+
+/// Run `body` against the one instance, instantiating it first when it is missing or a different
+/// artifact answered last time.
+fn with_instance<T>(
+    config: &Config,
+    body: impl FnOnce(&mut Served, &tokio::runtime::Runtime) -> Result<T, String>,
+) -> Result<T, String> {
+    let installed = component(config)?;
+    let engine = engine()?;
+    let runtime = runtime()?;
+    let mut held = SERVED.lock().map_err(|_| "seam_gate_poisoned".to_string())?;
+    let stale = held.as_ref().map(|served| served.sha256 != installed.sha256).unwrap_or(true);
+    if stale {
+        if held.is_some() {
+            // Dropping the old instance releases its store before the new one is built: a pin change
+            // must not double the node's wasm footprint for the length of a call.
+            *held = None;
+        }
+        let component = Component::new(&engine, &installed.bytes)
+            .map_err(|error| format!("component_compile:{error}"))?;
+        let memory_mb = installed
+            .manifest
+            .get("limits")
+            .and_then(|limits| limits.get("memory_mb"))
+            .and_then(Value::as_u64)
+            .filter(|mb| *mb > 0)
+            .unwrap_or(DEFAULT_MEMORY_MB);
+        let mut store = Store::new(
+            &engine,
+            State {
+                wasi: {
+                    let mut builder = WasiCtxBuilder::new();
+                    builder.args(&[COMPONENT]);
+                    builder.build()
+                },
+                limits: StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).build(),
+                table: ResourceTable::new(),
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        store.set_epoch_deadline(config.timeout_ms.div_ceil(TICK.as_millis() as u64).max(1));
+        let mut linker: Linker<State> = Linker::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|error| format!("component_link_wasi:{error}"))?;
+        let bindings = runtime
+            .block_on(async { SttComponent::instantiate_async(&mut store, &component, &linker).await })
+            .map_err(|error| format!("component_instantiate:{error}"))?;
+        *held = Some(Served { store, bindings, sha256: installed.sha256 });
+    }
+    let served = held.as_mut().expect("instance installed");
+    served.store.set_epoch_deadline(config.timeout_ms.div_ceil(TICK.as_millis() as u64).max(1));
+    body(served, runtime)
+}
+
+/// One call, admitted by the guest: the envelope's fields, or the reply bytes for the refusal.
+///
+/// The nesting is wasmtime's, not this module's: `run_concurrent` answers `Result<guest answer,
+/// wasmtime::Error>`, the guest's own call answers `Result<T, wasmtime::Error>`, and the timeout
+/// wraps both. Each layer is named where it is handled, so "the guest refused" and "the guest could not
+/// answer" never collapse into one.
+pub fn admit(me: &str, owner_nodes: &[String], skew_ms: i64, bytes: &[u8], caller: &str, now_ms: i64) -> Result<Admit, String> {
+    let config = Config::from_env();
+    with_instance(&config, |served, runtime| {
+        let (me, owners, bytes, caller) = (me.to_string(), owner_nodes.to_vec(), bytes.to_vec(), caller.to_string());
+        let timeout = Duration::from_millis(config.timeout_ms);
+        let raced = runtime.block_on(async {
+            let Served { store, bindings, .. } = &mut *served;
+            tokio::time::timeout(
+                timeout,
+                store.run_concurrent(async move |store| {
+                    bindings.wa_stt_stt().call_admit(store, me, owners, skew_ms, bytes, caller, now_ms).await
+                }),
+            )
+            .await
+        });
+        let admitted = flatten(raced, "admit")?;
+        Ok(match admitted {
+            seam::Admitted::Call(envelope) => Admit::Call {
+                op: envelope.op,
+                from: envelope.from_node,
+                to: envelope.to,
+                ts_ms: envelope.ts_ms,
+                rid: envelope.rid,
+                body_json: envelope.body_json,
+            },
+            seam::Admitted::Refused(refusal) => Admit::Refused { word: refusal.word, bytes: refusal.bytes },
+        })
+    })
+}
+
+/// The exact bytes a node sends for one call.
+pub fn encode(op: &str, from: &str, to: &str, ts_ms: i64, rid: &str, body_json: &str) -> Result<Vec<u8>, String> {
+    let config = Config::from_env();
+    with_instance(&config, |served, runtime| {
+        let (op, from, to, rid, body) = (op.to_string(), from.to_string(), to.to_string(), rid.to_string(), body_json.to_string());
+        let timeout = Duration::from_millis(config.timeout_ms);
+        let raced = runtime.block_on(async {
+            let Served { store, bindings, .. } = &mut *served;
+            tokio::time::timeout(
+                timeout,
+                store.run_concurrent(async move |store| {
+                    bindings.wa_stt_stt().call_encode(store, op, from, to, ts_ms, rid, body).await
+                }),
+            )
+            .await
+        });
+        flatten(raced, "encode")
+    })
+}
+
+/// The exact string a node signs for one call, or the refusal's own slug.
+pub fn signature_message(envelope: &[u8], body_sha256_hex: &str) -> Result<Result<String, String>, String> {
+    let config = Config::from_env();
+    with_instance(&config, |served, runtime| {
+        let (envelope, hex) = (envelope.to_vec(), body_sha256_hex.to_string());
+        let timeout = Duration::from_millis(config.timeout_ms);
+        let raced = runtime.block_on(async {
+            let Served { store, bindings, .. } = &mut *served;
+            tokio::time::timeout(
+                timeout,
+                store.run_concurrent(async move |store| {
+                    bindings.wa_stt_stt().call_signature_message(store, envelope, hex).await
+                }),
+            )
+            .await
+        });
+        let answer = flatten(raced, "signature_message")?;
+        Ok(answer.map_err(|refusal| refusal_slug(&refusal)))
+    })
+}
+
+/// One answer the node composed, as the wire carries it.
+pub fn reply_ok(body_json: &str) -> Result<Vec<u8>, String> {
+    let config = Config::from_env();
+    with_instance(&config, |served, runtime| {
+        let body = body_json.to_string();
+        let timeout = Duration::from_millis(config.timeout_ms);
+        let raced = runtime.block_on(async {
+            let Served { store, bindings, .. } = &mut *served;
+            tokio::time::timeout(
+                timeout,
+                store.run_concurrent(async move |store| {
+                    bindings.wa_stt_stt().call_reply_ok(store, body).await
+                }),
+            )
+            .await
+        });
+        flatten(raced, "reply_ok")
+    })
+}
+
+/// The three layers of one async call, flattened into the one answer this module promises:
+/// the timeout, `run_concurrent`'s own error, and the guest's call.
+fn flatten<T>(
+    raced: Result<Result<Result<T, wasmtime::Error>, wasmtime::Error>, tokio::time::error::Elapsed>,
+    op: &str,
+) -> Result<T, String> {
+    let ran = raced.map_err(|_| format!("component_wedged:{op}:timeout"))?;
+    let call = ran.map_err(|error| failure(op, &error))?;
+    call.map_err(|error| failure(op, &error))
+}
+
+/// The one refusal word for a case, in the vocabulary the wire already uses
+/// (`Refusal::as_str()`): the host renders the case the guest handed back with the same crate the
+/// guest answered with, so the two paths cannot spell one fault two ways.
+fn refusal_slug(refusal: &seam::Refusal) -> String {
+    use seam::Refusal as R;
+    use wa_stt_remote::protocol::Refusal as W;
+    // The two cases that carry a reason are rendered HERE with the crate's own words
+    // (\`Refusal::as_str\`): a leaked string per call would be a leak in the node's hot path.
+    match refusal {
+        R::Malformed(what) => return W::Malformed("body").as_str().replace("body", what),
+        R::Failed(what) => return format!("failed:{}", wa_stt_remote::protocol::sanitize(what)),
+        _ => {}
+    }
+    let wire = match refusal {
+        R::Version(version) => W::Version(*version),
+        R::WrongTarget => W::WrongTarget,
+        R::UnknownCaller => W::UnknownCaller,
+        R::Stale => W::Stale,
+        R::BadSignature => W::BadSignature,
+        R::Replayed => W::Replayed,
+        R::LeaseLost => W::LeaseLost,
+        R::NotFound => W::NotFound,
+        R::StaleJob => W::StaleJob,
+        R::TooLarge => W::TooLarge,
+        R::NotYet => W::NotYet,
+        // Rendered above.
+        R::Failed(_) | R::Malformed(_) => unreachable!("rendered before the mapping"),
+    };
+    wire.as_str()
+}

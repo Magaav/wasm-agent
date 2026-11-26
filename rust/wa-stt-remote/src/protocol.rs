@@ -191,6 +191,16 @@ impl Admission {
         self.owner_nodes.contains(node)
     }
 
+    /// This node's id, as the admission rule was built with it.
+    pub fn me(&self) -> &str {
+        &self.me
+    }
+
+    /// The owner's node list, as the admission rule was built with it.
+    pub fn owner_nodes(&self) -> Vec<String> {
+        self.owner_nodes.iter().cloned().collect()
+    }
+
     /// How many `rid`s are remembered (a test asserts the bound holds).
     pub fn remembered(&self) -> usize {
         self.seen.len()
