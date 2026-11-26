@@ -60,7 +60,7 @@ local nodata_all = canaries.aggregate({
   { node = 'peer-b', results = { { feature = 'mail', ok = false, not_proven = true, stage = 'no_data' } } },
 })
 eq(#nodata_all.proven_nowhere, 1, 'no_data on every node asked is proven nowhere (no stage exceptions)')
-has(nodata_all.proven_nowhere[1], 'mail (not proven on 2 node(s) asked)', 'named, with how many nodes were asked')
+has(nodata_all.proven_nowhere[1], 'mail (no_data; not proven on 2 node(s) asked)', 'named, with its reason and how many nodes were asked')
 eq(#nodata_all.failed, 0, 'and it is not a failure of any node')
 local cuts = canaries.aggregate({ { node = 'this node', results = { { feature = 'release-update', ok = false, not_proven = true, stage = 'cutting' } } } })
 eq(#cuts.proven_nowhere, 1, 'cutting on the only node asked is proven nowhere too')

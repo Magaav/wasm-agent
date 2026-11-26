@@ -157,6 +157,24 @@ end
 --
 -- 1. AN `unknown` FROM THE RELAY IS NOT A VERDICT. It says only that this read did not arrive, and an install that
 --    is still downloading answers exactly that. The wait keeps reading the node own record to the deploy deadline.
+-- WHAT THE AGGREGATE MEANS FOR THE RELEASE (26/11, Fable r5). One rule, named here so a row can drive it:
+--
+-- LISTED, NOT RED: a feature answered `not_proven` on EVERY node asked. The canary runs in a CLI process on a
+-- serving node and cannot see what that node serves, so "nothing to test here" is a fact about the probe, not
+-- a break in the release. It is printed by name under "NOT PROVEN ON ANY NODE" and the step passes.
+-- RED, unchanged: a FAIL (a node said it is broken, including a refusal like whatsapp_component_absent - r4
+-- item 3), and a CUTTING proven nowhere: release-update must be fresh on a deployed node, so a release that
+-- cannot prove its own cut did not cut.
+function M.release_not_proven(aggregated)
+  local listed, cutting = {}, {}
+  for _, entry in ipairs((type(aggregated) == "table" and aggregated.proven_nowhere) or {}) do
+    local line = tostring(entry)
+    local feature = line:match("^([%w%-_]+)") or line
+    if feature == "release-update" then cutting[#cutting + 1] = line else listed[#listed + 1] = line end
+  end
+  return { listed = listed, cutting = cutting, red = cutting }
+end
+
 function M.deploy_settles(state)
   local s = tostring(state or "unknown")
   if s == "unknown" or s == "not_known_yet" then return false end
@@ -4422,22 +4440,14 @@ impl.canaries = function(run, options)
     noticed = ok_call and tostring((answer or {}).reason or "") or ("raised: " .. tostring(answer))
   end
 
-  -- PROVEN NOWHERE IS RED BY NAME (25/11): an account canary nobody could answer proves nothing about the
-  -- release, and "unknown" is not yes. This is computed over this node AND every peer asked.
+  -- The aggregate still names every feature no node could answer; what that means is decided below, by
+  -- M.release_not_proven (26/11: listed and passing, unless it is the cut itself). This is computed over this
+  -- node AND every peer asked.
   local aggregated = canaries.aggregate((function()
     local list = { { node = "this node", results = results } }
     for _, answer in ipairs(peer_answers) do list[#list + 1] = answer end
     return list
   end)())
-  if #aggregated.proven_nowhere > 0 then
-    local named = table.concat(aggregated.proven_nowhere, ", ")
-    return false, { error = "canary_proven_nowhere",
-      observed = "not proven on every node asked: " .. named,
-      detail = "release is RED by name - proven nowhere: " .. named,
-      evidence = M.evidence_path(run.id, "canaries"),
-      next = "ask the node that holds the account (wa features canary json on it) and cut again: a canary no node could answer has proven nothing about this release",
-      notice = noticed }
-  end
   if #failed > 0 then
     local how = {}
     for _, entry in ipairs(ring or {}) do
@@ -4460,10 +4470,32 @@ impl.canaries = function(run, options)
       next = "make each named node answer (wa nodes, wa services status), then cut again: a node whose canaries could not be collected has not been proven by this release",
       notice = noticed }
   end
+  -- WHERE "PROVEN NOWHERE" LANDS (26/11, Fable r5, removing the rule of 25/11): see M.release_not_proven.
+  local not_proven = M.release_not_proven(aggregated)
+  if #not_proven.red > 0 then
+    local named = table.concat(not_proven.red, ", ")
+    return false, { error = "canary_cutting_nowhere",
+      observed = "cutting not proven on every node asked: " .. named,
+      detail = "release is RED by name - release-update proved nothing about this cut: " .. named,
+      evidence = M.evidence_path(run.id, "canaries"),
+      next = "read the node's own record (wa update <node> --status) and cut again: release-update must be fresh on a deployed node",
+      notice = noticed }
+  end
+  if #not_proven.listed > 0 then
+    print("NOT PROVEN ON ANY NODE")
+    evidence("NOT PROVEN ON ANY NODE\n")
+    for _, line in ipairs(not_proven.listed) do
+      print("  " .. line)
+      evidence("  " .. line .. "\n")
+    end
+    local because = "(not red: the canary runs in a CLI process on a serving node and cannot see what that node serves - 26/11)"
+    print("  " .. because)
+    evidence("  " .. because .. "\n")
+  end
   return true, { canaries = #results, nodes_asked = nodes_asked, nodes_answered = nodes_answered, off = #off, notice = noticed,
     observed = string.format("%d canary(ies) ran on this node and %d peer node(s) ran their own; %d off%s%s",
       #results, nodes_answered, #off, #off > 0 and (" (" .. table.concat(off, ", ") .. ")") or "",
-      fleet_recorded and "" or " - the deploy recorded no per-node outcome, so the fleet was not asked") }
+      fleet_recorded and "" or " - the deploy recorded no per-node outcome, so the fleet was not asked") .. (#not_proven.listed > 0 and (" | NOT PROVEN ON ANY NODE: " .. table.concat(not_proven.listed, ", ")) or "") }
 end
 
 impl.deploy = function(run, options)
