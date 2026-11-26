@@ -70,12 +70,33 @@ export SEQ_LOG="$W/seq.log" SEQ_MODE="$W/mode" SEQ_COMMIT="$COMMIT"
 in_place() { # <dir> <commit>
   local dir="$1" commit="$2"
   mkdir -p "$dir/lua-core/lua/core" "$dir/scripts"
-  printf '#!/bin/sh\nprintf "wa-stub\\n"\n' > "$dir/wa"; chmod +x "$dir/wa"
+  # A stub that DECLARES its interface, because a lua part is checked against the program that will run it.
+  printf '#!/bin/sh\n[ "$1" = --interface ] && { echo %s; exit 0; }\nprintf "wa-stub\\n"\n' "$HOST_INT" > "$dir/wa"
+  chmod +x "$dir/wa"
   printf 'sentinel' > "$dir/wa-sentinel"
   printf 'init' > "$dir/lua-core/lua/core/init.lua"
   printf 'deploy' > "$dir/scripts/deploy.sh"
   printf 'commit=%s\nbranch=main\n' "$commit" > "$dir/installed.txt"
 }
+# a lua part, built here exactly as scripts/test-lua-part.sh builds one: a tree + manifest, tarred, and pinned
+a_lua_part() { # <tree dir> <out> <interface>
+  local dir="$1" out="$2" int="$3"
+  mkdir -p "$dir/lua/core"
+  printf 'init from the part for %s\n' "$int" > "$dir/lua/core/init.lua"
+  printf 'vendored\n' > "$dir/lua/core/vendor.lua"
+  { printf 'capabilities %s\n' "$int"; printf 'commit deadbeefcafe\n'
+    printf '%s  lua/core/init.lua\n' "$(sha256sum < "$dir/lua/core/init.lua" | awk '{print $1}')"
+    printf '%s  lua/core/vendor.lua\n' "$(sha256sum < "$dir/lua/core/vendor.lua" | awk '{print $1}')"
+  } > "$dir/manifest.txt"
+  ( cd "$dir" && tar czf "$out" manifest.txt lua )
+}
+part_lock() { # <lock> <part> <interface>
+  local sha bytes
+  sha="$(sha256sum < "$2" | awk '{print $1}')"; bytes="$(wc -c < "$2" | tr -d '[:space:]')"
+  { printf 'compat 1\n'; printf 'lua-core %s %s interface=%s\n' "$sha" "$bytes" "$3"; } > "$1"
+}
+HOST_INT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OTHER_INT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 mkdir -p "$W/root/scripts" "$W/root/ui" "$W/lua-stage/lua/core"
 printf 'deploy' > "$W/root/scripts/deploy.sh"; printf 'ui' > "$W/root/ui/index.html"
 printf 'init' > "$W/lua-stage/lua/core/init.lua"
@@ -164,6 +185,31 @@ bash scripts/version-sequence.sh --install "$I5" --candidate "$I5/wa" --commit "
   && fail "member required: a missing lua-core must fail the sequence"
 grep -q 'version_folders_member_missing: lua-core' "$W/seq5.log" || { sed -n '1,8p' "$W/seq5.log" >&2; fail "member required: the failure is not named"; }
 ok
+
+# --- 5. the lua-core member COMES FROM A PART ---------------------------------------------------------------
+I6="$W/i6"; in_place "$I6" "$COMMIT"; echo ok > "$SEQ_MODE"
+a_lua_part "$W/part-tree" "$W/lua-core-good.tar.gz" "$HOST_INT"
+part_lock "$W/lua.part.lock" "$W/lua-core-good.tar.gz" "$HOST_INT"
+bash scripts/version-sequence.sh --install "$I6" --candidate "$I6/wa" --commit "$COMMIT" --root "$W/root" \
+  --upgrade "$W/upgrade-stub.sh" --share "$W/share6" \
+  --lua-part "$W/lua-core-good.tar.gz" --lua-lock "$W/lua.part.lock" > "$W/seq6.log" 2>&1 \
+  || { sed -n '1,12p' "$W/seq6.log" >&2; fail "part: a good lua part must install through the sequence"; }
+grep -q 'lua_part_filled' "$W/seq6.log" || { sed -n '1,12p' "$W/seq6.log" >&2; fail "part: the part did not fill the member"; }
+sealed="$W/share6/versions/$ID/lua-core/lua/core/init.lua"
+[ -f "$sealed" ] || fail "part: the sealed version has no lua/core/init.lua from the part"
+grep -q "init from the part for $HOST_INT" "$sealed" || fail "part: the sealed member is not the part's tree"
+[ "$(WA_SHARE_ROOT="$W/share6" bash -c '. scripts/lib/versions.sh; wa_version_current')" = "$ID" ] || fail "part: current does not name the version"
+ok
+# a part whose interface differs is refused BEFORE the seal, and the pointer does not move
+I7="$W/i7"; in_place "$I7" "$COMMIT"; echo ok > "$SEQ_MODE"
+a_lua_part "$W/part-tree2" "$W/lua-core-bad.tar.gz" "$OTHER_INT"
+part_lock "$W/lua.bad.lock" "$W/lua-core-bad.tar.gz" "$OTHER_INT"
+bash scripts/version-sequence.sh --install "$I7" --candidate "$I7/wa" --commit "$COMMIT" --root "$W/root" \
+  --upgrade "$W/upgrade-stub.sh" --share "$W/share7" \
+  --lua-part "$W/lua-core-bad.tar.gz" --lua-lock "$W/lua.bad.lock" > "$W/seq7.log" 2>&1 \
+  && fail "part: a part whose interface differs must not install"
+grep -q 'lua_part_interface_mismatch\|version_install_lua_part_refused' "$W/seq7.log" || { sed -n '1,12p' "$W/seq7.log" >&2; fail "part: the mismatch is not named"; }
+[ ! -d "$W/share7/versions/$ID" ] && ok || fail "part: a refused part still produced a sealed version"
 
 echo "version sequence ok ($n checks)"
 

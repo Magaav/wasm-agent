@@ -31,7 +31,7 @@ cd "$(dirname "$0")/.." 2>/dev/null || true
 say() { printf 'version-sequence: %s\n' "$*"; }
 die() { printf 'version-sequence: %s\n' "$*" >&2; exit 2; }
 
-INSTALL="" CANDIDATE="" COMMIT="" ROOT="" UPGRADE="" LUA_STAGE="" SHARE=""
+INSTALL="" CANDIDATE="" COMMIT="" ROOT="" UPGRADE="" LUA_STAGE="" SHARE="" LUA_PART="" LUA_LOCK=""
 REASON="version folders" FORCE_REASON="" VIA="version-sequence" SENTINEL_FAIL_EXPECTED=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +42,8 @@ while [ $# -gt 0 ]; do
     --upgrade) UPGRADE="${2:-}"; shift 2 ;;
     --lua-stage) LUA_STAGE="${2:-}"; shift 2 ;;
     --share) SHARE="${2:-}"; shift 2 ;;
+    --lua-part) LUA_PART="${2:-}"; shift 2 ;;
+    --lua-lock) LUA_LOCK="${2:-}"; shift 2 ;;
     --reason) REASON="${2:-}"; shift 2 ;;
     --force-reason) FORCE_REASON="${2:-}"; shift 2 ;;
     --via) VIA="${2:-}"; shift 2 ;;
@@ -72,8 +74,17 @@ WA_VERSION_STAGING="$STAGE" WA_UPGRADE_FORCE_REASON="$FORCE_REASON" \
   WA_INSTALL_DIR="$INSTALL" WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA="$VIA" \
   bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL/deploy-upgrade.log" 2>&1 \
   || die "version_folders_stage_failed: see $INSTALL/deploy-upgrade.log"
-[ -d "$LUA_STAGE" ] || die "version_folders_member_missing: lua-core (${LUA_STAGE:-<none>} is not there)"
-cp -a "$LUA_STAGE" "$STAGE/lua-core" || die "version_folders_member_failed: lua-core"
+if [ -n "$LUA_PART" ]; then
+  # THE LUA CORE ARRIVES AS A SIGNED PART (lua-core-is-a-signed-part): step 3 fills the member from it, checks the
+  # interface against the staged program and verifies every file - so nothing is copied here and the member is
+  # required all the same, by the part's own refusal if it is not good.
+  [ -f "$LUA_PART" ] || die "version_folders_member_missing: lua-core part ($LUA_PART is not there)"
+  [ -f "$LUA_LOCK" ] || die "version_folders_member_missing: lua-core lock (${LUA_LOCK:-<none>} is not there)"
+  say "step 2 lua-core comes from the part $LUA_PART"
+else
+  [ -d "$LUA_STAGE" ] || die "version_folders_member_missing: lua-core (${LUA_STAGE:-<none>} is not there)"
+  cp -a "$LUA_STAGE" "$STAGE/lua-core" || die "version_folders_member_failed: lua-core"
+fi
 [ -d "$ROOT/scripts" ] || die "version_folders_member_missing: scripts ($ROOT/scripts is not there)"
 mkdir -p "$STAGE/scripts" && cp -a "$ROOT/scripts/." "$STAGE/scripts/" || die "version_folders_member_failed: scripts"
 [ -d "$ROOT/ui" ] || die "version_folders_member_missing: ui ($ROOT/ui is not there)"
@@ -81,8 +92,14 @@ cp -a "$ROOT/ui" "$STAGE/ui" || die "version_folders_member_failed: ui"
 
 # 3. SEAL AND POINT - before any restart.
 say "SEQSTEP 3 seal and point"
+if [ -n "$LUA_PART" ]; then
+  bash "$(dirname "$0")/version-install.sh" --staging "$STAGE" --commit "$COMMIT" --install "$INSTALL" \
+    --lua-part "$LUA_PART" --lua-lock "$LUA_LOCK" \
+    || die "version_folders_seal_failed: the staged version could not be sealed or pointed at (lua part)"
+else
 bash "$(dirname "$0")/version-install.sh" --staging "$STAGE" --commit "$COMMIT" --install "$INSTALL" \
   || die "version_folders_seal_failed: the staged version could not be sealed or pointed at"
+fi
 
 # 4. RESTART through the pointer; a failed restart moves the pointer BACK by one rename.
 say "SEQSTEP 4 restart through the pointer"
