@@ -146,5 +146,17 @@ do
 end
 check("and NOTHING was deleted (" .. before_files .. " -> " .. after_files .. ")", before_files == after_files)
 
+-- 6. THE CUT'S DEPLOY WAIT SEES IT: the wait settles on the state a RECORD carries (land.deploy_settles), so a
+-- record left at queued made it poll an install that had finished - the openclaw event. The chain, driven here: the
+-- settle writes installed into the file, and the wait own predicate reads that state as settled.
+local land = dofile("lua/core/land.lua")
+check("the wait treats installed as settled", land.deploy_settles("installed") == true)
+check("and failed too", land.deploy_settles("failed") == true)
+check("but QUEUED is NOT settled - which is why a queued record made the cut poll", land.deploy_settles("queued") == false)
+check("and unknown is not a verdict", land.deploy_settles("unknown") == false)
+local settled_record = read_json(records .. "/" .. ID .. ".json")
+check("a record settled by the install is what the wait settles on (state=" .. tostring(settled_record and settled_record.state) .. ")",
+  settled_record and land.deploy_settles(tostring(settled_record.state)) == true)
+
 print("update settles ok (" .. n .. " checks)")
 
