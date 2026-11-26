@@ -87,7 +87,10 @@ else
   if [ -n "$LUA_PART" ]; then
     . scripts/lib/lua-part.sh
     [ -n "$LUA_LOCK" ] || die "version_install_lua_part: --lua-part needs --lua-lock"
-    [ -n "$HOST_INTERFACE" ] || die "version_install_lua_part: --lua-part needs --host-interface (today: the running tree manifest capabilities line)"
+    # THE HOST DECLARES ITS OWN INTERFACE. The staged program is the host that will RUN this tree, so its
+    # `--interface` is the answer - not a manifest read, which only describes a host already running.
+    [ -n "$HOST_INTERFACE" ] || HOST_INTERFACE="$(wa_lua_part_host_interface "$STAGING/wa")" \
+      || die "version_install_interface_unavailable: the staged program cannot declare its interface (nothing sealed, no pointer moved)"
     wa_lua_part_fill "$LUA_PART" "$LUA_LOCK" "$STAGING/lua-core" "$HOST_INTERFACE" \
       || die "version_install_lua_part_refused: the part did not verify or its interface does not match (nothing was sealed, no pointer moved)"
   fi

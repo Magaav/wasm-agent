@@ -128,5 +128,32 @@ grep -q 'lua_part_interface_mismatch' "$W/fill2.log" || { sed -n 1,3p "$W/fill2.
 [ -f "$W/member2/lua-core/keep.lua" ] || fail "R2: a refused part replaced the tree it must not touch"
 ok
 
+# R3b: the interface comes from the HOST's own declaration, not from a manifest read ----------------------------
+# The staged program is the host that will run the tree, so its --interface is the only correct source. A program
+# that answers garbage, or is not there, is refused by name rather than defaulted.
+cat > "$W/host-good" <<'HG'
+#!/bin/sh
+[ "$1" = --interface ] && { echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; exit 0; }
+exit 0
+HG
+chmod +x "$W/host-good"
+[ "$(wa_lua_part_host_interface "$W/host-good")" = "$HOST_INT" ] || fail "R3b: a host that declares its interface must be read"
+ok
+cat > "$W/host-old" <<'HO'
+#!/bin/sh
+[ "$1" = --interface ] && { echo "unknown command: --interface"; exit 2; }
+exit 0
+HO
+chmod +x "$W/host-old"
+wa_lua_part_host_interface "$W/host-old" 2> "$W/e7" && fail "R3b: a host that cannot declare its interface must be refused"
+grep -q 'lua_part_interface_undeclared_by_host' "$W/e7" || { sed -n 1,2p "$W/e7" >&2; fail "R3b: the refusal is not named"; }
+ok
+wa_lua_part_host_interface "$W/nope" 2> "$W/e8" && fail "R3b: a missing host must be refused"
+grep -q 'lua_part_host_missing' "$W/e8" || fail "R3b: the missing-host refusal is not named"
+ok
+# and the installer no longer DEMANDS --host-interface when it can ask the staged program
+grep -q 'wa_lua_part_host_interface' scripts/version-install.sh || fail "R3b: version-install.sh does not ask the staged program"
+ok
+
 echo "lua part ok ($n checks)"
 

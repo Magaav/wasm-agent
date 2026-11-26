@@ -130,3 +130,28 @@ wa_lua_part_fill() {
   printf 'lua_part_filled %s interface=%s\n' "$tree" "$host"
   return 0
 }
+
+# <program> -> the interface THAT PROGRAM declares, on stdout, or a named refusal.
+#
+# `wa --interface` is the declaration (commit 0cb4675c); taking it from the program that will RUN the tree is the
+# only correct source. The earlier version of this file inferred it from a manifest, which is right only while a
+# node already runs a tree - it says nothing about the NEW host a part is being prepared for.
+#
+#   lua_part_interface_undeclared_by_host   the program answered nothing like a digest
+#   lua_part_host_missing                  the program is not there or not executable
+wa_lua_part_host_interface() {
+  local program="${1:?program}" answer
+  [ -x "$program" ] || { printf 'lua_part_host_missing: %s
+' "$program" >&2; return 2; }
+  answer="$("$program" --interface 2>/dev/null | head -1)"
+  case "$answer" in
+    ''|*[!0-9a-f]*) printf 'lua_part_interface_undeclared_by_host: %s answered %s (it predates wa --interface?)
+' "$program" "${answer:-<nothing>}" >&2
+                    return 3 ;;
+  esac
+  [ "${#answer}" = 64 ] || { printf 'lua_part_interface_undeclared_by_host: %s answered %s characters, not a digest
+' "$program" "${#answer}" >&2; return 3; }
+  printf '%s
+' "$answer"
+  return 0
+}
