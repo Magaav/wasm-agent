@@ -191,3 +191,27 @@ unchanged: no capability description, no schema, no Lua file was touched (`git s
   own process, but rule 17 says stop the pid you started; the harness itself kills `supervisor.pid`.
 - The commit trailer names `wa worker (wasm-agent)`: this harness does not report a model id, and inventing
   one would be a false record. If the fleet wants a specific id there, it needs to be corrected by hand.
+
+
+## Slice 2 — the runner leaves the node (ff4a6db7)
+
+`operations.rs` is a wire client now; `wa-operations-supervisor` is its own 7,703,664 B program with its own
+facts (`wa-files` for a program's magic/digest/PATH, `wa-disk` for the cap, `wa-tool-progress` for both proxy
+stores), and the node STARTS it on first use - no operator step, no in-process fallback left to hide behind.
+
+| | before (slice 1) | after |
+|---|---|---|
+| the node, `wa` | 79,717,928 B | **79,180,384 B** |
+| what a landing here ships | the whole node | **7,703,664 B** |
+| touch `operations.rs`, build the node | 23.45 s (recompiled the runner) | **3.05 s** (the node is not recompiled; supervisor rebuild 2.54 s) |
+
+Proofs: runner suite 55/0, disk 22/0, and the rows through the wire - cwd 31, answer-not-a-raise 9,
+blocked-on 13, cpu-priority 18, queue-priority 26, survives-turn 16, supervisor row 43 (which also proves the
+supervisor is its own binary). The host-fact tests moved with the runner and install `test_facts`, which
+answers from the same leaf crates the supervisor uses and is thread-local - a process-global there made one
+test's cancel flag cancel another test's child (two tests failed that way; fixed, not loosened).
+
+Named remainder: `wa-operation` (spawn + ledger) is linked by BOTH the node and the supervisor - the node needs
+`quarantine` and `scrub_git_env`, and extracting them needs the ledger's sqlite and `legacy::creation`, so that
+extraction was reverted rather than shipped half-done. A landing in the runner's area no longer rebuilds the
+node; a landing in `wa-operation` still does.
