@@ -40,9 +40,10 @@ not belong to the host or the component… no wasmtime, no threads and no I/O"*;
 * **`rust/wa-kernel-runtime/src/stt_host.rs`** — the loader and `available()` in mesh's shape, **one**
   instance for the process (the ledger is the seam's state; every `stt_node` call already serialises on its
   runtime mutex), and the four async calls on wasmtime's async path (`run_concurrent` inside
-  `tokio::time::timeout`, the three error layers flattened in one named `flatten`). It needs its own
-  engine (`async_support(true)` + epoch + ticker) because `components::engine` is the sync one every
-  other seam shares.
+  `tokio::time::timeout`, the three error layers flattened in one named `flatten`). It shares
+  `components::engine()` with every other seam: the first shape gave it an engine of its own, and wasmtime
+  50 then reported `Config::async_support` as **deprecated, "no longer has any effect"** — the async call
+  path runs on the shared engine, so there is no second engine and no second epoch ticker in the node.
 * **`stt_node.rs`** — `routed()` asks the **feature resolver** per call (`wa_features::status("stt")`;
   `WA_STT_COMPONENT` is the resolver's override, never a product env read), `handle` tries the guest
   first, a refusal's word feeds `metrics.record_refusal_word` (the crate's own spellings) and its bytes

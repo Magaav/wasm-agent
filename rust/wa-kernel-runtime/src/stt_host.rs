@@ -107,26 +107,12 @@ static SERVED: Mutex<Option<Served>> = Mutex::new(None);
 
 /// The async engine, its epoch ticker, and the runtime the calls park on. One of each for the process:
 /// a runtime per call would cost more than the call.
+/// The engine every component already shares. This seam was written with one of its own because the
+/// async path was expected to need it; wasmtime 50 says otherwise - its Config::async_support is
+/// deprecated there ("no longer has any effect"), and the async call path runs on the shared engine. So
+/// there is no second engine and no second epoch ticker here.
 fn engine() -> Result<Engine, String> {
-    static ENGINE: OnceLock<Engine> = OnceLock::new();
-    if let Some(engine) = ENGINE.get() {
-        return Ok(engine.clone());
-    }
-    let mut config = WasmConfig::new();
-    config.wasm_component_model(true);
-    config.async_support(true);
-    config.epoch_interruption(true);
-    let engine = Engine::new(&config).map_err(|error| format!("component_engine:{error}"))?;
-    if ENGINE.set(engine.clone()).is_ok() {
-        std::thread::Builder::new()
-            .name("wa-stt-epoch".into())
-            .spawn(move || loop {
-                std::thread::sleep(TICK);
-                engine.increment_epoch();
-            })
-            .map_err(|error| format!("epoch_ticker:{error}"))?;
-    }
-    Ok(ENGINE.get().expect("engine initialized").clone())
+    crate::components::engine().map_err(|error| format!("component_engine:{error}"))
 }
 
 fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
