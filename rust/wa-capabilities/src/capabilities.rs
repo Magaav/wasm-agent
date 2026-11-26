@@ -274,7 +274,10 @@ pub const REGISTRY: &[Capability] = &[
     // The same generic door as `whatsapp_index`, declaring the other effect: the ops that ASK THE PHONE
     // ({op, ...args}, today `backfill`). A read must not ride it and a phone request must not ride the
     // read door - `seam::Op::effect` decides, and the refusal names the right row (2026-11-25).
-    plain!("whatsapp_request", Network, crate::whatsapp_query::request, "Ask the wa-whatsapp component one question that reaches the phone: {op, ...args}, op being backfill; the answer is the one whatsapp_<op> gives"),
+    plain!("whatsapp_request", Network, crate::whatsapp_query::request, "Ask the wa-whatsapp component one question that reaches the phone: {op, ...args}, op being backfill; the answer is the one whatsapp_<op> gives"),    plain!("whatsapp_request", Network, crate::whatsapp_query::request, "Ask the wa-whatsapp component one question that reaches the phone: {op, ...args}, op being backfill; the answer is the one whatsapp_<op> gives"),
+    // The third class, the same shape: the questions whose answer is a file this node writes ({op,
+    // ...args}, today `download`). `WritesFiles` is what a sandbox must not join as a read.
+    plain!("whatsapp_file", WritesFiles, crate::whatsapp_query::file, "Ask the wa-whatsapp component to write one thing into this node's bounded download folder: {op, ...args}, op being download; the answer is the path, or the one whatsapp_download gives"),
     // ---- Email (docs/EMAIL-CONNECTOR.md) -------------------------------------------------------
     // The same two shapes as the WhatsApp tools: an effect (`email_send`) is a job on `email.outbox`
     // after the node's `email.send` policy check, a question (`email_search`/`email_read`) is a job on

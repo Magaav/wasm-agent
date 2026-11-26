@@ -602,3 +602,38 @@ fn the_network_door_carries_backfill_and_refuses_a_read() {
     assert_eq!(refused["error"], "whatsapp_search_use_its_own_door");
     assert_eq!(door_q.stats(seam::QUEUE).unwrap().ready, ready_before, "a read queued nothing through the network door");
 }
+
+/// The file door carries the op whose answer is a file this node writes, and only that class: `download`
+/// answers through it byte for byte as through its named row, in the class the row declares, at the
+/// download's own wait; a read and a phone request are refused by name and queue nothing.
+#[test]
+fn the_file_door_carries_download_and_refuses_the_other_classes() {
+    let (_h1, named_q) = queue("file-named");
+    let (_h2, door_q) = queue("file-door");
+    let args = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"});
+    let named = ask_in(&named_q, seam::Op::Download, &args, 1, BUILD);
+    let mut with_op = args.clone();
+    with_op["op"] = serde_json::json!("download");
+    // The same call the door makes, through the same wait, so the two answers are comparable.
+    let through_door = ask_class_in(&door_q, &with_op, "file", seam::Effect::WritesFiles, 1, BUILD);
+    assert_eq!(named["error"], "whatsapp_download_slow");
+    assert_eq!(json_text(&named), json_text(&through_door), "the same answer bytes");
+    let named_job = named_q.job(wa_queue::JobId(named["id"].as_u64().expect("named id"))).unwrap().unwrap();
+    let door_job = door_q.job(wa_queue::JobId(through_door["id"].as_u64().expect("door id"))).unwrap().unwrap();
+    assert_eq!(named_job.payload, door_job.payload, "the component is asked the same bytes");
+
+    for (op, effect) in [("search", seam::Effect::ReadOnly), ("backfill", seam::Effect::Network)] {
+        let mut asked = serde_json::json!({"q": "boleto", "count": 5});
+        asked["op"] = serde_json::json!(op);
+        let ready_before = door_q.stats(seam::QUEUE).unwrap().ready;
+        let refused = ask_class_in(&door_q, &asked, "file", seam::Effect::WritesFiles, 1, BUILD);
+        assert_eq!(refused["error"], format!("whatsapp_{op}_use_its_own_door"), "{op} is not a file op");
+        assert_eq!(q_stats_ready(&door_q), ready_before, "{op} queued nothing through the file door");
+        let _ = effect;
+    }
+}
+
+/// The ready count of the query queue, as the tests above read it.
+fn q_stats_ready(q: &wa_queue::Queue) -> usize {
+    q.stats(seam::QUEUE).unwrap().ready
+}

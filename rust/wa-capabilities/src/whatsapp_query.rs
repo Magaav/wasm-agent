@@ -95,10 +95,45 @@ pub extern "C-unwind" fn media(l: *mut wa_host_support::lua::LuaState) -> std::o
 
 /// `host.whatsapp_download({chat, id})` - decrypt to the bounded directory and answer with the path.
 pub extern "C-unwind" fn download(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    // Its own row names the op, so this bind takes the arguments and no `op` field: delegating it to the
+    // generic door would have made `whatsapp_download({chat, id})` demand one (measured 25/11 - the row
+    // caught it, not a reviewer).
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(args) => component_absent(seam::Op::Download).unwrap_or_else(|| ask_download(&args)),
         Err(_) => seam::refusal(seam::Op::Download, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// `host.whatsapp_file({op, ...args})` - the ops that write into this node's bounded folder.
+///
+/// The third and last effect class, carried the same way: the question in the request, the class on the
+/// row. `download` is the same conversation as the other doors (validate, enqueue on `whatsapp.query`,
+/// wait) with one difference that stays here - its answer is a FILE the node writes from the job's
+/// progress stream, so it is the one path that does not end in a stored answer.
+pub extern "C-unwind" fn file(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer_file(l, "file")
+}
+
+/// The file door's answer: the class gate and the absent answer are the read door's, the wait is the
+/// download's own (`DOWNLOAD_WAIT_MS`: a CDN fetch plus a decrypt).
+fn answer_file(l: *mut wa_host_support::lua::LuaState, door: &str) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => match index_op(&args) {
+            Some(op) => match seam::Op::parse(op) {
+                Some(asked) if asked.effect() != seam::Effect::WritesFiles => seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is not what this door declares: ask whatsapp_{op}, the row that declares its effect"),
+                ),
+                _ => component_absent_text(op).unwrap_or_else(|| ask_download(&args)),
+            },
+            None => seam::refusal_text(door, "op_required", OP_REQUIRED),
+        },
+        Err(_) => seam::refusal_text(door, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
     1

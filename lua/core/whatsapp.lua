@@ -117,7 +117,7 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, id = args.id } end,
   },
   {
-    verb = 'download', capability = 'whatsapp_download', effect = 'write',
+    verb = 'download', capability = 'whatsapp_file', effect = 'write',
     description = 'Decrypt the media of one indexed WhatsApp message on the node that holds the account and answer with the file path there (mime, filename, bytes and sha256 included). The decrypted file lands in the bounded download folder of the node that holds the account, and the decrypt is bounded by max_bytes (524288 at most): a video larger than the bound answers download_too_large with its size instead of pretending; view-once and revoked media is never downloadable. Feed the path to OCR or transcription tools.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 }, max_bytes = { type = 'integer', minimum = 1, maximum = 524288 },
@@ -191,7 +191,7 @@ end
 --- instead of one row per op. `M.invoke` hands the word from this catalogue row, never from the caller's
 --- arguments, so a model cannot reach an op its tool does not name. One per effect class: reads ride the
 --- read-only door, the questions that reach the phone ride the network one.
-M.GENERIC = { whatsapp_index = true, whatsapp_request = true }
+M.GENERIC = { whatsapp_index = true, whatsapp_request = true, whatsapp_file = true }
 
 --- The exact name one verb is offered as (`mcp_whatsapp_read`).
 function M.name(verb) local tool = M.by_verb[verb]; return tool and tool.name or nil end

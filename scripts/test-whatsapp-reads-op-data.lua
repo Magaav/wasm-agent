@@ -118,6 +118,24 @@ local read_on_network = json.decode(tostring(host.whatsapp_request(json.encode({
 ok(read_on_network.error == "whatsapp_search_use_its_own_door", "a read is refused by the network door")
 ok(read_on_network.ok == false and read_on_network.effect == "none", "and changes nothing")
 
+-- The FILE door (`whatsapp_file`): the op whose answer is a file this node writes. Its answers are
+-- compared on the refusal shape (a full download waits for a decrypt, which a scratch node has nobody to
+-- do), and the other classes are refused by name.
+local named_download = tostring(host.whatsapp_download(json.encode({})))
+local door_download = tostring(host.whatsapp_file(json.encode({ op = "download" })))
+ok(named_download == door_download, "download: the file door answers the named row's bytes")
+local download_tool = whatsapp.tool("mcp_whatsapp_download")
+ok(download_tool ~= nil and download_tool.capability == "whatsapp_file",
+  "the download tool row points at the file door")
+local via_download_tool = whatsapp.invoke(download_tool, {})
+local dfine, dwhy = same(json.decode(named_download), via_download_tool)
+ok(dfine, "download: the tool door answers the named row's document (" .. tostring(dwhy) .. ")")
+for _, op in ipairs({ "search", "backfill" }) do
+  local wrong = json.decode(tostring(host.whatsapp_file(json.encode({ op = op, q = "x", count = 5 }))))
+  ok(wrong.error == "whatsapp_" .. op .. "_use_its_own_door", op .. " is refused by the file door")
+  ok(wrong.effect == "none", op .. " through the file door changes nothing")
+end
+
 -- The generic door is a READ door: an op that asks the phone or writes a file is refused by name and
 -- queues nothing, so a sandbox that joined it as a read cannot be made to cause an effect through it.
 for _, case in ipairs({ { op = "backfill", detail = "count" }, { op = "download" } }) do
