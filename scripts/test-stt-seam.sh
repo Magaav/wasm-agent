@@ -35,6 +35,11 @@ cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-stt-remote |
 echo "== cargo test -p wa-kernel-runtime stt_host:: (the seam's happy path, against the built artifact)"
 WA_STT_COMPONENT_WASM="$artifact" cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime stt_host:: || status=1
 
+# The node-level case the module test binary cannot hold: the switch is process-global, so it lives in
+# a test target of its own. A configured node take is admitted by the guest, its replay is refused from
+# the component ledger, and no fallback line may appear.
+echo "== cargo test -p wa-kernel-runtime --test stt_node_routed (a configured node, routed)"
+WA_STT_COMPONENT_WASM="$artifact" cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime --test stt_node_routed || status=1
 bin="${WA_BIN:-}"
 for c in "$TARGET/release/wa" "$ROOT/rust/target/release/wa" "$(command -v wa 2>/dev/null)"; do
   [ -n "$bin" ] && break; [ -n "$c" ] && [ -x "$c" ] && bin="$c"

@@ -89,15 +89,16 @@ microseconds of work per call. Reported rather than hidden, because it is the la
 
 ## What is not done, and why (measured, not deferred by preference)
 
-* **The routed happy path IS now proven, in process** — `stt_host::tests::the_guest_admits_one_call_and_refuses_its_own_replay`
-  (wired through `scripts/test-stt-seam.sh`, added to `scripts/test.sh` beside the other stt rows) runs the
-  seam against the built artifact: the guest decodes a real `take` envelope (`op`, `from`, `to`, `rid`
-  checked), **refuses its own replay** with `replayed_request` — from the component's ledger, which is the
-  point of holding one instance — and refuses a caller that is not one of the owner's nodes with
-  `unknown_caller`. What is still not exercised is the *node-level* path (a configured node's `stt_call`
-  reaching a successful admission through `server.lua`): a scratch home has no identity, so there the seam
-  is asked, answers `component_not_configured`, and the native rule runs — logged once. The row that would
-  give a node an identity is the two-node row, which fails on the base binary too.
+* **The routed path is proven at both levels.** In process, `stt_host::tests::the_guest_admits_one_call_and_refuses_its_own_replay`
+  drives the seam against the built artifact: the guest decodes a real `take` envelope, refuses its own
+  replay from its own ledger (`replayed_request` — the point of holding one instance) and refuses a caller
+  that is not one of the owner's nodes (`unknown_caller`). At the node's own level,
+  `tests/stt_node_routed.rs` — a **test target of its own process**, because the switch it needs
+  (`WA_COMPONENTS_DIR`) is process-global and setting it inside the module's binary made two neighbouring
+  tests share the guest's one instance (measured) — configures a node (`me: producer`, owners
+  `producer, worker`), installs the artifact with its pin, submits a note, and sends the same wire call the
+  two-node row sends: the guest **admits** the take, the replay is refused from the component's ledger, and
+  `stt_node::fallbacks()` stays empty. Both run from `scripts/test-stt-seam.sh`.
 * **`reply-ok` is routed** (the reply is the other half of the wire this layer owns); **`encode` and
   `signature-message` are not in the world at all**, because the producer composes and signs inside
   `wa-stt-remote` where the signer is - routing those would move that loop, a change to make with the
