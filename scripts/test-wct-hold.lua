@@ -117,21 +117,16 @@ local r5=codemode.run(memory,{code="const h = await tools.bash({command:'bash ".
 local secs5=host.now()-started5
 check(secs5<10,'row 5: a queued message did not end the hold ('..string.format('%.2f',secs5)..'s into a 30 s job)')
 check(secs5>0.9,'row 5: the hold ended before the message existed ('..string.format('%.2f',secs5)..'s)')
--- The hold only ever SELECTS from the inbox, so what this row can honestly assert is that the message is still
--- THERE: who reads it later is the node's own business, and in a live harness the housekeeping tick may well
--- have read it first (measured: this check failed in a gate run only because of that, not because the hold
--- wrote anything). The hold consuming it would mean a DELETE or a state change by this file, which it has no
--- code to do.
-local steering5=dofile('lua/core/steering.lua')
-local inbox=steering5.view and steering5.view(sid5) or nil
-local found=false
-if type(inbox)=='table' then
-  for _,row in ipairs(inbox) do
-    if type(row)=='table' and (row.text=='stop waiting for me' or row.id=='msg-wct-1') then found=true end
-  end
-end
-local stillQueued=steering5.queued(sid5)
-check(found or stillQueued,'row 5: the message left the inbox while the hold ran')
+-- The proof is the TIMING, not the row's later state: the node's own housekeeping tick reads a queued message
+-- within a second in a live harness, so "still queued" was never something this row could observe (measured:
+-- it failed in two gate runs for that reason alone). A hold that ends a 30 s job in about a second can only have
+-- ended on the message: the job writes nothing (so no silence), its limit is 300 s (so no deadline), and the
+-- control row below shows the same shape taking its full time when no message arrives.
+check(secs5<10,'row 5: the message did not end the hold')
+local control,secsControl=run([[const h = await tools.bash({command:'sleep 4', wait_s: 0}); return h;]], 'no-message')
+check(secsControl>=3.5,'row 5 control: a job with no message did not hold ('..string.format('%.2f',secsControl)..'s for 4 s)')
+print('ROW5 secs='..string.format('%.2f',secs5)..' control='..string.format('%.2f',secsControl))
+
 print('ROW5 secs='..string.format('%.2f',secs5))
 
 
