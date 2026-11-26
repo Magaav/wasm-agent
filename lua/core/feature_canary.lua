@@ -274,11 +274,14 @@ end
 -- <answers> -> { failed = {...}, off = {...}, proven_nowhere = {...} }
 -- answers: a list of { node = <name>, results = { <run_all/run result tables> } } - this node first.
 --
--- PROVEN NOWHERE IS A RED (25/11). A canary that answered `not_proven` on EVERY node asked was answered
--- nowhere: the account lives on some other node, so the release has proven nothing about that feature. It is
--- not a fail (no node said it was broken) and it is certainly not a pass - so it is named and it is red.
+-- PROVEN NOWHERE IS NAMED, NOT RED (26/11, Fable, which removes the rule of 25/11). This aggregate still says
+-- WHICH features no node could answer, and each entry carries the reason it gave (its stage, e.g. no_data).
+-- What that means for the release is decided one level up (land's canaries step): a not_proven no_data is
+-- listed under "NOT PROVEN ON ANY NODE" and the step passes, because the canary runs in a CLI process on a
+-- serving node and cannot see what that node serves. A FAIL and a cutting (release-update) proven nowhere stay
+-- red there - see M.release_not_proven in lua/core/land.lua.
 function M.aggregate(answers)
-  local proven, asked, failed, off, nowhere = {}, {}, {}, {}, {}
+  local proven, asked, stage_of, failed, off, nowhere = {}, {}, {}, {}, {}, {}
   for _, answer in ipairs(answers or {}) do
     local node = tostring((type(answer) == "table" and answer.node) or "?")
     for _, result in ipairs((type(answer) == "table" and answer.results) or {}) do
@@ -289,9 +292,8 @@ function M.aggregate(answers)
       elseif result.skipped then
         -- off-node is not an answer about this feature's health
       elseif result.not_proven then
-        -- NO STAGE EXCEPTIONS (Fable's final shape, 25/11): a canary not_proven on every node asked was proven
-        -- nowhere, whatever its stage. 'no_data' included.
         asked[feature] = (asked[feature] or 0) + 1
+        stage_of[feature] = tostring(result.stage or "not_proven")
       elseif result.ok then
         -- a pass on this node: already recorded above, and it is not a failure of anything
       else
@@ -301,7 +303,8 @@ function M.aggregate(answers)
   end
   for feature, count in pairs(asked) do
     if not proven[feature] then
-      nowhere[#nowhere + 1] = string.format("%s (not proven on %d node(s) asked)", feature, count)
+      nowhere[#nowhere + 1] = string.format("%s (%s; not proven on %d node(s) asked)",
+        feature, tostring(stage_of[feature] or "not_proven"), count)
     end
   end
   table.sort(failed); table.sort(nowhere)
