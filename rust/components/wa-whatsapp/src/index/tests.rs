@@ -2929,3 +2929,25 @@ fn a_search_that_mixes_chats_labels_every_hit_with_its_chat_and_a_read_never_mix
     let bare = seam::Request { op: "read".into(), ..Default::default() }.validate();
     assert_eq!(bare.unwrap_err().code, "chat_required");
 }
+
+/// P1.3 of whatsapp-index-heals-itself: a search hit carries the newest time the INDEX holds for that
+/// chat (`ChatCard.last`), not only the message's own time - a page of hits from three chats is only
+/// readable when each says how current its chat is. The item's own words: "newest_ts exists in index.rs
+/// but isn't exposed".
+#[test]
+fn a_search_hit_carries_the_newest_timestamp_its_chat_has() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "S1", base(), "o boleto vence amanha"))).unwrap();
+    block_on(put(&store, &direct(LAURA, "Laura", "S2", base() + 60_000, "boleto pago"))).unwrap();
+    let answer = block_on(search(&store, &search_request("boleto"))).unwrap();
+    let hits = answer["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 2);
+    println!("BEFORE/AFTER hit={}", serde_json::to_string(&hits[0]).unwrap());
+    for hit in hits {
+        assert_eq!(
+            hit["chat_newest_ts"].as_i64(),
+            Some(base() + 60_000),
+            "the chat's newest indexed time, not the hit's own: {hit}"
+        );
+    }
+}

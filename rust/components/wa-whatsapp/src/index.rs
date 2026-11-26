@@ -2529,22 +2529,26 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
 
     let mut hits: Vec<(i64, serde_json::Value)> = Vec::new();
     // One card read per chat, not per hit: a page of twenty messages is usually three chats.
-    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // The chat's bad name AND how current its index is: `ChatCard.last` is read with the name, once per
+    // chat, so a hit can say `chat_newest_ts` without a second store read.
+    let mut names: std::collections::HashMap<String, (String, i64)> = std::collections::HashMap::new();
     for candidate in list {
         let Some(record) = load(store, &candidate.chat, &candidate.id).await? else { continue };
         if !matches(&record, request) {
             continue;
         }
         let score = score(&record, &tokens, request.q.as_deref());
-        let chat_name = match names.get(&record.chat) {
-            Some(name) => name.clone(),
+        let (chat_name, chat_newest_ts) = match names.get(&record.chat) {
+            Some(cached) => cached.clone(),
             None => {
-                let name = card_of(store, &record.chat).await?.map(|card| card.best_name().0.to_string()).unwrap_or_default();
-                names.insert(record.chat.clone(), name.clone());
-                name
+                let card = card_of(store, &record.chat).await?;
+                let name = card.as_ref().map(|card| card.best_name().0.to_string()).unwrap_or_default();
+                let last = card.as_ref().map(|card| card.last).unwrap_or(0);
+                names.insert(record.chat.clone(), (name.clone(), last));
+                (name, last)
             }
         };
-        hits.push((score, hit_json(&record, score, &chat_name)));
+        hits.push((score, hit_json(&record, score, &chat_name, chat_newest_ts)));
     }
     // The order this answer is in, decided once: `newest` for a chat-scoped search or one with no query
     // terms (what a person means by "what is new"), `relevance` otherwise (what a person means by
@@ -3336,11 +3340,17 @@ fn score(record: &Record, tokens: &[String], q: Option<&str>) -> i64 {
 /// It is [`crate::view::message`] - the same object a thread read carries, so a hit and a bubble cannot
 /// describe one message two ways - plus the two things only a search knows: the score, and the name of
 /// the chat it was found in (a hit that says `5519…@s.whatsapp.net` makes a reader ask who that is).
-fn hit_json(record: &Record, score: i64, chat_name: &str) -> serde_json::Value {
+fn hit_json(record: &Record, score: i64, chat_name: &str, chat_newest_ts: i64) -> serde_json::Value {
     let mut hit = crate::view::message(record, None);
     hit["own"] = serde_json::Value::Bool(record.own);
     if !chat_name.is_empty() {
         hit["chat_name"] = serde_json::Value::String(chat_name.to_string());
+    }
+    // The newest time the INDEX holds for this hit's chat (not the hit's own `at`): a page from three
+    // chats is only readable when each says how current its chat is, which is what a reader comparing
+    // "what did they say recently" vs "when did I last hear from them" needs.
+    if chat_newest_ts > 0 {
+        hit["chat_newest_ts"] = serde_json::Value::from(chat_newest_ts);
     }
     if score != 0 {
         hit["score"] = serde_json::Value::from(score);
