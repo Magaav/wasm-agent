@@ -6524,6 +6524,23 @@ mod terminal_tests {
         assert_eq!(super::page_rows(&state), 1, "and a page there is still one row, never zero");
     }
 
+    /// The terminal program, for the tests that need a chat to have been drawn: the transcript is on
+    /// the wire now, so a `ConsoleInput` with the default handle has no rows to point a mouse at. It is
+    /// found the way the console finds it; a test that cannot find it FAILS with the build command,
+    /// because a mouse test over an empty chat proves nothing.
+    fn program_screen() -> crate::screen::Screen {
+        let named = std::env::var_os("WA_TERM_BIN").map(std::path::PathBuf::from);
+        let beside = || {
+            std::env::current_exe().ok().and_then(|exe| {
+                exe.ancestors().skip(1).take(6).map(|ancestor| ancestor.join("wa-term")).find(|path| path.is_file())
+            })
+        };
+        match named.or_else(beside) {
+            Some(path) => crate::screen::Screen::remote_at(path),
+            None => panic!("no wa-term program: build it with 'cargo build -p wa-term --bin wa-term', or set WA_TERM_BIN"),
+        }
+    }
+
     /// The wheel moves the chat ONE row per event (Victor 22/11 20:30Z: "the mouse scroll on TUI chat
     /// content is jumping way further than the pg up/down which ticks 1/3 of the content by each tick" ...
     /// "scroll from mouse should scroll line by line"), replacing his earlier wish that one notch equal
@@ -6551,6 +6568,7 @@ mod terminal_tests {
 
         // The key: the editor's own bytes, and the arm the host runs for them.
         let mut keys = super::ConsoleInput::default();
+        keys.transcript = program_screen();
         a_long_chat(&mut keys);
         let bottom = first(&mut keys);
         let mut action = Action::None;
@@ -6596,6 +6614,7 @@ mod terminal_tests {
     fn a_press_on_the_bar_scrolls_it_and_starts_no_selection() {
         use crate::selection::Mouse;
         let mut state = super::ConsoleInput::default();
+        state.transcript = program_screen();
         let mut editor = wa_term::terminal_editor::Editor::default();
         editor.row = 39; editor.width = 80; editor.height = 3;
         state.editor = Some(editor);
@@ -6634,6 +6653,7 @@ mod terminal_tests {
     fn a_drag_onto_the_bar_column_copies_the_chat_and_never_the_bar() {
         use crate::selection::Mouse;
         let mut state = super::ConsoleInput::default();
+        state.transcript = program_screen();
         let mut editor = wa_term::terminal_editor::Editor::default();
         editor.row = 39; editor.width = 80; editor.height = 3;
         state.editor = Some(editor);
