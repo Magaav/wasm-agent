@@ -1837,7 +1837,36 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     let chats = all.len();
     let matches = rank(&all, &query);
     let total = matches.len();
-    let kept: Vec<(u8, ChatCard, String, &'static str)> = matches.into_iter().take(request.limit as usize).collect();
+    // The cursor (`before`): the LAST candidate of the previous page, and this page continues after it in
+    // the same ranking - the ranking is deterministic for one index, so two pages never overlap. A cursor
+    // the index no longer ranks is not an empty answer: the page starts at the beginning and the counts
+    // (`matched`, `next`) still say what the index holds.
+    let cursor = request.before.as_deref().map(str::trim).filter(|cursor| !cursor.is_empty());
+    let after_cursor = match cursor {
+        Some(cursor) => {
+            // Starts at the beginning when the cursor names nothing this ranking holds: an index that
+            // moved under a caller should answer a page, not an empty one.
+            let mut skipped = 0usize;
+            for (at, (_, card, _, _)) in matches.iter().enumerate() {
+                if card.chat == cursor {
+                    skipped = at + 1;
+                    break;
+                }
+            }
+            skipped
+        }
+        None => 0,
+    };
+    let kept: Vec<(u8, ChatCard, String, &'static str)> =
+        matches.into_iter().skip(after_cursor).take(request.limit as usize).collect();
+    // One more candidate after this page? Then `next` names it, which is the whole point: chat 21 and
+    // beyond is a page away instead of unreachable.
+    let more = total.saturating_sub(after_cursor + kept.len());
+    let next = if more > 0 {
+        kept.last().map(|(_, card, _, _)| card.chat.clone()).unwrap_or_default()
+    } else {
+        String::new()
+    };
     // One person, one candidate (operator 17/11: "both pointers should point to same entity"). WhatsApp
     // journals the same person under a phone number AND a hidden `@lid`; the index learned that pair
     // (`ix/al/`), so a chat whose alias is also in the list is folded into the earlier - better ranked,
@@ -1879,9 +1908,12 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
         "candidates": candidates,
         "count": candidates.len(),
         "matched": total,
-        "truncated": total > candidates.len(),
+        "truncated": total > after_cursor + kept.len(),
         "ambiguous": top_count > 1,
     });
+    // `next` is the cursor for the page after this one (empty when this is the last page). It is the
+    // answer's own last candidate, so `before: next` continues exactly where this page stopped.
+    answer["next"] = if next.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(next) };
     if top_count == 1 {
         if let Some(first) = answer["candidates"].as_array().and_then(|list| list.first()).cloned() {
             answer["chat"] = first["chat"].clone();

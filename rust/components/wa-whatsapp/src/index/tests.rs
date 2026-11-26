@@ -2951,3 +2951,52 @@ fn a_search_hit_carries_the_newest_timestamp_its_chat_has() {
         );
     }
 }
+
+/// P2.3 of whatsapp-index-heals-itself: contacts pages, so chat 21 and beyond is reachable. `next` names
+/// the page's own last chat, and `before: next` continues exactly there - two pages never overlap, and the
+/// last page names no next.
+#[test]
+fn contacts_pages_with_a_cursor_so_the_rest_are_reachable() {
+    let store = Memory::new();
+    for i in 0..25u32 {
+        let chat = format!("55119777000{i:02}@s.whatsapp.net");
+        let name = format!("Contato {i:02}");
+        block_on(put(&store, &direct(&chat, &name, &format!("P{i:02}"), base() + i as i64 * 1000, "oi"))).unwrap();
+    }
+    let page = |before: Option<&str>| {
+        let request = verified(seam::Request {
+            op: "contacts".into(),
+            q: Some("Contato".into()),
+            limit: Some(20),
+            before: before.map(str::to_string),
+            ..Default::default()
+        });
+        block_on(contacts(&store, &request)).unwrap()
+    };
+    let chats = |answer: &serde_json::Value| -> Vec<String> {
+        answer["candidates"].as_array().expect("candidates").iter().map(|c| c["chat"].as_str().unwrap_or_default().to_string()).collect()
+    };
+
+    let first = page(None);
+    assert_eq!(first["matched"], 25, "the index knows twenty-five");
+    assert_eq!(chats(&first).len(), 20, "a page is the cap");
+    assert_eq!(first["truncated"], true);
+    let cursor = first["next"].as_str().expect("a cursor for the second page");
+    assert_eq!(Some(cursor), chats(&first).last().map(String::as_str), "the cursor is this page's last chat");
+
+    let second = page(Some(cursor));
+    assert_eq!(chats(&second).len(), 5, "the remaining five are a page away, not lost");
+    assert_eq!(second["matched"], 25, "the count is the index's, not the page's");
+    assert_eq!(second["truncated"], false);
+    assert!(second["next"].is_null(), "the last page names no next");
+    let first_page = chats(&first);
+    let second_page = chats(&second);
+    let overlap: Vec<&String> = second_page.iter().filter(|chat| first_page.contains(chat)).collect();
+    assert!(overlap.is_empty(), "two pages never overlap: {overlap:?}");
+
+    // A cursor the ranking no longer holds (the index moved between calls) is not an empty answer: the
+    // page starts at the beginning and the counts still say what the index has.
+    let stale = page(Some("55119777000999@s.whatsapp.net"));
+    assert_eq!(chats(&stale).len(), 20, "a stale cursor still answers a page");
+    assert_eq!(stale["matched"], 25);
+}
