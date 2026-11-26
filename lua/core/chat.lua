@@ -639,7 +639,9 @@ function M.run(argv)
     if built then pcall(host.status_snapshot, json.encode(spec)) end
   end
 
-  refresh_status = function() snapshot_status({ color = view.live, cached = true }) end
+  -- limits_marker: the CONSOLE fills those rows itself, from the door, on every draw - mid-run the
+  -- interpreter is inside the turn and cannot repaint when a read lands (status-limits-load-on-open).
+  refresh_status = function() snapshot_status({ color = view.live, cached = true, limits_marker = true }) end
 
   -- The model's own wakes (docs/SELF-LOOP.md). A node fires them from its placement tick; an
   -- interactive CLI has no served scheduler, so it claims a due wake between waits and runs the turn

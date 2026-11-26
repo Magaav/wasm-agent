@@ -216,6 +216,39 @@ fn save_cache(provider: &str, at: u64, usage: &Value) {
     let _ = std::fs::write(path, body);
 }
 
+/// The provider a spec asks the console to keep live, and the URL its read goes to: the
+/// `\u{1}limits:<provider>\t<url>` line Lua writes into a mid-run `/status` snapshot. That marker is
+/// what lets the console fill the rows itself - mid-run the interpreter is inside the turn and cannot
+/// repaint when a read lands.
+pub fn marker_of(spec: &Value) -> Option<(String, String, Value)> {
+    let lines = spec.get("lines").and_then(Value::as_array)?;
+    let marker = lines.iter().find_map(|line| line.as_str()?.strip_prefix("\u{1}limits:"))?;
+    let (provider, url) = marker.split_once('\t').unwrap_or((marker, ""));
+    Some((provider.to_string(), url.to_string(), spec.clone()))
+}
+
+/// A spec's marker lines, expanded from the door: the three window rows, or the loading/failure line.
+/// One marker line in, N rows out, in place; a spec without a marker is returned unchanged.
+pub fn expand_rows(spec: &Value, now: u64) -> Value {
+    let Some(lines) = spec.get("lines").and_then(Value::as_array) else { return spec.clone() };
+    let mut out: Vec<Value> = Vec::with_capacity(lines.len());
+    let mut expanded = false;
+    for line in lines {
+        match line.as_str().and_then(|text| text.strip_prefix("\u{1}limits:")) {
+            Some(marker) => {
+                let provider = marker.split('\t').next().unwrap_or(marker);
+                for row in row_texts(provider, now) { out.push(Value::String(row)); }
+                expanded = true;
+            }
+            None => out.push(line.clone()),
+        }
+    }
+    if !expanded { return spec.clone() }
+    let mut spec = spec.clone();
+    spec["lines"] = Value::Array(out);
+    spec
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +265,18 @@ mod tests {
     // The host draws these rows mid-run, so they MUST be the panel's rows. Lua's side pins the same
     // literals (scripts/test-status-midrun.lua): one string, two languages, and a change on either
     // side breaks one of the two pins.
+    // The spec the console draws mid-run carries ONE marker line per provider; the console expands
+    // it from the door on every draw. This is the seam that turns `loading limits...` into bars while
+    // the panel is open, so it is pinned here, in the crate that owns the drawing.
+    #[test]
+    fn the_marker_line_names_the_provider_and_its_url() {
+        let spec = json!({"title": "Status", "lines": ["Status", "\u{1}limits:opencode-go\thttps://x.test.invalid/v1", "Usage in 1"]});
+        let (provider, url, _) = marker_of(&spec).expect("the marker");
+        assert_eq!(provider, "opencode-go");
+        assert_eq!(url, "https://x.test.invalid/v1");
+        assert!(marker_of(&json!({"lines": ["no marker"]})).is_none());
+    }
+
     #[test]
     fn the_bar_and_the_words_are_the_panels_own() {
         let full = "\u{2588}";

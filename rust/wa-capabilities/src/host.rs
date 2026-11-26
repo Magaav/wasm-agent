@@ -4192,6 +4192,10 @@ struct ConsoleInput {
     /// ticker). It lives in that call's **block** in the transcript, never on the
     /// session-status-content row (Victor, 2026-11-10); kept so an unchanged phrase is not redrawn.
     tool_progress: String,
+    /// A panel whose limits rows the CONSOLE fills itself: the provider, and the spec those rows
+    /// belong in. Mid-run the interpreter is inside the turn, so only this thread can repaint the
+    /// rows when the read lands (crate::limits::row_texts). Cleared when the panel closes.
+    panel_limits: Option<(String, String, Value)>,
     /// The `/status` panel as Lua last described it (`host.status_snapshot`), shown by this thread when
     /// `/status` is submitted during a run - Lua is blocked in the model call then and cannot open it.
     status_snapshot: Option<Value>,
@@ -4787,6 +4791,9 @@ fn console_reader() {
                 let _ = refresh_editor_size();
                 expire_notice();
                 repaint_if_due();
+                // A /status panel open over a run draws its limits rows itself: the interpreter is
+                // inside the turn, so this thread is the only one that can repaint them.
+                limit_tick();
             }
             let mut chunk = [0u8; 512];
             let read = read_chunk(&mut handle, &mut chunk);
@@ -4892,9 +4899,18 @@ fn console_reader() {
                                 let running = state.editor.as_ref().is_some_and(|e| e.status);
                                 if running && text.trim() == "/status" {
                                     let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
-                                    if let (Some(spec), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
+                                    if let (Some(snapshot), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
+                                        let spec = crate::limits::expand_rows(&snapshot, epoch_seconds() as u64);
                                         state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
                                         state.host_panel = true;
+                                        // A spec that names a provider's limits keeps its rows live: the
+                                        // reader's tick repaints them when the read lands, mid-run and
+                                        // without the reader closing anything.
+                                        state.panel_limits = crate::limits::marker_of(&snapshot);
+                                        if let Some((provider, url, _)) = state.panel_limits.clone() {
+                                            // The panel opens the read now, off the turn, at once.
+                                            let _ = crate::limits::start(&provider, &url);
+                                        }
                                         continue;
                                     }
                                 }
@@ -4921,6 +4937,7 @@ fn console_reader() {
                                     state.balloon = false;
                                     state.host_panel = false;
                                     state.panel = None;
+                                    state.panel_limits = None;
                                 }
                                 // A queued Enter never ends anything; a send-now line raises the run's
                                 // interrupt exactly while a run is in flight (a Ctrl+Enter at an idle
@@ -5475,6 +5492,29 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
+}
+
+/// Repaint the open panel's limits rows from the door, in place. Called from the reader thread's tick,
+/// which is the only thing running while the interpreter is inside a turn; nothing is drawn when the
+/// rows did not change, so an idle panel costs one `row_texts` call per tick and no frame.
+fn refresh_panel_limits(state: &mut ConsoleInput) {
+    let Some((provider, url, spec)) = state.panel_limits.clone() else { return };
+    if state.panel.is_none() { state.panel_limits = None; return }
+    let fresh = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
+    if fresh.get("lines") == spec.get("lines") { return }
+    let Some((width, rows)) = state.editor.as_ref().map(|editor| (editor.width, editor.row + 1)) else { return };
+    state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&fresh, width, rows));
+    state.panel_limits = Some((provider, url, fresh));
+    let frame = layout_frame(state);
+    let _ = wa_term::terminal_editor::write(&frame);
+}
+
+/// The tick's entry point: the console lock is taken only while a panel waits on the door.
+fn limit_tick() {
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if state.panel_limits.is_none() { return }
+    refresh_panel_limits(&mut state);
 }
 
 /// `host.status_snapshot(spec_json)`: the panel `/status` shows if it is submitted while a run is in

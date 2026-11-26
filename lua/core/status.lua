@@ -324,6 +324,13 @@ function M.session_lines(session_id, opts)
   for _, item in ipairs(reported_providers(settings.provider)) do
     lines[#lines + 1] = ""
     lines[#lines + 1] = bold(item.id) .. (item.id == settings.provider and dim("  (in use)") or "")
+    -- A snapshot the CONSOLE draws mid-run names the rows it must fill itself: the interpreter is
+    -- inside the turn then, so nothing here can repaint when the read lands. The marker is one line;
+    -- the console expands it from the door on every draw (rust/wa-capabilities/src/limits.rs).
+    if opts and opts.limits_marker then
+      lines[#lines + 1] = "\1limits:" .. tostring(item.id)
+      goto continue_provider
+    end
     local limits, problem, age, state = limits_of(item.id, opts)
     local shown = 0
     for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
@@ -350,6 +357,7 @@ function M.session_lines(session_id, opts)
       -- screen mid-run cannot be read as this second's allowance.
       lines[#lines + 1] = dim("  " .. M.age_text(age))
     end
+    ::continue_provider::
   end
   return lines
 end
