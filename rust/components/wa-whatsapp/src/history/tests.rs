@@ -434,3 +434,54 @@ fn status_and_newsletter_traffic_is_not_a_chat() {
     let status = conversation("status@broadcast", vec![entry("status@broadcast", "S1", BASE_TS, "oi", false, None)]);
     assert!(candidates(&status, &me()).is_empty(), "the live path skips status, and so does the past");
 }
+
+// ---- MEASUREMENT (whatsapp-index-heals-itself, ready-heals.md §2) ----------------------------------
+
+/// What a reconnect delivers when one chat was offline for days: per chat, in counts, from a hand-built
+/// sync (no account, no socket). The index is the real `index::Memory`, the drain is the one the guest
+/// runs, and the budget is the node's own two-day window.
+///
+/// The fixture is one chat with: a message 72 hours old, one 47 hours old, a cluster 10/9/8 hours ago, a
+/// SEVEN-HOUR HOLE, then two messages in the last hour.
+#[test]
+fn measure_what_an_offline_gap_delivers_and_what_it_hides() {
+    let store = Memory::new();
+    let chat = conversation(
+        CHAT,
+        vec![
+            entry(CHAT, "OLD72", seconds_ago(72 * 3600), "x", false, None),
+            entry(CHAT, "OLD47", seconds_ago(47 * 3600), "x", false, None),
+            entry(CHAT, "C10", seconds_ago(10 * 3600), "x", false, None),
+            entry(CHAT, "C9", seconds_ago(9 * 3600), "x", false, None),
+            entry(CHAT, "C8", seconds_ago(8 * 3600), "x", false, None),
+            entry(CHAT, "N1", seconds_ago(3600), "x", false, None),
+            entry(CHAT, "N05", seconds_ago(1800), "x", false, None),
+        ],
+    );
+    let progress = drain(&store, &chat, keeping(1_000, 2));
+    println!(
+        "MEASURE delivered seen={} written={} too_old={} duplicate={} skipped={} remaining={}",
+        progress.seen, progress.written, progress.too_old, progress.duplicate, progress.skipped, progress.remaining
+    );
+    assert_eq!(progress.seen, 7, "every message the phone offered was seen");
+    assert_eq!(progress.too_old, 1, "the 72-hour message is outside a two-day window: seen, then refused");
+    assert_eq!(progress.written, 6, "the other six are in the index after one drain");
+    assert_eq!(progress.duplicate, 0);
+    assert_eq!(progress.skipped, 0);
+    assert_eq!(progress.remaining, 0, "the window's own budget did not cut this one");
+
+    // The same sync again: everything already there is a duplicate, which is how the measurement knows
+    // the index holds exactly those six and nothing invented.
+    let again = drain(&store, &chat, keeping(1_000, 2));
+    println!("MEASURE second_drain duplicate={} written={} too_old={}", again.duplicate, again.written, again.too_old);
+    assert_eq!((again.written, again.duplicate, again.too_old), (0, 6, 1));
+
+    // A tick cut short is the ONE thing that speaks about being behind: records left for the next tick.
+    let cut_store = Memory::new();
+    let cut = drain(&cut_store, &chat, budget(3));
+    println!("MEASURE tick_cut written={} remaining={} stopped={:?}", cut.written, cut.remaining, cut.stopped);
+    assert!(cut.remaining > 0, "a three-record tick leaves work behind: {cut:?}");
+
+    // And what NOTHING here says: the seven-hour hole. `Progress` has no field for an interval that is
+    // missing, and no answer carries one - which is the gap this mission exists to close.
+}
