@@ -1374,6 +1374,8 @@ check wit-lint-selftest bash scripts/test-wit-lint.sh
 # ASYNC-BORN INTERFACES (Victor 26/11): every NEW or MOVED wit interface is async - a future per result, a stream
 # for progress, cancellation and backpressure declared - and a sync export passes only with a reason line in the
 # file. Existing worlds are grandfathered by an explicit list (wit/async-grandfather.txt), never by a pattern.
+# The land path needs no separate hook: scripts/landing-queue.mjs defaults to `bash scripts/fast.sh` (its line 227),
+# so these two are what the landing gate runs. Proved by running them with the same argv fast.sh uses.
 check wit-async bash scripts/lint-wit-async.mjs
 check wit-async-selftest bash scripts/test-wit-async-lint.sh
 # The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
