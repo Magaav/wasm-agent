@@ -1,10 +1,14 @@
+BRIEF DONE
+
 # ready-operations-own-program — the process runner becomes its own program
 
-**BRIEF DONE.** All three items of the job are landed and reported (measurement §1, plan §2, first slice
+All three items of the job are landed and reported (measurement §1, plan §2, first slice
 f94e6d56 + report 42462e02 + request-bytes/ready file 5bd13b43). Left for the orchestrator:
 
-1. review `f94e6d56`, `42462e02`, `5bd13b43` (in that order) and land — the branch is 3 commits ahead of
-   origin/main and its tree is clean;
+1. review `f94e6d56`, `42462e02`, `5bd13b43`, `0905d96c` (in that order) and land — the branch is 4
+   commits ahead of origin/main and its tree is clean. **Checked 26/11:** the two commits main gained since
+   my base (`9042033c`, `6b6afc72`) touch only `scripts/test-feature-canary.lua`, and `comm -12` against the
+   files this branch changes is empty, so the rebase has no overlap;
 2. the pre-existing failure of `scripts/test-operation-control.cjs` on this node (fails identically with
    the installed base binary `~/.local/bin/wa`; not caused by, and not fixed in, this branch);
 3. slice 2 — move `operations.rs` into the supervisor's own crate (that is the commit that pays the build
