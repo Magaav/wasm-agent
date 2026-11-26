@@ -1733,6 +1733,70 @@ pub async fn set_subject<S: Store>(store: &S, chat: &str, subject: &str) -> Resu
     store.set(key_card(chat).as_bytes(), &json).await
 }
 
+/// A hole the index knows about: the chat stopped being indexed at `from_ms` and the next message the
+/// phone offered was at `to_ms`. It is what a reconnect leaves when the node was offline, and what the
+/// healer (`Op::Backfill`, already wired to `fetch_message_history`) is asked to close.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Gap {
+    pub chat: String,
+    pub from_ms: i64,
+    pub to_ms: i64,
+}
+
+/// How long a silence has to be before it is a HOLE rather than a quiet chat. A chat can legitimately be
+/// quiet for a long time, so this is deliberately generous: the cost of a false gap is one backfill
+/// request for a chat that turns out to need nothing, and the cost of a missed one is a reader who never
+/// learns a message arrived.
+pub const GAP_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// Note the hole a sync just revealed for `chat`, if there is one: the index's newest message before this
+/// batch (`card.last`) and the oldest message the batch carried. Returns the hole it recorded.
+///
+/// It is a NO-OP when the index knows nothing about the chat yet (a first sync is not a gap), when the
+/// batch continues where the index stopped, or when the silence is shorter than [`GAP_MS`].
+pub async fn note_gap<S: Store>(store: &S, chat: &str, batch_oldest_ms: i64) -> Result<Option<Gap>, String> {
+    if batch_oldest_ms <= 0 || chat.is_empty() {
+        return Ok(None);
+    }
+    let Some(card) = card_of(store, chat).await? else { return Ok(None) };
+    if card.last <= 0 || batch_oldest_ms <= card.last + GAP_MS {
+        return Ok(None);
+    }
+    let gap = Gap { chat: chat.to_string(), from_ms: card.last, to_ms: batch_oldest_ms };
+    let json = serde_json::to_vec(&gap).map_err(|error| format!("gap encode: {error}"))?;
+    store.set(key_gap(chat).as_bytes(), &json).await?;
+    Ok(Some(gap))
+}
+
+/// Every hole the index still has to heal, oldest first, so a healer asks for the longest-waiting first.
+pub async fn gaps<S: Store>(store: &S) -> Result<Vec<Gap>, String> {
+    let mut out = Vec::new();
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let page = store.scan(format!("{PREFIX}gp/").as_bytes(), cursor.clone(), PAGE).await?;
+        if page.is_empty() {
+            break;
+        }
+        for (_, value) in &page {
+            if let Ok(gap) = serde_json::from_slice::<Gap>(value) {
+                out.push(gap);
+            }
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+    }
+    out.sort_by_key(|gap| gap.from_ms);
+    Ok(out)
+}
+
+/// Forget one chat's hole, once its messages have been fetched.
+pub async fn clear_gap<S: Store>(store: &S, chat: &str) -> Result<(), String> {
+    store.del(key_gap(chat).as_bytes()).await
+}
+
+fn key_gap(chat: &str) -> String {
+    format!("{PREFIX}gp/{chat}")
+}
+
 /// Fill in group subjects from what this NODE already holds (the legacy journal's chat titles), and say
 /// what the index did: `(applied, kept, unknown)` - applied for a group that had no subject, kept for one
 /// whose subject this node already fetched (a fetched subject is newer and is never overwritten by an

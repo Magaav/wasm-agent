@@ -485,3 +485,35 @@ fn measure_what_an_offline_gap_delivers_and_what_it_hides() {
     // And what NOTHING here says: the seven-hour hole. `Progress` has no field for an interval that is
     // missing, and no answer carries one - which is the gap this mission exists to close.
 }
+
+/// P1.1 of whatsapp-index-heals-itself: a reconnect leaves a HOLE the index knows about, and the hole is
+/// what the healer is asked to close. Measured with the module's own fixture: the first sync stops three
+/// days back, the next one starts a day back.
+#[test]
+fn a_reconnect_records_the_hole_it_leaves_and_a_first_sync_is_not_one() {
+    let store = Memory::new();
+    // A first sync: one message three days ago. Nothing is known before it, so this is not a hole.
+    let first = conversation(CHAT, vec![entry(CHAT, "OLD", seconds_ago(3 * 86_400), "antes", false, None)]);
+    let progress = drain(&store, &first, Budget::default());
+    assert_eq!(progress.written, 1);
+    assert!(block_on(crate::index::gaps(&store)).unwrap().is_empty(), "a first sync is not a hole");
+
+    // The reconnect, one day later: the index stopped three days back, this batch starts one day back.
+    let reconnect = conversation(CHAT, vec![entry(CHAT, "NEW1", seconds_ago(86_400), "depois", false, None)]);
+    let progress = drain(&store, &reconnect, Budget::default());
+    assert_eq!(progress.written, 1, "the new message is written");
+    let gaps = block_on(crate::index::gaps(&store)).unwrap();
+    assert_eq!(gaps.len(), 1, "the hole is recorded, once: {gaps:?}");
+    assert_eq!(gaps[0].chat, CHAT);
+    assert_eq!(gaps[0].from_ms, seconds_ago(3 * 86_400) as i64 * 1000, "from where the index stopped");
+    assert_eq!(gaps[0].to_ms, seconds_ago(86_400) as i64 * 1000, "to the oldest message the batch offered");
+
+    // A batch that continues where the index stopped is not a second hole.
+    let next = conversation(CHAT, vec![entry(CHAT, "NEW2", seconds_ago(3600), "mais", false, None)]);
+    drain(&store, &next, Budget::default());
+    assert_eq!(block_on(crate::index::gaps(&store)).unwrap().len(), 1, "the same hole, not a second one");
+
+    // Once healed, the index forgets it.
+    block_on(crate::index::clear_gap(&store, CHAT)).unwrap();
+    assert!(block_on(crate::index::gaps(&store)).unwrap().is_empty(), "a healed chat has no hole");
+}

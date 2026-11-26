@@ -330,6 +330,16 @@ pub async fn drain_conversation<S: Store>(
     let oldest = plan.budget.oldest_ms(now_ms);
     let candidates = candidates(conversation, me);
     progress.seen = candidates.len();
+    // A reconnect delivers the recent messages and leaves a hole between where this index stopped and the
+    // oldest message the sync offered: the gap to heal (whatsapp-index-heals-itself item 1). Noted per
+    // chat, counts only, and only when the silence is longer than `index::GAP_MS`.
+    if let Some(batch_oldest) = candidates.iter().map(|candidate| candidate.envelope.ts).filter(|ts| *ts > 0).min() {
+        if let Err(reason) = index::note_gap(store, conversation.id.as_str(), batch_oldest).await {
+            progress.stopped = Some(Stop::Store);
+            progress.reason = one_word(&reason);
+            return progress;
+        }
+    }
     for (position, candidate) in candidates.iter().enumerate() {
         if plan.written >= plan.budget.per_sync {
             progress.stopped = Some(Stop::Sync);
