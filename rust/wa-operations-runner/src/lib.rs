@@ -5,6 +5,7 @@
 //! node's run/cancel state, its tool-progress rows, its subagent context, its disk cap) is asked of the
 //! process that embeds it through `node::NodeFacts`.
 
+pub mod files;
 pub mod node;
 /// The live facts behind a long tool call's row (docs/TOOL-PROGRESS.md): written here, beside the wait
 /// loops that produce them, and read by every surface through `wa_tool_progress`.
