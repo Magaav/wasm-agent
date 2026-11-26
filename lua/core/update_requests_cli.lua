@@ -7,7 +7,24 @@
 --   wa update requests --sweep          close what no install will serve, by name; deletes nothing
 --   wa update requests --sweep --dry-run   the same, printing what it WOULD close
 --   wa update requests --max-age 86400  the age the sweep calls expired (seconds; default one day)
+local json = dofile('lua/vendor/json.lua')
+
 local M = {}
+
+-- host.list_dir answers a JSON ENVELOPE ({entries = {{name = ...}}}), not a list of names - MEASURED: this verb first
+-- iterated the answer directly and listed nothing, so "no update requests" was printed over four existing records.
+local function names_in(dir)
+  local ok, raw = pcall(host.list_dir, dir)
+  local names = {}
+  if not ok or type(raw) ~= 'string' then return names end
+  local decoded_ok, listing = pcall(json.decode, raw)
+  if not decoded_ok or type(listing) ~= 'table' then return names end
+  for _, entry in ipairs(listing.entries or {}) do
+    local name = tostring(entry.name or entry or '')
+    if name:match('%.json$') then names[#names + 1] = name end
+  end
+  return names
+end
 
 local function age_text(seconds)
   if not seconds then return '-' end
@@ -49,11 +66,7 @@ function M.run(argv)
   local listing = remote.read_status({}, { node_id = '' })
   -- list every record on this node, newest first, as files (a reader of the record sees what a wait sees)
   local dir = remote.dir()
-  local names = {}
-  local ok, listed = pcall(host.list_dir, dir)
-  if ok and type(listed) == 'table' then
-    for _, name in ipairs(listed) do if tostring(name):match('%.json$') then names[#names + 1] = tostring(name) end end
-  end
+  local names = names_in(dir)
   if #names == 0 then print('no update requests on this node'); return 0 end
   table.sort(names)
   local now = math.floor(host.now())
