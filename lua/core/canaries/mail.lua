@@ -20,7 +20,10 @@ end
 local M = { mode = 'read' }
 function M.run()
   if type(host.email_search) ~= 'function' then return false, 'capability_missing', 'this binary has no email_search' end
-  local ok, raw = pcall(host.email_search, json.encode({ limit = 1 }))
+  -- A REAL QUESTION, NOT AN EMPTY ONE (26/11): email_search refuses {limit = 1} with email_empty_query - the
+  -- connector needs a question (rust/wa-capabilities/src/email_query.rs:9 lists q/from/subject/mailbox/...), so the
+  -- canary was refused before any mailbox was read. The cheapest real question is the newest inbox message.
+  local ok, raw = pcall(host.email_search, json.encode({ mailbox = "INBOX", limit = 1 }))
   if not ok then return false, 'index_unreadable', tostring(raw) end
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return false, 'index_unreadable', 'the search answered nothing' end

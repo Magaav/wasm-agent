@@ -13,8 +13,17 @@ function M.run()
   local ran, ok, stage, detail = guard.no_send(function()
     if type(host.whatsapp_search) ~= 'function' then return false, 'capability_missing', 'this binary has no whatsapp_search' end
     local answered, raw = pcall(host.whatsapp_search, json.encode({ kind = 'voice', limit = 5 }))
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11): on a node that does not hold the account the tool door refuses with
+    -- <tool>_slow and state = queued while the owner is still being asked. That is not_proven; every other refusal
+    -- keeps the FAIL r4 made it.  -- (answered)
     if not answered then return false, 'index_unreadable', tostring(raw) end
     local answer = type(raw) == 'string' and json.decode(raw) or raw
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11): on a node that does not hold the account the tool door refuses with
+    -- <tool>_slow and state = queued while the owner is still being asked. That is not_proven, not a break; every
+    -- other refusal keeps the FAIL r4 made it.
+    if type(answer) == "table" and tostring(answer.state or "") == "queued" then
+      return "not_proven", "queued", "the account question is still queued on the serving node"
+    end
     if type(answer) ~= 'table' then return false, 'index_unreadable', 'the voice search answered nothing' end
     local hits = answer.hits or answer.messages or {}
     -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers

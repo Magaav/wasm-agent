@@ -14,7 +14,16 @@ function M.run()
       return false, 'capability_missing', 'this binary has no WhatsApp query capability'
     end
     local queried, raw = pcall(host.whatsapp_contacts, '{}')
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11): on a node that does not hold the account the tool door refuses with
+    -- <tool>_slow and state = queued while the owner is still being asked. That is not_proven; every other refusal
+    -- keeps the FAIL r4 made it.  -- (queried)
     local contacts = queried and (type(raw) == 'string' and json.decode(raw) or raw) or nil
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11): on a node that does not hold the account the tool door refuses with
+    -- <tool>_slow and state = queued while the owner is still being asked. That is not_proven, not a break; every
+    -- other refusal keeps the FAIL r4 made it.
+    if type(contacts) == "table" and tostring(contacts.state or "") == "queued" then
+      return "not_proven", "queued", "the account question is still queued on the serving node"
+    end
     local list = type(contacts) == 'table' and (contacts.chats or contacts.contacts or {}) or {}
     -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers
     -- whatsapp_component_absent (with the state and the owner) BEFORE any index is touched; reading that as an

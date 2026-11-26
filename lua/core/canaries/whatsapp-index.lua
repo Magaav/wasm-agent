@@ -15,6 +15,9 @@ local M = { mode = 'read' }
 -- One read, as the numbers this canary judges: only counts and times leave here, never an id or text.
 local function read_once(chat)
   local answered, raw = pcall(host.whatsapp_read, json.encode({ chat = chat, limit = 5 }))
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11): on a node that does not hold the account the tool door refuses with
+    -- <tool>_slow and state = queued while the owner is still being asked. That is not_proven; every other refusal
+    -- keeps the FAIL r4 made it.  -- (answered)
   if not answered then return { ok = false, stage = 'read_unreadable', detail = 'the read refused' } end
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return { ok = false, stage = 'read_unreadable', detail = 'the read answered nothing' } end
@@ -51,6 +54,12 @@ function M.run()
     local answered, raw = pcall(host.whatsapp_contacts, '{}')
     if not answered then return false, 'index_unreadable', tostring(raw) end
     local contacts = type(raw) == 'string' and json.decode(raw) or raw
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11): on a node that does not hold the account the tool door refuses with
+    -- <tool>_slow and state = queued while the owner is still being asked. That is not_proven, not a break; every
+    -- other refusal keeps the FAIL r4 made it.
+    if type(contacts) == "table" and tostring(contacts.state or "") == "queued" then
+      return "not_proven", "queued", "the account question is still queued on the serving node"
+    end
     if type(contacts) ~= 'table' then return false, 'index_unreadable', 'the contacts query answered nothing' end
     local list = contacts.chats or contacts.contacts or {}
     -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers

@@ -174,6 +174,10 @@ function M.run(feature, opts)
   local ctx = {
     feature = row.name, canary = row.canary, row = row, mode = module.mode or 'child-node',
     scratch = scratch, home = paths.config(), now = tonumber(host.now()) or 0,
+    -- THE CALLER MODE REACHES THE CANARY (26/11): land passes cutting = true from inside a cut, and this ctx
+    -- dropped it, so release-update (which answers not_proven/cutting on such a node) could only answer FAIL -
+    -- a node that WAS cutting was judged as if it had already run the new build.
+    cutting = opts.cutting == true,
   }
   local called, ok, ran_stage, ran_detail = pcall(module.run, ctx)
   remove_scratch(scratch)
