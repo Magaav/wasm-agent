@@ -3056,6 +3056,10 @@ echo "attach tests ok"
 # Local mock provider only; no account, paid model or external browser required.
 gate_run node scripts/test-operation-control.cjs "$BIN"
 gate_run node scripts/test-operation-control.cjs "$BIN" --await
+# Slice 1 of ready-operations-own-program.md: the same operation verbs answered by the supervisor
+# (`wa operations-supervisor`) - two real processes, identical answers, identical cancellation, identical
+# env withholding.
+gate_run node scripts/test-operation-supervisor.cjs "$BIN"
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
 gate_phase_begin subagents

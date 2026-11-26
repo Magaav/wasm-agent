@@ -780,10 +780,28 @@ fn main() {
         });
         if let Err(error) = wa_capabilities::serve_static::serve(root, port, rendezvous) {
             eprintln!("serve-static: {error}");
+    // THE OPERATIONS SUPERVISOR (slice 1 of ready-operations-own-program.md): this binary in a second
+    // mode, owning the process groups the node's tools start. Its own process, its own lifetime and its
+    // own ledger lease - which is what lets a supervised child outlive the node that launched it.
+    if command == "operations-supervisor" {
+        if lua_args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h") {
+            println!("usage: wa operations-supervisor [--port 8791] [--rendezvous <file>]\n  own this node's supervised operations (blocks until stopped)\n  the node reaches it through WASM_AGENT_OPERATIONS_SUPERVISOR=<the rendezvous file>");
+            return;
+        }
+        let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8791);
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let rendezvous = flag(&lua_args, "--rendezvous").map(PathBuf::from).unwrap_or_else(|| {
+            PathBuf::from(home).join(".wasm-agent/operations-supervisor.json")
+        });
+        if let Err(error) = wa_capabilities::operations_supervisor::serve(rendezvous, port) {
+            eprintln!("operations-supervisor: {error}");
+>>>>>>> 38bfda24 (operations-supervisor: the runner's first verbs cross a process boundary (ready-operations-own-program.md, slice 1))
             std::process::exit(1);
         }
         return;
     }
+
+>>>>>>> 38bfda24 (operations-supervisor: the runner's first verbs cross a process boundary (ready-operations-own-program.md, slice 1))
     if command == "serve" {
         if let Err(error) = lua.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
             eprintln!("lua error: {error}");

@@ -42,6 +42,9 @@ pub mod host;
 pub mod http_transport;
 pub mod limits;
 pub mod operations;
+/// The operations supervisor (slice 1 of `ready-operations-own-program.md`): the node's supervised
+/// children owned by their own process, reached through `WASM_AGENT_OPERATIONS_SUPERVISOR`.
+pub mod operations_supervisor;
 pub mod plugins;
 pub mod quickjs;
 /// The build-time scan behind the capability registry (`src/capability_rows/`): which files declare

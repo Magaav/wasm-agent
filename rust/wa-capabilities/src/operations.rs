@@ -1378,6 +1378,12 @@ fn start_fields_refused(args: &Value) -> Result<(), String> {
 }
 
 pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<Value, String> {
+    // THE SUPERVISOR (slice 1 of ready-operations-own-program.md): when the node names one, the verb is
+    // answered by the process that owns the children, and the answer - including a refusal - is the
+    // supervisor's own. Unset is the default, and then this line does nothing at all.
+    if let Some(answer) = crate::operations_supervisor::forward(action, args) {
+        return answer;
+    }
     let id = args["id"].as_str().unwrap_or("");
     let caller = Caller::from(args);
     let result = match action {
