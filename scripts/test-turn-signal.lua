@@ -444,7 +444,7 @@ ok(type(started) == "table" and type(started.operation_id) == "string",
 local op_id = type(started) == "table" and started.operation_id or nil
 if op_id then
   local settled = tools_lib.dispatch(memory, "operation",
-    { action = "await", id = op_id, wait_s = 30 }, "master", ctx)
+    { action = "await", id = op_id, wait_ms = 30000 }, "master", ctx)
   ok(type(settled) == "table" and settled.operation_id == op_id, "#43: an await answers the id it was asked about")
   ok(type(settled) == "table" and settled.stdout == nil,
     "#43: and NOT the output body by default")
@@ -452,7 +452,7 @@ if op_id then
     "#43: while saying how many bytes it dropped")
   ok(type(settled) == "table" and settled.state ~= nil, "#43: with the state beside it")
   local with_body = tools_lib.dispatch(memory, "operation",
-    { action = "await", id = op_id, wait_s = 30, output = true }, "master", ctx)
+    { action = "await", id = op_id, wait_ms = 30000, output = true }, "master", ctx)
   ok(type(with_body) == "table" and type(with_body.stdout) == "string"
     and with_body.stdout:find("item-43-body", 1, true) ~= nil,
     "#43: output=true returns the body")
@@ -464,11 +464,11 @@ local big = tools_lib.dispatch(memory, "operation",
 local big_id = type(big) == "table" and big.operation_id or nil
 if big_id then
   local full = tools_lib.dispatch(memory, "operation",
-    { action = "await", id = big_id, wait_s = 30, output = true, max_bytes = 8192 }, "master", ctx)
+    { action = "await", id = big_id, wait_ms = 30000, output = true, max_bytes = 8192 }, "master", ctx)
   ok(type(full) == "table" and type(full.stdout) == "string" and #full.stdout == 3000,
     "#43: a body under the cap is returned whole")
   local cut = tools_lib.dispatch(memory, "operation",
-    { action = "await", id = big_id, wait_s = 30, output = true, max_bytes = 4 }, "master", ctx)
+    { action = "await", id = big_id, wait_ms = 30000, output = true, max_bytes = 4 }, "master", ctx)
   ok(type(cut) == "table" and type(cut.stdout) == "string" and #cut.stdout == 1024,
     "#43: a body over the cap is cut to the 1 KiB floor")
   eq(type(cut) == "table" and cut.stdout_truncated, 3000, "#43: and the record says how large it was")
