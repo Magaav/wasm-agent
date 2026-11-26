@@ -103,7 +103,10 @@ fn every_capability_is_a_row_in_its_own_file() {
 
     // 3. The live registry is exactly what those files declare - both directions, same effect class - so a
     //    row added to a file IS a capability, and nothing is registered from anywhere else.
-    let live: BTreeMap<String, String> = wa_capabilities::capabilities::registry()
+    // Through `inventory()`, the surface `wa capabilities --json` answers with, and not through the
+    // function this change added: the row has to FAIL on the code before it with an assertion that names
+    // what is wrong, rather than die on a symbol that code did not have yet.
+    let live: BTreeMap<String, String> = wa_capabilities::capabilities::inventory()
         .iter()
         .map(|capability| (capability.name.to_string(), capability.effect.as_str().to_string()))
         .collect();
