@@ -152,6 +152,30 @@ end
 
 -- How a landing waits between two polls of a node's own record. A field, not a sleep call inside the
 -- logic, so a test drains it instantly while production waits a real five seconds.
+-- TWO NAMED RULES OF THE DEPLOY WAIT (26/11, openclaw). They live here, not inside the wave loop, so a row can
+-- drive them: the loop is a closure, and the rule it carries is exactly what went wrong on a real node.
+--
+-- 1. AN `unknown` FROM THE RELAY IS NOT A VERDICT. It says only that this read did not arrive, and an install that
+--    is still downloading answers exactly that. The wait keeps reading the node own record to the deploy deadline.
+function M.deploy_settles(state)
+  local s = tostring(state or "unknown")
+  if s == "unknown" or s == "not_known_yet" then return false end
+  return s == "installed" or s == "failed" or s == "silent" or s == "refused"
+end
+--
+-- 2. THE NODE OWN RECORD DECIDES BEFORE `unknown` IS WRITTEN. A last read taken after the deadline can name the commit
+--    that was asked for - the install finished while the relay was not answering - and then the row settles as
+--    installed, never as unknown.
+function M.deploy_last_chance(row, sha, status)
+  local got = status and tostring(status.installed_commit or "") or ""
+  if got == "" or tostring(sha or "") == "" then return false end
+  if got ~= tostring(sha) then return false end
+  row.state = "installed"
+  row.installed_commit = got
+  row.detail = "installed (read back on the node own record after the wait)"
+  return true
+end
+
 function M.sleep(seconds) M.exec("sleep " .. tostring(seconds)) end
 
 -- ---------------------------------------------------------------- the gate's LIVE output
@@ -4537,8 +4561,7 @@ impl.deploy = function(run, options)
     -- and the round called the node "unknown after 186s: node_no_answer" while that node then finished and
     -- came up on node-6b6afc72f188. A status that says node_no_answer / unknown says ONLY that this read did
     -- not arrive; the wait keeps reading the node's own record until the deploy deadline.
-    if state == "unknown" then return false end
-    return state == "installed" or state == "failed" or state == "silent" or state == "unknown"
+    return M.deploy_settles(state)
   end
   local function failure_for(row)
     if row.state == "installed" then return nil end
@@ -4652,8 +4675,7 @@ impl.deploy = function(run, options)
         -- THE NODE'S OWN RECORD DECIDES BEFORE "unknown" IS WRITTEN (26/11). A last read can name the commit it
         -- installed even when the wait ran out: an install that finished is never reported as unknown.
         local last = remote_update.status(M.call(), row.node, { id = row.record, session = options.session })
-        if last and tostring(last.installed_commit or "") ~= "" and tostring(last.installed_commit) == tostring(sha) then
-          row.state = "installed"
+        if M.deploy_last_chance(row, sha, last) then
           row.installed_commit = tostring(last.installed_commit)
           row.detail = "installed (read back on the node's own record after the wait)"
         else
