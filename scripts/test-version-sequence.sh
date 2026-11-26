@@ -101,6 +101,27 @@ mkdir -p "$W/root/scripts" "$W/root/ui" "$W/lua-stage/lua/core"
 printf 'deploy' > "$W/root/scripts/deploy.sh"; printf 'ui' > "$W/root/ui/index.html"
 printf 'init' > "$W/lua-stage/lua/core/init.lua"
 
+seed_prev() { # <share> <install>
+  local share="$1" install="$2"
+  mkdir -p "$share/versions/$PREV_ID"
+  printf 'id=%s
+install_dir=%s
+' "$PREV_ID" "$install" > "$share/versions/$PREV_ID/version.txt"
+  printf '#!/bin/sh
+exit 0
+' > "$share/versions/$PREV_ID/wa-sentinel"; chmod +x "$share/versions/$PREV_ID/wa-sentinel"
+  # A PREVIOUS VERSION NEEDS ITS MEMBERS: the conversion links the install at them, so an empty folder
+  # leaves every link dangling and the conversion own verification refuses.
+  cp -f "$install/wa" "$share/versions/$PREV_ID/wa"; chmod +x "$share/versions/$PREV_ID/wa"
+  mkdir -p "$share/versions/$PREV_ID/lua-core" "$share/versions/$PREV_ID/scripts"
+  printf "prev init\n" > "$share/versions/$PREV_ID/lua-core/init.lua"
+  printf "prev deploy\n" > "$share/versions/$PREV_ID/scripts/deploy.sh"
+  # A REAL VERSION FOLDER HOLDS ITS RECORD: without one the installer skips linking installed.txt and the
+  # conversion own verification then refuses ("installed.txt is not a link").
+  printf "commit=%s\nvia=seed\n" "$PREV_COMMIT" > "$share/versions/$PREV_ID/installed.txt"
+  ln -sfn "versions/$PREV_ID" "$share/current"
+}
+
 sequence() { # <install> <commit> [extra args...]
   local install="$1" commit="$2"; shift 2
   bash scripts/version-sequence.sh --install "$install" --candidate "$install/wa" --commit "$commit" \
@@ -153,26 +174,6 @@ ok
 # A PREVIOUS VERSION must exist for step 5 to run at all: on a fresh share the sequence skips the sentinel move by
 # design (there is nothing to fall back to), which made the first version of this case prove nothing
 # (rows/20261125T233626Z-20949).
-seed_prev() { # <share> <install>
-  local share="$1" install="$2"
-  mkdir -p "$share/versions/$PREV_ID"
-  printf 'id=%s
-install_dir=%s
-' "$PREV_ID" "$install" > "$share/versions/$PREV_ID/version.txt"
-  printf '#!/bin/sh
-exit 0
-' > "$share/versions/$PREV_ID/wa-sentinel"; chmod +x "$share/versions/$PREV_ID/wa-sentinel"
-  # A PREVIOUS VERSION NEEDS ITS MEMBERS: the conversion links the install at them, so an empty folder
-  # leaves every link dangling and the conversion own verification refuses.
-  cp -f "$install/wa" "$share/versions/$PREV_ID/wa"; chmod +x "$share/versions/$PREV_ID/wa"
-  mkdir -p "$share/versions/$PREV_ID/lua-core" "$share/versions/$PREV_ID/scripts"
-  printf "prev init\n" > "$share/versions/$PREV_ID/lua-core/init.lua"
-  printf "prev deploy\n" > "$share/versions/$PREV_ID/scripts/deploy.sh"
-  # A REAL VERSION FOLDER HOLDS ITS RECORD: without one the installer skips linking installed.txt and the
-  # conversion own verification then refuses ("installed.txt is not a link").
-  printf "commit=%s\nvia=seed\n" "$PREV_COMMIT" > "$share/versions/$PREV_ID/installed.txt"
-  ln -sfn "versions/$PREV_ID" "$share/current"
-}
 I3="$W/i3"; in_place "$I3" "$PREV_COMMIT"; seed_prev "$W/share3" "$I3"; echo sentinel-fail > "$SEQ_MODE"
 bash scripts/version-sequence.sh --install "$I3" --candidate "$I3/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share3" > "$W/seq3.log" 2>&1 \
