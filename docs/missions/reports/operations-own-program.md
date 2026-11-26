@@ -149,6 +149,13 @@ unchanged: no capability description, no schema, no Lua file was touched (`git s
   drops `wa-operation`; that is the commit that pays the build claim and that gives `health()`,
   `foreground` and the node-wide listing one owner. Until then those three stay in the node — named here,
   not claimed.
+- **`components.lock` is untouched, and that is the answer to the rule, not an omission**: this move
+  takes the runner OUT of the host into a program, so there is no component to pin and no one-part row in
+  `ms` to add. A pin here would be a false statement about what a deploy installs.
+- **The row runs through the gate's own runner**: `scripts/test.sh` gained `gate_run node
+  scripts/test-operation-supervisor.cjs "$BIN"` beside `test-operation-control.cjs`, so the orchestrator's
+  runner executes it; the runs recorded here were that same file invoked directly with `$BIN`, single files
+  not needing the suite lock.
 - **Shipping a second artifact is a release hunk** (Fable owns it). Slice 1 therefore ships as a mode of
   the existing `wa` binary: no installer, deploy or `installed.txt` change (FACTORY rule 12 respected —
   nothing was installed).
