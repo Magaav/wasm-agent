@@ -618,7 +618,10 @@ fn parse_chat(text: &str) -> Result<Chat, Refusal> {
 /// address one exact chat, and `send` (which never reaches this crate) must not be able to name its
 /// target loosely either.
 fn accepts_a_name(op: Op) -> bool {
-    matches!(op, Op::Read | Op::Contacts)
+    // `read` and `contacts` always did; `search` joins them because a GROUP is named by its subject and
+    // nothing else (whatsapp-index-heals-itself P2.2): a caller that knows only "Família" must be able to
+    // search inside it without first turning that into a JID.
+    matches!(op, Op::Read | Op::Contacts | Op::Search)
 }
 
 /// A chat as a human wrote it, for the ops that resolve names: bounded, one line, never empty, and
@@ -1073,8 +1076,11 @@ mod tests {
         // an address by every op that addresses one chat (and by the send path's own JID rule).
         let numeric = Request { chat: Some("5511999999999".into()), ..request("read") };
         assert_eq!(numeric.validate().expect("a name to resolve").chat_name.as_deref(), Some("5511999999999"));
+        // A search filter may now name a GROUP's subject (whatsapp-index-heals-itself P2.2), so the seam
+        // carries the name to the component; the refusal for anything that is not a subject is made
+        // THERE, where the subjects are - and index/tests.rs pins it for a bare number.
         let numeric_search = Request { chat: Some("5511999999999".into()), q: Some("x".into()), ..request("search") };
-        assert_eq!(numeric_search.validate().unwrap_err().code, "bad_chat");
+        assert_eq!(numeric_search.validate().expect("a search filter resolves a name now").chat_name.as_deref(), Some("5511999999999"));
         let bad_id = Request {
             chat: Some("5511999999999@lid".into()),
             id: Some("3EB0 ABC".into()),

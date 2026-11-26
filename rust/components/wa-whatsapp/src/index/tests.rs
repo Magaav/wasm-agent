@@ -1179,8 +1179,11 @@ fn a_legacy_group_chat_a_search_hit_names_is_a_chat_every_question_accepts() {
     let numeric = seam::Request { op: "read".into(), chat: Some("5511999999999".into()), ..Default::default() };
     assert_eq!(numeric.validate().expect("a name to resolve").chat_name.as_deref(), Some("5511999999999"));
     assert_eq!(chat::jid("5511999999999").unwrap_err(), "bad_chat");
-    let send = seam::Request { op: "search".into(), chat: Some("5511999999999".into()), q: Some("x".into()), ..Default::default() };
-    assert_eq!(send.validate().unwrap_err().code, "bad_chat", "a search filter is an exact chat");
+    // A bare number as a search filter is still refused - now by the COMPONENT, which is where the
+    // subjects are: the seam carries a name, and only a group's subject opens the filter.
+    let send = verified(seam::Request { op: "search".into(), chat: Some("5511999999999".into()), q: Some("x".into()), ..Default::default() });
+    let refused = block_on(search(&store, &send)).unwrap();
+    assert_eq!(refused["error"], "whatsapp_search_bad_chat", "a search filter is an exact chat or a group subject: {refused}");
     // Nothing was written for a refused request, and the thread is still the one message.
     let answer = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some(LEGACY.into()), ..Default::default() }))).unwrap();
     assert_eq!(answer["count"], 1, "{answer}");
@@ -3064,4 +3067,52 @@ fn a_cut_transcript_names_the_op_and_the_file_that_hold_the_whole() {
     // A text inside the bound is NOT marked cut, and keeps the old pointer shape (or none).
     let view = crate::view::message(&direct(CHAT, "Ana", "V2", base(), "curta"), None);
     assert!(view.get("transcript_cut").is_none(), "a whole text is never marked cut");
+}
+
+/// P2.2 of whatsapp-index-heals-itself: a GROUP is named by its subject and nothing else, so a search can
+/// be narrowed by that subject - and when several chats carry it, the answer is the candidates, never a
+/// pick. `contacts` already resolved a subject (`matched_source: group_subject`); this is the search half.
+#[test]
+fn search_narrows_by_a_group_subject_and_never_picks_among_several() {
+    let store = Memory::new();
+    let group = "120363000000000001@g.us";
+    block_on(put(&store, &direct(group, "", "G1", base(), "o boleto do condominio"))).unwrap();
+    block_on(set_subject(&store, group, "Família")).unwrap();
+    block_on(put(&store, &direct(LAURA, "Laura", "S1", base() + 1000, "boleto da Laura"))).unwrap();
+
+    // The subject resolves the chat, so the search sees only that group's messages.
+    let request = verified(seam::Request {
+        op: "search".into(),
+        q: Some("boleto".into()),
+        chat: Some("familia".into()),
+        ..Default::default()
+    });
+    let answer = block_on(search(&store, &request)).unwrap();
+    let hits = answer["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 1, "only the group carries that subject: {answer}");
+    assert_eq!(hits[0]["chat"], group);
+
+    // A subject nothing carries is a named refusal, not an empty answer.
+    let missing = verified(seam::Request {
+        op: "search".into(),
+        q: Some("boleto".into()),
+        chat: Some("ninguem tem este nome".into()),
+        ..Default::default()
+    });
+    let answer = block_on(search(&store, &missing)).unwrap();
+    assert_eq!(answer["error"], "whatsapp_search_bad_chat", "a name no group carries is the old refusal: {answer}");
+
+    // Two chats carrying the same subject: the candidates, and no pick.
+    let other = "120363000000000002@g.us";
+    block_on(put(&store, &direct(other, "", "G2", base() + 500, "outro boleto"))).unwrap();
+    block_on(set_subject(&store, other, "Família")).unwrap();
+    let ambiguous = verified(seam::Request {
+        op: "search".into(),
+        q: Some("boleto".into()),
+        chat: Some("familia".into()),
+        ..Default::default()
+    });
+    let answer = block_on(search(&store, &ambiguous)).unwrap();
+    assert_eq!(answer["error"], "whatsapp_search_chat_ambiguous", "never a silent pick: {answer}");
+    assert_eq!(answer["candidates"].as_array().map(Vec::len), Some(2));
 }

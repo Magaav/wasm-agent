@@ -1783,7 +1783,9 @@ fn rank(list: &[ChatCard], query: &str) -> Vec<(u8, ChatCard, String, &'static s
 
 /// What a name resolved to: one chat, several, or none. Never a guess.
 pub enum Resolved {
-    One(String, u8, String),
+    /// (chat, score, the text that matched, WHICH field it matched): the source is what tells a person's
+    /// name from a group's subject - a search filter accepts only the latter (P2.2).
+    One(String, u8, String, &'static str),
     Many(Vec<serde_json::Value>),
     None,
 }
@@ -1795,8 +1797,8 @@ async fn resolve_chat<S: Store>(store: &S, name: &str) -> Result<Resolved, Strin
     let Some(top) = matches.first().map(|(score, _, _, _)| *score) else { return Ok(Resolved::None) };
     let best: Vec<&(u8, ChatCard, String, &'static str)> = matches.iter().filter(|(score, _, _, _)| *score == top).collect();
     if best.len() == 1 {
-        let (score, card, matched, _) = best[0];
-        return Ok(Resolved::One(card.chat.clone(), *score, matched.clone()));
+        let (score, card, matched, source) = best[0];
+        return Ok(Resolved::One(card.chat.clone(), *score, matched.clone(), source));
     }
     Ok(Resolved::Many(
         best.iter()
@@ -2512,6 +2514,49 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
 /// The same search, told how caught up the writer is: the answer says it too (`index`), and how new the
 /// newest thing it matched is (`as_of`, scoped to the matches - a search is not one chat).
 pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pace) -> Result<serde_json::Value, String> {
+    // A `chat` that is a name (a person's, or a group's SUBJECT) is resolved the way `read` resolves one,
+    // and the search narrows to every address that chat is known by. Several chats carrying it is an
+    // answer with the candidates, never a silent pick - the wrong-recipient risk P2 puts in words.
+    let mut narrowed_to: Option<Vec<String>> = None;
+    if request.chat.is_none() {
+        if let Some(name) = request.chat_name.clone() {
+            match resolve_chat(store, &name).await? {
+                // ONLY a group's subject opens the filter: a search narrows by an exact chat, and a
+                // PERSON's name or a bare number stays refused `bad_chat`, which is the rule that keeps a
+                // filter from becoming a guess (an existing row pins it, and this must not loosen it).
+                Resolved::One(chat, _, _, "group_subject") => {
+                    narrowed_to = Some(addresses_of(store, &chat).await?);
+                }
+                Resolved::One(_, _, _, _) | Resolved::None => {
+                    return Ok(seam::refusal(
+                        seam::Op::Search,
+                        "bad_chat",
+                        "a search filter is an exact chat JID or a GROUP's subject; ask whatsapp_contacts for a person's chat",
+                    ));
+                }
+                Resolved::Many(candidates) => {
+                    // Several chats carry it: still not a pick, and still the old word when none of them
+                    // matched on a subject.
+                    let subjects = candidates.iter().filter(|c| c["matched_source"] == "group_subject").count();
+                    if subjects == 0 {
+                        return Ok(seam::refusal(
+                            seam::Op::Search,
+                            "bad_chat",
+                            "a search filter is an exact chat JID or a GROUP's subject; ask whatsapp_contacts for a person's chat",
+                        ));
+                    }
+                    let mut answer = seam::refusal(
+                        seam::Op::Search,
+                        "chat_ambiguous",
+                        "more than one group carries that subject; search one of the candidates by its exact JID",
+                    );
+                    answer["q"] = serde_json::Value::String(name);
+                    answer["candidates"] = serde_json::Value::Array(candidates);
+                    return Ok(answer);
+                }
+            }
+        }
+    }
     let tokens = request.q.as_deref().map(record::tokenize).unwrap_or_default();
     let mut narrowed_list: Option<Vec<Candidate>> = None;
     if !tokens.is_empty() {
@@ -2577,6 +2622,11 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
         let Some(record) = load(store, &candidate.chat, &candidate.id).await? else { continue };
         if !matches(&record, request) {
             continue;
+        }
+        if let Some(addresses) = &narrowed_to {
+            if !addresses.contains(&record.chat) {
+                continue;
+            }
         }
         let score = score(&record, &tokens, request.q.as_deref());
         let (chat_name, chat_newest_ts) = match names.get(&record.chat) {
@@ -2895,7 +2945,7 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
     let chat = match (&request.chat, &request.chat_name) {
         (Some(chat), _) => chat.jid(),
         (None, Some(name)) => match resolve_chat(store, name).await? {
-            Resolved::One(chat, score, matched) => {
+            Resolved::One(chat, score, matched, _source) => {
                 resolved = serde_json::json!({
                     "from": name, "to": chat, "matched": matched,
                     "confidence": match score { 3 => "exact", 2 => "prefix", _ => "partial" },
