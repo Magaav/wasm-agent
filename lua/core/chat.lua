@@ -1252,12 +1252,15 @@ function M.run(argv)
       local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
         back = switched_from })
       if type(answer) == "table" and answer.action == "select" then
-        local chosen = tostring(answer.session or "")
+        -- The balloon hands back { action = "select", page, index, option = <the chosen row> }: the id
+        -- and the origin flag live on the ROW, not on the answer.
+        local option = type(answer.option) == "table" and answer.option or {}
+        local chosen = tostring(option.session or "")
         local ok, problem = switch_to(chosen)
-        if ok and answer.back then switched_from = nil end
+        if ok and option.origin then switched_from = nil end
         if not ok then ui.say("  " .. tostring(problem)) end
       end
-        elseif line == "/login" or line == "/provider" then
+    elseif line == "/login" or line == "/provider" then
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
       -- login is a device code entered in the browser, an API key is pasted in the balloon's secret
       -- field or on the vault page.

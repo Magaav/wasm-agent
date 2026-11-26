@@ -112,7 +112,7 @@ function M.page(opts)
       label = "\u{2190} back to " .. clip(from_name, 40),
       hint = "where you came from",
       session = opts.back,
-      back = true,
+      origin = true,   -- NOT `back`: the balloon reads that as "pop a page" and Enter would cancel.
     }
   end
   for _, entry in ipairs(rows) do
