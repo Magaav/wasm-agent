@@ -861,7 +861,25 @@ pub async fn put<S: Store>(store: &S, record: &Record) -> Result<(), String> {
             apply_delete(store, record).await
         }
         _ => put_message(store, record).await,
+    }?;
+    // A group's name, when the message itself carried one: the source the node already has. Only after the
+    // record landed - a refused write is an error to the caller, and it must not be masked by this.
+    learn_subject(store, record).await
+}
+
+/// The group subject a message carried, written beside the index when the card has none yet: the one source
+/// of a group's name the node does not have to ask for (`record::subject_of`). Never overwrites a subject
+/// this node already fetched, and costs nothing for the messages that carry no subject.
+async fn learn_subject<S: Store>(store: &S, record: &Record) -> Result<(), String> {
+    if !record.group || record.chat_subject.is_empty() {
+        return Ok(());
     }
+    if let Some(card) = card_of(store, &record.chat).await? {
+        if !card.subject.is_empty() {
+            return Ok(());
+        }
+    }
+    set_subject(store, &record.chat, &record.chat_subject).await
 }
 
 /// Store a message, after applying a mutation that arrived before it did.

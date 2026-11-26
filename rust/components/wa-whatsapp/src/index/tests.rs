@@ -3195,3 +3195,39 @@ fn a_limit_over_the_cap_is_clamped_and_said_in_every_list_tool() {
     let under = run("contacts", 5);
     assert!(under.get("limit_asked").is_none(), "a kept limit is not a clamp: {under}");
 }
+
+/// P2.1's real source: a group message carries its subject in the message's own context
+/// (`ContextInfo.groupSubject`), so the index learns a group's name from traffic it already receives -
+/// no metadata lookup, no journal. A subject the node already fetched is never overwritten.
+#[test]
+fn a_group_message_teaches_the_index_its_subject() {
+    let store = Memory::new();
+    let group = "120363000000000021@g.us";
+    let mut first = direct(group, "", "G21", base(), "oi");
+    first.group = true;
+    first.chat_subject = "Condomínio".into();
+    block_on(put(&store, &first)).unwrap();
+
+    let card = block_on(card_of(&store, group)).unwrap().expect("the card");
+    assert_eq!(card.subject, "Condomínio", "the message's context named the group");
+    assert!(block_on(subjects_missing(&store)).unwrap().is_empty(), "nothing left to ask the phone for");
+
+    // A later message carrying an older subject does not overwrite what the node holds.
+    let mut second = direct(group, "", "G22", base() + 1000, "mais");
+    second.group = true;
+    second.chat_subject = "Outro Nome".into();
+    block_on(put(&store, &second)).unwrap();
+    assert_eq!(block_on(card_of(&store, group)).unwrap().expect("card").subject, "Condomínio");
+
+    // A direct chat is never given a subject, even if a context carried one.
+    let mut person = direct(LAURA, "Laura", "S21", base(), "oi");
+    person.chat_subject = "Nao e grupo".into();
+    block_on(put(&store, &person)).unwrap();
+    assert_eq!(block_on(card_of(&store, LAURA)).unwrap().expect("card").subject, "");
+
+    // And the ranking answers by that name, saying which field matched.
+    let answer = block_on(contacts(&store, &named("Condomínio"))).unwrap();
+    let best = &answer["candidates"][0];
+    assert_eq!(best["chat"], group);
+    assert_eq!(best["matched_source"], "group_subject", "the answer says the subject matched: {answer}");
+}
