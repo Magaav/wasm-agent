@@ -43,6 +43,10 @@ pub mod http_transport;
 pub mod operations;
 pub mod plugins;
 pub mod quickjs;
+/// The build-time scan behind the capability registry (`src/capability_rows/`): which files declare
+/// rows. `build.rs` writes the aggregate from it, and `tests/capability_row_discovery.rs` runs the same
+/// function on a directory it makes itself, so a new row file is collected without editing anything.
+pub mod registry_scan;
 pub mod resources;
 pub mod ripgrep;
 pub mod serve;
