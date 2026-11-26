@@ -144,3 +144,25 @@ directory holding the artifact and its pin (the two files a deploy writes) so th
 
 No model-facing string is added or changed: the loop's own texts, the fence's sentences and the refusal
 messages are the ones that were there, and the bytes golden holds them.
+
+## Savings (measured, 26/11 — what this move takes off a landing)
+
+Asked for by the orchestrator: a host build in minutes and the bytes a node downloads, before → after.
+
+**Host build (`cargo build --release -p wa-host`, this node, 16 cores).** A change to the seam's JSON
+channel used to be a change to `rust/wa-capabilities/src/codemode_seam.rs`, so it rebuilt and relinked the
+host: **2 min 26 s cold** (146 s, fresh `CARGO_TARGET_DIR`, base worktree at 522e12ae) and **19 s** for a
+touch-rebuild (measured back to back with the after side, same load). After 97e8fbf0 / 8c6aa6fe the same
+change is a change to `rust/components/codemode`: **0 s of host build**, and a component build of
+**10 s** and **18 s** in two measured runs (`cargo build --release --target wasm32-wasip2`).
+
+**Bytes per landing.** Before, the artifact a node must take to get that change is the whole host binary:
+**79,701,736 B** (`wa`). After, it is `codemode.wasm`: **242,422 B** — 0.30% of it — with the
+`components.lock` pin moving beside it (the host binary is unchanged).
+
+**30-day landings it applies to (measured, `git log --since=30.days`).** Of the codemode row's 22 commits,
+**1** touched only `rust/components/codemode` + `wit/codemode` (a landing that already skipped the host
+rebuild — the shape this move extends), and **0** touched `codemode_seam.rs` alone. So the honest reading
+is that this move's saving is **prospective**: from here, a change to the channel lands in the component;
+in the 30 days measured, no commit would have been spared a host rebuild, because every one of the seam
+file's four also carried a loop or component change.
