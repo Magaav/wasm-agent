@@ -1205,6 +1205,19 @@ end
 
 local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
+-- Renaming a thread (/sessions, r on a row): the title is the name the reader sees in every list, so it
+-- is the session's own row and nothing else changes. An empty name is refused rather than stored - a
+-- blank title is what an unnamed session already has, and clearing a name a reader typed is not
+-- something a keypress should do quietly.
+function M.rename_session(session_id, title)
+  session_id, title = tostring(session_id or ""), tostring(title or "")
+  title = title:gsub("^%s+", ""):gsub("%s+$", "")
+  if session_id == "" or title == "" then return false end
+  if #title > 200 then title = title:sub(1, 200) end
+  exec("UPDATE sessions SET title = ? WHERE id = ?", { title, session_id })
+  return true
+end
+
 function M.base64_decode(text)
   if type(text) ~= "string" or text == "" then return "" end
   text = text:gsub("%s", ""):gsub("=+$", "")

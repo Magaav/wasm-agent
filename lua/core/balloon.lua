@@ -341,6 +341,10 @@ function M.panel_spec(page, selected, opts)
     spec.placeholder = page.placeholder
   end
   if page.hint then spec.hint = page.hint end
+  -- A letter that NAMES an action instead of a row (`keys_action = { c = "copy" }`): the panel answers
+  -- `{"action": "key", "key": "copy", "index": <the row the reader was on>}` and the caller decides.
+  -- `keys` (a letter that CHOOSES a row) is unchanged, and a page that names neither keeps its keys.
+  if page.keys_action then spec.keys_action = page.keys_action end
   if opts and opts.timeout_ms then spec.timeout_ms = opts.timeout_ms end
   return spec
 end
@@ -383,6 +387,11 @@ function M.flow(pages, io)
     local answer = open(M.panel_spec(page, frame.focus, io))
     if type(answer) ~= "table" then answer = { action = "cancel" } end
     if answer.action == "unsupported" then return { action = "unsupported" } end
+    -- A letter the page named as an ACTION (not a row): the caller owns it, and the page stays open
+    -- for it - `c` copies and the list is still there to pick from.
+    if answer.action == "key" then
+      return { action = "key", key = tostring(answer.key or ""), index = tonumber(answer.index) or 0 }
+    end
     if answer.action == "timeout" then close(); return { action = "timeout" } end
     if answer.action == "cancel" then
       if #stack == 1 then close(); return { action = "cancel" } end

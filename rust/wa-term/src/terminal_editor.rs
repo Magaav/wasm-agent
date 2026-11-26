@@ -1042,6 +1042,10 @@ pub struct Panel {
     /// (`{"e": 2}`). Opt-in per page, so no other panel's keys change: pressing a letter on a list
     /// that did not name it still does nothing.
     pub keys: Vec<(u8, usize)>,
+    /// The letters a page names as an ACTION rather than a row (`{"c": "copy"}`): pressing one asks
+    /// the caller for it - `{"action": "key", "key": "copy", "index": <the row the reader was on>}`
+    /// - and the panel is NOT finished by it, because the list is still there to pick from.
+    pub key_actions: Vec<(u8, String)>,
     text: Vec<char>, escape: Vec<u8>, paste: bool, utf8: Vec<u8>,
     pub result: Option<serde_json::Value>, pub width: usize, pub rows: usize,
 }
@@ -1089,6 +1093,14 @@ impl Panel {
                 Some((byte[0].to_ascii_lowercase(), option))
             })
             .collect()).unwrap_or_default();
+        let key_actions: Vec<(u8, String)> = spec.get("keys_action").and_then(|v| v.as_object())
+            .map(|object| object.iter().filter_map(|(letter, action)| {
+                let byte = letter.as_bytes();
+                if byte.len() != 1 { return None; }
+                let name = action.as_str()?.to_string();
+                if name.is_empty() { return None; }
+                Some((byte[0].to_ascii_lowercase(), name))
+            }).collect()).unwrap_or_default();
         let selected = spec.get("selected").and_then(|v| v.as_u64()).map(|n| (n as usize).saturating_sub(1)).unwrap_or(0)
             .min(options.len().saturating_sub(1));
         let hint = match text("hint") {
@@ -1098,7 +1110,7 @@ impl Panel {
             _ => "Esc or \u{2190} to go back".into(),
         };
         Panel { title: text("title"), lines, options, selected, numbered, input, placeholder: text("placeholder"), hint,
-            spaces, keys, text: value, width, rows, ..Default::default() }
+            spaces, keys, key_actions, text: value, width, rows, ..Default::default() }
     }
 
     /// The rows a page's group headings take: one each, and only on a page that has them (`/mcp`'s list).
@@ -1144,7 +1156,9 @@ impl Panel {
         // field, every printable byte is the text being typed.
         if self.input.is_none() {
             if let Some(act) = keymap::panel_digit(byte) { self.perform(act, byte); return; }
-            if !self.options.is_empty() {
+            // `key_actions` counts too: a page whose letters are ACTIONS (`c` copies, `r` renames) has
+            // named its letters just as much as one whose letters pick rows.
+            if !self.options.is_empty() || !self.key_actions.is_empty() {
                 if let Some(act) = keymap::panel_letter() { self.perform(act, byte); return; }
             }
         }
@@ -1199,6 +1213,12 @@ impl Panel {
                         self.selected = index - 1;
                         self.finish(serde_json::json!({"action": "select", "index": *index}));
                     }
+                } else if let Some((_, action)) = self.key_actions.iter().find(|(named, _)| *named == letter) {
+                    // An ACTION letter: the reader asked for something to happen to the row they are on,
+                    // not to pick it. The page stays open (no `finish`), and the answer carries the row so
+                    // the caller knows what the action is about.
+                    self.result = Some(serde_json::json!({"action": "key", "key": action,
+                        "index": self.selected + 1}));
                 }
             }
             A::Backspace => { if self.input.is_some() { self.text.pop(); } }
@@ -2247,6 +2267,30 @@ mod tests {
         let mut p = Panel::from_spec(&plain, 60, 30);
         type_panel(&mut p, b"c");
         assert_eq!(p.result, None, "a page that named no letter keeps none");
+    }
+
+    // A letter that names an ACTION (`keys_action`) answers with the row the reader was on and does NOT
+    // pick it: `/sessions` copies the id of the row under the cursor without switching to it.
+    #[test]
+    fn a_letter_that_names_an_action_answers_with_the_row_it_was_on() {
+        let spec = serde_json::json!({
+            "title": "Sessions",
+            "options": [{"label": "this one"}, {"label": "beta"}, {"label": "gamma"}],
+            "selected": 2,
+            "keys_action": {"c": "copy", "r": "rename"},
+        });
+        let mut p = Panel::from_spec(&spec, 60, 30);
+        type_panel(&mut p, b"c");
+        assert_eq!(p.result.take(), Some(serde_json::json!({"action": "key", "key": "copy", "index": 2})),
+            "c asks for the action on the second row");
+        // The page is still the reader's: the list is not finished by an action letter.
+        type_panel(&mut p, &[0x1b, b'[', b'B']);
+        type_panel(&mut p, b"R");
+        assert_eq!(p.result.take(), Some(serde_json::json!({"action": "key", "key": "rename", "index": 3})),
+            "Down then R: the action follows the cursor, and the letter is case-blind");
+        // A letter nobody named is still not a key.
+        type_panel(&mut p, b"z");
+        assert_eq!(p.result, None, "an unnamed letter does nothing");
     }
 
     fn type_panel_action(spec: &serde_json::Value, key: u8, expected: usize) {

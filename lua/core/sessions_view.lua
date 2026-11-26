@@ -138,6 +138,11 @@ function M.page(opts)
     title = string.format("Sessions (%d%s)", #options, total > #options and (" of " .. total) or ""),
     options = options,
     per = 14,
+    -- Enter switches; these two act on the row the reader is on, without picking it: `c` puts the id on
+    -- the clipboard, `r` renames the thread. The panel carries them (`keys_action`) and the caller does
+    -- the work, so the list stays open for the next pick.
+    keys_action = { c = "copy", r = "rename" },
+    hint = "Enter switches \u{b7} c copies the id \u{b7} r renames \u{b7} Esc closes",
   }
   return page, os.clock() - started
 end
