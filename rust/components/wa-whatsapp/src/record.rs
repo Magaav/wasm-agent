@@ -167,6 +167,12 @@ pub struct Record {
     pub poll: Option<Poll>,
     /// Text the transcription pipeline attached to this message (`speech.recognize`).
     pub transcript: String,
+    /// True when the transcript WhatsApp/the recognizer produced was LONGER than [`MAX_TEXT`] and was cut
+    /// at it: the index then holds a part, and only the media file holds the whole. A cut that is not
+    /// recorded reads as a complete text (`whatsapp-index-heals-itself` item 4).
+    pub transcript_cut: bool,
+    /// The same for an OCR pass.
+    pub ocr_cut: bool,
     /// Text an OCR pass attached to this message.
     pub ocr: String,
     /// `view_once`, `ephemeral_media_not_retained`, `media_too_large`, `unsupported_kind`, …: why this

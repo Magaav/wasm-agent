@@ -3040,3 +3040,28 @@ fn catching_up_names_the_chats_that_are_behind_and_since_when() {
     assert_eq!(state["state"], "current");
     assert_eq!(state["behind"].as_array().map(Vec::len), Some(0), "current never lists chats");
 }
+
+/// P1.4 of whatsapp-index-heals-itself: a text the STORE cut is not silently a whole text. The hit says
+/// the index holds a part, and names the op and the file that hold the rest.
+#[test]
+fn a_cut_transcript_names_the_op_and_the_file_that_hold_the_whole() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(CHAT, "Ana", "V1", base(), ""))).unwrap();
+    // Longer than a record keeps: `attach_text` is bounded at `record::MAX_TEXT`.
+    let long = format!("nota {} {}", "palavra ".repeat(600), "fim");
+    assert!(long.chars().count() > record::MAX_TEXT, "the fixture is longer than the bound");
+    block_on(attach_text(&store, CHAT, "V1", &long, Source::Transcript)).unwrap();
+
+    let stored = block_on(load(&store, CHAT, "V1")).unwrap().expect("the record");
+    let view = crate::view::message(&stored, None);
+    assert_eq!(view["transcript_cut"], true, "the answer says the index holds a part: {view}");
+    let full = &view["transcript_full"];
+    assert_eq!(full["tool"], "whatsapp_message", "the op that returns the stored part");
+    assert_eq!(full["chars_stored"], record::MAX_TEXT, "how much is held, stated");
+    assert_eq!(full["whole_in"]["tool"], "whatsapp_download", "and the op that returns the whole: the file");
+    assert_eq!(full["whole_in"]["chat"], CHAT);
+    assert_eq!(full["whole_in"]["id"], "V1");
+    // A text inside the bound is NOT marked cut, and keeps the old pointer shape (or none).
+    let view = crate::view::message(&direct(CHAT, "Ana", "V2", base(), "curta"), None);
+    assert!(view.get("transcript_cut").is_none(), "a whole text is never marked cut");
+}

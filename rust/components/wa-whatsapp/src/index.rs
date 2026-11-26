@@ -2196,10 +2196,19 @@ pub async fn attach_text<S: Store>(store: &S, chat: &str, id: &str, text: &str, 
     // A deleted message keeps what this node derived about it (`mark_deleted`): a transcript that lands
     // after the revoke is still the content of that one message, and the flag is what says it was deleted.
     let was = record.tokens();
+    let cut = text.chars().count() > record::MAX_TEXT;
     let bounded: String = text.chars().take(record::MAX_TEXT).collect();
+    // The cut is RECORDED, not silently applied: a text that was longer than a record keeps is a part,
+    // and the answer has to say so and say where the whole lives (`view`, `*_full.whole_in`).
     match source {
-        Source::Transcript => record.transcript = bounded,
-        Source::Ocr => record.ocr = bounded,
+        Source::Transcript => {
+            record.transcript = bounded;
+            record.transcript_cut = cut;
+        }
+        Source::Ocr => {
+            record.ocr = bounded;
+            record.ocr_cut = cut;
+        }
     }
     for token in was {
         store.del(key_token(&token, record.ts, &record.id, &record.chat).as_bytes()).await?;
