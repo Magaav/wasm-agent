@@ -138,6 +138,7 @@ becomes 3.3 s of program rebuild.**
 | `scripts/test-pinned-request-pty.mjs` | 26 ok, 0 failed | - | the pinned row and the notice row, existing behaviour |
 | `scripts/test-tui-chrome-pty.mjs` | 18 ok, 0 failed | - | the box, the scrollbar, a resize |
 | `scripts/test-reflow-blocks-pty.mjs` | 32 ok, 0 failed | - | wrapping and the bar |
+| the whole `wa-capabilities` crate (`cargo test --release -p wa-capabilities`) | 407 pass, 5 fail | 8,110 | the five failures are PRE-EXISTING: `origin/main` 522e12ae in its own worktree fails exactly the same five with the same counts (407 passed; 5 failed) - `capabilities::tests::documented_inventory_matches_the_live_registry`, `operations::adoption_survives_the_relay_deadline::an_adopted_operation_survives_the_relay_deadline_and_runs_once`, `operations::await_returns_at_its_own_wait::a_cancelled_shell_returns_before_its_settle_finishes`, `operations::await_returns_at_its_own_wait::a_relayed_await_answers_at_wait_ms_and_never_holds_the_relay`, `operations::promotion_says_so::a_promoted_shell_says_in_the_same_result_that_it_moved_to_the_background` |
 
 Both new rows are wired: `scripts/fast.sh` builds the program in its Rust section (so the
 two-process test finds `wa-term` in the same target dir) and runs `term-remote-pty` beside
