@@ -4136,7 +4136,7 @@ struct ConsoleInput {
     repaint_after: Option<std::time::Instant>,
     /// While the transcript has focus (Up on an empty draft), its key decoder.
     nav: Option<wa_term::transcript::NavDecoder>,
-    /// A mouse report split across two reads: its start, waiting for the rest (wa_term::selection).
+    /// A mouse report split across two reads: its start, waiting for the rest (crate::selection).
     mouse_pending: Vec<u8>,
     /// The chat text being selected with the mouse; Ctrl+C copies it (OSC 52).
     selection: Option<Selection>,
@@ -4799,7 +4799,7 @@ fn console_reader() {
                             resize_console(&mut state, columns as usize, rows as usize);
                         }
                     }
-                    // Mouse reports (wa_term::selection) are taken out first; the rest is keys, as before.
+                    // Mouse reports (crate::selection) are taken out first; the rest is keys, as before.
                     let mut data = std::mem::take(&mut state.mouse_pending);
                     data.extend_from_slice(&chunk[..n]);
                     let (keys, mice, pending) = crate::selection::take(&data);
