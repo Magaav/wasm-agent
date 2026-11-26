@@ -635,6 +635,10 @@ function M.run(argv)
   -- from tool children (rust/wa-operation/src/lib.rs, DENY_ENV). See lua/core/idle_reads.lua.
   local function snapshot_status(opts)
     if not (host.status_snapshot and view.editor and view.stdout) then return end
+    -- The console fills the limits rows itself from the door (it is the only side running mid-run),
+    -- so EVERY snapshot names them instead of drawing them: one marker line, expanded on each draw.
+    opts = opts or {}
+    opts.limits_marker = true
     local built, spec = pcall(status_panel, opts)
     if built then pcall(host.status_snapshot, json.encode(spec)) end
   end

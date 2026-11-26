@@ -4795,6 +4795,12 @@ fn console_reader() {
                 // inside the turn, so this thread is the only one that can repaint them.
                 limit_tick();
             }
+            // While a panel waits on the door, the read is BOUNDED: the tick above only runs between
+            // keystrokes otherwise, and a `/status` panel that turned from loading to bars because the
+            // reader happened to press a key is not the panel this feature promised.
+            while limits_waiting() && !byte_ready(150) {
+                limit_tick();
+            }
             let mut chunk = [0u8; 512];
             let read = read_chunk(&mut handle, &mut chunk);
             let (lock, wake) = console_input();
@@ -5499,6 +5505,9 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
 /// rows did not change, so an idle panel costs one `row_texts` call per tick and no frame.
 fn refresh_panel_limits(state: &mut ConsoleInput) {
     let Some((provider, url, spec)) = state.panel_limits.clone() else { return };
+    if std::env::var_os("WA_LIMITS_DEBUG").is_some() {
+        eprintln!("[limits] tick provider={provider} poll={}", crate::limits::poll(&provider));
+    }
     if state.panel.is_none() { state.panel_limits = None; return }
     let fresh = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
     if fresh.get("lines") == spec.get("lines") { return }
@@ -5507,6 +5516,13 @@ fn refresh_panel_limits(state: &mut ConsoleInput) {
     state.panel_limits = Some((provider, url, fresh));
     let frame = layout_frame(state);
     let _ = wa_term::terminal_editor::write(&frame);
+}
+
+/// Whether an open panel is waiting on the limits door (so the reader's read must be bounded).
+fn limits_waiting() -> bool {
+    let (lock, _) = console_input();
+    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.panel_limits.is_some()
 }
 
 /// The tick's entry point: the console lock is taken only while a panel waits on the door.

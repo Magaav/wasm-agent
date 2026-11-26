@@ -328,7 +328,7 @@ function M.session_lines(session_id, opts)
     -- inside the turn then, so nothing here can repaint when the read lands. The marker is one line;
     -- the console expands it from the door on every draw (rust/wa-capabilities/src/limits.rs).
     if opts and opts.limits_marker then
-      lines[#lines + 1] = "\1limits:" .. tostring(item.id)
+      lines[#lines + 1] = string.char(1) .. "limits:" .. tostring(item.id) .. string.char(9) .. tostring(item.base_url or "")
       goto continue_provider
     end
     local limits, problem, age, state = limits_of(item.id, opts)
