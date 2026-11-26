@@ -1203,7 +1203,21 @@ function M.run(argv)
       })
       refresh_model()
       if not done then ui.say(redact.text(tostring(problem))) end
-    elseif line == "/login" or line == "/provider" then
+    elseif line == "/sessions" then
+      -- The sessions on this node, as a balloon (lua/core/sessions_view.lua): one row per session,
+      -- with its state and age. Picking one switches (the switch itself is the REPL's, below); a pipe
+      -- gets the plain list.
+      local sessions = reload.require("lua/core/sessions_view.lua")
+      local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200 })
+      if type(answer) == "table" and answer.action == "select" then
+        local chosen = tostring(answer.session or "")
+        if chosen ~= "" and chosen ~= tostring(agent.session_id) then
+          -- Until the in-process switch lands, the row names what today already works: the resume
+          -- line, printed. The switch replaces this block.
+          ui.say("  switch: wa --resume " .. chosen)
+        end
+      end
+        elseif line == "/login" or line == "/provider" then
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
       -- login is a device code entered in the browser, an API key is pasted in the balloon's secret
       -- field or on the vault page.

@@ -130,4 +130,26 @@ function M.page(opts)
   return page, os.clock() - started
 end
 
+-- Open the page (a balloon) or, for a pipe, print the plain list. The answer is the balloon's:
+-- {action = "select", index, session?} with the chosen row, {action = "run", line} for a row that
+-- queued a line, or {action = "cancel"}. Nil when there was no balloon to open.
+function M.run(io, opts)
+  local page = M.page(opts)
+  if io and io.show then
+    local answer = io.show({page})
+    if type(answer) == "table" then return answer end
+    return nil
+  end
+  if io and io.print then
+    -- A pipe gets one line per session, the way `wa sessions` prints them: the id first, then the
+    -- name, so the output is greppable and pastable.
+    for _, option in ipairs(page.options) do
+      if option.session then
+        io.print(string.format("%s  %s", option.session, (tostring(option.label):gsub("^%s*%*?%s*", ""))))
+      end
+    end
+  end
+  return nil
+end
+
 return M

@@ -44,5 +44,21 @@ check(workers >= 1, 'and it is inside that block: ' .. workers)
 check(page.options[2].session ~= mission, 'the mission is not in the chat list')
 check(elapsed_ms < view.BUDGET_MS, string.format('200 sessions under %d ms (%.1f ms)', view.BUDGET_MS, elapsed_ms))
 
+-- ---- the command, and the pipe's plain list --------------------------------------------------
+local commands = dofile('lua/core/commands.lua')
+local listed_sessions, listed_alias = false, false
+for _, entry in ipairs(commands.commands or {}) do
+  if type(entry) == 'table' and entry.name == '/sessions' then listed_sessions = true end
+  if type(entry) == 'table' and entry.name == '/session' then listed_alias = true end
+end
+check(listed_sessions, '/sessions is a command')
+check(listed_alias, '/session stays an alias')
+
+local printed = {}
+view.run({ print = function(text) printed[#printed + 1] = text end },
+  { session_id = here, user_id = 'master', limit = 200 })
+check(#printed >= 199, 'a pipe prints the plain list: ' .. #printed)
+check(tostring(printed[1]):sub(1, 36) == here, 'the first line is this session id: ' .. tostring(printed[1]))
+
 if failed > 0 then error(string.format('sessions page: %d of %d failed, first: %s', failed, checks, tostring(first)), 0) end
 print(string.format('sessions page ok (%d checks, %.1f ms for %d sessions)', checks, elapsed_ms, #page.options))
