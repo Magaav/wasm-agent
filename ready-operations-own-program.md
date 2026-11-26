@@ -34,6 +34,7 @@ facts again, plans the program, and defines the first slice.
 | request bytes of a healthy call identical | measured: 66 tools, canonical sha256 `a79260f6…d6ad85` on both the base binary and this branch, `operation`'s own spec `210b6b65…d0f5b7` on both |
 | host build before/after | warm, `operations.rs` touched: 23.45 s / 79,712,792 B → 28.40 s / 79,717,928 B |
 | report | docs/missions/reports/operations-own-program.md (commit 42462e02) |
+| rule 16 (the test must fail on the base) | `scripts/test-discriminates.sh origin/main`: **discriminates**, 1 blocking 0 — run 26/11 on 1c978452 |
 
 **Left for the orchestrator:** (a) review of f94e6d56 and 42462e02, then landing in order; (b) the
 pre-existing `scripts/test-operation-control.cjs` failure on this node, proved against the installed base

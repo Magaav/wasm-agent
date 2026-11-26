@@ -85,7 +85,12 @@ other tool call, and the harness compares the two answers:
    ledger boot, and differs from the in-process pid.
 
 Verdicts: **42 checks, 4 of 4 consecutive runs green.** Against the base binary the row fails at "the
-supervisor wrote its rendezvous" (it discriminates — rule 16). The 5 new unit rows pass
+supervisor wrote its rendezvous" (installed base binary, so the failure is the missing mode, not a missing
+build). The repo's own gate agrees: `flock -o ~/Work/missions/.suite.lock bash
+scripts/test-discriminates.sh origin/main` on this branch answers `discriminates\tscripts/test-operation-supervisor.cjs`
+— **1 discriminating, 0 blocking** — with its reason printed verbatim: the scratch base worktree has no
+built binary at `base/rust/target/release/wa`, so that run failed on the binary rather than on the mode;
+the stronger statement is the installed-binary one above. The 5 new unit rows pass
 (`operations_supervisor::tests::*`). Existing rows re-run on this branch: `test-operation-survives-turn.lua`
 16 checks, `test-operation-cwd.lua` 31 checks, `test-operation-reconcile-json.cjs` 27 checks — all green.
 
