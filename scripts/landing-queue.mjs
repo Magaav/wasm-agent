@@ -1645,6 +1645,11 @@ function commandReconcile(options) {
 // pristine checkout itself). The record is keyed by the check command, this machine and main's retest
 // digest, so a log recorded for a different tree is refused rather than trusted.
 async function commandBaseline(options) {
+  // A BASELINE MEASURED ON DEMAND IS A LANDING'S OWN MOVE (Fable 26/11): `--measure` checks the canonical checkout out
+  // to main's commit, runs the check command there and puts it back (ensureBaseline), so it writes the canonical tree
+  // and belongs to the lane. `--record <log>` only records a log that already exists - it moves nothing - and stays
+  // open to everyone, which is why this guard sits here and not at the verb.
+  if (options.measure) requireTheLane('baseline --measure', options);
   const {repo, canonical, dir, db} = open(options);
   const command = options.command || 'bash scripts/fast.sh';
   const commit = resolveCommit(repo, options.commit || 'origin/main');

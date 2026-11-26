@@ -740,7 +740,22 @@ try {
     check('and that refusal still leaves the canonical checkout untouched',
       git(CANONICAL, 'rev-parse', 'HEAD').trim() === headBefore && reflogAfter() === reflogBefore);
 
-    // 10f. --DRY-RUN FROM A WORKER IS ALLOWED: it merges and pushes nothing, and it is how a worker checks its branch.
+    // 10f. A BASELINE MEASURED ON DEMAND MOVES THE CANONICAL CHECKOUT, SO IT IS THE LANE'S TOO - while `--record`,
+    // which only reads a log, stays open because it moves nothing.
+    const measure = q(['baseline', '--measure', '--command', 'echo never-runs'], {env: {WA_SESSION: '0f0f0f0f-1111-2222-3333-444444444444'}});
+    check('a worker cannot measure a baseline in the canonical checkout',
+      measure.status === 75 && /baseline --measure/.test(measure.stderr) && /landing is the orchestrator's/.test(measure.stderr), measure.stderr);
+    check('and a refused baseline leaves the canonical HEAD where it was', git(CANONICAL, 'rev-parse', 'HEAD').trim() === headBefore);
+    const recordLog = path.join(WORK, 'baseline-log');
+    fs.writeFileSync(recordLog, 'not a test run: nothing named, nothing passed\n');
+    const recordOnly = q(['baseline', '--record', recordLog], {env: {WA_SESSION: '0f0f0f0f-1111-2222-3333-444444444444'}});
+    // The log this row writes names nothing, so `--record` refuses it for ITS reason (baseline_log_unnamed): what is
+    // asserted is that the refusal is not the LANE's, which is what "stays open" means. A check on the exit code alone
+    // would pass for any refusal at all - measured, because that is exactly what the first version did.
+    check('and recording a log stays open to a worker (its refusal, if any, is not the lane\'s)',
+      !/landing is the orchestrator's/.test(recordOnly.stderr), recordOnly.stderr);
+
+    // 10g. --DRY-RUN FROM A WORKER IS ALLOWED: it merges and pushes nothing, and it is how a worker checks its branch.
     const dry = q(['land', '--branch', 'change/lane-probe', '--owner', SESSION, '--dry-run'],
       {env: {WA_SESSION: '0f0f0f0f-1111-2222-3333-444444444444'}});
     check('a worker may dry-run', dry.status === 0, `${dry.stdout}\n${dry.stderr}`);
