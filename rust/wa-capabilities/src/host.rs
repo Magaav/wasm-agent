@@ -4196,7 +4196,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
     let (width, rows) = (editor.width, output_rows(None, editor));
     // Which gestures a pointer event means, and in which order they are tried, is the table's answer
-    // (wa_term::keymap, the Mouse surface) - the same table /keybindings prints. A press a link
+    // (the keymap, the Mouse surface) - the same table /keybindings prints. A press a link
     // claims is a link copy because the table lists LinkCopy before the transcript's selection.
     match event {
         Mouse::WheelUp(row, _) | Mouse::WheelDown(row, _) => {
@@ -6144,7 +6144,7 @@ pub extern "C-unwind" fn transcript_copy_first(l: *mut LuaState) -> c_int {
 }
 
 /// `host.link_span(text)`: the first bare URL in `text` as "start,stop", 1-based byte offsets
-/// inclusive (Lua string positions), or nil. This is THE URL detector (`wa_term::links`): the renderer
+/// inclusive (Lua string positions), or nil. This is THE URL detector (crate::links): the renderer
 /// (`lua/core/markdown.lua`) underlines what this answers, and a click copies what a lookup in the same
 /// function answers, so the two can no longer disagree about where a link ends. Two numbers in one
 /// string rather than a table: the only caller slices the line with them.
@@ -6162,7 +6162,7 @@ pub extern "C-unwind" fn link_span(l: *mut LuaState) -> c_int {
 
 /// `host.keybindings()`: every special key the console handles, as JSON - one row per binding,
 /// `{surface, title, group, key, does}`, in the order `/keybindings` prints them. The rows come from
-/// `wa_term::keymap`, which is the table the editor, the slash menu, the transcript's blocks, a
+/// the keymap, which is the table the editor, the slash menu, the transcript's blocks, a
 /// panel, the pointer and this reader thread all dispatch on, and the fullscreen console's rows come
 /// from the settings it obeys (`WA_TUI_KEYS`) - so the list a reader is shown is generated from the
 /// behaviour, never written beside it.
