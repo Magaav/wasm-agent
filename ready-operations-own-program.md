@@ -16,6 +16,12 @@ f94e6d56 + report 42462e02 + request-bytes/ready file 5bd13b43). Left for the or
 4. a second artifact for the supervisor is a release hunk and belongs to Fable — slice 1 deliberately ships
    as a mode of the existing `wa` binary so no installer, deploy or `installed.txt` changes.
 
+**A note on the repeated idle wakes** (26/11, for whoever reads this next): this session has been woken
+nine times with "your brief still has items" while the first line of this file said BRIEF DONE. It is not a
+self-wake — `wake_list` answers `count: 0, pending: 0` for this session — so the idle scheduler is firing
+from outside it, and AGENTS.orchestrator.md says periodic watcher wakes are disabled. Every wake after the
+fifth was spent re-verifying that nothing remained; nothing was started.
+
 **Verdict: the move is feasible without a new WIT world, and the hard half is already built.** The
 operations surface has exactly one choke point (`operations::control` + `operations::manager()`, both in
 `rust/wa-capabilities/src/operations.rs`), and the cross-process half of ownership — a second process
