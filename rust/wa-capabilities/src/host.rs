@@ -4929,9 +4929,17 @@ fn console_reader() {
                                     if let wa_cli_views::Route::Local(spec) = route {
                                         let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
                                         if let Some((width, rows)) = dims {
-                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                            // The same live-rows contract as the mid-run snapshot: a
+                                            // published /status carries the marker, and the console
+                                            // fills it from the door on every draw.
+                                            let drawn = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
+                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&drawn, width, rows));
                                             state.host_panel = true;
                                             state.balloon = true;
+                                            state.panel_limits = crate::limits::marker_of(&spec);
+                                            if let Some((provider, url, _)) = state.panel_limits.clone() {
+                                                let _ = crate::limits::start(&provider, &url);
+                                            }
                                             continue;
                                         }
                                     }
@@ -5505,8 +5513,13 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
 /// rows did not change, so an idle panel costs one `row_texts` call per tick and no frame.
 fn refresh_panel_limits(state: &mut ConsoleInput) {
     let Some((provider, url, spec)) = state.panel_limits.clone() else { return };
-    if std::env::var_os("WA_LIMITS_DEBUG").is_some() {
-        eprintln!("[limits] tick provider={provider} poll={}", crate::limits::poll(&provider));
+    // A probe a pty row can read: the debug lines go to the file this names, not to the tty the row
+    // is measuring (a line of stderr in the pane is a line of the screen under test).
+    if let Some(path) = std::env::var_os("WA_LIMITS_DEBUG").filter(|path| !path.is_empty()) {
+        use std::io::Write as _;
+        if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(log, "[limits] tick provider={provider} poll={}", crate::limits::poll(&provider));
+        }
     }
     if state.panel.is_none() { state.panel_limits = None; return }
     let fresh = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
