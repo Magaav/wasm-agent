@@ -1553,6 +1553,21 @@ function M.call(name, args, ctx)
     end
     return answer
   end
+  -- A SEND to a chat that is a NAME is refused, and the refusal carries the candidates: the tool never
+  -- picks a recipient (a read may, a send may not), but a model told only "not an exact JID" guesses a
+  -- number - which is the mistake this answers (whatsapp-index-heals-itself P2.4). Nothing is queued, so
+  -- the one forbidden thing (a message to the wrong person) cannot happen here either.
+  if tool.verb == 'send' and type(args.chat) == 'string' and args.chat ~= '' and not args.chat:find('@', 1, true)
+      and not args.chat:match('^[%d%s%+%-%(%)]+$') then
+    local lookup = M.call('contacts', { q = args.chat, limit = 5 }, ctx)
+    local candidates = type(lookup) == 'table' and lookup.candidates or nil
+    local any = type(candidates) == 'table' and #candidates > 0
+    return { ok = false, error = any and 'whatsapp_send_chat_ambiguous' or 'whatsapp_send_chat_not_found',
+      status = any and 409 or 404, effect = 'none', asked = args.chat, candidates = candidates,
+      note = any
+        and 'a name is not a recipient: pick the chat you mean from candidates and send to its exact JID'
+        or 'no chat in the index carries that name: ask mcp_whatsapp_contacts({q}) for what it knows, or pass the exact JID' }
+  end
   -- Two verbs are more than one capability call: a send queues and then waits for its outcome in the
   -- same step, and the hidden alias is that resume with no wait (operator decision, 11/11).
   if tool.verb == 'send' then return M.send(args, ctx) end
