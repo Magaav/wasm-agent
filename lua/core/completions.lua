@@ -388,7 +388,16 @@ function wa_completion_run(raw)
   -- refusal beside it, and the next tick after the deploy delivers it once (the same shape a capacity refusal
   -- already uses, and the same bound: a row is retried, never replayed as a new settlement).
   if ok and type(result) == 'string' and bot.turn_refused ~= nil and tostring(bot.turn_refused) == result then
+    local next_detail=deferred_detail(row,result)
     exec('UPDATE child_completions SET state=? WHERE child_id=? AND state=?',{'ready',row.child_id,'running'})
+    -- THE SAME SENTENCE TWICE IS NOT A WRITE (27/11, main-health red on 032f4dd4: a row counted one write
+    -- over three waiting ticks and went red). `deferred_detail` answers the row's own detail when the note
+    -- is already there, so the UPDATE is skipped here - the skip its comment always described. A tick
+    -- that finds nothing new now writes nothing, and the count is a property of the code rather than of
+    -- where the scan cursor happened to land.
+    if next_detail ~= tostring(row.detail or '') then
+      exec('UPDATE child_completions SET detail=? WHERE child_id=?',{next_detail,row.child_id})
+    end
     exec('UPDATE child_completions SET detail=? WHERE child_id=?',{deferred_detail(row,result),row.child_id})
     return json.encode({not_started=true,deploy_waiting=result})
   end
