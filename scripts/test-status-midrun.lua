@@ -49,8 +49,15 @@ local ANSWERS = {
   WASM_AGENT_LLM_BASE_URL = 'http://limits.test.invalid',
   WASM_AGENT_LLM_API_KEY = 'test-only',
   WASM_AGENT_LLM_MODEL = 'deepseek-v4.1-flash',
+  -- This shell is vaulted; the test's provider is the one it names, not the vault's route.
+  WASM_AGENT_VAULT_URL = nil,
+  WASM_AGENT_OPENCODE_GO_VAULT_URL = nil,
 }
-host.getenv = function(key) if ANSWERS[key] then return ANSWERS[key] end return env_get(key) end
+host.getenv = function(key)
+  if key == 'WASM_AGENT_VAULT_URL' or key == 'WASM_AGENT_OPENCODE_GO_VAULT_URL' then return nil end
+  if ANSWERS[key] then return ANSWERS[key] end
+  return env_get(key)
+end
 local http_calls = 0
 local RESET = os.time() + 3600
 host.http = function(_, url)
@@ -77,33 +84,74 @@ check(status.age_text(250) == 'as of 4 min ago', '250 s is "as of 4 min ago": ' 
 check(status.age_text(7200) == 'as of 2 h ago', 'two hours is "as of 2 h ago": ' .. status.age_text(7200))
 check(status.age_text(200000) == 'as of 2 d ago', 'two days is "as of 2 d ago": ' .. status.age_text(200000))
 
--- ---- 2. a fresh read: bars, no age ------------------------------------------------------------
+-- ---- 2. THE DOOR: a /status that never waits, mid-run or not -------------------------------
+-- The limits read is the host's now (`host.limits_start`/`limits_poll`): this test stubs the door,
+-- which is exactly the seam the panel sees, and proves the three things Victor asked for - a spinner
+-- first, the bars when they land, one named line when they do not.
+local door = { state = 'none' }
+local starts, polls = 0, 0
+host.limits_poll = function(_id)
+  polls = polls + 1
+  if door.state == 'failed' then
+    return json.encode({ state = 'failed', error = door.error })
+  end
+  -- The real door keeps the last reading while a refresh is in flight: so does this one.
+  local answer = { state = door.state }
+  if door.usage then answer.usage = door.usage end
+  if door.age_s then answer.age_s = door.age_s end
+  return json.encode(answer)
+end
+host.limits_start = function(_id, url)
+  starts = starts + 1
+  door.started_with = url
+  door.state = 'loading'
+  return json.encode({ state = 'loading' })
+end
+
+-- 2a. FIRST EVER, mid-run: the panel draws what it has (session/model) and says the limits are on
+-- their way - and the read was started by the panel itself, off the turn.
 local sid = memory.start_session('', 'status mid-run', { user_id = 'master' })
 status._limits = {}
-local fresh = rows_text(status.session_lines(sid, {}))
-check(http_calls == 1, 'the first /status read the limits once: ' .. http_calls)
-has(fresh, '37%', 'a fresh reading draws its own percentage')
+door = { state = 'none' }
+starts, polls = 0, 0
+local first = rows_text(status.session_lines(sid, { cached = true }))
+has(first, 'loading limits', 'the first open says the limits are loading: ' .. first)
+check(starts == 1, 'and the panel started exactly one read: ' .. starts)
+check(door.started_with == 'http://limits.test.invalid',
+  'naming the provider URL it would have called: ' .. tostring(door.started_with))
+check(first:find('read on the next /status', 1, true) == nil,
+  'never again the old refusal to read')
+
+-- 2b. the answer lands: the bars, and no age (it was taken just now).
+door.state = 'ready'
+door.usage = { rolling = { percent = 37, resetsAt = os.date('!%Y-%m-%dT%H:%M:%SZ', RESET) } }
+door.age_s = 0
+local fresh = rows_text(status.session_lines(sid, { cached = true }))
+has(fresh, '37%', 'the bars are drawn as soon as the door has them')
 check(fresh:find('as of ', 1, true) == nil,
   'a reading taken now is not drawn with an age: ' .. string.format('%q', fresh))
+check(fresh:find('loading limits', 1, true) == nil, 'and the spinner text is gone')
 
--- ---- 3. the same reading, four minutes later, mid-run -----------------------------------------
-clock = clock + 250
-local before = http_calls
+-- 3. four minutes later, mid-run: the bars, their age, and a refresh started because they are old.
+local before_starts = starts
+door.age_s = 250
 local cached = rows_text(status.session_lines(sid, { cached = true }))
 has(cached, '37%', 'a mid-run snapshot still draws the reading it has')
 has(cached, 'as of 4 min ago', 'and says how old it is')
-check(http_calls == before, 'a mid-run snapshot asks the network nothing: ' .. (http_calls - before))
-check(cached:find('limits unavailable', 1, true) == nil,
-  'and never says the limits are unavailable while it has a reading: ' .. string.format('%q', cached))
+check(starts == before_starts + 1, 'a reading past the window starts one refresh: ' .. (starts - before_starts))
+check(door.state == 'loading', 'and the rows below keep the old bars while it loads')
 
--- ---- 4. a process that never read: no age, no invention ---------------------------------------
+-- 4. the provider that does not answer: ONE line naming why, never a blank.
 status._limits = {}
-local before_never = http_calls
-local never = rows_text(status.session_lines(sid, { cached = true }))
-has(never, 'limits unavailable: read on the next /status between runs',
-  'a snapshot with no reading in hand says which, by name')
-check(never:find('as of ', 1, true) == nil, 'and invents no age for a number it does not have')
-check(http_calls == before_never, 'and still asks the network nothing mid-run')
+door = { state = 'none' }
+starts = 0
+local _ = rows_text(status.session_lines(sid, {}))
+door.state = 'failed'
+door.error = "the provider didn't answer (timeout 8 s)"
+local failed_rows = rows_text(status.session_lines(sid, {}))
+has(failed_rows, "limits: the provider didn't answer (timeout 8 s)",
+  'a failure draws one line naming why')
+check(failed_rows:find('loading limits', 1, true) == nil, 'and stops claiming to be loading')
 
 -- ---- 5. the provider's own list cost, summed --------------------------------------------------
 -- Two model calls whose usage blocks carry opencode.list_cost, written the way a real run writes
