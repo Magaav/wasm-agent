@@ -43,7 +43,7 @@ step_done() {
   }
 }
 
-STAGING="" COMMIT="" BINARY_COMMIT="" INSTALL="" SHARE="" KEEP="${WA_VERSION_KEEP:-3}"
+STAGING="" COMMIT="" BINARY_COMMIT="" INSTALL="" SHARE="" LUA_PART="" LUA_LOCK="" HOST_INTERFACE="" KEEP="${WA_VERSION_KEEP:-3}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --staging) STAGING="${2:-}"; shift 2 ;;
@@ -52,6 +52,9 @@ while [ $# -gt 0 ]; do
     --install) INSTALL="${2:-}"; shift 2 ;;
     --share) SHARE="${2:-}"; shift 2 ;;
     --keep) KEEP="${2:-}"; shift 2 ;;
+    --lua-part) LUA_PART="${2:-}"; shift 2 ;;
+    --lua-lock) LUA_LOCK="${2:-}"; shift 2 ;;
+    --host-interface) HOST_INTERFACE="${2:-}"; shift 2 ;;
     *) die "version_install_usage: unknown argument $1" ;;
   esac
 done
@@ -81,6 +84,13 @@ if [ -f "$VERSION_DIR/version.txt" ]; then
 else
   step_done 3
   # 4. Assemble it.
+  if [ -n "$LUA_PART" ]; then
+    . scripts/lib/lua-part.sh
+    [ -n "$LUA_LOCK" ] || die "version_install_lua_part: --lua-part needs --lua-lock"
+    [ -n "$HOST_INTERFACE" ] || die "version_install_lua_part: --lua-part needs --host-interface (today: the running tree manifest capabilities line)"
+    wa_lua_part_fill "$LUA_PART" "$LUA_LOCK" "$STAGING/lua-core" "$HOST_INTERFACE" \
+      || die "version_install_lua_part_refused: the part did not verify or its interface does not match (nothing was sealed, no pointer moved)"
+  fi
   WA_VERSION_COMMIT="${COMMIT}" WA_VERSION_BINARY_COMMIT="${BINARY_COMMIT:-}" WA_VERSION_INSTALL_DIR="$INSTALL" \
     wa_version_assemble "$STAGING" "$ID" "$PREV_DIR" >/dev/null || die "version_assembled_failed: $ID"
   say "assembled $ID ($(wa_version_disk "$ID" | sed 's/^version_disk [^ ]* //'))"

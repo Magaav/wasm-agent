@@ -112,5 +112,21 @@ wa_lua_part_unpack "$W/esc.tar.gz" "$LOCK" "$W/dest3" 2> "$W/e6" && fail "R4: a 
 grep -q 'lua_part_unsafe_path' "$W/e6" || { sed -n 1,3p "$W/e6" >&2; fail "R4: the unsafe-path refusal is not named"; }
 ok
 
+# R2: a part FILLS a version member - and an interface mismatch stops it BEFORE anything is replaced --------------
+tree="$W/member/lua-core"; mkdir -p "$tree"; printf 'the old tree
+' > "$tree/old.lua"
+lock_line "$LOCK" "$P1" "$HOST_INT"
+wa_lua_part_fill "$P1" "$LOCK" "$tree" "$HOST_INT" > "$W/fill.log" 2>&1 \
+  || { sed -n 1,4p "$W/fill.log" >&2; fail "R2: a good part must fill the member"; }
+[ -f "$tree/lua/core/init.lua" ] || fail "R2: the part did not land in the member"
+[ ! -f "$tree/old.lua" ] || fail "R2: the tree it replaced is still there"
+ok
+mkdir -p "$W/member2/lua-core"; printf 'keep me\n' > "$W/member2/lua-core/keep.lua"
+wa_lua_part_fill "$P1" "$LOCK" "$W/member2/lua-core" "$OTHER_INT" 2> "$W/fill2.log" \
+  && fail "R2: a part whose interface differs must not fill the member"
+grep -q 'lua_part_interface_mismatch' "$W/fill2.log" || { sed -n 1,3p "$W/fill2.log" >&2; fail "R2: the refusal is not named"; }
+[ -f "$W/member2/lua-core/keep.lua" ] || fail "R2: a refused part replaced the tree it must not touch"
+ok
+
 echo "lua part ok ($n checks)"
 

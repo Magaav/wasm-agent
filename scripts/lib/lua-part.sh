@@ -104,3 +104,29 @@ wa_lua_part_interface() {
   return 0
 }
 
+# <part-file> <lock> <tree-dir> <host-interface-digest> -> 0, or a named refusal, and the tree-dir holds the part.
+#
+# This is the ONE call that puts a part into a version folder: verify it, unpack it beside where it will live, check
+# the interface BOTH ways (the part names what it needs, the host names what it offers), and only then replace the
+# tree. Nothing is written over a tree that has not passed all three - which is what makes "refuse before the switch"
+# true rather than aspirational, because wa_version_point runs after this returns 0 and not before.
+#
+# The host interface is passed IN on purpose: today it comes from the running node's own tree manifest
+# (sed -n 's/^capabilities //p' <install>/lua-core/manifest.txt) - the tree a host runs must already match the host,
+# so it IS the host's declaration until a verb prints it. That verb (wa --interface) is the next commit.
+wa_lua_part_fill() {
+  local part="${1:?part}" lock="${2:?lock}" tree="${3:?tree dir}" host="${4:?host interface digest}" staging
+  wa_lua_part_verify_file "$part" "$lock" || return $?
+  staging="${tree}.part.$$"
+  rm -rf "$staging"
+  wa_lua_part_unpack "$part" "$lock" "$staging" || { rm -rf "$staging"; return $?; }
+  if ! wa_lua_part_interface "$staging" "$host"; then
+    # The part is refused BEFORE it can be named by a pointer, and nothing of the tree it would replace is touched.
+    rm -rf "$staging"
+    return 11
+  fi
+  rm -rf "$tree"
+  mv -T "$staging" "$tree" || { printf 'lua_part_dest_unwritable: %s\n' "$tree" >&2; return 6; }
+  printf 'lua_part_filled %s interface=%s\n' "$tree" "$host"
+  return 0
+}
