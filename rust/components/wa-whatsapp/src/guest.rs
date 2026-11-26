@@ -2974,6 +2974,8 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut aliases = AliasRun::new();
     // When the next heal round may ask the phone (heal_tick).
     let mut heal_at = Instant::now();
+    // When the next subject round may ask the phone (subjects_tick).
+    let mut subjects_at = Instant::now();
     loop {
         for notice in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_notice(notice).await;
