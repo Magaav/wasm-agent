@@ -62,6 +62,7 @@ const SLOW_HOLD_MS = 30000;
 const KEY = 'test-only-limits-key';
 let completions = 0;
 let usageReads = 0;
+let silentUsage = false;
 
 const server = http.createServer((req, res) => {
   req.on('data', () => {});
@@ -69,6 +70,8 @@ const server = http.createServer((req, res) => {
     const url = String(req.url || '');
     if (url.startsWith('/usage')) {
       usageReads += 1;
+      // The silent provider: the request arrives and nothing ever comes back.
+      if (silentUsage) return;
       const answer = () => {
         res.writeHead(200, {'content-type': 'application/json'});
         res.end(JSON.stringify({usage: {rolling: {percent: 37,
@@ -214,6 +217,47 @@ try {
   };
   walk(HOME);
   check('the provider key appears in no file this session wrote', leaked.length === 0, leaked.join(', '));
+
+  // ---- a SECOND open draws at once, with its age ------------------------------------------------
+  // Close the panel the run left open first: a key inside it is the panel's, not a new /status.
+  tmux(['send-keys', '-t', SESSION, 'Escape']);
+  await sleep(600);
+  tmux(['send-keys', '-t', SESSION, '/status', 'Enter']);
+  await sleep(900);
+  const reopened = screen();
+  check('a second open draws the bars at once', reopened.includes('37%'), reopened.slice(0, 3000));
+  check('and says how old the reading is', /just now|as of \d+ (min|h|d) ago/.test(reopened), reopened.slice(0, 3000));
+
+  // ---- a provider that never answers: ONE line naming why, never a blank -----------------------
+  // A fresh chat (fresh HOME, fresh process) with the fixture swallowing /usage: the door gives up
+  // at eight seconds, and the next open draws its failure instead of a blank.
+  silentUsage = true;
+  fs.rmSync(HOME, {recursive: true, force: true});
+  fs.mkdirSync(HOME, {recursive: true});
+  const quiet = 'slimquiet';
+  const quietCmd = ['env', '-i', ...Object.entries({...ENV, HOME}).map(([k, v]) => k + '=' + v),
+    BIN, '--db', path.join(WORK, 'quiet.db'), 'chat'].join(' ');
+  const quietStart = tmux(['new-session', '-d', '-s', quiet, '-x', String(COLS), '-y', String(ROWS), '-c', WORK, quietCmd]);
+  if (quietStart.status === 0) {
+    const quietScreen = () => String(tmux(['capture-pane', '-p', '-t', quiet]).stdout || '')
+      .replace(/\r/g, '').split('\n').map(row => row.replace(/\s+$/, '')).join('\n');
+    await waitFor(() => quietScreen().includes('Type a message'), 'the quiet prompt', 60000);
+    tmux(['send-keys', '-t', quiet, '/status', 'Enter']);
+    await sleep(1500);
+    check('with no reading yet, the first open says the limits are loading', /loading limits/.test(quietScreen()));
+    await sleep(9000);
+    tmux(['send-keys', '-t', quiet, 'Escape']);
+    await sleep(400);
+    tmux(['send-keys', '-t', quiet, '/status', 'Enter']);
+    await sleep(1500);
+    const answered = quietScreen();
+    check("a provider that never answers draws one line naming why",
+      answered.includes("limits: the provider didn't answer (timeout 8 s)"), answered.slice(0, 2500));
+    check('and never the old refusal to read between runs', !answered.includes('read on the next /status'),
+      answered.slice(0, 2500));
+  } else {
+    check('a second chat could be started for the silent-provider case', false, quietStart.stderr);
+  }
 } catch (error) {
   failed += 1;
   console.error('status-limits-pty: FAILED - ' + error.message);
