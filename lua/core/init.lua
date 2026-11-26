@@ -586,6 +586,17 @@ elseif command == "capabilities" then
     os.exit(1)
   end
   if args[2] == "--json" then print(text) else print(inventory.text()) end
+elseif command == "release" then
+  -- `wa release rehearse` (lua/core/release_rehearse.lua): the gates a cut depends on, run against the real
+  -- fleet, changing nothing. It is NOT `wa update` and it is not a release: no build, tag, publish or deploy
+  -- happens here - it reads each ring node own record and asks every node for its canaries.
+  if args[2] == "rehearse" then
+    local code = dofile("lua/core/release_rehearse.lua").run({ table.unpack(args, 3) })
+    if code and code ~= 0 then os.exit(code) end
+  else
+    print("usage: wa release rehearse [--json]   (the gates a cut depends on, against the fleet; changes nothing)")
+    os.exit(2)
+  end
 elseif command == "services" then
   -- The operator's door to the service components (lua/core/services_cli.lua): list, status, start,
   -- stop, enable, disable - no turn and no model required, which is the whole point on a model-less
