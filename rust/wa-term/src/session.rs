@@ -13,11 +13,16 @@ use wa_term_proto as proto;
 
 use crate::scroll::bar::Bar;
 use crate::scroll::settings::Scrollbar;
+use crate::terminal_editor::{Action, Command, Editor};
 use crate::transcript::Transcript;
 
 /// One terminal program's transcript, and the calls it answers.
 pub struct Session {
     pub transcript: Transcript,
+    /// The input box, owned HERE (part 2 of `wa-term-own-program`): the node sets its state over the
+    /// wire (`editor_setup`), sends the key bytes (`editor_key`) and draws what `editor_render`
+    /// and `editor_state` answer. The node holds no Editor and links none.
+    pub editor: Editor,
 }
 
 impl Default for Session {
@@ -25,7 +30,7 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new() -> Self { Session { transcript: Transcript::default() } }
+    pub fn new() -> Self { Session { transcript: Transcript::default(), editor: Editor::default() } }
 
     /// The flag the node gates its frames on.
     pub fn dirty(&self) -> bool { self.transcript.dirty }
@@ -105,9 +110,121 @@ impl Session {
             // The node's own flag (`transcript.dirty`), set from its side: it decides a frame and
             // nothing in this crate reads it.
             "dirty" => { t.dirty = flag(a, 0)?; Value::Null }
+            // ---- the editor: the node's input box. The node holds no Editor; it sets its state,
+            // sends the key bytes and draws the rows this process answers. ----
+            "editor_open" => { self.editor = Editor::default(); Value::Null }
+            "editor_setup" => { editor_setup(&mut self.editor, a)?; Value::Null }
+            "editor_key" => {
+                let byte = u8::try_from(count(a, 0)?).map_err(|_| proto::Failure::new(proto::code::BAD_MESSAGE, "a key byte must be 0..=255"))?;
+                json!(action_value(self.editor.feed(byte)))
+            }
+            "editor_state" => json!(editor_state(&self.editor)),
+            "editor_render" => json!({ "frame": proto::bytes(self.editor.render().as_bytes()) }),
+            "editor_paste" => json!(action_value(self.editor.paste(text(a, 0)?))),
+            "editor_insert" => { self.editor.insert_text(text(a, 0)?); Value::Null }
+            "editor_replace" => { self.editor.replace_range(count(a, 0)?, count(a, 1)?, text(a, 2)?); Value::Null }
+            "editor_select" => { self.editor.select(count(a, 0)?, count(a, 1)?); Value::Null }
+            "editor_slice" => json!(self.editor.slice(count(a, 0)?, count(a, 1)?)),
+            "editor_selection" => match self.editor.selected_text() { Some(text) => json!(text), None => Value::Null },
+            "editor_click" => { self.editor.click(count(a, 0)?); Value::Null }
+            "editor_wheel" => json!(self.editor.wheel(flag(a, 0)?, count(a, 1)?)),
+            "editor_escape" => json!(self.editor.escape()),
             _ => return Err(unknown()),
         })
     }
+}
+
+
+/// An Action as the node reads it: a tag and, where the tag carries one, its text or index. The
+/// node's console loop matches on `kind` exactly where it used to match the enum.
+fn action_value(action: Action) -> Value {
+    match action {
+        Action::None => json!({ "kind": "none" }),
+        Action::Submit(text) => json!({ "kind": "submit", "text": text }),
+        Action::SubmitNow(text) => json!({ "kind": "submit_now", "text": text }),
+        Action::Eof => json!({ "kind": "eof" }),
+        Action::Interrupt => json!({ "kind": "interrupt" }),
+        Action::Nav => json!({ "kind": "nav" }),
+        Action::PageUp => json!({ "kind": "page_up" }),
+        Action::PageDown => json!({ "kind": "page_down" }),
+        Action::Bottom => json!({ "kind": "bottom" }),
+        Action::Copy(text) => json!({ "kind": "copy", "text": text }),
+        Action::Paste => json!({ "kind": "paste" }),
+        Action::Pasted(from) => json!({ "kind": "pasted", "from": from }),
+    }
+}
+
+/// The input box's whole state, as the node draws and lays out from it. Every number the node used to
+/// read off `Editor` in process is here, computed by the editor that owns it.
+fn editor_state(editor: &Editor) -> Value {
+    json!({
+        "draft": editor.draft(),
+        "selection": match editor.selection() { Some((a, b)) => json!([a, b]), None => Value::Null },
+        "empty": editor.draft_empty(),
+        "bash": editor.bash,
+        "pasting": editor.pasting(),
+        "row": editor.row,
+        "width": editor.width,
+        "height": editor.height,
+        "status": editor.status,
+        "out_bottom": editor.out_bottom(),
+        "status_row": editor.status_row(),
+        "footer_row": editor.footer_row(),
+        "session_row": editor.session_row(),
+        "wakes_row": editor.wakes_row(),
+        "bottom": editor.bottom(),
+        "box_rows": match editor.box_rows() { Some((top, bottom)) => json!([top, bottom]), None => Value::Null },
+        "menu_rows": editor.menu_rows(),
+        "footer": editor.footer,
+        "footer_right": editor.footer_right,
+        "wakes_content": editor.wakes_content(),
+        "session_content": editor.session_content(),
+        "cursor_frame": editor.cursor_frame(),
+    })
+}
+
+/// Set the editor's state from the node, one object per change; a key that is absent keeps what the
+/// editor has. The node sends the whole object after a change it knows about, so there is one shape
+/// and no "unset" ambiguity.
+fn editor_setup(editor: &mut Editor, args: &[Value]) -> Result<(), proto::Failure> {
+    let spec = args.first().and_then(Value::as_object)
+        .ok_or_else(|| proto::Failure::new(proto::code::BAD_MESSAGE, "argument 0 must be the editor's setup object"))?;
+    let size = |key: &str| spec.get(key).and_then(Value::as_i64).and_then(|n| usize::try_from(n).ok());
+    let line = |key: &str| spec.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    if let Some(n) = size("row") { editor.row = n; }
+    if let Some(n) = size("width") { editor.width = n; }
+    if let Some(n) = size("height") { editor.height = n; }
+    if let Some(flag) = spec.get("status").and_then(Value::as_bool) { editor.status = flag; }
+    if let Some(flag) = spec.get("bash").and_then(Value::as_bool) { editor.bash = flag; }
+    if spec.contains_key("queued") { editor.queued = strings(spec.get("queued")); }
+    if spec.contains_key("history") { editor.set_history(strings(spec.get("history"))); }
+    if let Some(list) = spec.get("commands") {
+        editor.commands = list.as_array().map(|items| items.iter().filter_map(|item| {
+            let name = item.get("name").and_then(Value::as_str)?.to_string();
+            Some(Command {
+                name,
+                args: item.get("args").and_then(Value::as_bool).unwrap_or(false),
+                hint: item.get("hint").and_then(Value::as_str).unwrap_or_default().to_string(),
+            })
+        }).collect()).unwrap_or_default();
+    }
+    for key in ["wakes", "build", "session_notice", "footer", "footer_right"] {
+        if !spec.contains_key(key) { continue; }
+        let value = line(key);
+        match key {
+            "wakes" => editor.wakes = value,
+            "build" => editor.build = value,
+            "session_notice" => editor.session_notice = value,
+            "footer" => editor.footer = value,
+            _ => editor.footer_right = value,
+        }
+    }
+    Ok(())
+}
+
+/// A JSON array of strings, missing or null being none.
+fn strings(value: Option<&Value>) -> Vec<String> {
+    value.and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
 }
 
 /// A bar as JSON: its four numbers, so the node's hit tests keep the same shape they had in process.
@@ -198,6 +315,74 @@ mod tests {
         let bytes = proto::unbytes(answer["frame"].as_str().expect("a frame")).expect("base64");
         assert_eq!(String::from_utf8(bytes).expect("utf-8"), expected);
         assert!(session.dirty(), "and the dirty flag rides with the answer");
+    }
+
+    #[test]
+    fn the_input_box_crosses_the_wire_with_its_geometry_and_its_actions() {
+        let mut session = Session::new();
+        let setup = json!([{ "row": 23, "width": 80, "height": 24, "status": false,
+            "wakes": "wakes", "build": "", "session_notice": "", "footer": "model", "footer_right": "opus",
+            "history": ["first line", "!ls"], "commands": [{ "name": "/login", "args": false, "hint": "sign in" }] }]);
+        session.handle(&call("editor_setup", setup)).expect("a setup");
+
+        // The same editor built here, field by field, is the ruler: every number the wire answers has
+        // to be the number the node used to read off the struct.
+        let mut local = Editor::default();
+        local.row = 23;
+        local.width = 80;
+        local.height = 24;
+        local.wakes = "wakes".to_string();
+        local.footer = "model".to_string();
+        local.footer_right = "opus".to_string();
+        let state = session.handle(&call("editor_state", json!([]))).expect("a state");
+        assert_eq!(state["row"], 23);
+        assert_eq!(state["status_row"], local.status_row());
+        assert_eq!(state["footer_row"], local.footer_row());
+        assert_eq!(state["out_bottom"], local.out_bottom());
+        assert_eq!(state["wakes_row"], local.wakes_row());
+        assert_eq!(state["session_row"], local.session_row());
+        assert_eq!(state["bottom"], local.bottom());
+        assert_eq!(state["menu_rows"], 0, "no slash menu on an empty draft");
+        assert_eq!(state["draft"], "");
+
+        // Keys, as bytes, and the actions they answer: typing then Enter submits the line.
+        for byte in b"hello" {
+            let answer = session.handle(&call("editor_key", json!([byte]))).expect("a key");
+            assert_eq!(answer["kind"], "none");
+        }
+        let answer = session.handle(&call("editor_key", json!([13]))).expect("enter");
+        assert_eq!(answer["kind"], "submit");
+        assert_eq!(answer["text"], "hello");
+        assert_eq!(session.handle(&call("editor_state", json!([]))).unwrap()["draft"], "");
+
+        // The slash menu is the editor's, so it counts its own rows: a `/` opens it on the commands the
+        // node handed over, and the status line moves up by that many rows.
+        session.handle(&call("editor_key", json!([47]))).expect("slash");
+        let menu = session.handle(&call("editor_state", json!([]))).expect("a state");
+        assert_eq!(menu["menu_rows"], 1, "one command offered");
+        let mut local = Editor::default();
+        local.row = 23;
+        local.width = 80;
+        local.height = 24;
+        local.wakes = "wakes".to_string();
+        local.footer = "model".to_string();
+        local.footer_right = "opus".to_string();
+        local.commands = vec![Command { name: "/login".into(), args: false, hint: "sign in".into() }];
+        local.feed(47);
+        assert_eq!(menu["status_row"], local.status_row());
+
+        // The frame: what the editor draws for its box, byte for byte, is what the wire carries.
+        let answer = session.handle(&call("editor_render", json!([]))).expect("a frame");
+        let bytes = proto::unbytes(answer["frame"].as_str().expect("a frame")).expect("base64");
+        assert_eq!(String::from_utf8(bytes).expect("utf-8"), local.render());
+    }
+
+    #[test]
+    fn a_length_a_key_byte_cannot_have_is_refused() {
+        let mut session = Session::new();
+        let failure = session.handle(&call("editor_key", json!([300]))).expect_err("a refusal");
+        assert_eq!(failure.code, "term_bad_message");
+        assert!(failure.message.contains("0..=255"), "{}", failure.message);
     }
 
     #[test]
