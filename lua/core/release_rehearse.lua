@@ -25,12 +25,20 @@ function M.ring(options)
   if not loaded or type(nodes) ~= "table" then
     return nil, "the roster (lua/core/nodes.lua) could not be read, so no node was read"
   end
+  -- A ROSTER LISTS THIS NODE UNDER ITS OWN NAME (measured 26/11, first live run: this node is avell, the roster
+  -- named it, and the rehearsal asked itself - the mesh denies a self call as mesh_denied/self_call, so the ring
+  -- went red for a question it already knew the answer to).
+  local self_name = ""
+  if type(nodes.node_name) == "function" then
+    local ok_name, name = pcall(nodes.node_name)
+    if ok_name and type(name) == "string" then self_name = tostring(name) end
+  end
   local ring = { { node = "this node", mode = "local" } }
   local listed = (type(nodes.list) == "function" and nodes.list({}))
     or (type(nodes.peers) == "function" and nodes.peers({})) or {}
   for _, entry in ipairs(type(listed) == "table" and listed or {}) do
     local name = tostring((type(entry) == "table" and (entry.name or entry.node)) or entry or "")
-    if trim(name) ~= "" and trim(name) ~= "this node" then
+    if trim(name) ~= "" and trim(name) ~= "this node" and not (self_name ~= "" and trim(name) == trim(self_name)) then
       -- A ROSTER ENTRY CARRIES NO DEPLOY MODE. MEASURED 26/11 on the first live run: the ring labelled peers
       -- "peer" and this node "local", and the preflight refused both as mode_unknown - the rehearsal judged its OWN
       -- labels as if they were ring modes. A peer the roster lists is deployed in tree mode unless the caller
@@ -218,7 +226,11 @@ function M.rehearse(options)
       local text = answer.stdout or answer.output or answer.text
       if type(text) ~= "string" then return nil end
       local ok_json, document = pcall(dofile("lua/vendor/json.lua").decode, text)
-      return ok_json and document or nil
+      if ok_json and type(document) == "table" then return document end
+      -- A PEER WHOSE BINARY HAS NO json FORM ANSWERS THE TEXT TABLE (measured 26/11: mail printed the component
+      -- table with code 0, nextcloud the same with code 3). The ask was ANSWERED and could not be read, which is
+      -- not the same as no answer, and the report says which happened.
+      return nil, trim(text) ~= "" and "peer_canary_text_only" or "its canaries did not arrive"
     end
   end
   local local_answer = options.local_results
@@ -246,11 +258,11 @@ function M.rehearse(options)
       local ok_read, status = pcall(read, name)
       row = M.record_row(name, ok_read and status or nil)
       if not ok_read then unreachable[#unreachable + 1] = name .. " (the read raised)" end
-      local ok_ask, document = pcall(ask, name)
+      local ok_ask, document, why_ask = pcall(ask, name)
       if ok_ask and type(document) == "table" and type(document.features) == "table" then
         answers[#answers + 1] = { node = name, results = document.features }
       else
-        unreachable[#unreachable + 1] = name .. " (its canaries did not arrive)"
+        unreachable[#unreachable + 1] = name .. " (" .. tostring(why_ask or 'its canaries did not arrive') .. ")"
       end
     end
     row.mode = tostring((type(entry) == "table" and entry.mode) or (name == "this node" and "local") or "peer")
