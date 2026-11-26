@@ -231,10 +231,12 @@ mod tests {
 
     #[test]
     fn a_program_that_speaks_another_protocol_is_refused_by_name_with_both_numbers() {
+        // A program one version ahead answers ITS hello: the number is the one it put in the reply.
         let mut other = hello_ok();
-        other["protocol"] = json!(2);
+        other["ok"]["protocol"] = json!(2);
+        other["v"] = json!(2);
         let hello = parse_hello(&other).expect("readable");
-        assert_eq!(hello.protocol, 2);
+        assert_eq!(hello.protocol, 2, "the program's own number is what is read, not the node's");
         assert_eq!(Failure::mismatch(hello.protocol).code, "term_protocol_mismatch");
         assert!(Failure::mismatch(2).message.contains("protocol 2") && Failure::mismatch(2).message.contains("speaks 1"),
             "the message names both numbers: {}", Failure::mismatch(2).message);

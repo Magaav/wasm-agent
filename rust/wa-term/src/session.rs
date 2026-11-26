@@ -167,3 +167,46 @@ fn ranges(args: &[Value], at: usize) -> Result<Vec<(usize, usize)>, proto::Failu
         Ok((first as usize, last as usize))
     }).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wa_term_proto::parse_call;
+
+    fn call(method: &str, args: Value) -> proto::Call {
+        parse_call(&json!({ "v": proto::PROTOCOL, "op": "call", "method": method, "args": args })).expect("a call")
+    }
+
+    #[test]
+    fn a_method_this_program_does_not_have_is_named_not_ignored() {
+        let mut session = Session::new();
+        let failure = session.handle(&call("widgets", json!([]))).expect_err("a refusal");
+        assert_eq!(failure.code, "term_unknown_method");
+        assert!(failure.message.contains("widgets"), "{}", failure.message);
+    }
+
+    #[test]
+    fn a_rendered_frame_crosses_the_wire_byte_for_byte() {
+        // The same transcript, drawn once here and once through the answer the node decodes: this is
+        // the property the pty row and the two-process row then prove at the far end.
+        let mut session = Session::new();
+        session.transcript.block(false);
+        session.transcript.write("a line of the chat");
+        session.transcript.notice("Copied 3 characters", std::time::Instant::now(), false);
+        let expected = session.transcript.render(40, 10);
+        let answer = session.handle(&call("render", json!([40, 10]))).expect("a frame");
+        let bytes = proto::unbytes(answer["frame"].as_str().expect("a frame")).expect("base64");
+        assert_eq!(String::from_utf8(bytes).expect("utf-8"), expected);
+        assert!(session.dirty(), "and the dirty flag rides with the answer");
+    }
+
+    #[test]
+    fn a_scrollbar_setting_the_node_cannot_name_is_refused() {
+        let mut session = Session::new();
+        assert!(session.handle(&call("scrollbar", json!(["always"]))).is_ok());
+        assert_eq!(session.transcript.scrollbar, Scrollbar::Always);
+        let failure = session.handle(&call("scrollbar", json!(["banana"]))).expect_err("a refusal");
+        assert_eq!(failure.code, "term_bad_message");
+        assert!(failure.message.contains("banana"), "{}", failure.message);
+    }
+}
