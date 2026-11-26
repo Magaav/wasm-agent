@@ -90,7 +90,7 @@ const SSE_ARGS: usize = 6;
 /// The names the **kernel itself** answers, before the capability registry is consulted.
 ///
 /// They are about the node, not about a capability: there is no native `host.*` C function to forward
-/// them to, so unlike every other name in the bridge they cannot come from `capabilities::REGISTRY`.
+/// them to, so unlike every other name in the bridge they cannot come from `capabilities::registry()`.
 /// They cross the same import with the same value shapes, and `__names` lists them so the guest's
 /// `if host.local_tz then` reads the truth for this kernel.
 ///
@@ -836,7 +836,7 @@ impl State {
         match name {
             // The guest's boot: which names `host.*` resolves, the shipping Lua modules, the script.
             "__names" => {
-                let mut names: Vec<&str> = crate::capabilities::REGISTRY.iter().map(|c| c.name).collect();
+                let mut names: Vec<&str> = crate::capabilities::registry().iter().map(|c| c.name).collect();
                 // The kernel's own calls cross the same import but have no registry entry (see
                 // `KERNEL_CALLS`); a guest resolves `host.<name>` from this list, so leaving them out
                 // would make `host.local_tz` read as absent in a kernel that answers it.
@@ -864,7 +864,7 @@ impl State {
                 "unsupported_in_component_v1:{name} (the interactive console reader belongs to the CLI; a \
                  --core-component run has no editor to read into)"
             )),
-            _ if !crate::capabilities::REGISTRY.iter().any(|c| c.name == name) => Err(format!("unknown_capability:{name}")),
+            _ if !crate::capabilities::registry().iter().any(|c| c.name == name) => Err(format!("unknown_capability:{name}")),
             _ => self.dispatch(name, args),
         }
     }

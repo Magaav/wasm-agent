@@ -56,6 +56,10 @@ M.whatsapp_spelling = whatsapp_spelling
 -- peer with tools and no registry, which is the "older build" case and must say so, not be guessed at.
 local CACHE_KEY = 'federation.catalog.v2'
 
+-- The decoded catalogue, kept for this process and keyed on the text the store answered (see
+-- `load_cache`).
+local decoded_raw, decoded_value
+
 local function meta_get(key)
   local ok, raw = pcall(host.sql_query, 'SELECT value FROM meta WHERE key=?', json.encode({ key }))
   if not ok then return nil end
@@ -400,10 +404,28 @@ function M.local_name(peer_name, tool_name)
   return name:sub(1, 55) .. '_' .. host.sha256(name):sub(1, 8)
 end
 
+-- The catalogue, decoded ONCE PER PROCESS, keyed on the exact text the store answered.
+--
+-- One paint asks for this cache two or three times - `mcp_command.peer_connectors`, and
+-- `whatsapp.service_row` twice (who owns the account, and the "is it up" check against the same
+-- catalogue) - and the operator's cache is ~290 KB of JSON with every peer tool's schema in it. MEASURED
+-- on avell 25/11: 70-100 ms per decode, i.e. ~300 ms of a 3.5 s `wa mcp list` spent decoding the same
+-- bytes three times for no new information. The key is the raw string, so a write through
+-- `M.refresh` / `M.remember` changes it and the next read decodes again: the cache cannot go stale
+-- behind this memo, and a reader never sees an older catalogue than the store holds.
+-- NO TIME-BASED MEMO, deliberately: the key is the stored TEXT, so a write from anywhere - this file,
+-- another process, a test's own INSERT - changes it and the next read decodes again. A wall-clock memo was
+-- tried on 25/11 and broke a peer toggle under test within the second: the peer's registry moved, a raw
+-- write landed, and the cached revision was still the old one, so the peer refused the change it had just
+-- been told about (scripts/test-mcp-command.lua section 4). The queries a paint makes were cut instead
+-- (`M.list` hands the catalogue it already loaded to the WhatsApp row), not the safety of the read.
 local function load_cache()
-  local raw = meta_get(CACHE_KEY)
-  local ok, value = pcall(json.decode, raw or '')
-  return (ok and type(value) == 'table') and value or { at = 0, peers = {} }
+  local raw = meta_get(CACHE_KEY) or ''
+  if decoded_value ~= nil and decoded_raw == raw then return decoded_value end
+  local ok, value = pcall(json.decode, raw)
+  decoded_value = (ok and type(value) == 'table') and value or { at = 0, peers = {} }
+  decoded_raw = raw
+  return decoded_value
 end
 
 -- Ask every online peer for its catalog and keep the answers. A peer that does not answer (down, or an

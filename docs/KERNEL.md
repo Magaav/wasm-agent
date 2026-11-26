@@ -524,7 +524,7 @@ are deliberately different in kind:
   read none of those.
 
 `local_tz` is a kernel call and not a capability: there is no native `host.*` C function to forward it
-to, so it does not come from `capabilities::REGISTRY` — it is listed in `__names` beside the registry so
+to, so it does not come from `capabilities::registry()` — it is listed in `__names` beside the registry so
 a guest's `if host.local_tz then` still reads the truth. It costs one `lua_pcallk` on the instance's
 native interpreter and a resolve of the zone name, per call, never cached: an offset read at boot is
 exactly the stale answer a DST change produces.

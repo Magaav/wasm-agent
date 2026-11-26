@@ -24,8 +24,16 @@ function M.run()
   if not ok then return false, 'index_unreadable', tostring(raw) end
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return false, 'index_unreadable', 'the search answered nothing' end
+  -- A REFUSAL IS NOT AN EMPTY MAILBOX (26/11): a connector that answers an error has not answered about a
+  -- mailbox at all, and an empty index would read as "no message" for a feature that never ran.
+  if type(answer) == 'table' and answer.error then
+    return false, tostring(answer.error), 'the search was REFUSED, not answered: ' .. tostring(answer.error)
+      .. (answer.state and (' (state ' .. tostring(answer.state) .. ')') or '')
+      .. (answer.owner and ('; the account is served by ' .. tostring(answer.owner)) or '')
+  end
   local messages = answer.messages or answer.hits or {}
-  if #messages == 0 then return false, 'index_empty', 'the email index answers, but holds no message' end
+  -- RULING (c), 25/11: no chat indexed on a node that DOES serve the account is no_data, not a break.
+  if #messages == 0 then return 'not_proven', 'no_data', 'no_data: no message in the index' end
   return true, 'index', 'the email index answers with ' .. #messages .. ' message(s)'
 end
 return M

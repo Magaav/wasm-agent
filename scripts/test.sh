@@ -373,6 +373,11 @@ fi
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime -- components::tests services::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests drain::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-governance -- node_policy::tests node_telemetry::tests store::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities -- capabilities::tests
+# A capability's registration is DATA (mission capability-registration-is-data): every row lives in a
+# file under src/capability_rows/, one file per area, and capabilities.rs declares none - so adding or
+# moving a capability never edits the file every other capability edits. Both rows read the sources on
+# disk. The first fails on the code before that change, by name: 152 rows were still in capabilities.rs.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities --test capability_registration --test capability_row_discovery
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
@@ -527,6 +532,10 @@ gate_run bash scripts/test-install-window.sh                             # the w
 # The version window (Fable 25/11, the orphan rule): a fixture feed, so no node, no network, no clock.
 # It lives on the gate rather than in the declared list for the same reason its sibling above does.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$DB.version-window" | grep "version window ok"
+# A CANARY THAT CANNOT SEE AN ACCOUNT IS NOT A BROKEN FEATURE (25/11 stop): not_proven is a third state beside
+# pass/fail/off, account canaries answer it only when the node has no account of that kind, and a canary proven
+# on no node asked is red.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db "$DB.canary-not-proven" | grep "canary not proven ok"
 # A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
 # install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
 # the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.

@@ -1098,6 +1098,11 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # operation row is read back too, so a fast row drawn without the fresh views is not a pass. The real
   # binary in a private tmux pty, as the rows above.
   WA_BIN="$bin" check chat-start-pty node scripts/test-chat-start-pty.mjs
+  # /mcp and `wa mcp list` in a real chat, against four peers that accept and never answer: the chat may not
+  # pay a peer deadline before the list draws, and the pipe may not ask one at all (mission mcp-list-is-fast,
+  # 25/11). Its own wrapper (scripts/test-mcp-list-pty.sh) is the same measurement for a row runner that takes
+  # .sh rows; this line is where the fast path runs it.
+  WA_BIN="$bin" check mcp-list-pty node scripts/test-mcp-list-pty.mjs
   # ESC ENDS A RUN AT ONCE (change/esc-stops-now, items 1-4): the real binary in a private tmux pty against
   # a fixture that is both the rendezvous and the provider, pressing Esc in each of the five ways a run can
   # wait - before response headers (30 s hold), mid-stream after a 10 s silence, during a local shell, during

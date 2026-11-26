@@ -1,9 +1,15 @@
 // The pinned code-mode assets (`quickjs.wasm`, `prelude.js`) are embedded by `wa-capabilities/src/quickjs.rs`,
 // so the crate that embeds them is the crate that provisions them. This is `wa-host/build.rs`'s asset half,
 // moved with `quickjs.rs`; the embedded Lua tree stays in the binary's build script, where main.rs reads it.
+// The capability registry is data: every row lives in a file under `src/capability_rows/`, and this
+// scan - the same source the crate compiles - is what collects them.
+#[path = "src/registry_scan.rs"]
+mod registry_scan;
+
 fn main() {
     generate_codemode_assets();
     generate_product_version();
+    generate_capability_rows();
 }
 
 // THE PRODUCT VERSION, from its ONE owner (`M.PRODUCT_VERSION` in lua/core/build_identity.lua). This crate
@@ -88,4 +94,23 @@ fn generate_codemode_assets() {
         }
         std::fs::write(out.join(name), bytes).expect("write code-mode build asset");
     }
+}
+
+// THE CAPABILITY REGISTRY, collected from data. A capability's registration is one `pub const ROWS` in a
+// file under `src/capability_rows/`, one file per area, beside the module that implements the handlers it
+// names - so adding or moving a capability edits its own file and no shared one. This scan is what makes
+// that true: it lists the directory, so a file ADDED is collected without an edit to `capabilities.rs` or
+// `host.rs`, and it writes the aggregate `capabilities.rs` includes. A missing or empty directory fails the
+// build by name: a node whose rows were not found can do nothing.
+fn generate_capability_rows() {
+    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let directory = manifest.join(registry_scan::DIRECTORY);
+    // A file added or removed has to rerun this script; a row file's CONTENT is tracked by the compiler,
+    // which reads the same file through the generated `mod`.
+    println!("cargo:rerun-if-changed={}", directory.display());
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let aggregate = registry_scan::generate(&directory)
+        .unwrap_or_else(|error| panic!("capability rows: {error}"));
+    std::fs::write(out.join("capability_rows.rs"), aggregate)
+        .expect("write the capability row aggregate");
 }
