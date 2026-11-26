@@ -135,8 +135,7 @@ ok
 I2="$W/i2"; in_place "$I2" "$PREV_COMMIT"
 WNEW="$W/w2"; mkdir -p "$WNEW"; cp -a "$W/share/versions/$ID" "$WNEW/" 2>/dev/null || true
 # a second scratch share with the previous version already current, so there IS a version to go back to
-mkdir -p "$W/share2/versions/$PREV_ID"; printf 'id=%s\ninstall_dir=%s\n' "$PREV_ID" "$I2" > "$W/share2/versions/$PREV_ID/version.txt"
-ln -sfn "versions/$PREV_ID" "$W/share2/current"
+seed_prev "$W/share2" "$I2"   # the same complete previous version the other cases seed
 echo restart-fail > "$SEQ_MODE"
 SEQ_MODE_FILE="$SEQ_MODE" bash scripts/version-sequence.sh --install "$I2" --candidate "$I2/wa" --commit "$COMMIT" \
   --root "$W/root" --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share2" > "$W/seq2.log" 2>&1
