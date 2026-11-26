@@ -14,7 +14,8 @@ local M = { mode = 'read' }
 
 -- One read, as the numbers this canary judges: only counts and times leave here, never an id or text.
 local function read_once(chat)
-  local answered, raw = pcall(host.whatsapp_read, json.encode({ chat = chat, limit = 5 }))
+  local serving_lib = dofile('lua/core/canaries/serving.lua')
+  local answered, raw = serving_lib.ask('whatsapp_read', { chat = chat, limit = 5 })
   if not answered then return { ok = false, stage = 'read_unreadable', detail = 'the read refused' } end
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return { ok = false, stage = 'read_unreadable', detail = 'the read answered nothing' } end
@@ -45,12 +46,10 @@ end
 
 function M.run()
   local ran, ok, stage, detail = guard.no_send(function()
-    if type(host.whatsapp_contacts) ~= 'function' or type(host.whatsapp_search) ~= 'function' then
-      return false, 'capability_missing', 'this binary has no WhatsApp query capability'
-    end
-    local answered, raw = pcall(host.whatsapp_contacts, '{}')
-    if not answered then return false, 'index_unreadable', tostring(raw) end
-    local contacts = type(raw) == 'string' and json.decode(raw) or raw
+    -- THE SERVING NODE ANSWERS (26/11, Fable item 2b): see lua/core/canaries/serving.lua.
+    local serving = dofile('lua/core/canaries/serving.lua')
+    local answered, contacts, how = serving.ask('whatsapp_contacts', {})
+    if not answered then return false, tostring(contacts.error or 'index_unreadable'), serving.detail(contacts, tostring(contacts.detail or '')) end
     if type(contacts) ~= 'table' then return false, 'index_unreadable', 'the contacts query answered nothing' end
     local list = contacts.chats or contacts.contacts or {}
     -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers
