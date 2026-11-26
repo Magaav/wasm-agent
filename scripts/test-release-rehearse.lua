@@ -67,6 +67,17 @@ ok(src:find('git push', 1, true) == nil, 'and never pushes')
 ok(src:find('M.deploy', 1, true) == nil, 'and never deploys')
 has(src, 'remote_update.status', 'it reads records with status only')
 
+-- 6b. THE VERB IS REACHABLE (26/11: my first cut put it in a second `command == release` branch, which never
+--     runs - the release verb already exists and answers verify/trust-key). The verb must live INSIDE that
+--     branch, before the trust door.
+local init = host.read_file('lua/core/init.lua') or ''
+local i_branch = init:find('if command == ' .. string.char(34) .. 'release' .. string.char(34) .. ' then', 1, true)
+local i_rehearse = init:find(string.char(34) .. 'rehearse' .. string.char(34), i_branch or 1, true)
+local i_trust = init:find('local trust = dofile(', i_branch or 1, true)
+ok(i_branch ~= nil, 'the release branch exists')
+ok(i_rehearse ~= nil, 'and dispatches the rehearse verb')
+ok(i_rehearse ~= nil and i_trust ~= nil and i_rehearse < i_trust, 'before the trust door, so the verb is reachable')
+ok(init:find('elseif command == ' .. string.char(34) .. 'release' .. string.char(34), 1, true) == nil, 'and there is no second release branch')
 -- 7. the exit code a caller sees
 ok(type(rehearse.run) == 'function', 'M.run is the CLI door')
 
