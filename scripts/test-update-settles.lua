@@ -75,11 +75,24 @@ local second_text = host.read_file(records .. "/" .. ID .. ".json")
 check("a second read still says installed", again and again.state == "installed")
 check("and it does NOT rewrite the record", first_text == second_text)
 
--- 4. A FAILED INSTALL: OPEN QUESTION, measured, not asserted. With a ledger outcome 'failed' for a request whose
--- installed.txt names the target commit, the reader answered `unknown` with the detail "installed.txt names <c>",
--- not `failed` - the ledger branch and the commit check disagree about which one speaks for the record. That is a
--- real question for this mission (item 2 says failed + why), and this row does not pretend to answer it:
---   measured 2026-11-26: state=unknown, detail="installed.txt names abab..."
+-- 4. A FAILED INSTALL settles failed - and the fixture is a REAL failure, which the first version was not: it said
+-- outcome=failed while installed.txt already named the commit asked for, a state no install produces (the node either
+-- runs the commit you asked for or it does not). A failed install is a node STILL ON THE OLD COMMIT, and that is what
+-- this fixture now describes.
+local OLD = string.rep("cd", 20)
+put(install .. "/installed.txt", "commit=" .. OLD .. "\nbranch=main\n")
+local ID2 = "request-refused"
+put(sentinel_dir .. "/deploy-outcome/" .. ID2 .. ".json",
+  json.encode({ state = "settled", outcome = "failed", detail = "the deploy refused: tree dirty" }))
+put(records .. "/" .. ID2 .. ".json", json.encode({
+  id = ID2, kind = "deploy", state = "queued", target_commit = TARGET, sentinel_request_id = ID2,
+  requested_at = 1001, requester = { node_id = CALLER.node_id } }))
+local refused = remote.read_status({ id = ID2 }, CALLER)
+check("a failed install reads failed (got " .. tostring(refused and refused.state) .. ")", refused and refused.state == "failed")
+local refused_file = read_json(records .. "/" .. ID2 .. ".json")
+check("and its FILE says failed, not queued (got " .. tostring(refused_file and refused_file.state) .. ")",
+  refused_file and refused_file.state == "failed")
+check("with the installer's own reason", refused_file and tostring(refused_file.detail or "") ~= "")
 
 print("update settles ok (" .. n .. " checks)")
 
