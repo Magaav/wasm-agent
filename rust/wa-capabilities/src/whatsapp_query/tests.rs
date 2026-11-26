@@ -446,3 +446,19 @@ fn a_job_that_died_on_an_older_component_is_not_the_answer_a_new_call_reads() {
     let again = ask_in(&queue, seam::Op::Contacts, &args, 1, BUILD);
     assert_eq!(again["id"].as_u64(), Some(fresh));
 }
+
+/// A date a model wrote reaches the wire as milliseconds, and a time nobody can read is refused by name
+/// with the forms - the host neither drops the string nor invents a rule of its own.
+#[test]
+fn the_host_passes_a_date_through_and_refuses_an_unreadable_time() {
+    let dated = request_of(seam::Op::Search, &serde_json::json!({"q": "boleto", "since": "2026-11-01"})).expect("a date is a time");
+    assert_eq!(dated.since, Some(1_793_491_200_000));
+    let numeric = request_of(seam::Op::Search, &serde_json::json!({"q": "boleto", "since": "1760000000"})).expect("an epoch string is a time");
+    assert_eq!(numeric.since, Some(1_760_000_000_000));
+
+    let refusal = request_of(seam::Op::Search, &serde_json::json!({"q": "boleto", "since": "last tuesday"})).expect_err("a word is not a time");
+    assert_eq!(refusal.code, "bad_since");
+    assert!(refusal.detail.contains("YYYY-MM-DD"), "the refusal names the forms: {}", refusal.detail);
+    assert_eq!(request_of(seam::Op::Search, &serde_json::json!({"q": "x", "until": "01/11/2026"})).expect_err("not a time").code, "bad_until");
+    // Nothing was queued for any of the refusals: `request_of_text` answers before a job exists.
+}

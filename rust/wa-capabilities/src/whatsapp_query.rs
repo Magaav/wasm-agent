@@ -180,7 +180,20 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
 /// search or `limit` to a backfill is understood instead of silently getting the default.
 fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusal> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
-    let number = |key: &str| args.get(key).and_then(Value::as_i64);
+    // A time is passed through in the form the caller wrote it: the FORMS are the shared seam's
+    // (`seam::TIME_FORMS`, `seam::parse_time`), so the host neither repeats the rule nor lets a date
+    // string fall on the floor of an `as_i64` that answers `None`.
+    let time = |key: &str| -> Result<Option<i64>, seam::Refusal> {
+        let code = if key == "since" { "bad_since" } else { "bad_until" };
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(number)) => Ok(number.as_i64()),
+            Some(Value::String(text)) => {
+                seam::parse_time(text).map(Some).ok_or_else(|| seam::Refusal::new(code, seam::TIME_FORMS))
+            }
+            Some(_) => Err(seam::Refusal::new(code, seam::TIME_FORMS)),
+        }
+    };
     let limit = match op {
         seam::Op::Backfill => args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64)),
         _ => args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64)),
@@ -192,8 +205,8 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
         id: text("id"),
         kind: text("kind"),
         from: text("from"),
-        since: number("since"),
-        until: number("until"),
+        since: time("since")?,
+        until: time("until")?,
         before: text("before"),
         limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
         max_bytes: args.get("max_bytes").and_then(Value::as_u64),

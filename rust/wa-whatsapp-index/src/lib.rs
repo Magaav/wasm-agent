@@ -301,8 +301,11 @@ pub struct Request {
     pub kind: Option<String>,
     pub from: Option<String>,
     /// Unix milliseconds (a seconds epoch is accepted and converted: a model writing `1760000000`
-    /// means the same instant as `1760000000000`).
+    /// means the same instant as `1760000000000`; a plain date `YYYY-MM-DD` is that day's UTC
+    /// midnight - see [`TIME_FORMS`]).
+    #[serde(default, deserialize_with = "time_value")]
     pub since: Option<i64>,
+    #[serde(default, deserialize_with = "time_value")]
     pub until: Option<i64>,
     /// A message id or an epoch; `read` returns what is *older* than it.
     pub before: Option<String>,
@@ -481,7 +484,18 @@ impl Request {
 
     /// Read a payload back. A payload this crate did not write is `malformed`, never guessed at.
     pub fn decode(bytes: &[u8]) -> Result<Request, Refusal> {
-        serde_json::from_slice(bytes)
+        let value: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|_| Refusal::new("malformed_job", "the job payload is not a whatsapp query"))?;
+        // A time nobody can read is refused BY NAME, with the forms: the payload is readable, one field
+        // is not, and a deserializer's word for it would lose which field.
+        for (key, code) in [("since", "bad_since"), ("until", "bad_until")] {
+            if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
+                if parse_time(text).is_none() {
+                    return Err(Refusal::new(code, TIME_FORMS));
+                }
+            }
+        }
+        serde_json::from_value(value)
             .map_err(|_| Refusal::new("malformed_job", "the job payload is not a whatsapp query"))
     }
 
@@ -634,6 +648,77 @@ fn parse_name(text: &str) -> Result<String, Refusal> {
 }
 
 /// One epoch as milliseconds: seconds (any value a human would type for a date) are scaled.
+/// The forms a time may take in `since` / `until`, in one sentence a refusal repeats verbatim: a caller
+/// that wrote something else (a model writes `last tuesday`, or `01/11/2026`) reads the forms instead of
+/// a deserializer's word for them.
+pub const TIME_FORMS: &str =
+    "a time is an epoch in seconds or milliseconds, or a date as YYYY-MM-DD (UTC midnight), e.g. 1760000000, 1760000000000 or 2026-11-01";
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm), so one subtraction needs no date
+/// crate. `None` for a day the calendar does not have.
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=12).contains(&month) || day < 1 {
+        return None;
+    }
+    // The day the calendar actually has: `2026-11-31` is not a date this seam accepts, and rolling it
+    // into December would answer for a day nobody asked about.
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let length = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => if leap { 29 } else { 28 },
+    };
+    if day > length {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// One time as the wire carries it: an epoch (seconds or milliseconds) or a plain date at UTC midnight.
+/// `None` when the text is neither, so every caller can refuse with [`TIME_FORMS`] instead of a guess.
+pub fn parse_time(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(epoch_ms(number));
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        let year: i64 = text[0..4].parse().ok()?;
+        let month: i64 = text[5..7].parse().ok()?;
+        let day: i64 = text[8..10].parse().ok()?;
+        // A date is UTC midnight and the answer says so: the node's own zone is a Lua concept, and a
+        // seam that guessed it would move a query's window by hours without saying it did.
+        return Some(days_from_civil(year, month, day)? * 86_400_000);
+    }
+    None
+}
+
+/// `since` / `until` on the wire: a number, a numeric string, or a date. Anything else is an error serde
+/// reports with the accepted forms, which `decode` turns into `bad_since` / `bad_until`.
+fn time_value<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => Ok(number.as_i64().map(epoch_ms)),
+        Some(serde_json::Value::String(text)) => {
+            parse_time(&text).map(Some).ok_or_else(|| serde::de::Error::custom(TIME_FORMS))
+        }
+        Some(_) => Err(serde::de::Error::custom(TIME_FORMS)),
+    }
+}
+
 fn epoch_ms(value: i64) -> i64 {
     if value.abs() < 100_000_000_000 {
         value.saturating_mul(1000)
@@ -1260,5 +1345,39 @@ mod tests {
         assert_eq!(answer["id"], 42);
         assert_eq!(answer["retry"], true);
         assert_eq!(state_word("done"), "done");
+    }
+
+    /// A plain date is that day's UTC midnight, and the two epoch forms mean what they always meant. The
+    /// refusal for anything else is `TIME_FORMS`, which the next row pins.
+    #[test]
+    fn a_time_may_be_an_epoch_or_a_date() {
+        assert_eq!(parse_time("2026-11-01"), Some(1_793_491_200_000), "a date is midnight UTC");
+        assert_eq!(parse_time("1760000000"), Some(1_760_000_000_000), "seconds become milliseconds");
+        assert_eq!(parse_time("1760000000000"), Some(1_760_000_000_000), "milliseconds stay milliseconds");
+        assert_eq!(parse_time(" 2026-11-01 "), Some(1_793_491_200_000), "surrounding space is not the caller's problem");
+        assert_eq!(parse_time("last tuesday"), None);
+        assert_eq!(parse_time("01/11/2026"), None, "a form this seam does not take is not guessed at");
+        assert_eq!(parse_time("2026-13-01"), None, "a month the calendar does not have");
+        assert_eq!(parse_time("2026-11-31"), None, "November has 30 days: an impossible day is not rolled into December");
+        assert_eq!(parse_time("2028-02-29"), Some(1_835_395_200_000), "a leap day exists");
+        assert_eq!(parse_time("2027-02-29"), None, "and the same day does not exist a year later");
+    }
+
+    /// A payload that carries a date arrives as milliseconds, and one that carries something unreadable
+    /// is refused BY NAME with the forms - not with a deserializer's sentence, and not as a whole-payload
+    /// `malformed_job` when only one field is wrong.
+    #[test]
+    fn a_bad_time_is_refused_by_name_with_the_forms() {
+        let request: Request = serde_json::from_value(serde_json::json!({"op": "search", "q": "x", "since": "2026-11-01"})).expect("a date is a time");
+        assert_eq!(request.since, Some(1_793_491_200_000));
+        assert_eq!(request.validate().unwrap().since, Some(1_793_491_200_000), "and it survives validate");
+
+        let payload = serde_json::to_vec(&serde_json::json!({"op": "search", "q": "x", "since": "last tuesday"})).unwrap();
+        let refusal = Request::decode(&payload).expect_err("a word is not a time");
+        assert_eq!(refusal.code, "bad_since");
+        assert!(refusal.detail.contains("YYYY-MM-DD"), "the refusal names the forms: {}", refusal.detail);
+
+        let payload = serde_json::to_vec(&serde_json::json!({"op": "search", "q": "x", "until": "01/11/2026"})).unwrap();
+        assert_eq!(Request::decode(&payload).expect_err("not a time").code, "bad_until");
     }
 }
