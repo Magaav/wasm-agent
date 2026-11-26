@@ -54,16 +54,24 @@ function check(name, condition, detail = '') {
 // ---- the fixture: every completion answers at once, and counts what it served --------------------
 const KEY = 'sk-sessions-switch-fixture-key';
 let completions = 0;
+// One held completion (the third: two turns have already run above it): the turn that is still running
+// while the reader switches away.
+const HOLD_MS = 9000;
 const server = http.createServer((req, res) => {
   req.on('data', () => {});
   req.on('end', () => {
     const index = completions;
     completions += 1;
-    res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-cache'});
-    res.write('data: ' + JSON.stringify({id: 's', choices: [{index: 0, delta: {role: 'assistant', content: 'answer ' + index}, finish_reason: null}]}) + '\n\n');
-    res.write('data: ' + JSON.stringify({id: 's', choices: [{index: 0, delta: {}, finish_reason: 'stop'}]}) + '\n\n');
-    res.write('data: [DONE]\n\n');
-    res.end();
+    const answer = () => {
+      res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-cache'});
+      res.write('data: ' + JSON.stringify({id: 's', choices: [{index: 0, delta: {role: 'assistant', content: 'answer ' + index}, finish_reason: null}]}) + '\n\n');
+      res.write('data: ' + JSON.stringify({id: 's', choices: [{index: 0, delta: {}, finish_reason: 'stop'}]}) + '\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+    // The third answer is HELD: that is the turn a switch happens in the middle of.
+    if (index === 2) setTimeout(answer, HOLD_MS);
+    else answer();
   });
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -242,8 +250,40 @@ try {
   check('Enter in the field renames and says so', true);
   check('the ledger holds the new name', counts()[0].title === 'alpha renamed',
     'titles ' + JSON.stringify(counts().map(entry => entry.title)));
+  // The list came back after the rename (that is the design: an action letter finishes the page and the
+  // arm re-opens it), so the reader closes it before typing a message.
+  tmux(['send-keys', '-t', SESSION, 'Escape', 'Escape']);
+  await sleep(600);
 
-  check('the fixture served both model calls', completions === 2, 'completions=' + completions);
+  // ---- 8. switching away from a RUNNING turn leaves it running, and it lands where it started -------
+  const before3 = counts();
+  // The prompt must be its own before a line is typed into it: a key sent while the arm above is still
+  // finishing is read by nothing, and the turn never starts.
+  await waitFor(() => screen().includes('Type a message'), 'the prompt before the slow turn', 30000);
+  await sleep(400);
+  tmux(['send-keys', '-t', SESSION, 'a slow one']);
+  await sleep(400);
+  tmux(['send-keys', '-t', SESSION, 'Enter']);
+  await waitFor(() => completions >= 3, 'the held model call', 60000);
+  // The turn is in flight now (its answer is held). The reader opens the list and leaves for beta.
+  tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
+  await waitFor(() => screen().includes('c copies the id'), 'the page mid-run', 30000);
+  await sleep(600);
+  tmux(['send-keys', '-t', SESSION, 'Down']);
+  await sleep(300);
+  tmux(['send-keys', '-t', SESSION, 'Enter']);
+  await waitFor(() => screen().includes('switched to beta'), 'the switch mid-run', 30000);
+  check('a switch is possible while a turn runs', true);
+  // The held answer lands with the finish line: the turn is not stopped by the switch.
+  await waitFor(() => screen().includes('answer 2'), 'the held answer on screen', 60000);
+  check('the running turn finishes after the switch', true);
+  const after3 = counts();
+  check('and its turn landed in alpha, where it started', after3[0].count === before3[0].count + 2,
+    'counts ' + JSON.stringify(before3) + ' -> ' + JSON.stringify(after3));
+  check('not in the thread the reader switched to', after3[1].count === before3[1].count,
+    'counts ' + JSON.stringify(before3) + ' -> ' + JSON.stringify(after3));
+
+  check('the fixture served every model call', completions >= 3, 'completions=' + completions);
   check('the provider key is in no file the session wrote', !spawnSync('grep', ['-rlF', KEY, WORK], {encoding: 'utf8'}).stdout);
 } catch (error) {
   check('the run completed without an exception', false, error && error.message);
