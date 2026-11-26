@@ -158,5 +158,31 @@ local settled_record = read_json(records .. "/" .. ID .. ".json")
 check("a record settled by the install is what the wait settles on (state=" .. tostring(settled_record and settled_record.state) .. ")",
   settled_record and land.deploy_settles(tostring(settled_record.state)) == true)
 
+-- 7. A DOOR THAT LEAVES NO SENTINEL LEDGER (release-install, a direct upgrade): the evidence is installed.txt itself,
+-- and it is the same answer - the record settles installed because the node runs the commit that was asked for.
+local ID3 = "request-no-ledger"
+put(install .. "/installed.txt", "commit=" .. TARGET .. "\nbranch=main\n")
+put(records .. "/" .. ID3 .. ".json", json.encode({
+  id = ID3, kind = "deploy", state = "queued", target_commit = TARGET, requested_at = NOW - 30,
+  requester = { node_id = CALLER.node_id } }))
+local no_ledger = remote.read_status({ id = ID3 }, CALLER)
+check("an install the ledger does not mention settles installed from installed.txt (got " .. tostring(no_ledger and no_ledger.state) .. ")",
+  no_ledger and no_ledger.state == "installed")
+local no_ledger_file = read_json(records .. "/" .. ID3 .. ".json")
+check("and its file says installed", no_ledger_file and no_ledger_file.state == "installed")
+
+-- 8. AND THE NEGATIVE, so the claim is not "anything reads installed": a request asking for a commit the node does
+-- NOT run stays unsettled - it is exactly what the sweep then closes by name.
+local OTHER = string.rep("ef", 20)
+local ID4 = "request-other-commit"
+put(records .. "/" .. ID4 .. ".json", json.encode({
+  id = ID4, kind = "deploy", state = "queued", target_commit = OTHER, requested_at = NOW - 90000,
+  requester = { node_id = "node-z" } }))
+local wrong = remote.read_status({ id = ID4 }, CALLER)
+check("a request for a commit the node does not run is NOT installed (got " .. tostring(wrong and wrong.state) .. ")",
+  wrong and wrong.state ~= "installed")
+local wrong_file = read_json(records .. "/" .. ID4 .. ".json")
+check("and the file does not claim installed either", wrong_file and wrong_file.state ~= "installed")
+
 print("update settles ok (" .. n .. " checks)")
 
