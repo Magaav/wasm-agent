@@ -60,14 +60,15 @@ not belong to the host or the component… no wasmtime, no threads and no I/O"*;
 
 | | before | after |
 |---|---|---|
-| `target/release/wa` | 79,722,024 B | **81,135,888 B** (**+1,413,864**, +1.8%) |
+| `target/release/wa` | 79,722,024 B | **81,236,440 B** (**+1,514,416**, +1.9%) — re-measured after the engine change (6bfd2c4e) |
 | cold `cargo build --release -p wa-host` | 192 s | 192 s |
 | `stt.wasm` | — (no component) | **146,696 B** pinned |
 | `stt_node.rs` | 1,362 lines | 1,424 |
 
-The +1.8% is the async rule's price and it is the host's, not the seam's: wasmtime 50 with
-`async_support` plus the tokio runtime are now linked into `wa` for one seam that answers a few
-microseconds of work per call. Reported rather than hidden, because it is the largest number in this move.
+The +1.9% is the async rule's price and it is the host's, not the seam's: the tokio runtime the async
+exports park on, and the async call plumbing around them, are now linked into `wa` for one seam whose
+work is a few microseconds per call. (It is not the engine: `Config::async_support` is a no-op on this
+pin and the seam shares `components::engine()` — see 6bfd2c4e.) Reported rather than hidden, because it is the largest number in this move.
 
 ## Gates
 
