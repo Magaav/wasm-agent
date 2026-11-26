@@ -637,3 +637,42 @@ fn the_file_door_carries_download_and_refuses_the_other_classes() {
 fn q_stats_ready(q: &wa_queue::Queue) -> usize {
     q.stats(seam::QUEUE).unwrap().ready
 }
+
+/// The registry is served by the READ door and only by it: the word travels on the same queue as every
+/// question, the component answers its own document, and the other two doors refuse it by name. It is
+/// the world's `ops.registry` (`wa:whatsapp@0.2.0`) arriving over the transport that exists today.
+#[test]
+fn the_read_door_serves_the_registry_and_the_other_doors_refuse_it() {
+    let (_host, q) = queue("registry");
+    let args = serde_json::json!({"op": "ops"});
+    // Nothing has answered yet: the registry's own slow answer, with the word it was asked with.
+    let slow = ask_registry_in(&q, &args, BUILD);
+    assert_eq!(slow["error"], "whatsapp_ops_slow");
+    assert_eq!(slow["op"], seam::REGISTRY_OP);
+    let id = slow["id"].as_u64().expect("the registry job id");
+    // The payload is the caller's own document, forwarded as it arrived: it is NOT an index request,
+    // so `Request::validate` - what every other question must survive - refuses it. That is the point.
+    let wa_queue::TakeOutcome::Job(taken) = q.take(seam::QUEUE, COMPONENT, None).unwrap() else {
+        panic!("the registry job must be takeable");
+    };
+    assert_eq!(taken.id.0, id);
+    assert_eq!(taken.payload, serde_json::to_vec(&args).unwrap(), "the word is forwarded untouched");
+    // `decode` is a parse; `validate` is the check every index question must survive, and the
+    // registry does not - which is why it is forwarded as it arrives instead.
+    let parsed = seam::Request::decode(&taken.payload).expect("it is a request document");
+    assert!(parsed.validate().is_err(), "the registry is not an index question");
+    // The component's answer is its registry document, and it is what a settled job carries.
+    let document = seam::registry();
+    q.done_by(taken.id, COMPONENT, &serde_json::to_vec(&document).unwrap()).unwrap();
+    let settled = q.job(wa_queue::JobId(id)).unwrap().unwrap();
+    assert_eq!(settled.result.as_deref(), Some(serde_json::to_vec(&document).unwrap().as_slice()),
+        "the tool answer is the component's own document, byte for byte");
+    assert_eq!(document["ops"].as_array().map(|ops| ops.len()), Some(seam::Op::ALL.len()));
+
+    // The other two doors declare another class, and say so rather than forwarding the word.
+    for (door, want) in [("request", seam::Effect::Network), ("file", seam::Effect::WritesFiles)] {
+        let refused = ask_class_in(&q, &args, door, want, 1, BUILD);
+        assert_eq!(refused["error"], "whatsapp_ops_use_its_own_door", "{door} refuses the registry");
+        assert_eq!(refused["effect"], "none");
+    }
+}

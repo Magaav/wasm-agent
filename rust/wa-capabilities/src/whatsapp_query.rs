@@ -276,6 +276,17 @@ fn answer_class(l: *mut wa_host_support::lua::LuaState, door: &str, want: seam::
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(args) => match index_op(&args) {
+            Some(op) if op == seam::REGISTRY_OP => {
+                if want != seam::Effect::ReadOnly {
+                    seam::refusal_text(
+                        op,
+                        "use_its_own_door",
+                        format!("{op} is the registry: ask whatsapp_index, the row that declares what it does"),
+                    )
+                } else {
+                    answer_registry(&args)
+                }
+            }
             Some(op) => match seam::Op::parse(op) {
                 Some(asked) if asked.effect() != want => seam::refusal_text(
                     op,
@@ -381,6 +392,58 @@ fn ask_text(op: &str, args: &Value, wait_ms: u64) -> Value {
     ask_text_in(&queue(), op, args, wait_ms, &component_build())
 }
 
+/// The registry through the queue: enqueue the word, wait, answer the component's document itself.
+///
+/// It is not an index question (`Request::validate` would refuse it `bad_op`), so it is forwarded as it
+/// arrives and settled by its own wait - the same bound, the same poll, the same beat.
+fn answer_registry(args: &Value) -> Value {
+    component_absent_text(seam::REGISTRY_OP)
+        .unwrap_or_else(|| ask_registry_in(&queue(), args, &component_build()))
+}
+
+fn ask_registry_in(q: &wa_queue::Queue, args: &Value, build: &str) -> Value {
+    let payload = serde_json::to_vec(args).unwrap_or_else(|_| br#"{"op":"ops"}"#.to_vec());
+    let id = match q.enqueue(
+        EnqueueRequest::new(seam::QUEUE, payload)
+            .fresh_for(seam::FRESH_MS)
+            .max_attempts(seam::MAX_ATTEMPTS)
+            .dedupe(format!("{}|{build}", seam::REGISTRY_OP))
+            .dedupe_in_flight(),
+    ) {
+        Ok(enqueued) => enqueued.id.0,
+        Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
+    };
+    let deadline = Instant::now() + Duration::from_millis(seam::WAIT_MS.max(1));
+    loop {
+        match q.job(JobId(id)) {
+            Ok(Some(job)) => match job.state.as_str() {
+                "done" => {
+                    let Some(result) = job.result.as_deref() else {
+                        return seam::refusal_text(seam::REGISTRY_OP, "answer_missing", "the registry settled without a document");
+                    };
+                    return match serde_json::from_slice::<Value>(result) {
+                        Ok(document) => document,
+                        Err(_) => seam::refusal_text(seam::REGISTRY_OP, "answer_unreadable", "the stored registry is not readable"),
+                    };
+                }
+                "dead" | "expired" => {
+                    let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
+                    return seam::refusal_text(seam::REGISTRY_OP, "failed", reason.chars().take(160).collect::<String>());
+                }
+                state => {
+                    if Instant::now() >= deadline {
+                        return seam::slow_text(seam::REGISTRY_OP, id, state);
+                    }
+                }
+            },
+            Ok(None) => return seam::refusal_text(seam::REGISTRY_OP, "job_lost", "the registry job is not in the queue any more"),
+            Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
+        }
+        crate::serve::beat();
+        std::thread::sleep(POLL);
+    }
+}
+
 /// [`ask_text_in`] for a request that carries its own op (the generic row's path, driven by the tests).
 fn ask_index_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
     ask_class_in(q, args, "index", seam::Effect::ReadOnly, wait_ms, build)
@@ -389,6 +452,17 @@ fn ask_index_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) ->
 /// [`ask_index_in`] against any generic door: the same three steps, gated by the door's effect class.
 fn ask_class_in(q: &wa_queue::Queue, args: &Value, door: &str, want: seam::Effect, wait_ms: u64, build: &str) -> Value {
     match index_op(args) {
+        Some(op) if op == seam::REGISTRY_OP => {
+            if want != seam::Effect::ReadOnly {
+                seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is the registry: ask whatsapp_index, the row that declares what it does"),
+                )
+            } else {
+                ask_registry_in(q, args, build)
+            }
+        }
         Some(op) => match seam::Op::parse(op) {
             Some(asked) if asked.effect() != want => seam::refusal_text(
                 op,

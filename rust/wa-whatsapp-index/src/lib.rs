@@ -60,6 +60,12 @@ pub use text::{fold, name_key, tokenize, tokens, Searchable, MAX_TOKENS};
 /// The queue every query travels on (`docs/SERVICE-COMPONENTS.md`).
 pub const QUEUE: &str = "whatsapp.query";
 
+/// The one word that is not an op: `{"op":"ops"}` asks the component for its registry (the op set and
+/// its effect classes, `ready-whatsapp-world.md`, package `wa:whatsapp@0.2.0`). It travels on the same
+/// queue as every question and is answered by the same worker, so a caller learns what this build can do
+/// without a second channel.
+pub const REGISTRY_OP: &str = "ops";
+
 /// A query nobody picked up within this window is answered "too old" instead of answered late: the
 /// index is a snapshot, and an answer produced ten minutes after the question is a different answer.
 pub const FRESH_MS: i64 = 120_000;
@@ -769,10 +775,16 @@ pub fn refusal_text(op: &str, code: &str, detail: impl AsRef<str>) -> serde_json
 /// The answer when the component has not settled inside [`WAIT_MS`]: the job id, so the caller can
 /// ask again (the dedupe key makes that a read of the same job, not a second scan).
 pub fn slow(op: Op, id: u64, state: &str) -> serde_json::Value {
+    slow_text(op.as_str(), id, state)
+}
+
+/// [`slow`] for a caller that carries the op as the word on the wire (and for the registry word, which
+/// is not an op at all). The bytes are the enum version's by construction.
+pub fn slow_text(op: &str, id: u64, state: &str) -> serde_json::Value {
     serde_json::json!({
         "ok": false,
-        "op": op.as_str(),
-        "error": format!("{}_slow", op.tool()),
+        "op": op,
+        "error": format!("whatsapp_{op}_slow"),
         "id": id,
         "state": state_word(state),
         "retry": true,
