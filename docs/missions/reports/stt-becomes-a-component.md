@@ -74,6 +74,10 @@ microseconds of work per call. Reported rather than hidden, because it is the la
   the component absent *and* installed. (`elapsed`-class timings are the only fields folded.)
 * `cargo test -p wa-stt-remote`: **23 passed, 0 failed**.
 * `cargo test -p wa-kernel-runtime stt_node::`: **8 passed, 0 failed**.
+* **`scripts/test-stt-seam.sh`** (new row, wired into `scripts/test.sh`): builds the component, runs the
+  crate's tests, runs the seam's happy-path test against that artifact (**1 passed**), and holds
+  `scripts/test-stt-seam-answers.lua` to the fixture on **both** paths — native and component — 12/12
+  identical each time. `stt seam: ok`.
 * `scripts/test-stt-node-script.lua`: ok (the status view). `scripts/test-stt-role.lua`: **79 checks ok**.
 * `scripts/test-stt-two-nodes.sh`: **FAILS, and fails identically on the pre-move binary** —
   `FAIL: could not find the worker node's process id`. Pre-existing in this environment, not this change:
@@ -81,11 +85,15 @@ microseconds of work per call. Reported rather than hidden, because it is the la
 
 ## What is not done, and why (measured, not deferred by preference)
 
-* **No successful guest admission has been exercised.** With the component installed the seam *is* asked
-  and answers `component_not_configured` — a scratch node has no node id and no owner list, so
-  `routed_call` refuses before the guest and the native rule runs (logged once). The row that would
-  configure an identity is the two-node row, and it fails on the base too. This is the one claim the
-  mission cannot make: **the routed branch's happy path is compiled and reachable, not proven.**
+* **The routed happy path IS now proven, in process** — `stt_host::tests::the_guest_admits_one_call_and_refuses_its_own_replay`
+  (wired through `scripts/test-stt-seam.sh`, added to `scripts/test.sh` beside the other stt rows) runs the
+  seam against the built artifact: the guest decodes a real `take` envelope (`op`, `from`, `to`, `rid`
+  checked), **refuses its own replay** with `replayed_request` — from the component's ledger, which is the
+  point of holding one instance — and refuses a caller that is not one of the owner's nodes with
+  `unknown_caller`. What is still not exercised is the *node-level* path (a configured node's `stt_call`
+  reaching a successful admission through `server.lua`): a scratch home has no identity, so there the seam
+  is asked, answers `component_not_configured`, and the native rule runs — logged once. The row that would
+  give a node an identity is the two-node row, which fails on the base binary too.
 * **`encode`, `signature-message`, `reply-ok` are declared but not routed.** Routing them moves
   `wa-stt-remote`'s producer loop (how an envelope is composed and signed on the way out), which is a
   change to make with the two-node row green under it.

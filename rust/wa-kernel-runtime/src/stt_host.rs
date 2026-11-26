@@ -243,8 +243,12 @@ fn with_instance<T>(
 /// wraps both. Each layer is named where it is handled, so "the guest refused" and "the guest could not
 /// answer" never collapse into one.
 pub fn admit(me: &str, owner_nodes: &[String], skew_ms: i64, bytes: &[u8], caller: &str, now_ms: i64) -> Result<Admit, String> {
-    let config = Config::from_env();
-    with_instance(&config, |served, runtime| {
+    admit_with(&Config::from_env(), me, owner_nodes, skew_ms, bytes, caller, now_ms)
+}
+
+/// [`admit`] with a config, so a test can point it at an artifact it just built.
+pub fn admit_with(config: &Config, me: &str, owner_nodes: &[String], skew_ms: i64, bytes: &[u8], caller: &str, now_ms: i64) -> Result<Admit, String> {
+    with_instance(config, |served, runtime| {
         let (me, owners, bytes, caller) = (me.to_string(), owner_nodes.to_vec(), bytes.to_vec(), caller.to_string());
         let timeout = Duration::from_millis(config.timeout_ms);
         let raced = runtime.block_on(async {
@@ -373,4 +377,60 @@ fn refusal_slug(refusal: &seam::Refusal) -> String {
         R::Failed(_) | R::Malformed(_) => unreachable!("rendered before the mapping"),
     };
     wire.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    //! The seam's own happy path, against the artifact this checkout built: the guest admits one call and
+    //! refuses its own replay (the rid ledger is the component's state, so this is also the test that the
+    //! ledger survives between calls). SKIPPED, and said so, when the artifact is not named — a skip is
+    //! never a pass. scripts/test-stt-seam.sh is the row that points it at a built component.
+    use super::*;
+    use wa_stt_remote::protocol::{Envelope, Op};
+
+    fn config() -> Option<Config> {
+        let path = std::env::var("WA_STT_COMPONENT_WASM").ok()?;
+        Some(Config { components_dir: std::path::PathBuf::from("/nonexistent"), wasm: Some(path.into()), timeout_ms: 5_000 })
+    }
+
+    #[test]
+    fn the_guest_admits_one_call_and_refuses_its_own_replay() {
+        let Some(config) = config() else {
+            eprintln!("SKIPPED: no WA_STT_COMPONENT_WASM (build the component and name it)");
+            return;
+        };
+        let owners = vec!["node-a".to_string()];
+        // The envelope a worker's take carries, composed by the same crate the guest links.
+        let envelope = Envelope::new(
+            Op::Take,
+            "node-a",
+            "node-b",
+            1_700_000_000_000,
+            "rid-admit-1",
+            serde_json::json!({"queue": "stt.requests", "worker": "w1", "wait_ms": 0}),
+        );
+        let bytes = envelope.encode();
+        let first = admit_with(&config, "node-b", &owners, 60_000, &bytes, "node-a", 1_700_000_000_000).expect("the seam answers");
+        match first {
+            Admit::Call { op, from, to, rid, .. } => {
+                assert_eq!(op, "take", "the guest decoded the op");
+                assert_eq!(from, "node-a");
+                assert_eq!(to, "node-b");
+                assert_eq!(rid, "rid-admit-1");
+            }
+            Admit::Refused { word, .. } => panic!("a valid call was refused: {word}"),
+        }
+        // The same rid again: the guest's own ledger, not the host's, is what refuses it.
+        let again = admit_with(&config, "node-b", &owners, 60_000, &bytes, "node-a", 1_700_000_000_000).expect("the seam answers");
+        match again {
+            Admit::Refused { word, .. } => assert_eq!(word, "replayed_request", "the ledger refused the replay"),
+            Admit::Call { .. } => panic!("a replayed call was admitted"),
+        }
+        // A caller that is not one of the owner's nodes is refused by the same rule.
+        let stranger = admit_with(&config, "node-b", &owners, 60_000, &bytes, "node-z", 1_700_000_000_001).expect("the seam answers");
+        match stranger {
+            Admit::Refused { word, .. } => assert_eq!(word, "unknown_caller"),
+            Admit::Call { .. } => panic!("a stranger was admitted"),
+        }
+    }
 }

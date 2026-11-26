@@ -346,6 +346,10 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-st
 # worker calls, the audio's lease rule, the component slot that mirrors a job, and the operator view.
 # The library above proves the two-node *logic*; these prove the host's dispatch and admission.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime stt_node::
+# The stt seam as a component (wit/stt): build the artifact, then prove the seam against it - the
+# guest admits a call, refuses its own replay from its own ledger, and the five capabilities answer
+# byte-identically with the component absent and installed (scripts/test-stt-seam.sh).
+gate_run bash scripts/test-stt-seam.sh --offline
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities graph::tests
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
 # fixtures, one per runner, each with its own end-to-end test in wa-kernel-runtime: `svc-echo-wasip1` (a plain
