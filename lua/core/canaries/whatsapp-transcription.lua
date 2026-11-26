@@ -11,10 +11,11 @@ local M = { mode = 'read' }
 
 function M.run()
   local ran, ok, stage, detail = guard.no_send(function()
-    if type(host.whatsapp_search) ~= 'function' then return false, 'capability_missing', 'this binary has no whatsapp_search' end
-    local answered, raw = pcall(host.whatsapp_search, json.encode({ kind = 'voice', limit = 5 }))
+    -- THE SERVING NODE ANSWERS (26/11, Fable item 2b): see lua/core/canaries/serving.lua.
+    local serving = dofile('lua/core/canaries/serving.lua')
+    local answered, answer, how = serving.ask('whatsapp_search', { kind = 'voice', limit = 5 })
+    if not answered then return false, tostring(answer.error or 'index_unreadable'), serving.detail(answer, tostring(answer.detail or '')) end
     if not answered then return false, 'index_unreadable', tostring(raw) end
-    local answer = type(raw) == 'string' and json.decode(raw) or raw
     if type(answer) ~= 'table' then return false, 'index_unreadable', 'the voice search answered nothing' end
     local hits = answer.hits or answer.messages or {}
     -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers
