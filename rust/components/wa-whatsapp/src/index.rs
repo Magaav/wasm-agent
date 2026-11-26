@@ -2644,6 +2644,11 @@ pub struct Pace {
     /// True when a catch-up the component knows about is running (offline resume, history sync): the
     /// index is knowingly behind the phone.
     pub catching_up: bool,
+    /// WHICH chats are behind, and since when: (chat, the oldest time this chat has a record waiting at).
+    /// A state that says "catching up" without naming a chat is a word a reader cannot act on; one that
+    /// names the chat and the instant it fell behind can say "ask again in a minute" or "that chat is
+    /// ten minutes old" (whatsapp-index-heals-itself item 2).
+    pub behind: Vec<(String, i64)>,
 }
 
 thread_local! {
@@ -2688,11 +2693,28 @@ pub fn observe_as_of(chat: &str, as_of: i64) -> Option<(i64, i64)> {
 fn index_state(pace: &Pace, as_of: i64) -> serde_json::Value {
     let pending = pace.pending_total.max(pace.pending.len());
     let catching_up = pace.catching_up || pending > 0;
+    // The chats that are behind, oldest first: the one that has waited longest is the one a reader has
+    // been waiting on longest. Empty is honest - a queued history sync has no records yet to name.
+    let mut behind: Vec<&(String, i64)> = pace.behind.iter().filter(|(_, since)| *since > 0).collect();
+    behind.sort_by_key(|(_, since)| *since);
+    let behind_json: Vec<serde_json::Value> = behind
+        .into_iter()
+        .map(|(chat, since)| {
+            serde_json::json!({
+                "chat": chat,
+                "since_ms": since,
+                "since_local": crate::view::local(*since),
+            })
+        })
+        .collect();
     serde_json::json!({
         "state": if catching_up { "catching_up" } else { "current" },
         "pending": pending,
         "lag_ms": (pace.newest_seen - as_of).max(0),
         "newest_seen_ms": if pace.newest_seen > 0 { serde_json::Value::from(pace.newest_seen) } else { serde_json::Value::Null },
+        // Named only while catching up: a current answer that listed chats would be a claim about work
+        // that is not happening.
+        "behind": if catching_up { serde_json::Value::Array(behind_json) } else { serde_json::Value::Array(Vec::new()) },
     })
 }
 
@@ -2951,6 +2973,8 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
         pending_total: pace.pending_total.saturating_sub(written),
         newest_seen: pace.newest_seen,
         catching_up: pace.catching_up,
+        // Whoever was behind is still behind: a read that answered a page did not write anybody's record.
+        behind: pace.behind.clone(),
     };
     // The header: which chat this is, in words. A card is what the index observed; an index written
     // before the card existed answers with the address and says so.

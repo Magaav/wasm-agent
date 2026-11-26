@@ -2056,7 +2056,21 @@ fn pace() -> index::Pace {
         pending = inbox.iter().rev().take(PACE_PENDING).map(|(record, _)| (record.chat.clone(), record.id.clone())).collect();
     });
     let catching_up = HISTORY_INBOX.with(|inbox| !inbox.borrow().is_empty());
-    index::Pace { pending, pending_total: total, newest_seen, catching_up }
+    // WHICH chats are behind and since when: per chat, the OLDEST record still waiting is the instant
+    // that chat fell behind. One pass over the inbox the count above already walked.
+    let mut oldest: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    INDEX_INBOX.with(|inbox| {
+        for (record, _) in inbox.borrow().iter() {
+            let entry = oldest.entry(record.chat.clone()).or_insert(record.ts);
+            if record.ts > 0 && (record.ts < *entry || *entry == 0) {
+                *entry = record.ts;
+            }
+        }
+    });
+    let mut behind: Vec<(String, i64)> = oldest.into_iter().collect();
+    behind.sort_by_key(|(_, since)| *since);
+    behind.truncate(PACE_PENDING);
+    index::Pace { pending, pending_total: total, newest_seen, catching_up, behind }
 }
 
 /// Refill the OCR inbox from the index when it is empty: images that were indexed without text (the

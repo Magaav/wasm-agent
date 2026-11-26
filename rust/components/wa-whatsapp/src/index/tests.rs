@@ -2724,6 +2724,7 @@ fn a_message_accepted_and_not_written_yet_is_named_pending_and_the_answer_says_i
         pending_total: 1,
         newest_seen: base() + 30_000,
         catching_up: false,
+        behind: vec![(FRESH_CHAT.to_string(), base())],
     };
     let asking = verified(seam::Request { op: "read".into(), chat: Some(FRESH_CHAT.into()), limit: Some(20), ..Default::default() });
     let behind = block_on(read_paced(&store, &asking, &pending)).unwrap();
@@ -2999,4 +3000,43 @@ fn contacts_pages_with_a_cursor_so_the_rest_are_reachable() {
     let stale = page(Some("55119777000999@s.whatsapp.net"));
     assert_eq!(chats(&stale).len(), 20, "a stale cursor still answers a page");
     assert_eq!(stale["matched"], 25);
+}
+
+/// P1.2 of whatsapp-index-heals-itself: while catching up, the answer NAMES the chats that are behind and
+/// the instant each fell behind - and a current answer names none, because there is no work to name.
+#[test]
+fn catching_up_names_the_chats_that_are_behind_and_since_when() {
+    let chat_a = "55119777000aa-like@s.whatsapp.net";
+    let chat_b = CHAT;
+    // Two chats behind, `chat_b` longer than `chat_a`; one chat already written (not in `behind`).
+    let pace = Pace {
+        pending: vec![(chat_a.to_string(), "M1".into())],
+        pending_total: 3,
+        newest_seen: base() + 120_000,
+        catching_up: false,
+        behind: vec![(chat_a.to_string(), base() + 60_000), (chat_b.to_string(), base())],
+    };
+    let state = index_state(&pace, base() + 120_000 - 30_000);
+    assert_eq!(state["state"], "catching_up", "records waiting is catching up: {state}");
+    let behind = state["behind"].as_array().expect("a list");
+    assert_eq!(behind.len(), 2);
+    assert_eq!(behind[0]["chat"], chat_b, "oldest first: the chat that waited longest is named first");
+    assert_eq!(behind[0]["since_ms"].as_i64(), Some(base()));
+    assert_eq!(behind[1]["chat"], chat_a);
+    assert_eq!(behind[1]["since_ms"].as_i64(), Some(base() + 60_000));
+    assert!(behind[0]["since_local"].as_str().unwrap_or_default().len() > 10, "a caller can read it as a time");
+    assert_eq!(state["pending"], 3, "the count is exact, the list is bounded");
+
+    // A queued history sync with nothing written yet: still catching up, and it names nobody rather than
+    // inventing a chat.
+    let queued = Pace { catching_up: true, ..Default::default() };
+    let state = index_state(&queued, base());
+    assert_eq!(state["state"], "catching_up");
+    assert_eq!(state["behind"].as_array().map(Vec::len), Some(0));
+
+    // Nothing waiting: `current`, and no `behind` list to misread.
+    let quiet = Pace { newest_seen: base(), ..Default::default() };
+    let state = index_state(&quiet, base());
+    assert_eq!(state["state"], "current");
+    assert_eq!(state["behind"].as_array().map(Vec::len), Some(0), "current never lists chats");
 }
