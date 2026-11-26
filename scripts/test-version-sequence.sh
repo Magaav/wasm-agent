@@ -169,6 +169,9 @@ exit 0
   mkdir -p "$share/versions/$PREV_ID/lua-core" "$share/versions/$PREV_ID/scripts"
   printf "prev init\n" > "$share/versions/$PREV_ID/lua-core/init.lua"
   printf "prev deploy\n" > "$share/versions/$PREV_ID/scripts/deploy.sh"
+  # A REAL VERSION FOLDER HOLDS ITS RECORD: without one the installer skips linking installed.txt and the
+  # conversion own verification then refuses ("installed.txt is not a link").
+  printf "commit=%s\nvia=seed\n" "$PREV_COMMIT" > "$share/versions/$PREV_ID/installed.txt"
   ln -sfn "versions/$PREV_ID" "$share/current"
 }
 I3="$W/i3"; in_place "$I3" "$PREV_COMMIT"; seed_prev "$W/share3" "$I3"; echo sentinel-fail > "$SEQ_MODE"
