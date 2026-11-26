@@ -58,9 +58,51 @@ pub struct EditorState {
     pub pasting: bool,
     pub footer: String,
     pub footer_right: String,
+    /// The lines the node SET and the editor holds: kept so a change is only sent when it differs.
+    pub wakes: String,
+    pub build: String,
+    pub session_notice: String,
+    pub queued: Vec<String>,
+    pub notice: String,
     pub wakes_content: String,
     pub session_content: String,
     pub cursor_frame: String,
+}
+
+impl EditorState {
+    /// The box's bottom border: the row above the footer, one higher while the session-status-content
+    /// line has something to say. Read off the numbers the editor answered with, so the node and the
+    /// editor cannot disagree.
+    pub fn bottom(&self) -> usize { self.bottom }
+    /// The footer row: the last row of the screen.
+    pub fn footer_row(&self) -> usize { self.footer_row }
+    /// The input's top divider and the draft's own rows.
+    pub fn box_rows(&self) -> Option<(usize, usize)> { self.box_rows }
+    /// The rows the slash menu takes above the status line.
+    pub fn menu_rows(&self) -> usize { self.menu_rows }
+    /// Inside a paste: an Esc there is the paste's end marker, never the Esc key.
+    pub fn pasting(&self) -> bool { self.pasting }
+    /// Nothing typed and not in bash mode.
+    pub fn draft_empty(&self) -> bool { self.empty }
+    pub fn status_row(&self) -> usize { self.status_row }
+    pub fn session_row(&self) -> usize { self.session_row }
+    pub fn wakes_row(&self) -> usize { self.wakes_row }
+    pub fn out_bottom(&self) -> usize { self.out_bottom }
+    pub fn selection(&self) -> Option<(usize, usize)> { self.selection }
+    /// The state the editor answered with, as one change: the console caches this after every call
+    /// that can move the box (a key, a resize, a session line), and lays out from it.
+    pub fn setup(&self) -> EditorSetup {
+        EditorSetup {
+            row: Some(self.row),
+            width: Some(self.width),
+            height: Some(self.height),
+            status: Some(self.status),
+            bash: Some(self.bash),
+            footer: Some(self.footer.clone()),
+            footer_right: Some(self.footer_right.clone()),
+            ..Default::default()
+        }
+    }
 }
 
 /// A key's answer in the node's own words, decoded from the program's `editor_key` reply. The console
@@ -173,6 +215,11 @@ fn editor_state_of(value: &Value) -> EditorState {
         pasting: boolean("pasting"),
         footer: line("footer"),
         footer_right: line("footer_right"),
+        wakes: line("wakes"),
+        build: line("build"),
+        session_notice: line("session_notice"),
+        queued: value.get("queued").and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
+        notice: line("notice"),
         wakes_content: line("wakes_content"),
         session_content: line("session_content"),
         cursor_frame: line("cursor_frame"),
@@ -378,6 +425,17 @@ impl Screen {
         self.remote.want_bool("editor_wheel", json!([up, rows]))
     }
     pub fn editor_escape(&mut self) -> bool { self.remote.want_bool("editor_escape", json!([])) }
+    /// The draft index a click lands on: the editor's own wrap arithmetic, not the node's guess.
+    pub fn editor_index_at(&mut self, row: usize, col: usize) -> Option<usize> {
+        self.remote.want("editor_index_at", json!([row, col])).ok().filter(|value| !value.is_null()).and_then(|value| value.as_u64()).map(|n| n as usize)
+    }
+    /// The editor's one-keystroke note (`Interrupting…`), taken: read, then cleared, as the console's
+    /// notice row used to.
+    pub fn editor_take_notice(&mut self) -> String {
+        self.remote.want("editor_take_notice", json!([])).ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
 
     pub fn bar_frame(&self, width: usize) -> String {
         self.remote.want_frame("bar_frame", json!([width]))

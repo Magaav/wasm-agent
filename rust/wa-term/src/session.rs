@@ -129,6 +129,8 @@ impl Session {
             "editor_click" => { self.editor.click(count(a, 0)?); Value::Null }
             "editor_wheel" => json!(self.editor.wheel(flag(a, 0)?, count(a, 1)?)),
             "editor_escape" => json!(self.editor.escape()),
+            "editor_index_at" => match self.editor.index_at(count(a, 0)?, count(a, 1)?) { Some(index) => json!(index), None => Value::Null },
+            "editor_take_notice" => json!(std::mem::take(&mut self.editor.notice)),
             _ => return Err(unknown()),
         })
     }
@@ -177,6 +179,11 @@ fn editor_state(editor: &Editor) -> Value {
         "menu_rows": editor.menu_rows(),
         "footer": editor.footer,
         "footer_right": editor.footer_right,
+        "wakes": editor.wakes,
+        "build": editor.build,
+        "session_notice": editor.session_notice,
+        "queued": editor.queued,
+        "notice": editor.notice,
         "wakes_content": editor.wakes_content(),
         "session_content": editor.session_content(),
         "cursor_frame": editor.cursor_frame(),

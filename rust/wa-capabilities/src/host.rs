@@ -4120,7 +4120,9 @@ struct ConsoleInput {
     stop: bool,
     running: bool,
     raw: Option<crate::tty::RawMode>,
-    editor: Option<wa_term::terminal_editor::Editor>,
+    /// The input box, as the program's editor last answered it: the node holds no editor and lays
+    /// out from these numbers (`Some` exactly while the box is open). Refreshed by `sync_editor`.
+    editor: Option<crate::screen::EditorState>,
     /// An open panel (`host.panel`): it owns the keys and the bottom of the screen until closed.
     panel: Option<wa_term::terminal_editor::Panel>,
     /// The output region's last row as this process last set it; 0 = the view's own layout.
@@ -4206,7 +4208,8 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
                     // it is the transcript's as before.
                     let over_box = state.nav.is_none() && state.editor.as_ref().and_then(|input| input.box_rows())
                         .is_some_and(|(top, bottom)| row >= top && row <= bottom);
-                    if over_box && state.editor.as_mut().is_some_and(|input| input.wheel(up, 3)) {
+                    if over_box && state.transcript.editor_wheel(up, 3) {
+                        sync_editor(state);
                         let frame = layout_frame(state);
                         let _ = crate::tty::write(&frame);
                         return;
@@ -4244,11 +4247,8 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
                     // (operator 17/11).
                     Gesture::DraftPress => {
                         if row > rows && state.nav.is_none() {
-                            let hit = state.editor.as_mut().and_then(|input| {
-                                let index = input.index_at(row, col)?;
-                                input.click(index);
-                                Some(index)
-                            });
+                            let hit = state.transcript.editor_index_at(row, col);
+                            if hit.is_some() { state.transcript.editor_click(hit.unwrap()); sync_editor(state); }
                             if let Some(index) = hit {
                                 state.box_drag = Some(index);
                                 let frame = layout_frame(state);
@@ -4371,7 +4371,10 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
                     Gesture::SelectDrag if state.box_drag.is_some() => {
                         let anchor = state.box_drag.unwrap_or(0);
                         if let Some(input) = state.editor.as_mut() {
-                            if let Some(index) = input.index_at(row, col) { input.select(anchor, index); }
+                            if let Some(index) = state.transcript.editor_index_at(row, col) {
+                                state.transcript.editor_select(anchor, index);
+                                sync_editor(state);
+                            }
                         }
                         // (the editor borrow ends here; the frame below reads the whole state)
                         if matches!(event, Mouse::Release(..)) { state.box_drag = None; }
@@ -4456,19 +4459,19 @@ fn write_at_editor(text: &str) -> std::io::Result<()> {
             } else { text.to_string() };
             if state.panel.is_some() { return crate::tty::write(&text); }
             crate::tty::write(&format!("\x1b[?25l{}{}\x1b[?25h",
-                text.replace("\x1b[?25h", ""), editor.cursor_frame()))
+                text.replace("\x1b[?25h", ""), &editor.cursor_frame))
         }
         None => crate::tty::write(text),
     }
 }
 
-fn current_region(state: &ConsoleInput, editor: &wa_term::terminal_editor::Editor) -> usize {
+fn current_region(state: &ConsoleInput, editor: &crate::screen::EditorState) -> usize {
     if state.region == 0 { editor.row.saturating_sub(6) } else { state.region }
 }
 
 /// The rows the chat occupies on screen now (`1..=` this): the terminal minus the bottom - the
 /// input box with its status, menu and footer rows, or an open panel.
-fn output_rows(panel: Option<&wa_term::terminal_editor::Panel>, editor: &wa_term::terminal_editor::Editor) -> usize {
+fn output_rows(panel: Option<&wa_term::terminal_editor::Panel>, editor: &crate::screen::EditorState) -> usize {
     match panel {
         Some(panel) => (editor.row + 1).saturating_sub(panel.height().max(7)),
         None => editor.out_bottom(),
@@ -4509,7 +4512,10 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
         state.transcript.clean();
     }
     let Some(editor) = state.editor.as_ref() else { return frame };
-    let frame = frame + &match state.panel.as_ref() { Some(panel) => panel.render(), None => editor.render() };
+    let frame = frame + &match state.panel.as_mut() {
+        Some(panel) => panel.render(),
+        None => state.transcript.editor_render(),
+    };
     state.region = want.max(1);
     frame
 }
@@ -4531,8 +4537,10 @@ fn say(state: &mut ConsoleInput, text: impl Into<String>, sticky: bool) -> bool 
 /// the frame is drawn. `Editor::render` no longer paints that field, so the row it used to overwrite
 /// - the session status bar - cannot be taken by a message again.
 fn flush_editor_notice(state: &mut ConsoleInput) -> bool {
-    let text = state.editor.as_mut().map(|editor| std::mem::take(&mut editor.notice)).unwrap_or_default();
+    if state.editor.is_none() { return false }
+    let text = state.transcript.editor_take_notice();
     if text.is_empty() { return false }
+    sync_editor(state);
     say(state, text, false)
 }
 
@@ -4569,13 +4577,35 @@ fn refresh_editor_size() -> Option<usize> {
     Some(state.editor.as_ref()?.status_row())
 }
 
+/// After a call that can move the box (a key, a resize, a session line): the editor's own numbers,
+/// cached for the layout. Nothing is guessed here; every number comes from the editor that owns it.
+fn sync_editor(state: &mut ConsoleInput) {
+    if state.editor.is_none() { return }
+    let fresh = state.transcript.editor_state();
+    state.editor = Some(fresh);
+}
+
+/// The box's state as a setup call: what the node SETS on the editor, sent as one object.
+fn editor_setup_of(state: &ConsoleInput) -> crate::screen::EditorSetup {
+    match &state.editor {
+        Some(editor) => editor.setup(),
+        None => crate::screen::EditorSetup::default(),
+    }
+}
+
+/// Send the state and keep what the editor answers with.
+fn set_editor(state: &mut ConsoleInput, setup: crate::screen::EditorSetup) {
+    state.transcript.editor_setup(&setup);
+    sync_editor(state);
+}
+
 /// The rebuild row (wa_term::build_status) as it reads now; redrawn only when its text changed - a
 /// row coming or going moves the status line and the chat's last row, which `layout_frame` applies.
 fn refresh_build(state: &mut ConsoleInput) {
-    let Some(editor) = state.editor.as_mut() else { return };
+    let Some(editor) = state.editor.as_ref() else { return };
     let build = wa_term::build_status::current(editor.width);
     if build == editor.build { return; }
-    editor.build = build;
+    set_editor(state, crate::screen::EditorSetup { build: Some(build), ..Default::default() });
     let frame = layout_frame(state);
     let _ = crate::tty::write(&frame);
 }
@@ -4615,7 +4645,7 @@ fn refresh_tool_progress(state: &mut ConsoleInput) {
 const EDITOR_MIN_ROWS: i32 = 10;
 
 fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
-    let Some(editor) = state.editor.as_mut() else { return };
+    let Some(editor) = state.editor.as_ref() else { return };
     if editor.row == rows - 1 && editor.width == columns { return; }
     let old_rows = editor.row + 1;
     // Item G: a resize is answered by ONE repaint from state, 150 ms after the last event of the
@@ -4624,11 +4654,10 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
     state.repaint_after = Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
     let mut frame = String::from("\x1b[?25l");
     for row in (state.region + 1).max(1)..=old_rows.min(rows) { frame.push_str(&format!("\x1b[{row};1H\x1b[2K")); }
-    editor.row = rows - 1;
-    editor.width = columns;
+    set_editor(state, crate::screen::EditorSetup { row: Some(rows - 1), width: Some(columns), ..Default::default() });
     if let Some(panel) = state.panel.as_mut() { panel.width = columns; panel.rows = rows; }
     state.transcript.mark_dirty();
-    let want = output_rows(state.panel.as_ref(), editor);
+    let want = output_rows(state.panel.as_ref(), state.editor.as_ref().expect("just set"));
     frame.push_str(&format!("\x1b[1;{}r", want.max(1)));
     state.region = want.max(1);
     frame.push_str(&layout_frame(state));
@@ -4818,35 +4847,38 @@ fn console_reader() {
                                 NavKey::Other(bytes) => {
                                     // Typing goes back to the draft (synced to the bottom), keystroke included.
                                     state.transcript.sync(); state.nav = None;
-                                    if let Some(input) = state.editor.as_mut() { for &b in bytes.iter() { let _ = input.feed(b); } }
+                                    for &b in bytes.iter() { let _ = state.transcript.editor_key(b); }
+                                    sync_editor(&mut state);
                                 }
                             }
                             continue;
                         }
-                        let Some(input) = state.editor.as_mut() else { break };
-                        match input.feed(byte) {
-                            wa_term::terminal_editor::Action::Nav => {
+                        if state.editor.is_none() { break }
+                        let action = state.transcript.editor_key(byte);
+                        sync_editor(&mut state);
+                        match action {
+                            crate::screen::EditorAction::Nav => {
                                 // Navigating freezes the view where it is; output keeps arriving below.
                                 if state.transcript.topics().is_empty() { continue; }
                                 state.transcript.hold();
                                 state.transcript.focus_prev();
                                 state.nav = Some(Default::default());
                             }
-                            wa_term::terminal_editor::Action::Bottom => state.transcript.sync(),
-                            action @ (wa_term::terminal_editor::Action::PageUp | wa_term::terminal_editor::Action::PageDown) => {
+                            crate::screen::EditorAction::Bottom => state.transcript.sync(),
+                            action @ (crate::screen::EditorAction::PageUp | crate::screen::EditorAction::PageDown) => {
                                 let page = page_rows(&state);
-                                let up = action == wa_term::terminal_editor::Action::PageUp;
+                                let up = action == crate::screen::EditorAction::PageUp;
                                 state.transcript.page(if up { page } else { -page });
                             }
                             // Enter and Ctrl+Enter share every line of this arm; the ONE difference is
                             // recorded below, when the line is queued: send_now says whether the reader
                             // asked for it at once (and then, only while a run is in flight, the run's own
                             // interrupt is raised, which is what ends a script's wait).
-                            action @ (wa_term::terminal_editor::Action::Submit(_)
-                              | wa_term::terminal_editor::Action::SubmitNow(_)) => {
+                            action @ (crate::screen::EditorAction::Submit(_)
+                              | crate::screen::EditorAction::SubmitNow(_)) => {
                                 let (text, send_now) = match action {
-                                    wa_term::terminal_editor::Action::SubmitNow(text) => (text, true),
-                                    wa_term::terminal_editor::Action::Submit(text) => (text, false),
+                                    crate::screen::EditorAction::SubmitNow(text) => (text, true),
+                                    crate::screen::EditorAction::Submit(text) => (text, false),
                                     _ => unreachable!(),
                                 };
                                 // `/status` while a run is in flight: shown now, over the box, from the
@@ -4897,13 +4929,13 @@ fn console_reader() {
                                 state.lines.push(if send_now { TypedLine::now(text) } else { TypedLine::queued(text) });
                                 sync_queued(&mut state);
                             }
-                            wa_term::terminal_editor::Action::Eof => { state.eof = true; state.running = false; break; }
+                            crate::screen::EditorAction::Eof => { state.eof = true; state.running = false; break; }
                             // The editor put its own notice (`Interrupting…`) in the footer's place; the
                             // frame below draws it. The draft is never touched by Ctrl+C.
-                            wa_term::terminal_editor::Action::Interrupt => raise_cli_interrupt(2),
+                            crate::screen::EditorAction::Interrupt => raise_cli_interrupt(2),
                             // The draft's selection to the clipboard (Ctrl+C / Ctrl+Insert with text selected):
                             // OSC 52, the same write the transcript's copy icon makes.
-                            wa_term::terminal_editor::Action::Copy(text) => {
+                            crate::screen::EditorAction::Copy(text) => {
                                 let _ = crate::tty::write(&crate::selection::osc52(&text));
                                 let count = text.chars().count();
                                 say(&mut state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
@@ -4912,29 +4944,32 @@ fn console_reader() {
                             // clipboard image: the same attachment inserted the same way. One
                             // function decides the token number, keeps the bytes and records that
                             // this draft carries it; the two arms differ only in what they replace.
-                            wa_term::terminal_editor::Action::Pasted(from) => {
+                            crate::screen::EditorAction::Pasted(from) => {
                                 attach_pasted_path(&mut state, from);
                             }
                             // Ctrl+V is ONE read of the clipboard that does the right thing: an image
                             // type listed is the `[Image #n]` it always was, and otherwise the text is
                             // pasted exactly as a bracketed paste puts it - a path to an image in that
                             // text becoming the same attachment a dropped path is (Action::Pasted).
-                            wa_term::terminal_editor::Action::Paste => match read_clipboard() {
+                            crate::screen::EditorAction::Paste => match read_clipboard() {
                                 Ok(Clipboard::Image(mime, bytes)) => {
                                     let (token, kb, size) = attach_image(&mut state, &mime, bytes);
-                                    if let Some(editor) = state.editor.as_mut() { editor.insert_text(&token); }
+                                    state.transcript.editor_insert(&token);
+                                    sync_editor(&mut state);
                                     say(&mut state, attachment_notice(&token, kb, size), false);
                                 }
                                 Ok(Clipboard::Text(text)) => {
-                                    let from = match state.editor.as_mut().map(|e| e.paste(&text)) {
-                                        Some(wa_term::terminal_editor::Action::Pasted(from)) => Some(from),
+                                    let pasted = state.transcript.editor_paste(&text);
+                                    sync_editor(&mut state);
+                                    let from = match pasted {
+                                        crate::screen::EditorAction::Pasted(from) => Some(from),
                                         _ => None,
                                     };
                                     if let Some(from) = from { attach_pasted_path(&mut state, from); }
                                 }
                                 Err(reason) => { say(&mut state, reason, true); }
                             }
-                            wa_term::terminal_editor::Action::None => {}
+                            crate::screen::EditorAction::None => {}
                         }
                     }
                     // A lone Esc: the terminal sent nothing after it.
@@ -4951,18 +4986,18 @@ fn console_reader() {
                         else if let Some(nav) = state.nav.as_mut() {
                             if nav.lone_escape() { state.transcript.sync(); state.nav = None; }
                         }
-                        else if let Some(input) = state.editor.as_mut() {
+                        else if state.editor.is_some() {
                             // Esc closes the slash menu first; with nothing to close and a run in flight
                             // (the status row is up) it interrupts the run, as Ctrl+C does.
-                            // Bash mode is left the same way, never interrupting the run.
-                            let menu_open = input.menu_rows() > 0 || input.bash;
-                            input.escape();
-                            // The interrupt is raised after the editor's own borrow ends, because raising it
-                            // also shuts a socket down and cannot run under a borrow of this state.
-                            if !menu_open && input.status {
-                                input.notice = "Interrupting\u{2026}".into();
-                                escape_interrupt = true;
-                            }
+                            // Bash mode is left the same way, never interrupting the run. The editor's
+                            // own notice it composes for this key comes back with the state.
+                            let menu_open = state.editor.as_ref().is_some_and(|e| e.menu_rows() > 0 || e.bash);
+                            let status = state.editor.as_ref().is_some_and(|e| e.status);
+                            state.transcript.editor_escape();
+                            sync_editor(&mut state);
+                            // The interrupt is raised after the editor's state is refreshed, because
+                            // raising it also shuts a socket down and cannot run under a borrow of this state.
+                            if !menu_open && status { escape_interrupt = true; }
                         }
                         if escape_interrupt { raise_cli_interrupt(1); }
                     }
@@ -5076,7 +5111,12 @@ pub extern "C-unwind" fn input_start(l: *mut LuaState) -> c_int {
                 && std::env::var("WASM_AGENT_CLI_EDITOR").unwrap_or_default() != "off" {
                 crate::tty::try_raw()
             } else { None };
-            state.editor = state.raw.as_ref().map(|_| wa_term::terminal_editor::Editor::default());
+            if state.raw.is_some() {
+                state.transcript.editor_open();
+                set_editor(&mut state, crate::screen::EditorSetup { ..Default::default() });
+                sync_editor(&mut state);
+                state.editor = Some(state.transcript.editor_state());
+            }
             state.running = true;
             state.stop = false;
         }
@@ -5305,10 +5345,8 @@ pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
     let height = arg_integer(l, 3).unwrap_or(1).clamp(1, 3) as usize;
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let ok = if let Some(editor) = state.editor.as_mut() {
-        editor.row = row;
-        editor.width = width;
-        editor.height = height;
+    let ok = if state.editor.is_some() {
+        set_editor(&mut state, crate::screen::EditorSetup { row: Some(row), width: Some(width), height: Some(height), ..Default::default() });
         let frame = layout_frame(&mut state);
         crate::tty::write(&format!("\x1b[?2004h{}{frame}", crate::selection::ENABLE)).is_ok()
     } else { false };
@@ -5373,10 +5411,9 @@ pub extern "C-unwind" fn editor_footer(l: *mut LuaState) -> c_int {
     let right = arg_string(l, 2);
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let ok = if let Some(editor) = state.editor.as_mut() {
-        editor.footer = text;
-        if let Some(right) = right { editor.footer_right = right; }
-        if editor.row > 0 && state.panel.is_none() {
+    let ok = if state.editor.is_some() {
+        set_editor(&mut state, crate::screen::EditorSetup { footer: Some(text), footer_right: right, ..Default::default() });
+        if state.editor.as_ref().is_some_and(|editor| editor.row > 0) && state.panel.is_none() {
             let frame = layout_frame(&mut state);
             crate::tty::write(&frame).is_ok()
         } else { true }
@@ -5395,11 +5432,8 @@ pub extern "C-unwind" fn editor_wakes(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let changed = state.editor.as_mut().map(|editor| {
-        let changed = editor.wakes != text;
-        editor.wakes = text;
-        changed
-    }).unwrap_or(false);
+    let changed = state.editor.as_ref().is_some_and(|editor| editor.wakes != text);
+    if changed { set_editor(&mut state, crate::screen::EditorSetup { wakes: Some(text), ..Default::default() }); }
     let ok = if changed {
         let frame = layout_frame(&mut state);
         frame.is_empty() || crate::tty::write(&frame).is_ok()
@@ -5417,11 +5451,8 @@ pub extern "C-unwind" fn editor_notice(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let changed = state.editor.as_mut().map(|editor| {
-        let changed = editor.session_notice != text;
-        editor.session_notice = text;
-        changed
-    }).unwrap_or(false);
+    let changed = state.editor.as_ref().is_some_and(|editor| editor.session_notice != text);
+    if changed { set_editor(&mut state, crate::screen::EditorSetup { session_notice: Some(text), ..Default::default() }); }
     let ok = if changed {
         let frame = layout_frame(&mut state);
         frame.is_empty() || crate::tty::write(&frame).is_ok()
@@ -6085,10 +6116,13 @@ fn attach_pasted_path(state: &mut ConsoleInput, from: usize) {
 /// The same, with the allowed directories injected: a test drives the real function without writing into
 /// the node's own state root, and the launch path passes the real list.
 fn attach_pasted_path_in(state: &mut ConsoleInput, from: usize, roots: &[std::path::PathBuf]) {
-    let Some((text, to)) = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor())) else { return };
-    let Some((mime, bytes)) = dropped_image_in(&text, roots) else { return };
+    let draft = state.editor.as_ref().map(|e| e.draft.clone()).unwrap_or_default();
+    let chars = draft.chars().count();
+    let slice: String = draft.chars().skip(from).collect();
+    let Some((mime, bytes)) = dropped_image_in(&slice, roots) else { return };
     let (token, kb, size) = attach_image(state, &mime, bytes);
-    if let Some(editor) = state.editor.as_mut() { editor.replace_range(from, to, &token); }
+    state.transcript.editor_replace(from, chars, &token);
+    sync_editor(state);
     say(state, attachment_notice(&token, kb, size), false);
 }
 
@@ -6178,12 +6212,12 @@ pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
     let on = unsafe { wa_host_support::lua::lua_toboolean(l, 1) } != 0;
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let ok = if let Some(editor) = state.editor.as_mut() {
+    let ok = if let Some(editor) = state.editor.as_ref() {
         if editor.status != on {
             // The notice is not on this row any more (it has one of its own at the top of the
             // transcript), so a run starting or ending says nothing about a message.
-            editor.status = on;
-            if editor.row > 0 && state.panel.is_none() {
+            set_editor(&mut state, crate::screen::EditorSetup { status: Some(on), ..Default::default() });
+            if state.editor.as_ref().is_some_and(|editor| editor.row > 0) && state.panel.is_none() {
                 let frame = layout_frame(&mut state);
                 let _ = crate::tty::write(&frame);
             }
@@ -6206,7 +6240,11 @@ pub extern "C-unwind" fn input_commands(l: *mut LuaState) -> c_int {
         })).collect();
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let ok = if let Some(editor) = state.editor.as_mut() { editor.commands = list; true } else { false };
+    let ok = if state.editor.is_some() {
+        let commands = list.iter().map(|command| (command.name.clone(), command.args, command.hint.clone())).collect();
+        set_editor(&mut state, crate::screen::EditorSetup { commands: Some(commands), ..Default::default() });
+        true
+    } else { false };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
@@ -6216,8 +6254,11 @@ pub extern "C-unwind" fn input_commands(l: *mut LuaState) -> c_int {
 fn sync_queued(state: &mut ConsoleInput) -> bool {
     let queued: Vec<String> = state.held.iter()
         .chain(state.lines.iter().map(|line| &line.text)).cloned().collect();
-    match state.editor.as_mut() {
-        Some(editor) if editor.queued != queued => { editor.queued = queued; true }
+    match state.editor.as_ref() {
+        Some(editor) if editor.queued != queued => {
+            set_editor(state, crate::screen::EditorSetup { queued: Some(queued), ..Default::default() });
+            true
+        }
         _ => false,
     }
 }
@@ -6488,9 +6529,9 @@ mod terminal_tests {
     #[test]
     fn a_steer_is_listed_until_it_is_taken() {
         let mut state = super::ConsoleInput::default();
-        let mut editor = wa_term::terminal_editor::Editor::default();
-        editor.row = 39; editor.width = 80; editor.height = 3; editor.status = true;
-        state.editor = Some(editor);
+        let mut state = super::ConsoleInput::default();
+        state.transcript = program_screen();
+        state.editor = Some(open_box(&mut state.transcript, 39, 80, 3, true));
         let bottom = state.editor.as_ref().unwrap().out_bottom();
         state.lines.push(super::TypedLine::queued("use the new requirement".into()));
         assert!(super::sync_queued(&mut state));
@@ -6510,25 +6551,34 @@ mod terminal_tests {
     #[test]
     fn a_page_is_a_third_of_the_chat_rows_on_screen() {
         let mut state = super::ConsoleInput::default();
-        let mut editor = wa_term::terminal_editor::Editor::default();
-        editor.row = 39; editor.width = 80; editor.height = 3;
-        state.editor = Some(editor);
+        state.transcript = program_screen();
+        state.editor = Some(open_box(&mut state.transcript, 39, 80, 3, false));
         let area = state.editor.as_ref().unwrap().out_bottom();
         assert_eq!(area, 36, "a 40-row terminal: footer, box borders and one draft row below the chat");
         assert_eq!(super::page_rows(&state), 12);
-        state.editor.as_mut().unwrap().status = true;
+        super::set_editor(&mut state, crate::screen::EditorSetup { status: Some(true), ..Default::default() });
         assert_eq!(super::page_rows(&state), 11, "a run's status row is not chat: 35 rows, a third is 11");
-        state.editor.as_mut().unwrap().row = 9;
+        super::set_editor(&mut state, crate::screen::EditorSetup { row: Some(9), ..Default::default() });
         let small = state.editor.as_ref().unwrap().out_bottom();
         assert!(small < 6, "a 10-row terminal leaves under six chat rows: {small}");
         assert_eq!(super::page_rows(&state), 1, "and a page there is still one row, never zero");
+    }
+
+    /// An input box opened by the program at a size, with its state read back: the tests lay out the
+    /// same way the console does, from the editor's own numbers.
+    pub(super) fn open_box(transcript: &mut crate::screen::Screen, row: usize, width: usize, height: usize, status: bool) -> crate::screen::EditorState {
+        transcript.editor_open();
+        transcript.editor_setup(&crate::screen::EditorSetup {
+            row: Some(row), width: Some(width), height: Some(height), status: Some(status), ..Default::default()
+        });
+        transcript.editor_state()
     }
 
     /// The terminal program, for the tests that need a chat to have been drawn: the transcript is on
     /// the wire now, so a `ConsoleInput` with the default handle has no rows to point a mouse at. It is
     /// found the way the console finds it; a test that cannot find it FAILS with the build command,
     /// because a mouse test over an empty chat proves nothing.
-    fn program_screen() -> crate::screen::Screen {
+    pub(super) fn program_screen() -> crate::screen::Screen {
         let named = std::env::var_os("WA_TERM_BIN").map(std::path::PathBuf::from);
         let beside = || {
             std::env::current_exe().ok().and_then(|exe| {
@@ -6549,7 +6599,7 @@ mod terminal_tests {
     #[test]
     fn one_wheel_event_moves_the_chat_one_row() {
         use crate::selection::Mouse;
-        use wa_term::terminal_editor::Action;
+        use crate::screen::EditorAction as Action;
         // The chat's first visible row, as the reader would point at it: its own line number.
         fn first(state: &mut super::ConsoleInput) -> usize {
             let area = super::output_rows(state.panel.as_ref(), state.editor.as_ref().unwrap());
@@ -6559,9 +6609,7 @@ mod terminal_tests {
                 .unwrap_or_else(|| panic!("no line number in {row:?}"))
         }
         fn a_long_chat(state: &mut super::ConsoleInput) {
-            let mut editor = wa_term::terminal_editor::Editor::default();
-            editor.row = 39; editor.width = 80; editor.height = 3;
-            state.editor = Some(editor);
+            state.editor = Some(open_box(&mut state.transcript, 39, 80, 3, false));
             for n in 0..400 { state.transcript.write(&format!("line {n}\n")); }
             let _ = super::layout_frame(state); // one frame: the transcript knows its height
         }
@@ -6572,7 +6620,7 @@ mod terminal_tests {
         a_long_chat(&mut keys);
         let bottom = first(&mut keys);
         let mut action = Action::None;
-        for byte in b"\x1b[5~" { action = keys.editor.as_mut().unwrap().feed(*byte); }
+        for byte in b"\x1b[5~" { action = keys.transcript.editor_key(*byte); }
         assert!(matches!(action, Action::PageUp), "the sequence is PageUp's, not another key's");
         let page = super::page_rows(&keys);
         assert_eq!(page, 12, "an 80x40 terminal pages twelve chat rows");
@@ -6615,9 +6663,7 @@ mod terminal_tests {
         use crate::selection::Mouse;
         let mut state = super::ConsoleInput::default();
         state.transcript = program_screen();
-        let mut editor = wa_term::terminal_editor::Editor::default();
-        editor.row = 39; editor.width = 80; editor.height = 3;
-        state.editor = Some(editor);
+        state.editor = Some(open_box(&mut state.transcript, 39, 80, 3, false));
         for n in 0..400 { state.transcript.write(&format!("line {n}\n")); }
         let _ = super::layout_frame(&mut state); // one frame: the transcript knows its bar
         let rows = super::output_rows(None, state.editor.as_ref().unwrap());
@@ -6654,9 +6700,7 @@ mod terminal_tests {
         use crate::selection::Mouse;
         let mut state = super::ConsoleInput::default();
         state.transcript = program_screen();
-        let mut editor = wa_term::terminal_editor::Editor::default();
-        editor.row = 39; editor.width = 80; editor.height = 3;
-        state.editor = Some(editor);
+        state.editor = Some(open_box(&mut state.transcript, 39, 80, 3, false));
         for n in 0..400 { state.transcript.write(&format!("line {n}\n")); }
         let _ = super::layout_frame(&mut state); // one frame: the transcript knows its bar
         assert!(state.transcript.bar().is_some(), "a long chat draws a bar to scroll");
@@ -7904,23 +7948,25 @@ mod image_and_token_tests {
         let dir = scratch_dir("pasted-image-path");
         let path = scratch(&dir, "pasted.png", PNG);
         let mut state = ConsoleInput::default();
-        let mut editor = wa_term::terminal_editor::Editor::default();
-        editor.insert_text(&path.to_string_lossy());
-        state.editor = Some(editor);
+        state.transcript = super::terminal_tests::program_screen();
+        state.editor = Some(super::terminal_tests::open_box(&mut state.transcript, 39, 80, 3, false));
+        state.transcript.editor_insert(&path.to_string_lossy());
+        state.editor = Some(state.transcript.editor_state());
         attach_pasted_path_in(&mut state, 0, &allowed(&dir));
         let editor = state.editor.as_ref().expect("the editor");
-        assert_eq!(editor.slice(0, editor.cursor()), "[Image #1]", "the path became the token");
+        assert_eq!(editor.draft, "[Image #1]", "the path became the token");
         assert_eq!(state.draft_images, vec![1], "and it is this draft's, so the message carries it");
         assert_eq!(state.pasted_images.len(), 1);
         assert_eq!(state.pasted_images[0].0, "image/png");
         // A path outside the allowed directories is NOT read: it stays the text it was.
         let mut state = ConsoleInput::default();
-        let mut editor = wa_term::terminal_editor::Editor::default();
-        editor.insert_text("/etc/hostname");
-        state.editor = Some(editor);
+        state.transcript = super::terminal_tests::program_screen();
+        state.editor = Some(super::terminal_tests::open_box(&mut state.transcript, 39, 80, 3, false));
+        state.transcript.editor_insert("/etc/hostname");
+        state.editor = Some(state.transcript.editor_state());
         attach_pasted_path_in(&mut state, 0, &allowed(&dir));
         let editor = state.editor.as_ref().expect("the editor");
-        assert_eq!(editor.slice(0, editor.cursor()), "/etc/hostname");
+        assert_eq!(editor.draft, "/etc/hostname");
         assert!(state.pasted_images.is_empty(), "nothing was attached");
     }
 
