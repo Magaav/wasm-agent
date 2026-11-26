@@ -4187,9 +4187,9 @@ fn clear_selection(state: &mut ConsoleInput) {
 }
 
 /// One mouse report from the terminal. Ignored while a panel is open (it owns the screen's bottom).
-fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
+fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
     use wa_term::keymap::{self, Gesture, Pose};
-    use wa_term::selection::Mouse;
+    use crate::selection::Mouse;
     if state.panel.is_some() { return; }
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
     let (width, rows) = (editor.width, output_rows(None, editor));
@@ -4304,9 +4304,9 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         if !state.transcript.bar_active() {
                             let shown = state.transcript.view(width, rows);
                             if let Some(url) = shown.get(row.saturating_sub(1))
-                                .and_then(|line| wa_term::links::at(&wa_term::selection::plain(line), col))
+                                .and_then(|line| wa_term::links::at(&crate::selection::plain(line), col))
                             {
-                                let _ = crate::tty::write(&wa_term::selection::osc52(&url));
+                                let _ = crate::tty::write(&crate::selection::osc52(&url));
                                 let count = url.chars().count();
                                 say(state, format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" }), false);
                                 let frame = layout_frame(state);
@@ -4321,7 +4321,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                     Gesture::BlockCopy => {
                         if !over_transcript { return; }
                         if let Some(text) = state.transcript.copy_at(row, col) {
-                            let _ = crate::tty::write(&wa_term::selection::osc52(&text));
+                            let _ = crate::tty::write(&crate::selection::osc52(&text));
                             let count = text.chars().count();
                             say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
                             let frame = layout_frame(state);
@@ -4333,7 +4333,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         if !over_transcript { return; }
                         let following = state.transcript.following();
                         state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
-                        let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| wa_term::selection::plain(r)).collect();
+                        let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| crate::selection::plain(r)).collect();
                         // The chat's columns only: a press on the bar's last column, or anywhere past
                         // the text, is a press on the chat's last column (a press that IS the bar's
                         // went to `keymap`'s BarJump, above).
@@ -4400,8 +4400,8 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
             // reached wa. The selection is on the clipboard the moment the button comes up; Super+C then
             // finds it there, and Ctrl+C still copies and clears as before.
             if matches!(event, Mouse::Release(..)) {
-                let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
-                let _ = crate::tty::write(&wa_term::selection::osc52(&text));
+                let text = crate::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
+                let _ = crate::tty::write(&crate::selection::osc52(&text));
                 let count = text.chars().count();
                 say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
             }
@@ -4414,8 +4414,8 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
 /// Ctrl+C with a selection: copy it to the terminal's clipboard and say so in the footer.
 fn copy_selection(state: &mut ConsoleInput) -> bool {
     let Some(selection) = state.selection.as_ref() else { return false };
-    let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
-    let _ = crate::tty::write(&wa_term::selection::osc52(&text));
+    let text = crate::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
+    let _ = crate::tty::write(&crate::selection::osc52(&text));
     let count = text.chars().count();
     clear_selection(state);
     say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
@@ -4501,7 +4501,7 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
     if state.transcript.dirty() && want >= 1 {
         frame.push_str(&state.transcript.render(width, want));
         if let Some(selection) = state.selection.as_ref() {
-            frame.push_str(&wa_term::selection::overlay(&selection.rows, selection.anchor, selection.head, selection.cols));
+            frame.push_str(&crate::selection::overlay(&selection.rows, selection.anchor, selection.head, selection.cols));
             // The overlay cleared every row it touched - the bar's column with them - so the track
             // is drawn back where the transcript put it: the highlight never covers the bar.
             frame.push_str(&state.transcript.bar_frame(width));
@@ -4773,7 +4773,7 @@ fn console_reader() {
                     // Mouse reports (wa_term::selection) are taken out first; the rest is keys, as before.
                     let mut data = std::mem::take(&mut state.mouse_pending);
                     data.extend_from_slice(&chunk[..n]);
-                    let (keys, mice, pending) = wa_term::selection::take(&data);
+                    let (keys, mice, pending) = crate::selection::take(&data);
                     state.mouse_pending = pending;
                     // An error on the notice row stays until the next KEY. A mouse report is not one:
                     // the release of the very click that copied something arrives a few milliseconds
@@ -4904,7 +4904,7 @@ fn console_reader() {
                             // The draft's selection to the clipboard (Ctrl+C / Ctrl+Insert with text selected):
                             // OSC 52, the same write the transcript's copy icon makes.
                             wa_term::terminal_editor::Action::Copy(text) => {
-                                let _ = crate::tty::write(&wa_term::selection::osc52(&text));
+                                let _ = crate::tty::write(&crate::selection::osc52(&text));
                                 let count = text.chars().count();
                                 say(&mut state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
                             }
@@ -5310,7 +5310,7 @@ pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
         editor.width = width;
         editor.height = height;
         let frame = layout_frame(&mut state);
-        crate::tty::write(&format!("\x1b[?2004h{}{frame}", wa_term::selection::ENABLE)).is_ok()
+        crate::tty::write(&format!("\x1b[?2004h{}{frame}", crate::selection::ENABLE)).is_ok()
     } else { false };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -6329,7 +6329,7 @@ pub fn restore_input() {
         // flow: a blank alternate screen with no cursor is the one failure a terminal program must not
         // have (docs/TERMINAL.md, "Giving the terminal back").
         finish_opening(&mut state);
-        if state.editor.is_some() { let _ = crate::tty::write(&format!("\x1b[?2004l{}", wa_term::selection::DISABLE)); }
+        if state.editor.is_some() { let _ = crate::tty::write(&format!("\x1b[?2004l{}", crate::selection::DISABLE)); }
         state.selection = None;
         state.mouse_pending.clear();
         state.editor = None;
@@ -6531,7 +6531,7 @@ mod terminal_tests {
     /// read the way the reader reads it - the chat's first visible row. PageUp/PageDown keep their third.
     #[test]
     fn one_wheel_event_moves_the_chat_one_row() {
-        use wa_term::selection::Mouse;
+        use crate::selection::Mouse;
         use wa_term::terminal_editor::Action;
         // The chat's first visible row, as the reader would point at it: its own line number.
         fn first(state: &mut super::ConsoleInput) -> usize {
@@ -6594,7 +6594,7 @@ mod terminal_tests {
     /// `/status` - keeps the mouse to itself, as it did before the bar existed.
     #[test]
     fn a_press_on_the_bar_scrolls_it_and_starts_no_selection() {
-        use wa_term::selection::Mouse;
+        use crate::selection::Mouse;
         let mut state = super::ConsoleInput::default();
         let mut editor = wa_term::terminal_editor::Editor::default();
         editor.row = 39; editor.width = 80; editor.height = 3;
@@ -6632,7 +6632,7 @@ mod terminal_tests {
     /// transcript really drew a bar into.
     #[test]
     fn a_drag_onto_the_bar_column_copies_the_chat_and_never_the_bar() {
-        use wa_term::selection::Mouse;
+        use crate::selection::Mouse;
         let mut state = super::ConsoleInput::default();
         let mut editor = wa_term::terminal_editor::Editor::default();
         editor.row = 39; editor.width = 80; editor.height = 3;
@@ -6647,12 +6647,12 @@ mod terminal_tests {
         super::handle_mouse(&mut state, Mouse::Drag(5, 80));
         let selection = state.selection.as_ref().expect("a drag keeps it");
         assert_eq!(selection.head.1, 79, "the drag stops where the chat stops, not on the bar");
-        let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
+        let text = crate::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
         assert!(!text.contains(['\u{2502}', '\u{2503}', '\u{2588}']), "no glyph of the bar: {text:?}");
         assert!(text.lines().all(|line| line == line.trim_end()), "and no trailing spaces: {text:?}");
         assert!(text.lines().count() >= 3, "three rows were dragged over: {text:?}");
         // The highlight is clamped the same way: it never paints the bar's column.
-        let frame = wa_term::selection::overlay(&selection.rows, selection.anchor, selection.head, selection.cols);
+        let frame = crate::selection::overlay(&selection.rows, selection.anchor, selection.head, selection.cols);
         assert!(!frame.contains(['\u{2502}', '\u{2503}', '\u{2588}']), "the overlay leaves the bar alone: {frame:?}");
     }
 

@@ -63,6 +63,7 @@ pub mod fabric;
 pub mod tool_progress;
 /// The node's own tty: the funnel every screen byte goes through, the launch animation's hold and raw
 /// mode (moved out of `wa-term` in its last slice: it is I/O, not display).
+pub mod selection;
 pub mod tty;
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
