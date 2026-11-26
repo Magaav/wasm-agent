@@ -113,7 +113,67 @@ local function named(verb, name, want_json)
 end
 
 --- `wa services ...`: dispatch and print. Returns the process exit code.
-function M.run(argv)
+-- THE CLI IS NOT THE NODE (26/11, Fable item 2a).
+--
+-- `services.control` asks THIS process kernel registry (rust/wa-kernel-runtime/src/services.rs `status`):
+-- that registry is memory plus an OS lock, so a name this process was never told about answers
+-- `not_running`. When ANOTHER process serves this node, that answer is the CLI own emptiness - measured
+-- 26/11: `wa services status wa-whatsapp` said not_running while the node said running, and the operator
+-- was told a component was down.
+--
+-- So before any live state is printed, the CLI asks who serves this node: an install serve.pid naming a
+-- LIVE pid other than this one. Then it says so plainly - a status names the pid, and a verb that would
+-- CHANGE the node is refused, because starting a second copy beside the supervisor is worse than saying
+-- "ask it". `list` is not gated: its rows are the stored definitions and say what they are.
+function M.serve_pid_paths(options)
+  if type(options) == 'table' and type(options.paths) == 'table' then return options.paths end
+  local env = type(host.getenv) == 'function' and host.getenv or function() return '' end
+  local paths = {}
+  local explicit = tostring(env('WA_INSTALL_DIR') or '')
+  if explicit ~= '' then paths[#paths + 1] = explicit .. '/serve.pid' end
+  local home = tostring(env('HOME') or '')
+  if home ~= '' then
+    paths[#paths + 1] = home .. '/AppData/Local/wasm-agent/serve.pid'
+    paths[#paths + 1] = home .. '/.local/share/wasm-agent/serve.pid'
+  end
+  return paths
+end
+
+-- <options> -> { pid, path } | nil. options.read_file/options.pid/options.paths are the row seams.
+function M.supervisor(options)
+  options = type(options) == 'table' and options or {}
+  local read_file = options.read_file or host.read_file
+  local mine = tonumber(options.pid or 0) or 0
+  if mine == 0 then
+    local source = type(host.process_identity) == 'function' and host.process_identity or host.runtime_info
+    local ok, raw = pcall(source or function() return '{}' end)
+    local info = ok and type(raw) == 'string' and (json.decode(raw) or {}) or {}
+    mine = tonumber(info.process_id) or 0
+  end
+  for _, path in ipairs(M.serve_pid_paths(options)) do
+    local ok, text = pcall(read_file, path)
+    if ok and type(text) == 'string' then
+      local pid = tonumber(text:match('%d+'))
+      if pid and pid > 0 and pid ~= mine then
+        -- A pid file outlives its process (deploy.sh says so); liveness decides, never the file.
+        local alive = options.alive and options.alive(pid) or pcall(read_file, '/proc/' .. tostring(pid) .. '/cmdline')
+        if alive then return { pid = pid, path = path } end
+      end
+    end
+  end
+  return nil
+end
+
+-- <verb>, <options> -> nil, or { pid, path, mutating, line } when another process serves this node.
+function M.served(verb, options)
+  if tostring(verb) == 'list' then return nil end
+  local sup = M.supervisor(options)
+  if not sup then return nil end
+  sup.mutating = tostring(verb) ~= 'status'
+  sup.line = string.format('served by pid %d (%s); ask it - this CLI is not the node supervisor, so it cannot report or change the node components', sup.pid, sup.path)
+  return sup
+end
+function M.run(argv, options)
   argv = type(argv) == 'table' and argv or {}
   local verb = tostring(argv[1] or '')
   local want_json = false
@@ -129,6 +189,17 @@ function M.run(argv)
     io.stderr:write(string.format('services: unknown verb %q\n', verb))
     usage('err')
     return 2
+  end
+  -- WHO SERVES THIS NODE, asked before any live state (see M.served).
+  local served = M.served(verb, options)
+  if served then
+    if want_json then
+      print(json.encode({ ok = false, error = 'cli_is_not_the_node', state = 'served_by', served_by_pid = served.pid,
+        serve_pid = served.path, verb = verb, name = rest[1], detail = served.line }))
+    else
+      io.stderr:write('services: ' .. served.line .. '\n')
+    end
+    return served.mutating and 1 or 0
   end
   if verb == 'list' then
     local answer = services.control({ action = 'list' }, { role = 'master', user_id = 'cli' })
