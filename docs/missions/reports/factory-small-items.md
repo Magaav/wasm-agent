@@ -206,6 +206,38 @@ land rows fail at their first "it lands" check, which is downstream of the same 
 pre-existing on the base (they are outside this brief and the run was the load, not the subject), and I did not
 change anything they touch - `git log --stat` on this branch lists no land or graph file.
 
+## Item 8 (orchestrator, 26/11) - tmp-cleanliness: the watchdog leak is judged in its own process group (f67c7868, b6c32536)
+
+MEASURED (main-health on e64ab009): `FAIL the mission runner's watchdog left 1 long sleep(s) behind on its normal
+exit`.
+
+REPRODUCED here, and the cause is NOT the code the hint names: `lua/core/mission.lua` has counted its deadline in
+5-second steps since 4098c6ca (`git merge-base --is-ancestor 4098c6ca origin/main` -> yes, so it is in e64ab009).
+What failed is the MEASUREMENT: the probe compared a MACHINE-WIDE set of sleeps of ten minutes or more before and
+after its seven-second window, so any stranger that started one inside the window was reported as the runner's
+leftover. Reproduced exactly: a `setsid sleep 1800` started three seconds into the window made the row red with the
+very line main-health saw (`left 1 long sleep(s) behind ... pids 4167578`), in another session, started by nothing the
+probe ran.
+
+* scripts/test-tmp-cleanliness.mjs (f67c7868): the probe is spawned detached - its own process-group leader - and the
+  leak is `longSleepsInGroup(probe.pid)`; a sleep the watchdog really left behind inherits that group, a stranger's
+  does not. The threshold is unchanged (>= 600 s). `longSleepWitness()` keeps the detector able to fail: it starts a
+  group holding a real `sleep 1800`, asserts the same function reports it, and kills it.
+* scripts/test-tmp-cleanliness.sh (b6c32536): a door, not a test - the row runner accepts `scripts/<name>.sh|.lua`
+  and refused the `.mjs` by name, so this `exec`s `scripts/test-tmp-cleanliness.mjs`. The gate and the fast path keep
+  running the `.mjs` directly (scripts/test.sh:2828, scripts/fast.sh:1236).
+
+FIVE RUNS THROUGH THE RUNNER, all `rc=0`, `leftovers=0 canary_before=green canary_after=green`,
+`test-tmp-cleanliness: PASS (10 checks)`, each carrying
+`ok - the mission runner leaves no long sleep behind when its watchdog is killed the way the runner kills it` and
+`ok - the leak detector still finds a long sleep in its own process group (1 found, killed)`:
+
+`20261126T132329Z-6704`, `20261126T132651Z-31651`, `20261126T132943Z-22839`, `20261126T133155Z-10368`,
+`20261126T133507Z-25001`.
+
+Before the change, the same sabotage (a stranger's long sleep inside the window) produced main-health's exact FAIL;
+after it, the same run is green and the witness is the line that keeps the check honest.
+
 ## Rows through the orchestrator's runner (25/11, 22:2x-22:3xZ)
 
 The brief says rows go through the runner, and the runner found four real defects that a direct run had hidden - each
