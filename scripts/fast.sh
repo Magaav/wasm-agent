@@ -163,6 +163,7 @@ export -f wa_fast_watchdog wa_watchdog_hung 2>/dev/null || true
 # OUTERMOST - env cannot exec a shell function, which is exit 127 on every row.
 . "$ROOT/scripts/lib/fast-row-exec.sh"
 export -f wa_fast_row_exec 2>/dev/null || true
+export -f wa_fast_row_seconds 2>/dev/null || true
 
 # ---- the binary -------------------------------------------------------------------------------------
 # Which `wa` the rows run is a fact about the verdicts, not a detail: see scripts/lib/fast-binary.sh for
@@ -650,7 +651,7 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$ms" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
 }
-export -f lua_run run_lua native wa_fast_row_exec wa_fast_watchdog
+export -f lua_run run_lua native wa_fast_row_exec wa_fast_row_seconds wa_fast_watchdog
 xargs -P "$jobs" -I{} bash -c 'run_lua "$1"' _ {} < "$work/lua.list" > "$work/lua.tsv"
 # The rows the machine could not run: retried once, one at a time, AFTER the batch, so the retry is
 # genuinely alone on the machine. A row that passes then is a pass (reported as one); a row that still
