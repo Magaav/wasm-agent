@@ -209,3 +209,22 @@ Operator- and developer-facing strings this branch adds or changes:
 No `wa capabilities`, `/health`, sandbox or refusal text changed: the JSON and the text form are the same
 bytes as before (item 3).
 
+
+## Savings, measured (Fable 26/11: "what has the component work saved, as a number")
+
+Two different questions, two different answers, both measured with `cargo build --release -p wa-host` on this
+node and both before/after the four commits above:
+
+| what a landing in this area costs | before (`522e12ae`) | after | delta |
+|---|---|---|---|
+| a **cold** host build (fresh target dir, `WA_CODEMODE_ALLOW_EMPTY=1`) | 294,846 ms = **4.91 min** | 258,315 ms = **4.31 min** | -36 s, which is one run each on a shared machine and is NOT claimed as a saving |
+| **one capability-row change** (touch the file, rebuild `wa-capabilities` + `wa-host`) | 33,766 ms = **0.56 min** | 36,444 ms = **0.61 min** | +2.7 s, i.e. noise: the row moved, the amount of work did not |
+| the binary a node takes | 78,372,360 B (row change) / 78,372,568 B (cold) | 78,371,008 B / 78,370,416 B | **-1,352 B / -2,152 B**, and **0 B saved per landing**: a row is data INSIDE the host binary, so nothing ships separately |
+
+**The honest headline: this move saves ZERO build minutes and ZERO download bytes per landing, and that is
+the point of measuring it.** It is not a component and it was never claimed to be one: what it saves is the
+conflict, and that number is in item 5 - 50 of the 55 commits that edited `capabilities.rs` in the last 30
+days would no longer edit it, 21 of those would no longer touch `host.rs` either, and the commits touching
+both files fall from 32 to 3. A parallel move now costs a rebase on its own row file instead of on the file
+every capability edits. Compression of the artifact (what a node actually downloads over the wire) was not
+measured; the bytes above are the release binary.
