@@ -52,7 +52,7 @@ echo "building rust/components/codemode (wasm32-wasip2) ..."
 
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 home=$(mktemp -d "${TMPDIR:-/tmp}/wa-codemode-component-XXXXXX")
-trap 'rm -rf "$home"' EXIT
+trap 'rm -rf "$home" "${bytes_home:-}" "${bytes_components:-}"' EXIT
 
 # `run <script> [EXTRA=value ...]`: one hermetic run - its own temp home, no node, no network, no real
 # store - and the extra variables only for that run. The component is reached through the development
@@ -132,6 +132,37 @@ echo "== scripts/test-codemode-component.lua (parity suite) =="
 parity_log="$home/parity.log"
 run scripts/test-codemode-component.lua "WA_CODEMODE_COMPONENT=1" "WA_CODEMODE_COMPONENT_WASM=$(native "$artifact")" 2>&1 | tee "$parity_log"
 check "parity suite" "$parity_log" "${PIPESTATUS[0]}"
+
+# The seam's model-facing BYTES: one fixed task set, the request the loop hands the seam and the result the
+# model receives, compared with fixtures/codemode-seam-bytes.jsonl - recorded on main 522e12ae while the
+# JSON rendering still ran in the host. This is the row that says the move into the component changed no
+# byte a model or the prompt cache sees (values, items, refusals, unexecuted calls, the sandbox's own
+# reasons), field for field and in the loop's own encoding.
+echo "== scripts/test-codemode-seam-bytes.lua (the seam's bytes) =="
+bytes_log="$home/bytes.log"
+# ...in a home of its own: the recording this compares against was made in a fresh node, and a golden of
+# BYTES is only meaningful against a defined state (the suites above pin a loadout and write session
+# variables into this home, and a grant list or a var row would then differ for reasons that are not the
+# seam). One mktemp, removed with the rest.
+bytes_home=$(mktemp -d "${TMPDIR:-/tmp}/wa-codemode-bytes-XXXXXX")
+# The component must be INSTALLED for the loop to route to it: a scratch home has no component directory,
+# so the node's feature resolver answers component_missing and every row here would be the native loop
+# answering (measured: `host.features` says active: native in a temp home). This row therefore gives the
+# run a components directory of its own, holding the artifact this script just built and its pin - the same
+# two files a deploy puts there - and nothing else.
+bytes_components=$(mktemp -d "${TMPDIR:-/tmp}/wa-codemode-bytes-components-XXXXXX")
+cp "$artifact" "$bytes_components/codemode.wasm"
+sha256sum "$bytes_components/codemode.wasm" | cut -d' ' -f1 > "$bytes_components/codemode.wasm.sha256"
+env WASM_AGENT_LUA_ROOT="$(native "$ROOT")" WASM_AGENT_HOME="$(native "$bytes_home")" \
+    WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
+    WA_CODEMODE_COMPONENT=1 WA_COMPONENTS_DIR="$(native "$bytes_components")" \
+    WA_SCRIPT="$(native "$ROOT/scripts/test-codemode-seam-bytes.lua")" \
+    timeout 900 "$bin" --db "$(native "$bytes_home/t.db")" 2>&1 | tee "$bytes_log"
+check "seam bytes" "$bytes_log" "${PIPESTATUS[0]}"
+if codemode_fallback "$bytes_log"; then
+  echo "  FAILED the seam bytes suite fell back to native:"; grep -E '(\]|^) ?codemode: .*served natively' "$bytes_log" | head -3
+  failed=$((failed + 1))
+fi
 
 # The pending-call handle, on both paths and with the same suite unchanged: a call that outlives its
 # wait is a managed operation the loop answers, so the component must drive it identically
