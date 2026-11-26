@@ -4135,7 +4135,9 @@ struct ConsoleInput {
     /// the whole transcript again at the new width. Cleared once done.
     repaint_after: Option<std::time::Instant>,
     /// While the transcript has focus (Up on an empty draft), its key decoder.
-    nav: Option<wa_term::transcript::NavDecoder>,
+    /// The chat has focus (Up on an empty draft). The decoder itself is the program's: it is the
+    /// transcript's key, and the transcript lives there.
+    nav: bool,
     /// A mouse report split across two reads: its start, waiting for the rest (crate::selection).
     mouse_pending: Vec<u8>,
     /// The chat text being selected with the mouse; Ctrl+C copies it (OSC 52).
@@ -4206,7 +4208,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
                     // The pointer is over the input box and its draft has more rows than it shows:
                     // the wheel is the box's (Victor 21/11). Anywhere else, or a draft that fits,
                     // it is the transcript's as before.
-                    let over_box = state.nav.is_none() && state.editor.as_ref().and_then(|input| input.box_rows())
+                    let over_box = !state.nav && state.editor.as_ref().and_then(|input| input.box_rows())
                         .is_some_and(|(top, bottom)| row >= top && row <= bottom);
                     if over_box && state.transcript.editor_wheel(up, 3) {
                         sync_editor(state);
@@ -4236,7 +4238,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
             // press is reported in the same ones: one screenful of text per press, and a click can
             // no longer land on a row some other frame put somewhere else.
             let _ = state.transcript.view(width, rows);
-            let over_transcript = row <= rows && state.nav.is_none();
+            let over_transcript = row <= rows && !state.nav;
             for gesture in state.transcript.keymap_gestures(Pose::Press) {
                 match gesture {
                     // The scrollbar's own gesture, before the selection's: a press in the bar's column
@@ -4246,7 +4248,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
                     // A press in the input box places the cursor; a drag from there selects
                     // (operator 17/11).
                     Gesture::DraftPress => {
-                        if row > rows && state.nav.is_none() {
+                        if row > rows && !state.nav {
                             let hit = state.transcript.editor_index_at(row, col);
                             if hit.is_some() { state.transcript.editor_click(hit.unwrap()); sync_editor(state); }
                             if let Some(index) = hit {
@@ -4479,10 +4481,11 @@ fn output_rows(panel: Option<&crate::screen::PanelState>, editor: &crate::screen
 }
 
 /// How far one PageUp/PageDown moves the chat: a third of the rows it occupies at the key press.
-fn page_rows(state: &ConsoleInput) -> isize {
+fn page_rows(state: &mut ConsoleInput) -> isize {
     let area = state.editor.as_ref().filter(|editor| editor.row > 0).map(|editor| output_rows(state.panel.as_ref(), editor));
-    // No framed screen (cannot happen while keys page; kept total): the old ten-row step.
-    wa_term::transcript::page_step(area.unwrap_or(30))
+    // No framed screen (cannot happen while keys page; kept total): the old ten-row step. The
+    // arithmetic is the transcript's, asked over the wire: one place decides how far a page is.
+    state.transcript.page_step(area.unwrap_or(30))
 }
 
 /// The rows the bottom of the screen needs now, applied, and that bottom drawn: the box (with the
@@ -4836,24 +4839,23 @@ fn console_reader() {
                                 && copy_selection(&mut state) { continue; }
                             clear_selection(&mut state);
                         }
-                        if let Some(nav) = state.nav.as_mut() {
-                            use wa_term::transcript::NavKey;
-                            let key = nav.feed(byte);
+                        if state.nav {
+                            let key = state.transcript.nav_key(byte);
                             match &key {
-                                NavKey::None => {}
-                                NavKey::Up => { state.transcript.focus_prev(); }
-                                NavKey::Down => { if !state.transcript.focus_next() { state.transcript.sync(); state.nav = None; } }
-                                NavKey::Right => state.transcript.set_expanded(true),
-                                NavKey::Left => state.transcript.set_expanded(false),
-                                NavKey::Pin => { state.transcript.pin_toggle(); }
-                                NavKey::PageUp | NavKey::PageDown => {
-                                    let page = page_rows(&state);
-                                    state.transcript.page(if matches!(key, NavKey::PageUp) { page } else { -page });
+                                crate::screen::NavKey::None => {}
+                                crate::screen::NavKey::Up => { state.transcript.focus_prev(); }
+                                crate::screen::NavKey::Down => { if !state.transcript.focus_next() { state.transcript.sync(); state.nav = false; } }
+                                crate::screen::NavKey::Right => state.transcript.set_expanded(true),
+                                crate::screen::NavKey::Left => state.transcript.set_expanded(false),
+                                crate::screen::NavKey::Pin => { state.transcript.pin_toggle(); }
+                                crate::screen::NavKey::PageUp | crate::screen::NavKey::PageDown => {
+                                    let page = page_rows(&mut state);
+                                    state.transcript.page(if matches!(key, crate::screen::NavKey::PageUp) { page } else { -page });
                                 }
-                                NavKey::Exit | NavKey::Bottom => { state.transcript.sync(); state.nav = None; }
-                                NavKey::Other(bytes) => {
+                                crate::screen::NavKey::Exit | crate::screen::NavKey::Bottom => { state.transcript.sync(); state.nav = false; }
+                                crate::screen::NavKey::Other(bytes) => {
                                     // Typing goes back to the draft (synced to the bottom), keystroke included.
-                                    state.transcript.sync(); state.nav = None;
+                                    state.transcript.sync(); state.nav = false;
                                     for &b in bytes.iter() { let _ = state.transcript.editor_key(b); }
                                     sync_editor(&mut state);
                                 }
@@ -4869,11 +4871,12 @@ fn console_reader() {
                                 if state.transcript.topics().is_empty() { continue; }
                                 state.transcript.hold();
                                 state.transcript.focus_prev();
-                                state.nav = Some(Default::default());
+                                state.transcript.nav_open();
+                                state.nav = true;
                             }
                             crate::screen::EditorAction::Bottom => state.transcript.sync(),
                             action @ (crate::screen::EditorAction::PageUp | crate::screen::EditorAction::PageDown) => {
-                                let page = page_rows(&state);
+                                let page = page_rows(&mut state);
                                 let up = action == crate::screen::EditorAction::PageUp;
                                 state.transcript.page(if up { page } else { -page });
                             }
@@ -4991,8 +4994,9 @@ state.panel = None;
                     let mut escape_interrupt = false;
                     if !state.eof && escape.is_some() && keys.last().copied() == escape && !pasting && !byte_ready(120) {
                         if state.panel.is_some() { let after = state.transcript.panel_escape(); state.panel = Some(after); }
-                        else if let Some(nav) = state.nav.as_mut() {
-                            if nav.lone_escape() { state.transcript.sync(); state.nav = None; }
+                        else if state.nav {
+                            // The chat's own decoder decides whether this Esc closes it: the program holds it.
+                            if state.transcript.nav_lone_escape() { state.transcript.sync(); state.nav = false; }
                         }
                         else if state.editor.is_some() {
                             // Esc closes the slash menu first; with nothing to close and a run in flight
@@ -6389,7 +6393,7 @@ pub fn restore_input() {
 state.panel = None;
         state.region = 0;
         state.transcript = Default::default();
-        state.nav = None;
+        state.nav = false;
         state.raw = None; // Drop restores the original console mode and input codepage.
         wake.notify_all();
     }
@@ -6567,13 +6571,13 @@ mod terminal_tests {
         state.editor = Some(open_box(&mut state.transcript, 39, 80, 3, false));
         let area = state.editor.as_ref().unwrap().out_bottom();
         assert_eq!(area, 36, "a 40-row terminal: footer, box borders and one draft row below the chat");
-        assert_eq!(super::page_rows(&state), 12);
+        assert_eq!(super::page_rows(&mut state), 12);
         super::set_editor(&mut state, crate::screen::EditorSetup { status: Some(true), ..Default::default() });
-        assert_eq!(super::page_rows(&state), 11, "a run's status row is not chat: 35 rows, a third is 11");
+        assert_eq!(super::page_rows(&mut state), 11, "a run's status row is not chat: 35 rows, a third is 11");
         super::set_editor(&mut state, crate::screen::EditorSetup { row: Some(9), ..Default::default() });
         let small = state.editor.as_ref().unwrap().out_bottom();
         assert!(small < 6, "a 10-row terminal leaves under six chat rows: {small}");
-        assert_eq!(super::page_rows(&state), 1, "and a page there is still one row, never zero");
+        assert_eq!(super::page_rows(&mut state), 1, "and a page there is still one row, never zero");
     }
 
     /// An input box opened by the program at a size, with its state read back: the tests lay out the

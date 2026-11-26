@@ -26,6 +26,9 @@ pub struct Session {
     /// The open panel, if any: `panel_open` creates it, `panel_key`/`panel_escape` drive it, and the
     /// node draws what `panel_render` answers. It owns the screen's bottom while it is open.
     panel: Option<Panel>,
+    /// The transcript's key decoder while the chat has focus (Up on an empty draft): the escape
+    /// buffer lives with the transcript, so the node does not carry a copy of it.
+    nav: crate::transcript::NavDecoder,
 }
 
 impl Default for Session {
@@ -33,7 +36,7 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new() -> Self { Session { transcript: Transcript::default(), editor: Editor::default(), panel: None } }
+    pub fn new() -> Self { Session { transcript: Transcript::default(), editor: Editor::default(), panel: None, nav: Default::default() } }
 
     /// The flag the node gates its frames on.
     pub fn dirty(&self) -> bool { self.transcript.dirty }
@@ -191,6 +194,29 @@ impl Session {
                 None => Value::Null,
             },
             "panel_close" => { self.panel = None; Value::Null }
+            // ---- the chat's own keys: the decoder and the arithmetic that moves it ----------------
+            "nav_open" => { self.nav = Default::default(); Value::Null }
+            "nav_lone_escape" => json!(self.nav.lone_escape()),
+            "nav_key" => {
+                let byte = u8::try_from(count(a, 0)?).map_err(|_| proto::Failure::new(proto::code::BAD_MESSAGE, "a key byte must be 0..=255"))?;
+                let key = self.nav.feed(byte);
+                let (name, bytes) = match key {
+                    crate::transcript::NavKey::None => ("none", Vec::new()),
+                    crate::transcript::NavKey::Up => ("up", Vec::new()),
+                    crate::transcript::NavKey::Down => ("down", Vec::new()),
+                    crate::transcript::NavKey::Right => ("right", Vec::new()),
+                    crate::transcript::NavKey::Left => ("left", Vec::new()),
+                    crate::transcript::NavKey::Pin => ("pin", Vec::new()),
+                    crate::transcript::NavKey::PageUp => ("page_up", Vec::new()),
+                    crate::transcript::NavKey::PageDown => ("page_down", Vec::new()),
+                    crate::transcript::NavKey::Exit => ("exit", Vec::new()),
+                    crate::transcript::NavKey::Bottom => ("bottom", Vec::new()),
+                    crate::transcript::NavKey::Other(bytes) => ("other", bytes),
+                };
+                json!({ "key": name, "bytes": bytes })
+            }
+            "page_step" => json!(crate::transcript::page_step(count(a, 0)?)),
+            "card_rows" => json!(crate::transcript::CARD_ROWS),
             _ => return Err(unknown()),
         })
     }

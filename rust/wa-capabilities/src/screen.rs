@@ -148,6 +148,10 @@ fn panel_state_of(value: &Value) -> PanelState {
     }
 }
 
+/// The chat's own key, as the transcript names it (`wa_term::transcript::NavKey`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NavKey { None, Up, Down, Right, Left, Pin, PageUp, PageDown, Exit, Bottom, Other(Vec<u8>) }
+
 /// A console act, as the program's keymap table names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostAct { Pin, CopySelection, Escape }
@@ -553,6 +557,46 @@ impl Screen {
         self.remote.want("panel_take", json!([])).ok().filter(|value| !value.is_null())
     }
     pub fn panel_close(&mut self) { self.remote.nothing("panel_close", json!([])) }
+
+    // ---- the chat's own keys: the decoder and the arithmetic that moves it ----
+
+    /// Focus the chat: the decoder starts a fresh sequence (Up on an empty draft).
+    pub fn nav_open(&mut self) { self.remote.nothing("nav_open", json!([])) }
+    /// One key byte while the chat has focus, as the transcript names it.
+    pub fn nav_key(&mut self, byte: u8) -> NavKey {
+        let value = self.remote.want("nav_key", json!([byte])).ok();
+        let name = value.as_ref().and_then(|v| v.get("key")).and_then(Value::as_str).unwrap_or("none");
+        match name {
+            "up" => NavKey::Up,
+            "down" => NavKey::Down,
+            "right" => NavKey::Right,
+            "left" => NavKey::Left,
+            "pin" => NavKey::Pin,
+            "page_up" => NavKey::PageUp,
+            "page_down" => NavKey::PageDown,
+            "exit" => NavKey::Exit,
+            "bottom" => NavKey::Bottom,
+            "other" => NavKey::Other(value.as_ref().and_then(|v| v.get("bytes")).and_then(Value::as_array)
+                .map(|bytes| bytes.iter().filter_map(Value::as_u64).map(|b| b as u8).collect()).unwrap_or_default()),
+            _ => NavKey::None,
+        }
+    }
+    /// How far one PageUp/PageDown moves the chat: a third of the rows it occupies at the key press.
+    pub fn page_step(&mut self, area: usize) -> isize {
+        self.remote.want("page_step", json!([area])).ok()
+            .and_then(|value| value.as_i64())
+            .map(|n| n as isize)
+            .unwrap_or(1)
+    }
+    /// Whether the Esc that just arrived is the chat's own (nothing after it in the sequence).
+    pub fn nav_lone_escape(&mut self) -> bool { self.remote.want_bool("nav_lone_escape", json!([])) }
+    /// The rows one collapsed card stands for (the transcript's own count).
+    pub fn card_rows(&mut self) -> usize {
+        self.remote.want("card_rows", json!([])).ok()
+            .and_then(|value| value.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(1)
+    }
 
     /// The keybindings table as JSON, for `/keybindings`: printed from the one that decoded the keys.
     pub fn keymap_json(&mut self) -> String {
