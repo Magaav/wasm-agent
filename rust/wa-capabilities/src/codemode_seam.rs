@@ -53,7 +53,6 @@ wasmtime::component::bindgen!({
     world: "codemode-component",
 });
 
-use wa::codemode::types as seam;
 use wa::kernel::quickjs as sandbox;
 
 /// Where one call gets what it needs. A value rather than ambient environment, so a test can point two
@@ -567,15 +566,6 @@ pub fn call_with(config: &Config, request: &Value) -> Value {
     answer
 }
 
-fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String> {
-    match op {
-        "open" => open(config, request),
-        "advance" => advance(config, request),
-        "finish" => finish(config, request),
-        other => Err(format!("invalid_codemode_op:{other}")),
-    }
-}
-
 fn session_of(request: &Value) -> Result<String, String> {
     request
         .get("session")
@@ -589,39 +579,45 @@ fn text_field(value: &Value, key: &str) -> String {
     value.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
 }
 
-fn optional(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()).map(str::to_string)
-}
-
-fn execution(value: Option<&Value>) -> seam::Execution {
-    let Some(value) = value else {
-        return seam::Execution {
-            status: "not_blocked".to_string(),
-            scope: String::new(),
-            workspace_binding: String::new(),
-            reason: None,
-            detail: None,
-            next: None,
-            available: None,
-            required: None,
-        };
-    };
-    seam::Execution {
-        status: text_field(value, "status"),
-        scope: text_field(value, "scope"),
-        workspace_binding: text_field(value, "workspace_binding"),
-        reason: optional(value, "reason"),
-        detail: optional(value, "detail"),
-        next: optional(value, "next"),
-        available: value.get("available").and_then(Value::as_bool),
-        required: value.get("required").and_then(Value::as_bool),
+/// The loop's one op, one answer.
+///
+/// The request goes to the component's own door (wa:codemode/control) and the answer comes back
+/// rendered there: the shape of a step, a refusal and a report is the seam's vocabulary and lives with
+/// the seam (rust/components/codemode/src/channel.rs). What is left here is what only the host knows -
+/// the instance a session names, the deadline, and the artifact it loads.
+///
+/// The four sentences this function can say on its own are exactly those: an op it does not serve, a
+/// session the request must name, an instance it never kept, and an artifact it cannot load. Everything
+/// the seam says comes back from the component.
+fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String> {
+    match op {
+        "open" | "advance" | "finish" => {
+            let session = session_of(request)?;
+            let raw = request.to_string();
+            let answered = match op {
+                "open" => open(config, &session, &raw)?,
+                "advance" => advance(config, &session, &raw)?,
+                _ => finish(config, &session, &raw)?,
+            };
+            let answer: Value = serde_json::from_str(&answered)
+                .map_err(|error| format!("component_answer_invalid:{error}"))?;
+            match answer.get("ok").and_then(Value::as_bool) {
+                Some(true) => Ok(answer.get("answer").cloned().unwrap_or(Value::Null)),
+                // Unknown is not yes: a door that answers nothing parseable, or a refusal with no
+                // sentence, is a failure this caller can name rather than an empty success.
+                _ => {
+                    let reason = text_field(&answer, "error");
+                    Err(if reason.is_empty() { "component_answer_invalid:no_error".to_string() } else { reason })
+                }
+            }
+        }
+        other => Err(format!("invalid_codemode_op:{other}")),
     }
 }
 
-/// Start a script: compile/instantiate the component for this session (cold start) and hand it the
-/// catalogue. One instance per session, kept until `finish`.
-fn open(config: &Config, request: &Value) -> Result<Value, String> {
-    let session = session_of(request)?;
+/// Start a script: compile/instantiate the component for this session (cold start), keep it until
+/// finish, and hand the request to its door. One instance per session.
+fn open(config: &Config, session: &str, request: &str) -> Result<String, String> {
     let (sha, bytes, manifest) = artifact(config)?;
     let engine = engine()?;
     let component = compiled(config, &engine, &sha, &bytes)?;
@@ -652,68 +648,12 @@ fn open(config: &Config, request: &Value) -> Result<Value, String> {
     sandbox::add_to_linker::<Host, Host>(&mut linker, |host| host).map_err(|error| format!("component_link_quickjs:{error}"))?;
     let bindings = CodemodeComponent::instantiate(&mut store, &component, &linker)
         .map_err(|error| format!("component_instantiate:{error}"))?;
-
-    let catalogue: Vec<seam::ToolFacts> = request
-        .get("catalogue")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| seam::ToolFacts {
-                    name: text_field(item, "name"),
-                    description: text_field(item, "description"),
-                    schema_json: text_field(item, "schema_json"),
-                    execution: execution(item.get("execution")),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    // The guest's own names as discovery entries, composed by the loop: this bridge copies them through
-    // unchanged (`builtin-fact` in wit/codemode), because their text is the node's.
-    let builtins: Vec<seam::BuiltinFact> = request
-        .get("builtins")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| seam::BuiltinFact {
-                    name: text_field(item, "name"),
-                    description: text_field(item, "description"),
-                    execution: execution(item.get("execution")),
-                    entry_json: text_field(item, "entry_json"),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let store_entries: Vec<seam::StoreEntry> = request
-        .get("store")
-        .and_then(Value::as_object)
-        .map(|entries| {
-            entries
-                .iter()
-                .map(|(key, value)| seam::StoreEntry { key: key.clone(), value: value.as_str().map(str::to_string) })
-                .collect()
-        })
-        .unwrap_or_default();
-    let open = seam::OpenRequest {
-        session: session.clone(),
-        owner: text_field(request, "owner"),
-        code: text_field(request, "code"),
-        timeout_ms: request.get("timeout_ms").and_then(Value::as_u64),
-        catalogue,
-        builtins,
-        store: store_entries,
-        wasm_path: optional(request, "wasm_path"),
-        prelude_path: optional(request, "prelude_path"),
-        module_cache: optional(request, "module_cache"),
+    let answered = {
+        let door = bindings.wa_codemode_control();
+        door.call_serve(&mut store, request).map_err(|error| trap_error("open", &error))?
     };
-    let opened = {
-        let seam_api = bindings.wa_codemode_codemode();
-        seam_api.call_open(&mut store, &open).map_err(|error| trap_error("open", &error))?
-    };
-    let answer = opened_json(&opened);
-    LIVE.with(|live| live.borrow_mut().insert(session, Live { store, bindings }));
-    Ok(answer)
+    LIVE.with(|live| live.borrow_mut().insert(session.to_string(), Live { store, bindings }));
+    Ok(answered)
 }
 
 fn ticks(config: &Config) -> u64 {
@@ -721,39 +661,30 @@ fn ticks(config: &Config) -> u64 {
 }
 
 /// One step of a live script.
-fn advance(config: &Config, request: &Value) -> Result<Value, String> {
-    let session = session_of(request)?;
-    let reply = request.get("reply").filter(|reply| !reply.is_null()).map(|reply| seam::Reply {
-        call_id: reply.get("call_id").and_then(Value::as_u64).unwrap_or(0),
-        ok: reply.get("ok").and_then(Value::as_bool).unwrap_or(false),
-        payload_json: reply.get("payload_json").and_then(Value::as_str).unwrap_or("null").to_string(),
-    });
-    with_live(&session, |live| {
-        let seam_api = live.bindings.wa_codemode_codemode();
+fn advance(config: &Config, session: &str, request: &str) -> Result<String, String> {
+    with_live(session, |live| {
+        let door = live.bindings.wa_codemode_control();
         live.store.set_epoch_deadline(ticks(config));
-        let progress = seam_api.call_advance(&mut live.store, &session, reply.as_ref()).map_err(|error| trap_error("advance", &error))?;
-        Ok(progress_json(&progress))
+        door.call_serve(&mut live.store, request).map_err(|error| trap_error("advance", &error))
     })
 }
 
 /// Close a live script: the component closes its sandbox and reports what the script did.
-fn finish(config: &Config, request: &Value) -> Result<Value, String> {
-    let session = session_of(request)?;
-    let live = LIVE.with(|live| live.borrow_mut().remove(&session));
+fn finish(config: &Config, session: &str, request: &str) -> Result<String, String> {
+    let live = LIVE.with(|live| live.borrow_mut().remove(session));
     let Some(mut live) = live else {
         return Err("component_session_unknown".to_string());
     };
-    let seam_api = live.bindings.wa_codemode_codemode();
+    let door = live.bindings.wa_codemode_control();
     live.store.set_epoch_deadline(ticks(config));
-    let report = seam_api.call_finish(&mut live.store, &session).map_err(|error| trap_error("finish", &error))?;
-    Ok(report_json(&report))
+    door.call_serve(&mut live.store, request).map_err(|error| trap_error("finish", &error))
 }
 
 /// Run one step against a live session. A trap drops the session: its sandbox cannot be trusted, and the
 /// router's rule is that a live script is never replayed.
-fn with_live<F>(session: &str, body: F) -> Result<Value, String>
+fn with_live<T, F>(session: &str, body: F) -> Result<T, String>
 where
-    F: FnOnce(&mut Live) -> Result<Value, String>,
+    F: FnOnce(&mut Live) -> Result<T, String>,
 {
     let mut live = LIVE.with(|live| live.borrow_mut().remove(session));
     let Some(current) = live.as_mut() else {
@@ -772,113 +703,6 @@ where
             Err(error)
         }
     }
-}
-
-// ------------------------------------------------------------------------------------ the answer shape
-
-fn output_json(items: &[seam::OutputItem]) -> Value {
-    Value::Array(items.iter().map(|item| json!({"type": "text", "text": item.text, "console": item.console})).collect())
-}
-
-fn unexecuted_json(items: &[seam::UnexecutedCall]) -> Value {
-    Value::Array(
-        items
-            .iter()
-            .map(|call| json!({"id": call.id, "name": call.name, "executed": false, "effect": "none", "reason": call.reason}))
-            .collect(),
-    )
-}
-
-fn writes_json(writes: &[seam::StoreEntry]) -> Value {
-    Value::Array(
-        writes
-            .iter()
-            .map(|entry| match &entry.value {
-                Some(value) => json!([entry.key, value]),
-                None => json!([entry.key, Value::Null]),
-            })
-            .collect(),
-    )
-}
-
-fn outcome_json(outcome: &seam::Outcome) -> Value {
-    json!({
-        "ok": outcome.ok,
-        "value": outcome.value,
-        "error": outcome.error,
-        "writes": writes_json(&outcome.writes),
-    })
-}
-
-fn refusal_json(refusal: &seam::Refusal) -> Value {
-    match refusal {
-        seam::Refusal::TargetNotAvailable(target) => json!({
-            "kind": "target_not_available",
-            "name": target.name,
-            "route": target.route,
-        }),
-    }
-}
-
-fn step_json(step: &seam::Step) -> Value {
-    match step {
-        seam::Step::Call(call) => {
-            let mut answer = json!({"kind": "call", "id": call.id, "target": call.target, "name": call.name, "args_json": call.args_json});
-            if let Some(refusal) = &call.refusal {
-                answer["refusal"] = refusal_json(refusal);
-            }
-            answer
-        }
-        seam::Step::HostGlobal(global) => {
-            // `target: "global"` is what the loop records in the attempt, the same field, with the same
-            // value, the native loop writes for a guest global.
-            json!({"kind": "host_global", "id": global.id, "target": "global", "name": global.name, "args_json": global.args_json})
-        }
-        seam::Step::Finished(outcome) => json!({"kind": "finished", "outcome": outcome_json(outcome)}),
-        seam::Step::Aborted(reason) => json!({"kind": "aborted", "reason": reason}),
-    }
-}
-
-fn opened_json(opened: &seam::Opened) -> Value {
-    json!({
-        "session": opened.session,
-        "items": output_json(&opened.items),
-        "backend": opened.backend,
-        "sandbox_failure": opened.sandbox_failure,
-        "unexecuted": unexecuted_json(&opened.unexecuted),
-        "aborted": opened.aborted,
-    })
-}
-
-fn progress_json(progress: &seam::Progress) -> Value {
-    // `answered` is the seam's journal row for a global it answered inside the guest: the loop writes
-    // one attempt per guest call exactly as the native path does, so dropping it here would put the two
-    // journals back out of step (and the parity suite exists to catch that).
-    let answered: Vec<Value> = progress
-        .answered
-        .iter()
-        .map(|answer| {
-            json!({
-                "id": answer.id,
-                "name": answer.name,
-                "ok": answer.ok,
-                "args_json": answer.args_json,
-                "result_json": answer.result_json,
-            })
-        })
-        .collect();
-    json!({"items": output_json(&progress.items), "answered": answered, "step": step_json(&progress.step)})
-}
-
-fn report_json(report: &seam::Report) -> Value {
-    json!({
-        "items": output_json(&report.items),
-        "unexecuted": unexecuted_json(&report.unexecuted),
-        "outcome": report.outcome.as_ref().map(outcome_json),
-        "aborted": report.aborted,
-        "close_failure": report.close_failure,
-        "sandbox_calls": report.sandbox_calls,
-    })
 }
 
 /// The call itself failed (a trap, the epoch deadline, a missing export). Reported apart from the seam's

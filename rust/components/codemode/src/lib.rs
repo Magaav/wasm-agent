@@ -23,9 +23,11 @@ use serde_json::{json, Map, Value};
 
 wit_bindgen::generate!({ path: "../../../wit/codemode", world: "codemode-component", generate_all });
 
+mod channel;
 mod logic;
 
 use crate::exports::wa::codemode::codemode::Guest as CodemodeGuest;
+use crate::exports::wa::codemode::control::Guest as ControlGuest;
 use crate::wa::codemode::types::{
     AnsweredCall, CallStep, Execution as WitExecution, GlobalStep, OpenRequest, Opened, Outcome,
     OutputItem, Progress, Refusal, Reply, Report, Step, StoreEntry, TargetRefusal, UnexecutedCall,
@@ -62,7 +64,7 @@ thread_local! {
 }
 
 /// The component: no state of its own between calls; every script is a [`Script`].
-struct CodemodeComponent;
+pub(crate) struct CodemodeComponent;
 
 fn execution(wit: WitExecution) -> Execution {
     Execution {
@@ -472,6 +474,14 @@ fn advance_script(script: &mut Script, reply: Option<Reply>) -> Progress {
                 }
             }
         }
+    }
+}
+
+/// The loop's JSON door (the `channel` module): the request decoded and the answer rendered here,
+/// so the host holds no seam shape. It renders the typed interface above, which is unchanged.
+impl ControlGuest for CodemodeComponent {
+    fn serve(request: String) -> String {
+        channel::call(&request)
     }
 }
 
