@@ -91,8 +91,16 @@ scripts/test-discriminates.sh origin/main` on this branch answers `discriminates
 — **1 discriminating, 0 blocking** — with its reason printed verbatim: the scratch base worktree has no
 built binary at `base/rust/target/release/wa`, so that run failed on the binary rather than on the mode;
 the stronger statement is the installed-binary one above. The 5 new unit rows pass
-(`operations_supervisor::tests::*`). Existing rows re-run on this branch: `test-operation-survives-turn.lua`
-16 checks, `test-operation-cwd.lua` 31 checks, `test-operation-reconcile-json.cjs` 27 checks — all green.
+(`operations_supervisor::tests::*`). The ten existing `test-*operation*` rows, run on this branch (each in its own scratch `HOME`):
+
+| row | result |
+|---|---|
+| `survives-turn.lua` / `cwd.lua` / `reconcile-json.cjs` / `answer-not-a-raise.lua` / `blocked-on.lua` / `cpu-priority.lua` / `queue-priority.lua` | green — 16, 31, 27, 9, 13, 18, 26 checks |
+| `control.cjs` (both invocations) | **fails on the base binary too** (`timeout: real tool produced output`, installed `~/.local/bin/wa`) — pre-existing, named, not touched |
+| `reconcile-json.lua` | not judgeable alone: it asserts `WA_RECONCILE_JSON_ROOT` / `WA_RECONCILE_JSON_MODE` at line 4 and is driven by its `.cjs` sibling (green above) |
+| `recovery.cjs` | not judgeable here: it spawns `rust/wa-sentinel/target/release/wa-sentinel watch`, which this mission does not build |
+
+Nothing in the last two rows is evidence about this change, and neither is counted as a pass.
 
 **How I checked the rows read real stores** (Fable 24/11): nothing is stubbed. The row builds its manager
 through `wa`'s own `operations::manager()` in a scratch `HOME`; the supervisor writes the same

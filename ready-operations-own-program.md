@@ -35,6 +35,7 @@ facts again, plans the program, and defines the first slice.
 | host build before/after | warm, `operations.rs` touched: 23.45 s / 79,712,792 B → 28.40 s / 79,717,928 B |
 | report | docs/missions/reports/operations-own-program.md (commit 42462e02) |
 | rule 16 (the test must fail on the base) | `scripts/test-discriminates.sh origin/main`: **discriminates**, 1 blocking 0 — run 26/11 on 1c978452 |
+| the 10 existing operation rows unchanged | 7 green (9/13/18/26/27/31/16 checks); `control.cjs` fails on the base binary too (pre-existing); `reconcile-json.lua` and `recovery.cjs` need their own harnesses and are not counted |
 
 **Left for the orchestrator:** (a) review of f94e6d56 and 42462e02, then landing in order; (b) the
 pre-existing `scripts/test-operation-control.cjs` failure on this node, proved against the installed base
