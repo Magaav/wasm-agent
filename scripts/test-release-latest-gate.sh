@@ -91,6 +91,11 @@ has 'and names the target it did not publish' "$d" 'aarch64-unknown-linux-musl'
 # and the product carries no environment override for it
 case "$(cat "$ROOT/scripts/release-linux.sh")" in *WA_RELEASE_EXPECTED_TARGETS*) bad 'the release script still reads an EXPECTED_TARGETS environment override' ;; *) ok 'no environment override decides the expected targets' ;; esac
 grep -q 'wa_release_built_targets' "$ROOT/scripts/release-linux.sh" && ok 'the targets come from the build record (wa_release_built_targets)' || bad 'release-linux.sh does not read the built targets'
+# and the operator gets a CONCRETE by-hand line, with this repo in it, not a placeholder to fill in
+case "$(grep -n 'to take the badge by hand' "$ROOT/scripts/release-linux.sh")" in
+  *'--repo $REPO'*) ok 'the by-hand line names the repo the script already knows' ;;
+  *) bad 'the by-hand line still says <owner/repo>' ;;
+esac
 
 # 8. the shipped script promotes LAST, and creates without the badge
 sh=$(cat "$ROOT/scripts/release-linux.sh")

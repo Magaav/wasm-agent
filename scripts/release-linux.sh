@@ -376,6 +376,12 @@ case "$decision" in
       || fail 'latest_failed: gh release edit did not take the badge'
     say "release $tag is now the Latest release"
     ;;
+  skip:latest_unknown*)
+    # THE BY-HAND LINE IS CONCRETE (Fable 26/11 asked the report to say how): the lib cannot know the repo, this
+    # script does, so the operator gets a command they can paste - not a placeholder to fill in.
+    say "latest: ${decision#skip:} (the release stays a prerelease)"
+    say "latest: to take the badge by hand once GitHub answers again: gh release edit $tag --repo $REPO --prerelease=false --latest"
+    ;;
   skip:*)
     say "latest: ${decision#skip:} (the release stays a prerelease)"
     ;;
