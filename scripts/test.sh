@@ -1571,6 +1571,9 @@ gate_run bash scripts/test-scratch-env.sh
 # verifies, a truncated/flipped/tampered one is refused by name, an interface mismatch names BOTH digests, and a
 # tarball path that escapes is refused. Milliseconds; no install, no pointer, no network.
 gate_run bash scripts/test-lua-part.sh
+# THE HOST DECLARES ITS LUA INTERFACE (wa --interface) and names the tree in force with its digest
+# (wa --build-info lua_tree/lua_tree_digest). A binary older than the verbs SKIPS by name.
+WA_BIN="$BIN" gate_run bash scripts/test-lua-interface.sh
 # THE G CONDITION ITSELF: the checker rejects every live dimension on its own (HOME, install dir, unit dir, the
 # real systemctl, the ledger path, XDG_CONFIG_HOME, a live port, a vault URL), the installer row asks it before
 # it runs anything, and neutralising a live-inheriting harness lands on ISOLATED with no live file changed.

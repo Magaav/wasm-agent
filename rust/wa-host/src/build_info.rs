@@ -37,8 +37,11 @@ pub fn product_version() -> &'static str {
 /// The identity document, one `key=value` per line - the same shape `installed.txt` uses, so a record can
 /// be written by copying fields and a reader needs no parser beyond `sed -n 's/^key=//p'`.
 pub fn render() -> String {
+    // WHICH TREE RUNS, and which bytes (Fable 25/11, lua-core-is-a-signed-part item 4): the installed Lua the
+    // loader already verified, or "embedded" for the compiled-in copy. One call, no path guessing here.
+    let (lua_tree, lua_tree_digest) = crate::lua_tree_report();
     format!(
-        "version={}\ncommit={}\ntree={}\ndirty={}\nsource={}\nsource_shared={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\nancestors_floor={}\n",
+        "version={}\ncommit={}\ntree={}\ndirty={}\nsource={}\nsource_shared={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\nancestors_floor={}\nlua_tree={}\nlua_tree_digest={}\n",
         product_version(),
         if COMMIT.is_empty() { "unknown" } else { COMMIT },
         if TREE.is_empty() { "unknown" } else { TREE },
@@ -49,6 +52,8 @@ pub fn render() -> String {
         ANCESTORS.len(),
         if ANCESTORS_COMPLETE { "true" } else { "false" },
         if ANCESTORS_FLOOR.is_empty() { "unknown" } else { ANCESTORS_FLOOR },
+        lua_tree,
+        if lua_tree_digest.is_empty() { "-" } else { lua_tree_digest.as_str() },
     )
 }
 
