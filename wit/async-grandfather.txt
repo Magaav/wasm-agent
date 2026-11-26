@@ -1,0 +1,33 @@
+# Worlds grandfathered before async-born-interfaces (Victor 26/11). ONE LINE PER FILE, by PATH - never a pattern.
+# max_sync is the SYNC export count this file had on the day the rule landed (27/11, origin/main dc46ba1f); a
+# file that grows past it has added a sync export and is refused until that export is async or carries a reason
+# line. A file that is not listed has no grandfathering at all, which is what makes this a list and not a rule
+# about old files.
+#
+# path max_sync why-this-one-is-still-sync
+wit/agent-control/agent-control.wit              8  baseline 27/11: 8 sync export(s), predates the rule
+wit/bus/bus.wit                                  1  baseline 27/11: 1 sync export(s), predates the rule
+wit/codemode/codemode.wit                        3  baseline 27/11: 3 sync export(s), predates the rule
+wit/codemode/deps/kernel/quickjs.wit             4  baseline 27/11: 4 sync export(s), predates the rule
+wit/fabric/fabric.wit                           16  baseline 27/11: 16 sync export(s), predates the rule
+wit/hooks/hooks.wit                              6  baseline 27/11: 6 sync export(s), predates the rule
+wit/kernel/host.wit                              7  baseline 27/11: 7 sync export(s), predates the rule
+wit/kernel/kernel.wit                           16  baseline 27/11: 16 sync export(s), predates the rule
+wit/kernel/sql.wit                               5  baseline 27/11: 5 sync export(s), predates the rule
+wit/kernel-v2/deps/cli.wit                      11  baseline 27/11: 11 sync export(s), predates the rule
+wit/kernel-v2/deps/clocks.wit                    7  baseline 27/11: 7 sync export(s), predates the rule
+wit/kernel-v2/deps/filesystem.wit                5  baseline 27/11: 5 sync export(s), predates the rule
+wit/kernel-v2/deps/random.wit                    5  baseline 27/11: 5 sync export(s), predates the rule
+wit/kernel-v2/deps/sockets.wit                  35  baseline 27/11: 35 sync export(s), predates the rule
+wit/kernel-v2/kernel.wit                        18  baseline 27/11: 18 sync export(s), predates the rule
+wit/memory/deps/kernel/kernel.wit                5  baseline 27/11: 5 sync export(s), predates the rule
+wit/memory/memory.wit                            7  baseline 27/11: 7 sync export(s), predates the rule
+wit/mesh/mesh.wit                                7  baseline 27/11: 7 sync export(s), predates the rule
+wit/model/model.wit                              5  baseline 27/11: 5 sync export(s), predates the rule
+wit/model/router.wit                             2  baseline 27/11: 2 sync export(s), predates the rule
+wit/queue/queue.wit                              1  baseline 27/11: 1 sync export(s), predates the rule
+wit/seams/seams.wit                              7  baseline 27/11: 7 sync export(s), predates the rule
+wit/selfloop/deps/kernel/kernel.wit              5  baseline 27/11: 5 sync export(s), predates the rule
+wit/selfloop/selfloop.wit                       17  baseline 27/11: 17 sync export(s), predates the rule
+wit/telemetry/telemetry.wit                      1  baseline 27/11: 1 sync export(s), predates the rule
+wit/vault/vault.wit                             10  baseline 27/11: 10 sync export(s), predates the rule
