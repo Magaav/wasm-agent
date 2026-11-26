@@ -13,6 +13,9 @@
 //! `host.rs` holds the state and the drawing.
 // The terminal cells a character takes: moved here with the selection, which measures what it copies
 // and what it paints. It is wa_term::terminal_editor::cell_width exactly (same table).
+/// The width of one character, for the modules that moved here with it (`crate::links`).
+pub(crate) fn cell_width_for(ch: char) -> usize { cell_width_of(ch) }
+
 fn cell_width_of(ch: char) -> usize {
     let cp = ch as u32;
     if (0x300..=0x36f).contains(&cp) || (0x1ab0..=0x1aff).contains(&cp)

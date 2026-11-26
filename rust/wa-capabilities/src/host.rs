@@ -4304,7 +4304,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
                         if !state.transcript.bar_active() {
                             let shown = state.transcript.view(width, rows);
                             if let Some(url) = shown.get(row.saturating_sub(1))
-                                .and_then(|line| wa_term::links::at(&crate::selection::plain(line), col))
+                                .and_then(|line| crate::links::at(&crate::selection::plain(line), col))
                             {
                                 let _ = crate::tty::write(&crate::selection::osc52(&url));
                                 let count = url.chars().count();
@@ -6150,7 +6150,7 @@ pub extern "C-unwind" fn transcript_copy_first(l: *mut LuaState) -> c_int {
 /// string rather than a table: the only caller slices the line with them.
 pub extern "C-unwind" fn link_span(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
-    match wa_term::links::first_bytes(&text) {
+    match crate::links::first_bytes(&text) {
         Some((start, end)) => {
             let answer = format!("{},{}", start + 1, end);
             unsafe { lua_pushlstring(l, answer.as_ptr() as *const c_char, answer.len()) };
