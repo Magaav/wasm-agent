@@ -163,17 +163,40 @@ function M.deploy_settles(state)
   return s == "installed" or s == "failed" or s == "silent" or s == "refused"
 end
 --
+-- 2. THE NODE OWN RECORD DECIDES BEFORE `unknown` IS WRITTEN. Five read-backs, 30 s apart, stopping at the
+--    first ANSWER - one read on a relay that just missed one is not evidence. A record naming the commit that
+--    was asked for settles the row as installed; a record naming another commit settles it as installed_mismatch.
+M.DEPLOY_FINAL_READS = 5
+M.DEPLOY_FINAL_INTERVAL = 30
 -- 2. THE NODE OWN RECORD DECIDES BEFORE `unknown` IS WRITTEN. A last read taken after the deadline can name the commit
 --    that was asked for - the install finished while the relay was not answering - and then the row settles as
 --    installed, never as unknown.
-function M.deploy_last_chance(row, sha, status)
-  local got = status and tostring(status.installed_commit or "") or ""
-  if got == "" or tostring(sha or "") == "" then return false end
-  if got ~= tostring(sha) then return false end
-  row.state = "installed"
-  row.installed_commit = got
-  row.detail = "installed (read back on the node own record after the wait)"
-  return true
+function M.deploy_last_chance(row, sha, read)
+  local want = tostring(sha or "")
+  local reads = 0
+  for i = 1, M.DEPLOY_FINAL_READS do
+    local ok_read, status = pcall(read)
+    if not ok_read then status = nil end
+    reads = reads + 1
+    local got = status and tostring(status.installed_commit or "") or ""
+    if want ~= "" and got == want then
+      row.state = "installed"
+      row.installed_commit = got
+      row.detail = "installed (read back on the node own record after the wait, read " .. reads .. ")"
+      return true
+    end
+    local state = tostring(status and status.state or "unknown")
+    if state == "installed" and got ~= "" then
+      row.state = "installed_mismatch"
+      row.installed_commit = got
+      row.detail = "the node installed " .. got .. ", not the " .. want .. " this round asked for"
+      return true
+    end
+    -- AN ANSWER ENDS THE READ-BACKS: failed, silent and refused are verdicts, not a missing reply.
+    if state ~= "unknown" and state ~= "not_known_yet" then return false, state end
+    if i < M.DEPLOY_FINAL_READS then M.sleep(M.DEPLOY_FINAL_INTERVAL) end
+  end
+  return false, nil
 end
 
 function M.sleep(seconds) M.exec("sleep " .. tostring(seconds)) end
@@ -4674,15 +4697,20 @@ impl.deploy = function(run, options)
       for _, row in ipairs(pending) do
         -- THE NODE'S OWN RECORD DECIDES BEFORE "unknown" IS WRITTEN (26/11). A last read can name the commit it
         -- installed even when the wait ran out: an install that finished is never reported as unknown.
-        local last = remote_update.status(M.call(), row.node, { id = row.record, session = options.session })
-        if M.deploy_last_chance(row, sha, last) then
-          row.installed_commit = tostring(last.installed_commit)
-          row.detail = "installed (read back on the node's own record after the wait)"
+        local read = function()
+          return remote_update.status(M.call(), row.node, { id = row.record, session = options.session })
+        end
+        local settled, answered = M.deploy_last_chance(row, sha, read)
+        if settled then
+          -- row.state and row.detail were set by the rule: installed, or installed_mismatch
+        elseif answered then
+          row.state = answered
+          row.detail = "the node answered " .. tostring(answered) .. " while the wait was ending; read it with: wa update " .. row.node .. " --status"
         else
           -- The deadline passed with the node still working: say `unknown`, never `installed`. Its own records
           -- are the truth and `wa update <node> --status` reads them.
           row.state = "unknown"
-          row.detail = "not settled within " .. tostring(deadline) .. "s; read it with: wa update " .. row.node .. " --status"
+          row.detail = "not settled within " .. tostring(deadline) .. "s after " .. tostring(M.DEPLOY_FINAL_READS) .. " read-backs " .. tostring(M.DEPLOY_FINAL_INTERVAL) .. "s apart; read it with: wa update " .. row.node .. " --status"
         end
         row.seconds = now() - (row.started_at or now())
       end

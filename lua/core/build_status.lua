@@ -35,7 +35,11 @@ function M.recorded_commit(config_root)
   for _, name in ipairs({ '/installed.txt', '/startup/installed.txt' }) do
     local ok, text = pcall(host.read_file, tostring(root) .. name)
     if ok and type(text) == 'string' then
-      local sha = text:match('%x%x%x%x%x%x%x%x%x%x%x%x+')
+      -- THE NAMED KEY, not the first run of hex (26/11, Fable): scripts/lib/install-record.sh writes this
+      -- record and its identity line is commit=<id> - the short form a build reports in its own --build-info,
+      -- the full id for a prebuilt install. tree=, sha256= and source_commit_hint= carry hex too, a record can
+      -- hold other hex BEFORE commit=, and the key is what says which value is the program.
+      local sha = text:match('^commit=([0-9a-fA-F]+)') or text:match('\ncommit=([0-9a-fA-F]+)')
       if sha then return sha end
     end
   end
