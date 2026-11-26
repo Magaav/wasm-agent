@@ -254,7 +254,7 @@ selfloop 949c657d3dcd365095425133d755e6023ddc3fe7bd5735d87064872346cff0a8 247835
 # 26/11 first pin of stt (change/stt-becomes-a-component): the speech queue's wire layer becomes a
 # component - wit/stt's async world (wa:stt: admit, encode, signature-message, reply-ok, sanitize) over
 # wa-stt-remote, which is pure and builds for wasip2 as it is. The node asks the feature resolver
-# (features.stt, WA_STT_COMPONENT as its override) per call and falls back to
+# (features.stt - the switch is the feature, with no env override in product code) per call and falls back to
 # rust/wa-kernel-runtime/src/stt_node.rs, which keeps the queue, the worker thread, the clock, the
 # recogniser and the node's key. Built by scripts/build-components.sh stt: rustc 1.99.1, build root
 # /tmp/wa-component-build/src, two builds in two target dirs, same sha256 both times. 152,942 bytes.
