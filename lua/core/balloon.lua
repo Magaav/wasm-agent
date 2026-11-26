@@ -167,6 +167,11 @@ function M.page(spec)
     -- A field's own handler: what to do with the text, returning the page that says so. Only the
     -- interpreter can run one, which is why a published page never carries it.
     act = spec.act,
+    -- The letters a page names: one that CHOOSES a row, one that asks for an ACTION on the row the
+    -- reader is on. Both are the panel's own fields (`keys`, `keys_action`) and this list is the page's
+    -- whole vocabulary - a field missing here is a field the panel never sees.
+    keys = spec.keys,
+    keys_action = spec.keys_action,
   }
 end
 

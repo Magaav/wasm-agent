@@ -1215,9 +1215,11 @@ impl Panel {
                     }
                 } else if let Some((_, action)) = self.key_actions.iter().find(|(named, _)| *named == letter) {
                     // An ACTION letter: the reader asked for something to happen to the row they are on,
-                    // not to pick it. The page stays open (no `finish`), and the answer carries the row so
-                    // the caller knows what the action is about.
-                    self.result = Some(serde_json::json!({"action": "key", "key": action,
+                    // not to pick it. It finishes the page like every other answer - a panel that keeps
+                    // drawing while its answer is already with the caller reads keys and does nothing
+                    // (measured: Esc and Enter were swallowed after `c`). The caller re-opens the list
+                    // when it wants the reader back on it.
+                    self.finish(serde_json::json!({"action": "key", "key": action,
                         "index": self.selected + 1}));
                 }
             }
@@ -2283,7 +2285,8 @@ mod tests {
         type_panel(&mut p, b"c");
         assert_eq!(p.result.take(), Some(serde_json::json!({"action": "key", "key": "copy", "index": 2})),
             "c asks for the action on the second row");
-        // The page is still the reader's: the list is not finished by an action letter.
+        // It finishes the page like any other answer (a panel that keeps drawing after its answer has gone
+        // reads keys and does nothing), and the caller re-opens it on the same row.
         type_panel(&mut p, &[0x1b, b'[', b'B']);
         type_panel(&mut p, b"R");
         assert_eq!(p.result.take(), Some(serde_json::json!({"action": "key", "key": "rename", "index": 3})),

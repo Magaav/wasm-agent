@@ -1022,35 +1022,6 @@ function M.run(argv)
   -- a line that says whose they are - without a new process. Nothing is stopped: a turn running in
   -- another process (a served session, a worker) keeps running, which is why the row says its state.
   local switched_from = nil
-  -- The id on the clipboard: OSC 52, which every terminal this CLI runs in understands and which needs no
-  -- `wl-copy` beside it (the link click already copies this way). The base64 is the session's own id, so
-  -- nothing but an id can ever be put there.
-  local function copy_id(id)
-    id = tostring(id or "")
-    if id == "" then return false end
-    local encoded = memory.base64_encode(id)
-    view:control("\27]52;c;" .. encoded .. "\7")
-    ui.say("  copied " .. id:sub(1, 8) .. "\u{2026}")
-    return true
-  end
-  -- Rename through the panel's own field, then the ledger: the title is what every list shows.
-  local function rename_session(id)
-    local session = memory.session(tostring(id or ""))
-    if not session then ui.say("  no such session") return false end
-    local page = {
-      title = "Rename " .. (tostring(session.title or "") ~= "" and tostring(session.title) or tostring(id):sub(1, 8)),
-      lines = { "the name every list shows for this thread" },
-      input = "line",
-      placeholder = "name",
-      hint = "Enter saves \u{b7} Esc cancels",
-    }
-    local answer = ui.show({page})
-    local text = type(answer) == "table" and answer.action == "submit" and tostring(answer.text or "") or ""
-    if text == "" then return false end
-    if not memory.rename_session(id, text) then ui.say("  the name was empty; nothing changed") return false end
-    ui.say("  renamed to " .. text)
-    return true
-  end
   local function switch_to(target)
     target = tostring(target or "")
     if target == "" then return false, "no session given" end
@@ -1085,6 +1056,36 @@ function M.run(argv)
   end
 
   local ui = balloon.for_view(view, { print = print, redact = redact })
+
+  -- The id on the clipboard: OSC 52, which every terminal this CLI runs in understands and which needs no
+  -- `wl-copy` beside it (the link click already copies this way). The base64 is the session's own id, so
+  -- nothing but an id can ever be put there.
+  local function copy_id(id)
+    id = tostring(id or "")
+    if id == "" then return false end
+    local encoded = memory.base64_encode(id)
+    view:control("\27]52;c;" .. encoded .. "\7")
+    ui.say("  copied " .. id:sub(1, 8) .. "\u{2026}")
+    return true
+  end
+  -- Rename through the panel's own field, then the ledger: the title is what every list shows.
+  local function rename_session(id)
+    local session = memory.session(tostring(id or ""))
+    if not session then ui.say("  no such session") return false end
+    local page = {
+      title = "Rename " .. (tostring(session.title or "") ~= "" and tostring(session.title) or tostring(id):sub(1, 8)),
+      lines = { "the name every list shows for this thread" },
+      input = "line",
+      placeholder = "name",
+      hint = "Enter saves \u{b7} Esc cancels",
+    }
+    local answer = ui.show({page})
+    local text = type(answer) == "table" and answer.action == "submit" and tostring(answer.text or "") or ""
+    if text == "" then return false end
+    if not memory.rename_session(id, text) then ui.say("  the name was empty; nothing changed") return false end
+    ui.say("  renamed to " .. text)
+    return true
+  end
 
 
   while true do
@@ -1278,27 +1279,31 @@ function M.run(argv)
       -- with its state and age. Picking one switches (the switch itself is the REPL's, below); a pipe
       -- gets the plain list.
       local sessions = reload.require("lua/core/sessions_view.lua")
-      local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
-        back = switched_from })
-      if type(answer) == "table" and answer.action == "key" then
-        -- A letter that names an action rather than a row: the page it names came with the row the reader
-        -- was on, and the list is still there for the next pick.
-        local key = tostring(answer.key or "")
-        local page_opts = sessions.page({ session_id = agent.session_id, user_id = USER, limit = 200,
-          back = switched_from })
-        local option = page_opts.options[tonumber(answer.index) or 0] or {}
-        if key == "copy" then copy_id(option.copy or option.session)
-        elseif key == "rename" then rename_session(option.session) end
-        answer = nil
-      end
-      if type(answer) == "table" and answer.action == "select" then
-        -- The balloon hands back { action = "select", page, index, option = <the chosen row> }: the id
-        -- and the origin flag live on the ROW, not on the answer.
-        local option = type(answer.option) == "table" and answer.option or {}
-        local chosen = tostring(option.session or "")
-        local ok, problem = switch_to(chosen)
-        if ok and option.origin then switched_from = nil end
-        if not ok then ui.say("  " .. tostring(problem)) end
+      -- The list comes back after an action: `c` and `r` finish the panel (a page whose answer has gone to
+      -- the caller reads keys and does nothing), so the reader gets the list again, on the same row.
+      local focus = nil
+      while true do
+        local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
+          back = switched_from, selected = focus })
+        if type(answer) ~= "table" then break end
+        if answer.action == "key" then
+          local option = (sessions.page({ session_id = agent.session_id, user_id = USER, limit = 200,
+            back = switched_from })).options[tonumber(answer.index) or 0] or {}
+          if answer.key == "copy" then copy_id(option.copy or option.session)
+          elseif answer.key == "rename" then rename_session(option.session) end
+          focus = tonumber(answer.index)
+        elseif answer.action == "select" then
+          -- { action = "select", page, index, option = <the chosen row> }: the id and the origin flag
+          -- live on the ROW, not on the answer.
+          local option = type(answer.option) == "table" and answer.option or {}
+          local chosen = tostring(option.session or "")
+          local ok, problem = switch_to(chosen)
+          if not ok then ui.say("  " .. tostring(problem)) end
+          if ok and option.origin then switched_from = nil end
+          break
+        else
+          break
+        end
       end
     elseif line == "/login" or line == "/provider" then
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT

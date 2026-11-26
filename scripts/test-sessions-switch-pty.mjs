@@ -75,6 +75,8 @@ const ENV = {
   TERM: 'xterm-256color',
   LANG: 'C.UTF-8',
   WASM_AGENT_HOME: HOME,
+  // THE TREE'S OWN LUA, not the copy embedded in whatever binary this is: a row on a worktree must
+  // exercise the lua/ the branch carries, or it silently tests the last build instead.
   WASM_AGENT_LUA_ROOT: REPO,
   WASM_AGENT_PROVIDER: 'opencode-go',
   WASM_AGENT_LLM_BASE_URL: 'http://127.0.0.1:' + PORT,
@@ -115,7 +117,10 @@ fs.writeFileSync(READ, [
   "local memory = dofile('lua/core/memory.lua')",
   'memory.setup()',
   'local out = {}',
-  'for _, id in ipairs(json.decode(host.getenv("IDS") or "{}")) do out[#out + 1] = memory.message_count(id) end',
+  'for _, id in ipairs(json.decode(host.getenv("IDS") or "{}")) do',
+  '  local s = memory.session(id)',
+  '  out[#out + 1] = { count = memory.message_count(id), title = s and s.title or "" }',
+  'end',
   'print(json.encode(out))',
   '',
 ].join('\n'));
@@ -182,8 +187,8 @@ try {
   await waitFor(() => completions >= 1, 'the model call after the switch', 60000);
   await waitFor(() => screen().includes('answer 0'), 'the answer after the switch', 60000);
   const after = counts();
-  check('the turn after the switch landed in beta', after[1] === before[1] + 2, 'counts ' + JSON.stringify(before) + ' -> ' + JSON.stringify(after));
-  check('and not in alpha', after[0] === before[0], 'counts ' + JSON.stringify(before) + ' -> ' + JSON.stringify(after));
+  check('the turn after the switch landed in beta', after[1].count === before[1].count + 2, 'counts ' + JSON.stringify(before) + ' -> ' + JSON.stringify(after));
+  check('and not in alpha', after[0].count === before[0].count, 'counts ' + JSON.stringify(before) + ' -> ' + JSON.stringify(after));
 
   // ---- 4. the way back --------------------------------------------------------------------------
   tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
@@ -201,8 +206,42 @@ try {
   await waitFor(() => completions >= 2, 'the model call after going back', 60000);
   await waitFor(() => screen().includes('answer 1'), 'the answer after going back', 60000);
   const after2 = counts();
-  check('the turn after going back landed in alpha', after2[0] === before2[0] + 2, 'counts ' + JSON.stringify(before2) + ' -> ' + JSON.stringify(after2));
-  check('and not in beta', after2[1] === before2[1], 'counts ' + JSON.stringify(before2) + ' -> ' + JSON.stringify(after2));
+  check('the turn after going back landed in alpha', after2[0].count === before2[0].count + 2, 'counts ' + JSON.stringify(before2) + ' -> ' + JSON.stringify(after2));
+  check('and not in beta', after2[1].count === before2[1].count, 'counts ' + JSON.stringify(before2) + ' -> ' + JSON.stringify(after2));
+
+  // ---- 6. c copies the id of the row the cursor is on, and does not switch --------------------
+  tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
+  await waitFor(() => screen().includes('c copies the id'), 'the page with its keys', 30000);
+  check('the page names its keys', true);
+  await sleep(800);
+  // The transcript above the page already says "switched to beta" from step 2, so the count is what
+  // says whether THIS key moved the reader: a copy that picked a row would add one.
+  const switches_before = (screen().match(/switched to/g) || []).length;
+  tmux(['send-keys', '-t', SESSION, 'c']);
+  await waitFor(() => screen().includes('copied ' + ids.a.slice(0, 8)), 'the copy confirmation', 30000);
+  check('c copies the id of this session and says so', true);
+  const switches_after = (screen().match(/switched to/g) || []).length;
+  check('and a copy does not switch', switches_after === switches_before,
+    'switch lines ' + switches_before + ' -> ' + switches_after);
+  // The panel's cancel is a DOUBLE Esc (one is the first byte of a sequence): one would leave the page
+  // drawn and swallow the next command. Pressed twice, and waited for, before the next step.
+  tmux(['send-keys', '-t', SESSION, 'Escape', 'Escape']);
+  await waitFor(() => !screen().includes('c copies the id'), 'the page to close', 15000);
+  check('a double Esc closes the page', true);
+
+  // ---- 7. r renames the thread, and the ledger agrees ---------------------------------------
+  tmux(['send-keys', '-t', SESSION, '/sessions', 'Enter']);
+  await waitFor(() => screen().includes('c copies the id'), 'the page again', 30000);
+  await sleep(800);
+  tmux(['send-keys', '-t', SESSION, 'r']);
+  await waitFor(() => screen().includes('Enter saves'), 'the rename field', 30000);
+  check('r opens the name field', true);
+  await sleep(400);
+  tmux(['send-keys', '-t', SESSION, 'alpha renamed', 'Enter']);
+  await waitFor(() => screen().includes('renamed to alpha renamed'), 'the rename confirmation', 30000);
+  check('Enter in the field renames and says so', true);
+  check('the ledger holds the new name', counts()[0].title === 'alpha renamed',
+    'titles ' + JSON.stringify(counts().map(entry => entry.title)));
 
   check('the fixture served both model calls', completions === 2, 'completions=' + completions);
   check('the provider key is in no file the session wrote', !spawnSync('grep', ['-rlF', KEY, WORK], {encoding: 'utf8'}).stdout);

@@ -142,6 +142,8 @@ function M.page(opts)
     -- the clipboard, `r` renames the thread. The panel carries them (`keys_action`) and the caller does
     -- the work, so the list stays open for the next pick.
     keys_action = { c = "copy", r = "rename" },
+    -- Where the cursor was, when the list comes back after an action: the reader keeps their place.
+    selected = tonumber(opts.selected) or 1,
     hint = "Enter switches \u{b7} c copies the id \u{b7} r renames \u{b7} Esc closes",
   }
   return page, os.clock() - started
