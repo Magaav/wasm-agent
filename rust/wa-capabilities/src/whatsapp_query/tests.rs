@@ -462,3 +462,23 @@ fn the_host_passes_a_date_through_and_refuses_an_unreadable_time() {
     assert_eq!(request_of(seam::Op::Search, &serde_json::json!({"q": "x", "until": "01/11/2026"})).expect_err("not a time").code, "bad_until");
     // Nothing was queued for any of the refusals: `request_of_text` answers before a job exists.
 }
+
+/// The cursor the contacts tool advertises (ready-heals.md §25) has to survive the host: `before` must land
+/// on the wire as the component's `Request.before`. Without this row the tool would advertise a page it
+/// cannot pass, and every test would agree with it.
+#[test]
+fn the_host_carries_the_contacts_cursor_onto_the_wire() {
+    let (_host, queue) = queue("contacts-before");
+    let cursor = "15550000001@lid";
+    let args = serde_json::json!({"q": "Contato", "limit": 20, "before": cursor});
+    let slow = ask_in(&queue, seam::Op::Contacts, &args, 1, BUILD);
+    let id = slow["id"].as_u64().expect("the job id");
+    let job = queue.job(wa_queue::JobId(id)).unwrap().unwrap();
+    let request = seam::Request::decode(&job.payload).expect("a query request");
+    assert_eq!(request.before.as_deref(), Some(cursor), "the cursor reaches the component");
+    assert_eq!(request.validate().expect("a valid request").before.as_deref(), Some(cursor));
+    // And the read op keeps its own cursor, unchanged: one mapping, every op that carries one.
+    let read = ask_in(&queue, seam::Op::Read, &serde_json::json!({"chat": "15550000001@lid", "before": "3EB0"}), 1, BUILD);
+    let read_job = queue.job(wa_queue::JobId(read["id"].as_u64().expect("read job"))).unwrap().unwrap();
+    assert_eq!(seam::Request::decode(&read_job.payload).expect("a request").before.as_deref(), Some("3EB0"));
+}
