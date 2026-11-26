@@ -39,6 +39,9 @@ pub mod file_search;
 pub mod features;
 pub mod graph;
 pub mod host;
+/// The console's transcript handle: the same calls in process (default) or across the wire to the
+/// terminal program (`WA_TERM_REMOTE=1`).
+pub mod screen;
 pub mod http_transport;
 pub mod operations;
 pub mod plugins;

@@ -4125,8 +4125,10 @@ struct ConsoleInput {
     panel: Option<wa_term::terminal_editor::Panel>,
     /// The output region's last row as this process last set it; 0 = the view's own layout.
     region: usize,
-    /// The chat as blocks (wa_term::transcript), drawn into the output region by this process.
-    transcript: wa_term::transcript::Transcript,
+    /// The chat as blocks (wa_term::transcript), drawn into the output region by this process - or,
+    /// with `WA_TERM_REMOTE=1`, by the terminal program across `crate::screen`'s wire. Same calls
+    /// either way; the default is the in-process path, unchanged.
+    transcript: crate::screen::Screen,
     /// When the debounced FULL repaint after a resize is due (item G): a resize sets it to now + the
     /// debounce, and a later call that finds it passed clears the screen and the scrollback and draws
     /// the whole transcript again at the new width. Cleared once done.
@@ -4181,7 +4183,7 @@ struct Selection { anchor: (usize, usize), head: (usize, usize), rows: Vec<Strin
 fn clear_selection(state: &mut ConsoleInput) {
     if let Some(selection) = state.selection.take() {
         if selection.following { state.transcript.sync(); }
-        state.transcript.dirty = true;
+        state.transcript.mark_dirty();
     }
 }
 
@@ -4282,7 +4284,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         if !over_transcript { return; }
                         if state.transcript.on_pill(row, col, rows) {
                             state.transcript.to_bottom();
-                            state.transcript.dirty = true;
+                            state.transcript.mark_dirty();
                             let frame = layout_frame(state);
                             let _ = wa_term::terminal_editor::write(&frame);
                             return;
@@ -4339,7 +4341,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         let cols = state.transcript.text_width(width);
                         let at = (row, col.min(cols));
                         state.selection = Some(Selection { anchor: at, head: at, rows: shown, following, cols });
-                        state.transcript.dirty = true;
+                        state.transcript.mark_dirty();
                         return;
                     }
                     _ => {}
@@ -4404,7 +4406,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                 let count = text.chars().count();
                 say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
             }
-            state.transcript.dirty = true;
+            state.transcript.mark_dirty();
         }
         Mouse::Other => {}
     }
@@ -4426,12 +4428,14 @@ static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = Once
 fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
     CONSOLE_INPUT.get_or_init(|| {
         let mut state = ConsoleInput::default();
+        // The transcript is this process's (the default) or the terminal program's
+        // (`WA_TERM_REMOTE=1`, crate::screen). The switch is read ONCE, here, and an unknown value
+        // is refused by name rather than read as "today's path".
+        state.transcript = crate::screen::Screen::for_console();
         // The inline transcript's scrollbar obeys the same knob as the fullscreen console's
         // (`WA_TUI_SCROLLBAR`, docs/TERMINAL.md, #115): one setting, one meaning, in both layouts.
-        if let Some(bar) = std::env::var("WA_TUI_SCROLLBAR").ok()
-            .and_then(|value| wa_term::scroll::settings::Scrollbar::parse(&value))
-        {
-            state.transcript.scrollbar = bar;
+        if let Ok(value) = std::env::var("WA_TUI_SCROLLBAR") {
+            state.transcript.set_scrollbar(&value);
         }
         (Mutex::new(state), std::sync::Condvar::new())
     })
@@ -4494,9 +4498,9 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
     if want >= 1 && want != have {
         frame.push_str(&format!("\x1b[1;{want}r"));
         for row in want + 1..=rows { frame.push_str(&format!("\x1b[{row};1H\x1b[2K")); }
-        state.transcript.dirty = true;
+        state.transcript.mark_dirty();
     }
-    if state.transcript.dirty && want >= 1 {
+    if state.transcript.dirty() && want >= 1 {
         frame.push_str(&state.transcript.render(width, want));
         if let Some(selection) = state.selection.as_ref() {
             frame.push_str(&wa_term::selection::overlay(&selection.rows, selection.anchor, selection.head, selection.cols));
@@ -4504,7 +4508,7 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
             // is drawn back where the transcript put it: the highlight never covers the bar.
             frame.push_str(&state.transcript.bar_frame(width));
         }
-        state.transcript.dirty = false;
+        state.transcript.clean();
     }
     let Some(editor) = state.editor.as_ref() else { return frame };
     let frame = frame + &match state.panel.as_ref() { Some(panel) => panel.render(), None => editor.render() };
@@ -4598,7 +4602,7 @@ fn refresh_tool_progress(state: &mut ConsoleInput) {
     let mut row = wa_term::tool_progress::current(width, &session, crate::operations::elsewhere_count(&session));
     // Never inside a code-mode block: its call rows already say ⏳/✓/✗ in place, and this row coming and going
     // under the block moved everything above it up and down (operator 17/11, measured in the TUI).
-    if state.transcript.blocks.last().is_some_and(|block| block.code) { row = String::new(); }
+    if state.transcript.last_is_code() { row = String::new(); }
     if row == state.tool_progress { return; }
     state.tool_progress = row;
     let text = if state.tool_progress.is_empty() { None } else { Some(state.tool_progress.as_str()) };
@@ -4625,7 +4629,7 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
     editor.row = rows - 1;
     editor.width = columns;
     if let Some(panel) = state.panel.as_mut() { panel.width = columns; panel.rows = rows; }
-    state.transcript.dirty = true;
+    state.transcript.mark_dirty();
     let want = output_rows(state.panel.as_ref(), editor);
     frame.push_str(&format!("\x1b[1;{}r", want.max(1)));
     state.region = want.max(1);
@@ -4659,7 +4663,7 @@ fn repaint_if_due() {
     state.repaint_after = None;
     if state.editor.as_ref().is_none_or(|editor| editor.row == 0) { return }
     let mut frame = String::from(REPAINT_CLEAR);
-    state.transcript.dirty = true;
+    state.transcript.mark_dirty();
     let rest = layout_frame(&mut state);
     frame.push_str(&rest);
     let _ = wa_term::terminal_editor::write(&frame);
@@ -4778,7 +4782,7 @@ fn console_reader() {
                     // after the press that set the message, and clearing on it made "Copied N
                     // characters" vanish before a reader could see it (measured: the tui-chrome row's
                     // copy icon click reported nothing on screen).
-                    if !keys.is_empty() && state.transcript.clear_notice() { state.transcript.dirty = true; }
+                    if !keys.is_empty() && state.transcript.clear_notice() { state.transcript.mark_dirty(); }
                     for event in mice { handle_mouse(&mut state, event); }
                     for &byte in &keys {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
@@ -4997,7 +5001,7 @@ fn console_reader() {
                             state.panel = None;
                             state.host_panel = false;
                             state.balloon = false;
-                            state.transcript.dirty = true;
+                            state.transcript.mark_dirty();
                         }
                     }
                     flush_editor_notice(&mut state);
@@ -5059,6 +5063,15 @@ pub extern "C-unwind" fn input_start(l: *mut LuaState) -> c_int {
         Ok(mut state) => {
             if state.running {
                 push_json(l, &json!({"started": true, "editor": state.editor.is_some()}));
+                return 1;
+            }
+            // The transcript behind the wire (`WA_TERM_REMOTE=1`) must answer its handshake before
+            // this process takes the screen: a program that is missing, or that speaks another
+            // protocol, is refused BY NAME here, never discovered mid-frame. Today's path
+            // (`Screen::Local`) never returns one, so this is dead on the default path.
+            if let Some(failure) = state.transcript.attach_error() {
+                eprintln!("wa: {}", failure.line());
+                unsafe { wa_host_support::lua::lua_pushnil(l) };
                 return 1;
             }
             state.raw = if arg_integer(l, 1) == Some(1) && console_size().is_some()
@@ -5191,7 +5204,7 @@ fn finish_opening(state: &mut ConsoleInput) {
     let _ = wa_term::terminal_editor::write_now(&wa_term::opening::leave_bytes());
     let held = wa_term::terminal_editor::release();
     if !held.is_empty() { let _ = wa_term::terminal_editor::write_now(&held); }
-    state.transcript.dirty = true;
+    state.transcript.mark_dirty();
     if state.editor.as_ref().is_some_and(|editor| editor.row > 0) && state.panel.is_none() {
         let frame = layout_frame(state);
         if !frame.is_empty() { let _ = wa_term::terminal_editor::write(&frame); }
@@ -5475,7 +5488,7 @@ pub extern "C-unwind" fn transcript_hold(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let was = std::mem::replace(&mut state.transcript_held, on);
     if was && !on && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() {
-        state.transcript.dirty = true;
+        state.transcript.mark_dirty();
         let frame = layout_frame(&mut state);
         let _ = wa_term::terminal_editor::write(&frame);
     }

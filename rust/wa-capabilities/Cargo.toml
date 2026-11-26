@@ -18,6 +18,10 @@ wa-sqlite = { path = "../wa-sqlite" }
 wa-host-support = { path = "../wa-host-support" }
 wa-governance = { path = "../wa-governance" }
 wa-term = { path = "../wa-term" }
+# The versioned wire to the terminal program (src/screen.rs): the call table the node speaks when
+# `WA_TERM_REMOTE=1` puts the transcript behind the boundary. A leaf, so the node can keep speaking it
+# after it stops linking `wa-term` (docs/missions/reports/wa-term-own-program.md).
+wa-term-proto = { path = "../wa-term-proto" }
 wa-rendezvous = { path = "../wa-rendezvous" }
 wa-kernel-runtime = { path = "../wa-kernel-runtime" }
 # The feature resolver behind the `features` capability (docs/FEATURES.md): the Lua gates ask through it,
