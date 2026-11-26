@@ -1491,6 +1491,19 @@ M.HOLD_DEADLINE_MS = 30000  -- "near its own limit": within this much of the ope
 -- instance the node uses, registered in `package.loaded` below - instead of changing the environment
 -- under a running process. Production never touches them.
 
+-- A MESSAGE WAITING IS AN EVENT (Fable 27/11). Until this, only a stop/steer ended a hold: a user message
+-- queued mid-turn sat in `steering_inbox` until the turn was over, so a held answer could delay the
+-- operator's own words by up to the hold ceiling. The probe is the session's queued row, read once per
+-- slice; a store this process cannot read answers "nothing waiting", which is the pre-existing behaviour.
+local function message_waiting(opts)
+  local sid = tostring((opts and (opts.session or (opts.ctx and opts.ctx.session_id))) or "")
+  if sid == "" then return false end
+  local ok, steering = pcall(dofile, "lua/core/steering.lua")
+  if not ok or type(steering) ~= "table" or type(steering.queued) ~= "function" then return false end
+  local called, queued = pcall(steering.queued, sid)
+  return called and queued == true
+end
+
 -- Hold this scope's answer until an event. Returns nil when there was nothing live to hold, else the reason
 -- the hold ended and how long it held - for the ledger, never for the model.
 -- WHAT A WAKE CARRIES BESIDE THE HANDLE (Fable 27/11): a job that has been quiet for minutes must not be
@@ -1614,7 +1627,10 @@ function M.hold_before_answer(dispatch, opts, scope)
     if live == 0 then break end
     if silent then woke = "silent" break end
     if near_limit then woke = "deadline" break end
-    if cancelled() then woke = "user" break end
+    -- The operator's own words end the wait before a stop does: a queued message is a person asking for the
+    -- turn to end, and a hold that ignores it is the harness talking over them.
+    if message_waiting(opts) then woke = "user" break end
+    if cancelled() then woke = "cancelled" break end
     local spent_ms = math.floor((host.now() - started) * 1000)
     if spent_ms >= limit_ms then woke = "hold_limit" break end
     -- One real slice of waiting, so this loop is not a spin: the same 1 s slice `operation_poll` uses, and

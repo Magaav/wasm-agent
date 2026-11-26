@@ -93,4 +93,32 @@ check(secs3>=3.5,'row 3: the answer did not wait for the job beside it')
 check(body3:find('wct%-parallel')~=nil,'row 3: the awaited result was lost')
 check(body3:find('wct%-quick')~=nil,'row 3: work beside the handle answered nothing')
 
+
+-- ROW 5: a user message queued while the hold waits ENDS the hold (Fable 27/11). What happened before this
+-- change, measured from the code: only a stop/steer set the run's cancel flag, so a message sat in
+-- `steering_inbox` until the turn was over - the operator's own words could wait out the whole hold. The
+-- message is written by the JOB at 1 s into a 30 s job, which is a concurrent writer, the way a person
+-- typing is.
+local home=(host.getenv and host.getenv('WASM_AGENT_HOME')) or ''
+local db=home..'/.wasm-agent/memory.db'
+local sid5=memory.start_session('','wct hold queued',{user_id='master'})
+local ctx5={session_id=sid5,user_id='master'}
+local catalog5=tools.all('master',ctx5,memory)
+local execution5=tools.discovery_execution(memory,ctx5)
+local function dispatch5(tool,params) return tools.dispatch(memory,tool,params,'master',ctx5) end
+local msg_path='/tmp/wct-queued-'..sid5..'.sh'
+local sql=string.format(
+  'INSERT INTO steering_inbox(id,owner,session_id,run_id,request_key,text,images,attribution,state,created_at,detail) '..
+  "VALUES('msg-wct-1','master','%s','run-wct-1','key-wct-1','stop waiting for me','[]','test','queued',strftime('%%s','now'),'')", sid5)
+assert(host.write_file(msg_path,'sleep 1\nsqlite3 "'..db..'" "'..sql..'"\n'), 'row 5: could not write the message script')
+local started5=host.now()
+local r5=codemode.run(memory,{code="const h = await tools.bash({command:'bash "..msg_path.."; sleep 30', wait_s: 0}); return h;"},
+  'master',ctx5,catalog5,function()return catalog5 end,dispatch5,execution5)
+local secs5=host.now()-started5
+check(secs5<10,'row 5: a queued message did not end the hold ('..string.format('%.2f',secs5)..'s into a 30 s job)')
+check(secs5>0.9,'row 5: the hold ended before the message existed ('..string.format('%.2f',secs5)..'s)')
+local stillQueued=dofile('lua/core/steering.lua').queued(sid5)
+check(stillQueued,'row 5: the hold consumed the message instead of leaving it for the next turn')
+print('ROW5 secs='..string.format('%.2f',secs5))
+
 print('wct-hold: '..checks..' checks passed')
