@@ -236,3 +236,85 @@ the same sha256, `2a17427d...65e8c111b`, at every commit from 1fc54f29 to f33306
 is not a field `M.schemas()` emits - which is exactly why a tool row may be repointed without moving a
 request byte. The other new prose is Rust doc comments and test headers that no model and no operator
 reads.
+
+## 9. The count, measured from git; and the send/approve plan (no code)
+
+### 9.1 How the number is computed
+
+One script, three rules, run over every commit in the 30-day window that touches a WhatsApp file
+(`git log --since=30.days --format=@@%H`, then `--name-only` per commit; 183 commits):
+
+  * a commit **needs a host rebuild now** when it touches `rust/Cargo.toml`, `rust/Cargo.lock`,
+    `rust/wa-host/**`, any crate `wa-capabilities` depends on (23, read from its `Cargo.toml`), or a
+    `wa-capabilities` file other than the two the move made data. Test files (`/tests.rs`, `/tests/`) are
+    excluded: they do not build the release binary.
+  * `rust/wa-capabilities/src/capabilities.rs` and `whatsapp_query.rs` are judged by their **hunks**: a
+    commit whose changes there are only read-op rows/binds (a line naming `whatsapp_search|read|contacts|
+    message|reactions|media` and no queue/settle/enqueue/download word) is free now, because an op rides
+    `whatsapp_index` and needs no row.
+  * everything else (component, `wit/`, `lua/`, docs, scripts) never rebuilt the host.
+
+### 9.2 The numbers
+
+| | commits (30 days) |
+|---|---|
+| touch a WhatsApp file | **183** |
+| needed a host rebuild BEFORE this branch | **52** |
+| need one AFTER | **52** |
+| **would now have stayed out of a host rebuild because of this branch** | **0** |
+| would stay out if `wa-whatsapp-index` were dropped from the hub | **9** |
+
+Why 0, stated plainly: every commit in the window that added or changed a read-op row also changed
+`wa-whatsapp-index` (the request/answer contract, still a `wa-capabilities` dependency) or the forwarder.
+Removing the row from the hub removes one of its two hub files, not both. The nine that only
+`wa-whatsapp-index` stands in front of are the measured size of the next slice: `1fc54f29`, `d1266ca8`,
+`626a3339`, `1b008d78`, `14bd0013`, `514a1c41`, `384b2b4d`, `69f84802`, `18aad90c`.
+
+### 9.3 Do `host.rs` / `capabilities.rs` still change for a WhatsApp-only change?
+
+* **`host.rs`: no, and never did.** `git log -S'whatsapp' -- rust/wa-capabilities/src/host.rs` returns
+  **0 commits** in the whole history, not only the window. The two window commits whose file set includes
+  `host.rs` (`fc581ca2`, `cd6d3aa5`) are the chat-start-guard merge and the codemode pending pool: they
+  changed `host.rs` for reasons that have nothing to do with WhatsApp.
+* **`capabilities.rs`: not for a read op - yes for an effectful one.** 11 of the 52 commits change it,
+  and exactly 2 of them change it only to add read-op rows (`384b2b4d`: 2 rows, `297b2d86`: 4 rows) - that
+  is the part a read op no longer pays. The other 9 name an effect class (send, send_status, approve,
+  backfill, download, archive, and the three generic doors), which stays on purpose: that class is what the
+  sandbox joins and serializes on, and the repository has no WIT world to carry the policy, the drafts or
+  a bounded write.
+
+### 9.4 The send/approve ops: a plan, not code
+
+Three ops are left, and they are one family: `whatsapp_send` (Network), `whatsapp_send_status` (ReadOnly)
+and `whatsapp_approve` (Network). **No code was written for them: a send touches the live account, and
+that is Fable's read.** What each needs today, measured from the code:
+
+| need | where it lives now | can a component do it? |
+|---|---|---|
+| the `whatsapp.send` policy: rate limit, daily cap, audit | `wa-grant-policy` / governance, called from `whatsapp_send.rs` | **no world**: `wit/` has no governance interface |
+| the outbox request: exact JID, reply shape, dedupe key | `wa-whatsapp-outbox` (shared with the component) | yes, already shared |
+| the queue the account node owns | `wa:queue`, `whatsapp.outbox` | yes, the component already consumes it |
+| the operator's drafts and `policy.json` | files under the node's components dir, read by `wa approve` and the CLI | **no world**: no bounded-fs interface for a guest |
+| the answer shapes (`done`/`failed`/`pending`, the draft's `approval:"waiting"`) | `lua/core/whatsapp.lua` + `whatsapp_send.rs` | the waiting and the shapes are Lua's already |
+
+Three ways to move it, in the order I would try them:
+
+**B (recommended): a `wa:governance` world.** One interface - `decide(policy, request) -> allow |
+refuse(code)`, plus an audit sink - lets the component ask the policy where the account is, which is
+where the limits must be enforced anyway (a forwarded send already runs under the owner's guards). Host
+keeps the queue producer and nothing else; `whatsapp_send.rs`'s policy half leaves. Rows that would
+prove it: the `scripts/test-approve*` row, the send rows (`test-whatsapp-send.lua`,
+`test-whatsapp-send-waits.lua`, `test-whatsapp-cancel.lua`), and one row that only Fable can run - a
+real send on the live account, whose answer bytes are compared before/after exactly as the read rows
+were.
+
+**D (needed for approve/archive whichever way): a bounded-fs world.** `list/read/write` inside one
+declared directory per component, so the drafts and the sealed archives can live where the operator's
+CLI still finds them. Without it, `whatsapp_approve` cannot leave the host at all.
+
+**A (do nothing): the current state.** Costs what section 9.2 measures: 1 of 52 commits a month changes
+`capabilities.rs` for an effectful op, and every send change rebuilds the host.
+
+What I would NOT do: give the generic door a `send` op. A send names a chat and text from a model, so it
+must keep a door whose effect class is `Network` and whose policy runs on the account node - the effect
+gate I added in `d1266ca8` exists exactly so a read door cannot be made to send.
