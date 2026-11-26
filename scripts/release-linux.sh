@@ -336,7 +336,19 @@ Install a node on a fresh Linux machine - one command, no checkout and no toolch
 The same command updates it. Verification: ./SHA256SUMS, and inside the bundle bundle.manifest ->
 files.sha256 -> every member (the installer checks all of it before anything is installed).
 reason: ${reason:-none stated}"
-  gh release create "$tag" "$out/$asset" "$sums" "$out/SHA256SUMS.sig" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
+  # A FULL VERSION IS A FULL RELEASE AND TAKES LATEST (26/11, Fable; proven by the two-shape row in
+  # release-rows-real/latest.md). MEASURED: v0.1.2 was published as a prerelease, and then a v0.1.1 node AND a v0.1.2
+  # node both answered unknown - nobody could move (lua/core/release.lua:268-270 returns /releases/latest first for a
+  # stable node, and a prerelease never wins the window). A tag carrying a suffix (v0.2.0-rc1, a rehearsal) stays a
+  # prerelease: only v<digits>.<digits>.<digits> is published as Latest.
+  if printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+    latest_flags="--latest --prerelease=false"
+    say "release $tag: full version, published as the Latest release"
+  else
+    latest_flags="--prerelease"
+    say "release $tag: version suffix, published as a prerelease (never Latest)"
+  fi
+  gh release create "$tag" "$out/$asset" "$sums" "$out/SHA256SUMS.sig" --repo "$REPO" --target "$commit" --title "$tag" $latest_flags --notes "$notes" \
     || fail 'publish_failed: gh release create'
 fi
 url="https://github.com/$REPO/releases/download/$tag/$asset"

@@ -311,6 +311,14 @@ function M.rehearse(options)
       lines[#lines + 1] = string.format("  mode %-8s %-18s %s - %s", row.mode, row.node, row.verdict, tostring(row.detail or ""))
     end
   end
+  -- THE RING THE REPORT ACTUALLY COVERED (26/11, Fable): a node that refused the question - mail answered its
+  -- canary with a refusal, work was offline - shrinks the ring, and a report that only says RED hides which nodes
+  -- the cut never reached. The left-out nodes are NAMED with their reason, and the count stands next to the ring.
+  if #unreachable > 0 then
+    lines[#lines + 1] = string.format("LEFT OUT OF THE RING (%d of %d node(s) did not answer; proven on %d)",
+      #unreachable, #ring, #ring - #unreachable)
+    for _, entry in ipairs(unreachable) do lines[#lines + 1] = "  " .. tostring(entry) end
+  end
   local red = {}
   for _, entry in ipairs(unreachable) do red[#red + 1] = entry end
   for _, entry in ipairs(aggregated.failed) do red[#red + 1] = entry end

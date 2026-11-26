@@ -215,6 +215,10 @@ STAGE="$(mktemp -d "${KEEP:-${TMPDIR:-/tmp}}/wasm-agent-artifacts.XXXXXX")" || f
   # The pointer wa.colmeio.com/install.sh reads first (scripts/web/install.sh): GitHub's release listing is
   # not ordered by date (17/11: an edited older release came first and the installer picked it).
   echo "# The installer's pointer, where this host serves wa.colmeio.com:"
+  # THE OLD VALUE IS RECORDED BEFORE IT IS REPLACED (26/11, Fable): the pointer moves every anonymous install at
+  # once, so the evidence must say what it replaced - otherwise a regression is a guess about which build was served.
+  echo 'if [ -d /srv/wasm-agent-releases ]; then before=$(cat /srv/wasm-agent-releases/latest-node.txt 2>/dev/null || echo none);'
+  echo '  printf "pointer_before=%s\npointer_after=%s\n" "$before" "$TAG" >> "$(dirname "$0")/POINTER.log"; fi'
   echo 'if [ -d /srv/wasm-agent-releases ]; then printf "%s\n" '"$TAG"' > /tmp/latest-node.txt && sudo -n install -m0644 /tmp/latest-node.txt /srv/wasm-agent-releases/latest-node.txt && echo "pointer: '"$TAG"'"; fi'
 } > "$STAGE/PUBLISH.sh" || fail "stage_unwritable: $STAGE/PUBLISH.sh" 2
 chmod +x "$STAGE/PUBLISH.sh"
