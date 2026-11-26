@@ -187,29 +187,34 @@ grep -q 'version_folders_member_missing: lua-core' "$W/seq5.log" || { sed -n '1,
 ok
 
 # --- 5. the lua-core member COMES FROM A PART ---------------------------------------------------------------
-I6="$W/i6"; in_place "$I6" "$COMMIT"; echo ok > "$SEQ_MODE"
+# ITS OWN COMMIT: reusing the earlier one means the version is already assembled, version-install skips to step 5
+# and the part is never filled - the row would then be testing nothing (rows/20261126T023132Z-13126). A Lua-only
+# landing IS its own commit.
+COMMIT_P=dddddddddddddddddddddddddddddddddddddddd; ID_P=dddddddddddd
+I6="$W/i6"; in_place "$I6" "$COMMIT_P"; echo ok > "$SEQ_MODE"
 a_lua_part "$W/part-tree" "$W/lua-core-good.tar.gz" "$HOST_INT"
 part_lock "$W/lua.part.lock" "$W/lua-core-good.tar.gz" "$HOST_INT"
-bash scripts/version-sequence.sh --install "$I6" --candidate "$I6/wa" --commit "$COMMIT" --root "$W/root" \
+bash scripts/version-sequence.sh --install "$I6" --candidate "$I6/wa" --commit "$COMMIT_P" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --share "$W/share6" \
   --lua-part "$W/lua-core-good.tar.gz" --lua-lock "$W/lua.part.lock" > "$W/seq6.log" 2>&1 \
   || { sed -n '1,12p' "$W/seq6.log" >&2; fail "part: a good lua part must install through the sequence"; }
 grep -q 'lua_part_filled' "$W/seq6.log" || { sed -n '1,12p' "$W/seq6.log" >&2; fail "part: the part did not fill the member"; }
-sealed="$W/share6/versions/$ID/lua-core/lua/core/init.lua"
+sealed="$W/share6/versions/$ID_P/lua-core/lua/core/init.lua"
 [ -f "$sealed" ] || fail "part: the sealed version has no lua/core/init.lua from the part"
 grep -q "init from the part for $HOST_INT" "$sealed" || fail "part: the sealed member is not the part's tree"
-[ "$(WA_SHARE_ROOT="$W/share6" bash -c '. scripts/lib/versions.sh; wa_version_current')" = "$ID" ] || fail "part: current does not name the version"
+[ "$(WA_SHARE_ROOT="$W/share6" bash -c '. scripts/lib/versions.sh; wa_version_current')" = "$ID_P" ] || fail "part: current does not name the version"
 ok
 # a part whose interface differs is refused BEFORE the seal, and the pointer does not move
-I7="$W/i7"; in_place "$I7" "$COMMIT"; echo ok > "$SEQ_MODE"
+COMMIT_P2=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee; ID_P2=eeeeeeeeeeee
+I7="$W/i7"; in_place "$I7" "$COMMIT_P2"; echo ok > "$SEQ_MODE"
 a_lua_part "$W/part-tree2" "$W/lua-core-bad.tar.gz" "$OTHER_INT"
 part_lock "$W/lua.bad.lock" "$W/lua-core-bad.tar.gz" "$OTHER_INT"
-bash scripts/version-sequence.sh --install "$I7" --candidate "$I7/wa" --commit "$COMMIT" --root "$W/root" \
+bash scripts/version-sequence.sh --install "$I7" --candidate "$I7/wa" --commit "$COMMIT_P2" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --share "$W/share7" \
   --lua-part "$W/lua-core-bad.tar.gz" --lua-lock "$W/lua.bad.lock" > "$W/seq7.log" 2>&1 \
   && fail "part: a part whose interface differs must not install"
 grep -q 'lua_part_interface_mismatch\|version_install_lua_part_refused' "$W/seq7.log" || { sed -n '1,12p' "$W/seq7.log" >&2; fail "part: the mismatch is not named"; }
-[ ! -d "$W/share7/versions/$ID" ] && ok || fail "part: a refused part still produced a sealed version"
+[ ! -d "$W/share7/versions/$ID_P2" ] && ok || fail "part: a refused part still produced a sealed version"
 
 echo "version sequence ok ($n checks)"
 
