@@ -157,6 +157,35 @@ wa_version_assemble() {
   printf 'version_assembled %s members=%s linked=%s copied=%s\n' "$id" "$((linked + copied))" "$linked" "$copied"
 }
 
+# 1b. WHICH PARTS CHANGED (Fable 25/11, lua-core-is-a-signed-part item 2).
+#
+# A node must fetch only the parts whose digest differs. wa_version_need_bytes already answers that as a NUMBER (the
+# bytes a version adds); this answers it as NAMES, so a fetcher does not have to diff the trees itself and cannot
+# disagree with the assembler about what a member is.
+#
+#   wa_version_changed_members <staging-dir> [<previous-version-dir>]
+#     -> one member per line, sorted: wa wa-sentinel lua-core scripts ui installed.txt. A member the staging tree
+#        does not carry is not listed. With no previous version, every member it carries is listed (a first install
+#        fetches everything, which is what a first install is).
+wa_version_changed_members() {
+  local stage="${1:?staging dir}" prev="${2:-}" name path sha
+  [ -d "$stage" ] || { printf 'version_need_unknown: no staging dir %s\n' "$stage" >&2; return 2; }
+  for name in wa wa-sentinel lua-core scripts ui installed.txt; do
+    [ -e "$stage/$name" ] || continue
+    if [ -n "$prev" ] && [ -e "$prev/$name" ]; then
+      # A member is a file or a tree: compare it as ONE value (a tree by its file list and bytes), which is the same
+      # comparison the assembler makes per file, folded to the member.
+      sha="$(cd "$stage" && find "$name" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r path; do
+                printf '%s %s\n' "$path" "$(sha256sum < "$path" 2>/dev/null | cut -d' ' -f1)"
+              done | sha256sum | cut -d' ' -f1)"
+      [ "$sha" = "$(cd "$prev" && find "$name" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r path; do
+                printf '%s %s\n' "$path" "$(sha256sum < "$path" 2>/dev/null | cut -d' ' -f1)"
+              done | sha256sum | cut -d' ' -f1)" ] && continue
+    fi
+    printf '%s\n' "$name"
+  done
+}
+
 # 4. ONE ATOMIC THING. <id>: point current at versions/<id> with ONE rename. Readers see the old version or
 # the new one, never a missing pointer, and nothing else is written.
 wa_version_point() {

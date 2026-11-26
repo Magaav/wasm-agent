@@ -336,6 +336,27 @@ fi
 case "$rec" in *'[ -L '*) ;; *) fail "(a): the record writer does not test for a link";; esac
 ok
 
+# --- WHICH PARTS CHANGED (lua-core-is-a-signed-part item 2) ----------------------------------------------------
+# A Lua-only landing must fetch only lua-core. The answer is by NAME so a fetcher cannot disagree with the assembler
+# about what a member is.
+cm="$W/cm"; mkdir -p "$cm/stage1/lua-core/lua/core" "$cm/stage1/scripts" "$cm/stage1/ui"
+printf 'wa' > "$cm/stage1/wa"; printf 'sentinel' > "$cm/stage1/wa-sentinel"
+printf 'init' > "$cm/stage1/lua-core/lua/core/init.lua"; printf 'deploy' > "$cm/stage1/scripts/deploy.sh"
+printf 'ui' > "$cm/stage1/ui/index.html"; printf 'commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$cm/stage1/installed.txt"
+first="$(wa_version_changed_members "$cm/stage1" "" | tr '\n' ' ')"
+[ "$first" = "wa wa-sentinel lua-core scripts ui installed.txt " ] || fail "changed members: a first install lists every member it carries (got '$first')"
+ok
+cp -a "$cm/stage1" "$cm/stage2"
+[ -z "$(wa_version_changed_members "$cm/stage2" "$cm/stage1")" ] || fail "changed members: an identical tree lists nothing"
+ok
+printf 'changed' > "$cm/stage2/lua-core/lua/core/init.lua"
+only="$(wa_version_changed_members "$cm/stage2" "$cm/stage1" | tr '\n' ' ')"
+[ "$only" = "lua-core " ] || fail "changed members: only lua-core changed, got '$only'"
+ok
+cv="$(wa_version_need_bytes "$cm/stage2" "$cm/stage1" 2>/dev/null || true)"
+[ "$cv" -lt 1000 ] || fail "changed members: the byte answer for the same change is the changed files only (got $cv)"
+ok
+
 # --- the report's number: REAL disk, not apparent ------------------------------------------------------------
 wa_version_disk eeeeeeeeeeee | grep -q '^version_disk eeeeeeeeeeee real=[0-9]* apparent=' || fail "report: wa_version_disk names real blocks and apparent bytes"
 ok
