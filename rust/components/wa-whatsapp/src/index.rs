@@ -1760,12 +1760,41 @@ pub async fn note_gap<S: Store>(store: &S, chat: &str, batch_oldest_ms: i64) -> 
     }
     let Some(card) = card_of(store, chat).await? else { return Ok(None) };
     if card.last <= 0 || batch_oldest_ms <= card.last + GAP_MS {
+        // This batch reaches back to (or past) what the index knew, so whatever hole was recorded for
+        // this chat is now filled - a fetched range arriving is exactly this case.
+        let _ = clear_gap(store, chat).await;
         return Ok(None);
     }
     let gap = Gap { chat: chat.to_string(), from_ms: card.last, to_ms: batch_oldest_ms };
     let json = serde_json::to_vec(&gap).map_err(|error| format!("gap encode: {error}"))?;
     store.set(key_gap(chat).as_bytes(), &json).await?;
     Ok(Some(gap))
+}
+
+/// The oldest message this chat holds at or after `ms`, with what the phone needs to find it: the anchor a
+/// heal asks from. `None` when the chat holds nothing that new (nothing was delivered yet, so there is
+/// nothing to walk back from).
+///
+/// The scan is the newest-first key order the index already keeps, bounded by the same budget a read uses:
+/// a gap's boundary is recent by construction, so its anchor is near the head.
+pub async fn oldest_at_or_after<S: Store>(store: &S, chat: &str, ms: i64) -> Result<Option<(String, bool, i64)>, String> {
+    let prefix = format!("{PREFIX}m/{chat}/");
+    let mut best: Option<(String, bool, i64)> = None;
+    for (key, value) in store.scan(prefix.as_bytes(), None, LOAD_BUDGET).await? {
+        let Some(candidate) = parse_candidate(&key) else { continue };
+        let Ok(inv) = u64::from_str_radix(&candidate.inv, 16) else { continue };
+        let ts = (u64::MAX - inv) as i64;
+        if ts < ms {
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<Record>(&value) else { continue };
+        if record.kind == "reaction" {
+            continue;
+        }
+        // The list is newest-first, so the LAST one at or after `ms` is the oldest such message.
+        best = Some((record.id, record.own, ts));
+    }
+    Ok(best)
 }
 
 /// Every hole the index still has to heal, oldest first, so a healer asks for the longest-waiting first.

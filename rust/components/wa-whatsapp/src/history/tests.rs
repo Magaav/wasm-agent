@@ -517,3 +517,31 @@ fn a_reconnect_records_the_hole_it_leaves_and_a_first_sync_is_not_one() {
     block_on(crate::index::clear_gap(&store, CHAT)).unwrap();
     assert!(block_on(crate::index::gaps(&store)).unwrap().is_empty(), "a healed chat has no hole");
 }
+
+/// P1.1's heal half, the part that can be tested without a phone: from the holes the index recorded, the
+/// round asks for the right anchor (the oldest message at the gap's far edge, which is what
+/// `fetch_message_history` wants), bounded to a few chats per round - and a batch that spans the hole
+/// clears it instead of asking again.
+#[test]
+fn a_heal_round_asks_from_the_gap_edge_and_a_spanning_batch_clears_it() {
+    let store = Memory::new();
+    let first = conversation(CHAT, vec![entry(CHAT, "OLD", seconds_ago(3 * 86_400), "antes", false, None)]);
+    drain(&store, &first, Budget::default());
+    let reconnect = conversation(CHAT, vec![entry(CHAT, "NEW1", seconds_ago(86_400), "depois", false, None)]);
+    drain(&store, &reconnect, Budget::default());
+    assert_eq!(block_on(crate::index::gaps(&store)).unwrap().len(), 1, "the hole is there");
+
+    // The round asks from the oldest message at the gap's far edge: the one the sync delivered.
+    let asks = block_on(heal_asks(&store)).unwrap();
+    assert_eq!(asks.len(), 1, "one chat to heal: {asks:?}");
+    assert_eq!(asks[0].chat, CHAT);
+    assert_eq!(asks[0].id, "NEW1", "the message at the far edge is the anchor");
+    assert_eq!(asks[0].ts, seconds_ago(86_400) as i64 * 1000);
+    assert_eq!(asks[0].count, HEAL_PER_CHAT, "bounded per round, not a storm");
+
+    // The fetched range arrives and reaches back into the hole: the gap is cleared, not asked again.
+    let fetched = conversation(CHAT, vec![entry(CHAT, "MID", seconds_ago(2 * 86_400), "no meio", false, None)]);
+    drain(&store, &fetched, Budget::default());
+    assert!(block_on(crate::index::gaps(&store)).unwrap().is_empty(), "a spanning batch fills the hole");
+    assert!(block_on(heal_asks(&store)).unwrap().is_empty(), "and nothing is asked again");
+}
