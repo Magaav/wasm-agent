@@ -2239,6 +2239,46 @@ fn retry_after_ms(headers: &ureq::http::HeaderMap) -> Option<u64> {
 }
 
     /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
+/// The agent for a limits read: the same transport a provider call uses, with the read bounded by the
+/// door's own eight seconds rather than the model call's budget.
+pub(crate) fn limits_agent(url: &str) -> Result<ureq::Agent, String> {
+    let read = crate::limits::READ_TIMEOUT_SECONDS;
+    let (connect, _, _) = http_timeouts();
+    let mut builder = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(std::time::Duration::from_secs(connect.min(read))))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(read)))
+        .timeout_recv_body(Some(std::time::Duration::from_secs(read)));
+    if wa_tls::is_tls(url) {
+        builder = builder.tls_config(wa_tls::tls_config().map_err(|error| error.to_string())?);
+    }
+    Ok(builder.build().into())
+}
+
+/// host.limits_start(provider, url) -> the door's answer at once ({"state": "loading", ...}).
+/// The read happens on a thread of the host program's own; a turn never waits for it.
+pub extern "C-unwind" fn limits_start(l: *mut LuaState) -> c_int {
+    let provider = arg_string(l, 1).unwrap_or_default();
+    let url = arg_string(l, 2).unwrap_or_default();
+    push_json(l, &crate::limits::start(&provider, &url));
+    1
+}
+
+/// host.limits_poll(provider) -> {"state": "loading"|"ready"|"failed"|"none", usage?, age_s?, error?}.
+pub extern "C-unwind" fn limits_poll(l: *mut LuaState) -> c_int {
+    let provider = arg_string(l, 1).unwrap_or_default();
+    push_json(l, &crate::limits::poll(&provider));
+    1
+}
+
+/// host.limits_forget(provider) -> nil. Drop this process's slot; the next start reads afresh.
+pub extern "C-unwind" fn limits_forget(l: *mut LuaState) -> c_int {
+    let provider = arg_string(l, 1).unwrap_or_default();
+    crate::limits::forget(&provider);
+    1
+}
+
+
 /// host.http(method, url, headers_json, body) -> {status, body} | {error}
 pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
