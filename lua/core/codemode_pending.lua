@@ -1495,6 +1495,23 @@ M.HOLD_DEADLINE_MS = 30000  -- "near its own limit": within this much of the ope
 -- queued mid-turn sat in `steering_inbox` until the turn was over, so a held answer could delay the
 -- operator's own words by up to the hold ceiling. The probe is the session's queued row, read once per
 -- slice; a store this process cannot read answers "nothing waiting", which is the pre-existing behaviour.
+-- AN INSTALL OUTRANKS A HELD ANSWER. A turn pauses at its next STEP boundary (lua/core/deploy_pause.lua), and a
+-- hold IS one step: so a hold can spend the deploy's whole idle bound - and the two numbers coincide, because
+-- the bound is M.DEFAULT_BOUND = 900 s and the hold ceiling is the same 900 s. When a deploy is waiting,
+-- requested or already installing, the hold ends here and the boundary pauses the turn, which is the notice an
+-- operator expects. A module this process cannot read answers "no deploy", the pre-existing behaviour.
+local deploy_module
+local function deploy_waiting()
+  if deploy_module == nil then
+    local ok, module = pcall(dofile, "lua/core/deploy_pause.lua")
+    deploy_module = (ok and type(module) == "table") and module or false
+  end
+  local deploy_pause = deploy_module or nil
+  if not deploy_pause or type(deploy_pause.waiting) ~= "function" then return false end
+  local called, marker = pcall(deploy_pause.waiting, host.now())
+  return called and marker ~= nil
+end
+
 local function message_waiting(opts)
   local sid = tostring((opts and (opts.session or (opts.ctx and opts.ctx.session_id))) or "")
   if sid == "" then return false end
@@ -1630,6 +1647,7 @@ function M.hold_before_answer(dispatch, opts, scope)
     -- The operator's own words end the wait before a stop does: a queued message is a person asking for the
     -- turn to end, and a hold that ignores it is the harness talking over them.
     if message_waiting(opts) then woke = "user" break end
+    if deploy_waiting() then woke = "deploy" break end
     if cancelled() then woke = "cancelled" break end
     local spent_ms = math.floor((host.now() - started) * 1000)
     if spent_ms >= limit_ms then woke = "hold_limit" break end

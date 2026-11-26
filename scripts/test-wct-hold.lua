@@ -121,4 +121,19 @@ local stillQueued=dofile('lua/core/steering.lua').queued(sid5)
 check(stillQueued,'row 5: the hold consumed the message instead of leaving it for the next turn')
 print('ROW5 secs='..string.format('%.2f',secs5))
 
+
+-- ROW 6: an install waiting ends the hold (item 4). A turn pauses at its next STEP boundary and a hold is one
+-- step, so a hold can spend the deploy's whole idle bound - and the numbers coincide: deploy_pause.DEFAULT_BOUND
+-- is 900 s and the hold ceiling is the same 900 s. With a real marker on disk the hold must end at once and
+-- leave the turn to pause, rather than making the operator's install wait out the job.
+local deploy=dofile('lua/core/deploy_pause.lua')
+local marker_path=deploy.path()
+assert(marker_path,'row 6: no pause marker path on this node')
+assert(host.write_file(marker_path, json.encode({since=os.time(), bound_seconds=deploy.DEFAULT_BOUND, state='deploy_pending'})),
+  'row 6: could not write the marker')
+local r6,secs6=run([[const h = await tools.bash({command:'sleep 30', wait_s: 0}); return h;]], 'deploy')
+os.remove(marker_path)
+check(secs6<10,'row 6: an install waited '..string.format('%.2f',secs6)..'s for a held answer')
+print('ROW6 secs='..string.format('%.2f',secs6))
+
 print('wct-hold: '..checks..' checks passed')
