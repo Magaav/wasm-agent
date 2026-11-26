@@ -318,3 +318,31 @@ CLI still finds them. Without it, `whatsapp_approve` cannot leave the host at al
 What I would NOT do: give the generic door a `send` op. A send names a chat and text from a model, so it
 must keep a door whose effect class is `Network` and whose policy runs on the account node - the effect
 gate I added in `d1266ca8` exists exactly so a read door cannot be made to send.
+
+## 10. The landing shape after main moved (preflight round 1)
+
+Preflight against main `ec7525e0` stopped on one row: `land-quick: merge conflict ... in
+rust/wa-capabilities/src/capabilities.rs`. The cause is the other worker's change landing first:
+`capability-registration-is-data` moved every capability row out of `capabilities.rs` into
+`src/capability_rows/<area>.rs` (`build.rs` scans the directory; `capabilities::registry()` is built from
+what it finds), while this branch had added three rows in the old file.
+
+What this branch did about it, in two commits:
+
+1. **`3a618dd3` a merge of origin/main into the branch** (not a rebase: 23 commits of review context stay
+   attached), resolving the one conflict by taking main's `capabilities.rs` whole - registration no longer
+   lives there, so this branch has nothing to say about it;
+2. **`87b03eaa` the registration commit on its own**, as the ownership rule asks: `whatsapp_index`
+   (ReadOnly), `whatsapp_request` (Network) and `whatsapp_file` (WritesFiles) added to
+   `src/capability_rows/whatsapp.rs`, same three descriptions, so `docs/HOST.md` and the registry still
+   agree.
+
+The merge also exposed a defect of this branch that no test had caught: `whatsapp_request` had been
+written **twice on one line** in the old file (a botched patch). The duplicate-name assertion would have
+caught it, and the `run_state` drift failure had masked that test - the row has it once now.
+
+Measured after the merge: `cargo test -p wa-capabilities --lib whatsapp` = **48 passed, 0 failed**;
+`capabilities::tests` = 4 passed, 1 failed - `documented_inventory_matches_the_live_registry`, naming
+`run_state` only, which is **main's own** row (not this branch's; the gate judges a landing by what main
+already fails). The five WhatsApp Lua rows re-run green: reads 52 checks, route 32, finds-owner 59, one
+surface 207, mcp-command 136. `git merge-tree --write-tree origin/main HEAD` exit 0.
