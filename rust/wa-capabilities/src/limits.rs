@@ -229,6 +229,39 @@ mod tests {
         panic!("the read never settled");
     }
 
+    // The host draws these rows mid-run, so they MUST be the panel's rows. Lua's side pins the same
+    // literals (scripts/test-status-midrun.lua): one string, two languages, and a change on either
+    // side breaks one of the two pins.
+    #[test]
+    fn the_bar_and_the_words_are_the_panels_own() {
+        let full = "\u{2588}";
+        let part = "\u{2589}";
+        let empty = "\u{2591}";
+        assert_eq!(bar(37.0, 24), format!("{}{}{}{}{}{}{}{}{}{}", full, full, full, full, full, full, full, full, part, empty.repeat(15)));
+        assert_eq!(bar(0.0, 24), empty.repeat(24));
+        assert_eq!(bar(100.0, 24), full.repeat(24));
+        assert_eq!(bar(150.0, 4), full.repeat(4), "a percentage over 100 is clamped");
+        assert_eq!(age_text(5), "just now");
+        assert_eq!(age_text(250), "as of 4 min ago");
+        assert_eq!(age_text(7200), "as of 2 h ago");
+        assert_eq!(age_text(200000), "as of 2 d ago");
+        let now = 1_795_000_000u64;
+        assert_eq!(resets(Some(&json!(now + 8640)), now), " resets in 2.4h");
+        assert_eq!(resets(Some(&json!(now + 600)), now), " resets in 10m");
+        assert_eq!(resets(Some(&json!(now - 5)), now), " resets now");
+        assert!(iso_seconds("2026-11-26T12:00:00Z").is_some(), "an ISO reset is read as a time");
+    }
+
+    #[test]
+    fn a_provider_with_nothing_yet_draws_one_line_and_never_a_blank() {
+        let name = format!("test-rows-{}", std::process::id());
+        forget(&name);
+        if let Some(path) = cache_path(&name) { let _ = std::fs::remove_file(path); }
+        assert_eq!(poll(&name)["state"], "none");
+        assert_eq!(row_texts(&name, 0), vec!["  loading limits...".to_string()]);
+        forget(&name);
+    }
+
     #[test]
     fn the_first_answer_is_loading_and_the_threads_answer_is_the_three_windows() {
         let name = format!("test-loading-{}", std::process::id());
@@ -280,4 +313,106 @@ mod tests {
         forget(&name);
         let _ = std::fs::remove_file(cache_path(&name).expect("a path"));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The rows, drawn by the HOST.
+//
+// Mid-run the interpreter is inside the turn, so a published /status panel cannot republish itself
+// when the read lands - nothing in Lua runs. The console therefore fills these three rows from the
+// door at draw time (limits::row_texts), and the bars replace `loading limits...` in place.
+//
+// The formatting is Lua's, ported: status.M.bar (a 24-cell bar with eighths) and status.resets /
+// status.age_text's words. row_texts_matches_the_lua_panel pins the two against each other for a
+// grid of percentages, so the port cannot drift from the panel between runs.
+const FULL: char = '\u{2588}';
+const EMPTY: char = '\u{2591}';
+const PARTS: [&str; 8] = ["", "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}"];
+
+/// Lua's status.M.bar, plain (the snapshot is drawn uncoloured; the panel paints its own dims).
+pub fn bar(percent: f64, width: usize) -> String {
+    let percent = percent.clamp(0.0, 100.0);
+    let width = if width == 0 { 24 } else { width };
+    let eighths = (percent / 100.0 * width as f64 * 8.0 + 0.5).floor() as usize;
+    let (full, part) = (eighths / 8, eighths % 8);
+    let mut text = String::new();
+    for _ in 0..full { text.push(FULL); }
+    text.push_str(PARTS[part]);
+    let cells = full + usize::from(part > 0);
+    for _ in cells..width { text.push(EMPTY); }
+    text
+}
+
+/// Lua's status.resets, in its words: ` resets in 2.4h`, ` resets now`, or the raw value.
+pub fn resets(value: Option<&Value>, now: u64) -> String {
+    let Some(value) = value else { return String::new() };
+    let at = match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => iso_seconds(text),
+        _ => None,
+    };
+    let Some(mut at) = at else {
+        return match value {
+            Value::String(text) if !text.is_empty() => format!(" resets {text}"),
+            _ => String::new(),
+        };
+    };
+    if at > 1e12 { at /= 1000.0; }
+    let left = at - now as f64;
+    if left <= 0.0 { return " resets now".to_string() }
+    if left < 3600.0 { return format!(" resets in {}m", (left / 60.0).ceil() as u64) }
+    if left < 172800.0 { return format!(" resets in {:.1}h", left / 3600.0) }
+    format!(" resets in {:.1}d", left / 86400.0)
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` as epoch seconds (the only shape the provider sends).
+fn iso_seconds(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches('Z');
+    let (date, time) = text.split_once('T')?;
+    let mut d = date.split('-');
+    let (year, month, day) = (d.next()?.parse::<i64>().ok()?, d.next()?.parse::<i64>().ok()?, d.next()?.parse::<i64>().ok()?);
+    let mut t = time.split(':');
+    let (hour, minute, second) = (t.next()?.parse::<i64>().ok()?, t.next()?.parse::<i64>().ok()?, t.next().unwrap_or("0").parse::<i64>().ok()?);
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some((days * 86400 + hour * 3600 + minute * 60 + second) as f64)
+}
+
+/// The three window rows plus one status line, as status.session_lines draws them for a provider.
+/// An EMPTY vector means nothing to say and the caller keeps whatever it drew.
+pub fn row_texts(provider: &str, now: u64) -> Vec<String> {
+    let state = poll(provider);
+    let mut rows = Vec::new();
+    let usage = state.get("usage").filter(|value| value.is_object());
+    let mut shown = 0;
+    for (label, key) in [("5h", "rolling"), ("7d", "weekly"), ("30d", "monthly")] {
+        let Some(entry) = usage.and_then(|usage| usage.get(key)).filter(|entry| entry.is_object()) else { continue };
+        let percent = entry.get("percent").and_then(Value::as_f64).unwrap_or(0.0);
+        rows.push(format!("  {:<4} {} {:>4.0}%{}", label, bar(percent, 24), percent, resets(entry.get("resetsAt"), now)));
+        shown += 1;
+    }
+    if shown == 0 {
+        return match state.get("state").and_then(Value::as_str).unwrap_or("none") {
+            "loading" | "none" => vec!["  loading limits...".to_string()],
+            "failed" => vec![format!("  limits: {}", state.get("error").and_then(Value::as_str).unwrap_or("the provider did not answer"))],
+            _ => vec!["  limits: asking the provider...".to_string()],
+        };
+    }
+    if let Some(age) = state.get("age_s").and_then(Value::as_u64).map(|_| state["age_s"].as_u64().unwrap_or(0)) {
+        rows.push(format!("  {}", age_text(age)));
+    }
+    rows
+}
+
+/// Lua's status.age_text, in the same words.
+pub fn age_text(seconds: u64) -> String {
+    if seconds < 45 { return "just now".to_string() }
+    if seconds < 5400 { return format!("as of {} min ago", (seconds + 30) / 60) }
+    if seconds < 129600 { return format!("as of {} h ago", (seconds as f64 / 3600.0 + 0.5).floor() as u64) }
+    format!("as of {} d ago", (seconds as f64 / 86400.0 + 0.5).floor() as u64)
 }
