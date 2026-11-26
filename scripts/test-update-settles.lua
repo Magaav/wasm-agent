@@ -94,5 +94,57 @@ check("and its FILE says failed, not queued (got " .. tostring(refused_file and 
   refused_file and refused_file.state == "failed")
 check("with the installer's own reason", refused_file and tostring(refused_file.detail or "") ~= "")
 
+-- 5. THE SWEEP: old queued records are CLOSED BY NAME, nothing is deleted, and a second run closes nothing.
+local NOW = math.floor(host.now())
+local function queued(id, node, age_seconds)
+  put(records .. "/" .. id .. ".json", json.encode({ id = id, kind = "deploy", state = "queued",
+    target_commit = TARGET, requested_at = NOW - age_seconds, requester = { node_id = node } }))
+end
+-- two from one node (the newer must supersede the older) and one old one from another
+queued("same-node-new", "node-a", 60)
+queued("same-node-old", "node-a", 120)
+queued("other-node-old", "node-b", 90000)
+local before_files = 0
+do
+  local ok_list, listed = pcall(host.list_dir, records)
+  if ok_list and type(listed) == "table" then
+    for _, name in ipairs(listed) do if tostring(name):match("%.json$") then before_files = before_files + 1 end end
+  end
+end
+
+local dry = remote.sweep({ max_age_seconds = 86400, dry_run = true })
+check("a dry sweep reports what it would close", type(dry) == "table" and #(dry.closed or {}) >= 2)
+check("and closes NOTHING", (function()
+  local rec = read_json(records .. "/same-node-old.json")
+  return rec and rec.state == "queued" and rec.closed_reason == nil
+end)())
+
+local first = remote.sweep({ max_age_seconds = 86400 })
+local reasons = {}
+for _, entry in ipairs(first.closed or {}) do reasons[tostring(entry.id)] = tostring(entry.reason) end
+check("the older request of a node is superseded BY NAME (" .. tostring(reasons["same-node-old"]) .. ")",
+  (reasons["same-node-old"] or ""):match("^superseded_by same%-node%-new") ~= nil)
+check("a request nothing served in a day is expired (" .. tostring(reasons["other-node-old"]) .. ")",
+  reasons["other-node-old"] == "expired")
+check("the newest from a node stays queued", (function()
+  local rec = read_json(records .. "/same-node-new.json")
+  return rec and rec.state == "queued"
+end)())
+check("a closed record is still READABLE, with its reason", (function()
+  local rec = read_json(records .. "/other-node-old.json")
+  return rec and rec.state == "expired" and tostring(rec.closed_reason) == "expired" and tonumber(rec.closed_at or 0) > 0
+end)())
+
+local second = remote.sweep({ max_age_seconds = 86400 })
+check("a second sweep closes nothing (idempotent)", #(second.closed or {}) == 0)
+local after_files = 0
+do
+  local ok_list, listed = pcall(host.list_dir, records)
+  if ok_list and type(listed) == "table" then
+    for _, name in ipairs(listed) do if tostring(name):match("%.json$") then after_files = after_files + 1 end end
+  end
+end
+check("and NOTHING was deleted (" .. before_files .. " -> " .. after_files .. ")", before_files == after_files)
+
 print("update settles ok (" .. n .. " checks)")
 
