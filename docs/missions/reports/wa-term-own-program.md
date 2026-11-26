@@ -216,10 +216,16 @@ One line on stderr, always `wa: <code>: <message>`:
 
 - It does not delete the in-process path and does not unpin `wa-term` from the node: the node still
   links it, so a display change still rebuilds the host until the last slice lands (21 s, measured).
-- It does not touch `capabilities.rs` or the registration in `host.rs` beyond the `input_start`
-  refusal line, which is the console's own file and the console's own behaviour.
-- It changes no model request: no prompt, tool manifest or request byte is on this path (the pty rows
-  still make their provider requests and answer, which is what the fixture checks).
+- It does not touch `capabilities.rs` at all (`git diff --stat 522e12ae..HEAD --
+  rust/wa-capabilities/src/capabilities.rs` is empty): the capability registration belongs to
+  `capability-registration-is-data`. `host.rs` IS changed, and only in the console's own code - the
+  transcript field's type, its 13 `dirty` sites, the scrollbar setter, `last_is_code`, and the
+  `input_start` refusal line - never in the registry. The files this branch touches are exactly the
+  ones the move names, plus `scripts/fast.sh` (where the rows are wired) and this report.
+- It changes no model request, and that is a fact about the diff, not a claim: `git diff --stat
+  522e12ae..HEAD -- lua/` is EMPTY, so not one byte of the prompt, the tool manifest or the view the
+  provider sees changed (the pty rows still make their two provider requests and print the answer,
+  which is what their fixture checks).
 - It installs nothing: `~/.local/bin` and `installed.txt` are untouched, and `components.lock` is
   unchanged (a native program is not a WASI component; the plan says how it will be pinned when the
   in-process path goes).
