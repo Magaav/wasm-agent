@@ -4606,7 +4606,7 @@ fn set_editor(state: &mut ConsoleInput, setup: crate::screen::EditorSetup) {
 /// row coming or going moves the status line and the chat's last row, which `layout_frame` applies.
 fn refresh_build(state: &mut ConsoleInput) {
     let Some(editor) = state.editor.as_ref() else { return };
-    let build = wa_term::build_status::current(editor.width);
+    let build = wa_tool_progress::build::current(editor.width);
     if build == editor.build { return; }
     set_editor(state, crate::screen::EditorSetup { build: Some(build), ..Default::default() });
     let frame = layout_frame(state);

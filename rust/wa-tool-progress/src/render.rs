@@ -138,6 +138,9 @@ pub fn clip(text: &str, room: usize) -> String {
 
 /// One character's width in terminal cells: the same table the transcript and the editor use
 /// (`wa_term::terminal_editor::cell_width`, and `wa_capabilities::selection`'s copy of it).
+/// One character's width, for the build row beside this module.
+pub fn cell_width_pub(ch: char) -> usize { cell_width(ch) }
+
 fn cell_width(ch: char) -> usize {
     let cp = ch as u32;
     if (0x300..=0x36f).contains(&cp) || (0x1ab0..=0x1aff).contains(&cp)
@@ -265,3 +268,17 @@ mod tests {
     }
 }
 
+/// ANSI stripped, for the tests of the rows beside this module (the build row's own helper).
+#[cfg(test)]
+pub(crate) fn tests_plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.peek() == Some(&'[') { chars.next(); for c in chars.by_ref() { if ('@'..='~').contains(&c) { break; } } }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}

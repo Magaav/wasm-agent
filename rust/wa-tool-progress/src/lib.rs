@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 
 /// The bar's width, and its glyphs: the same shape `wa-term`'s build loader draws, so the two
 /// loaders on the same row cannot look like two different features.
+pub mod build;
 pub mod render;
 
 pub const BAR: usize = 14;
