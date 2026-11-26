@@ -71,7 +71,7 @@ M.TOOLS = {
     request = function(args) return { q = args.q, limit = args.limit } end,
     -- What a script reads from the answer (rust/components/wa-whatsapp/src/index.rs `contacts`,
     -- `candidate_json`); the connector index prints it after the arguments (lua/core/return_shapes.lua).
-    returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,truncated}',
+    returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,matched,truncated,next,limit_asked}',
   },
   {
     verb = 'search', capability = 'whatsapp_search', effect = 'read',
@@ -90,7 +90,7 @@ M.TOOLS = {
       return { q = args.q, chat = args.chat, kind = args.kind, ['from'] = args['from'], ['since'] = args['since'], ['until'] = args['until'], limit = args.limit, order = args.order }
     end,
     -- index.rs `search` + `hit_json` (a hit is `view::message` plus chat_name/score).
-    returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text}],count,matched,truncated}',
+    returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text,chat_newest_ts}],count,matched,truncated,limit_asked}',
   },
   {
     verb = 'read', capability = 'whatsapp_read', effect = 'read',
