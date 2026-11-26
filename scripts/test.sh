@@ -536,6 +536,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$D
 # pass/fail/off, account canaries answer it only when the node has no account of that kind, and a canary proven
 # on no node asked is red.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db "$DB.canary-not-proven" | grep "canary not proven ok"
+
+# THE CUT CANARIES STEP IS ADVISORY UNTIL THE REHEARSAL IS GREEN (Fable 26/11, r6): the step runs, names every finding
+# - a FAIL, an unreachable node, a cutting canary proven nowhere, the rollback line - under the heading
+# LIVE CHECKS (advisory until rehearsed), and the cut continues to the tag. The row drives land.impl.canaries with
+# fixture canaries; the wrapper owns the scratch root the test-home guard needs and runs the tree under test.
+gate_run bash scripts/test-release-canaries-advisory.sh
 # A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
 # install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
 # the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.
