@@ -108,7 +108,7 @@ sequence() { # <install> <commit> [extra args...]
 }
 
 # --- 1. happy path ---------------------------------------------------------------------------------------------
-I="$W/i1"; in_place "$I" "$COMMIT"; echo ok > "$SEQ_MODE"
+I="$W/i1"; in_place "$I" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
 sequence "$I" "$COMMIT" > "$W/seq1.log" 2>&1 || { sed -n '1,10p' "$W/seq1.log" >&2; fail "happy: the sequence must succeed"; }
 grep -q 'version_folders_ok' "$W/seq1.log" || fail "happy: the sequence does not say it finished"
 ok
@@ -132,7 +132,7 @@ case "$order" in 'SEQSTEP1,SEQSTEP2,SEQSTEP3,SEQSTEP4,SEQSTEP5,') ;; *) fail "ha
 ok
 
 # --- 2. a FAILED restart moves the pointer BACK -----------------------------------------------------------------
-I2="$W/i2"; in_place "$I2" "$COMMIT"
+I2="$W/i2"; in_place "$I2" "$PREV_COMMIT"
 WNEW="$W/w2"; mkdir -p "$WNEW"; cp -a "$W/share/versions/$ID" "$WNEW/" 2>/dev/null || true
 # a second scratch share with the previous version already current, so there IS a version to go back to
 mkdir -p "$W/share2/versions/$PREV_ID"; printf 'id=%s\ninstall_dir=%s\n' "$PREV_ID" "$I2" > "$W/share2/versions/$PREV_ID/version.txt"
@@ -163,15 +163,21 @@ install_dir=%s
   printf '#!/bin/sh
 exit 0
 ' > "$share/versions/$PREV_ID/wa-sentinel"; chmod +x "$share/versions/$PREV_ID/wa-sentinel"
+  # A PREVIOUS VERSION NEEDS ITS MEMBERS: the conversion links the install at them, so an empty folder
+  # leaves every link dangling and the conversion own verification refuses.
+  cp -f "$install/wa" "$share/versions/$PREV_ID/wa"; chmod +x "$share/versions/$PREV_ID/wa"
+  mkdir -p "$share/versions/$PREV_ID/lua-core" "$share/versions/$PREV_ID/scripts"
+  printf "prev init\n" > "$share/versions/$PREV_ID/lua-core/init.lua"
+  printf "prev deploy\n" > "$share/versions/$PREV_ID/scripts/deploy.sh"
   ln -sfn "versions/$PREV_ID" "$share/current"
 }
-I3="$W/i3"; in_place "$I3" "$COMMIT"; seed_prev "$W/share3" "$I3"; echo sentinel-fail > "$SEQ_MODE"
+I3="$W/i3"; in_place "$I3" "$PREV_COMMIT"; seed_prev "$W/share3" "$I3"; echo sentinel-fail > "$SEQ_MODE"
 bash scripts/version-sequence.sh --install "$I3" --candidate "$I3/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share3" > "$W/seq3.log" 2>&1 \
   && fail "failed sentinel: without the expectation the sequence must not claim success"
 grep -q 'version_folders_sentinel_failed' "$W/seq3.log" || { sed -n '1,12p' "$W/seq3.log" >&2; fail "failed sentinel: the failure is not named"; }
 ok
-I4="$W/i4"; in_place "$I4" "$COMMIT"; seed_prev "$W/share4" "$I4"
+I4="$W/i4"; in_place "$I4" "$PREV_COMMIT"; seed_prev "$W/share4" "$I4"
 bash scripts/version-sequence.sh --install "$I4" --candidate "$I4/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/lua-stage" --share "$W/share4" --sentinel-fail-expected > "$W/seq4.log" 2>&1 \
   || { sed -n '1,12p' "$W/seq4.log" >&2; fail "failed sentinel: with the expectation the sequence reports it"; }
@@ -179,7 +185,7 @@ grep -q 'sentinel_move_failed_as_expected' "$W/seq4.log" || fail "failed sentine
 ok
 
 # --- 4. a required member that is not there --------------------------------------------------------------------
-I5="$W/i5"; in_place "$I5" "$COMMIT"; echo ok > "$SEQ_MODE"
+I5="$W/i5"; in_place "$I5" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
 bash scripts/version-sequence.sh --install "$I5" --candidate "$I5/wa" --commit "$COMMIT" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --lua-stage "$W/absent-lua" --share "$W/share5" > "$W/seq5.log" 2>&1 \
   && fail "member required: a missing lua-core must fail the sequence"
@@ -191,7 +197,7 @@ ok
 # and the part is never filled - the row would then be testing nothing (rows/20261126T023132Z-13126). A Lua-only
 # landing IS its own commit.
 COMMIT_P=dddddddddddddddddddddddddddddddddddddddd; ID_P=dddddddddddd
-I6="$W/i6"; in_place "$I6" "$COMMIT_P"; echo ok > "$SEQ_MODE"
+I6="$W/i6"; in_place "$I6" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
 a_lua_part "$W/part-tree" "$W/lua-core-good.tar.gz" "$HOST_INT"
 part_lock "$W/lua.part.lock" "$W/lua-core-good.tar.gz" "$HOST_INT"
 bash scripts/version-sequence.sh --install "$I6" --candidate "$I6/wa" --commit "$COMMIT_P" --root "$W/root" \
@@ -206,7 +212,7 @@ grep -q "init from the part for $HOST_INT" "$sealed" || fail "part: the sealed m
 ok
 # a part whose interface differs is refused BEFORE the seal, and the pointer does not move
 COMMIT_P2=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee; ID_P2=eeeeeeeeeeee
-I7="$W/i7"; in_place "$I7" "$COMMIT_P2"; echo ok > "$SEQ_MODE"
+I7="$W/i7"; in_place "$I7" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
 a_lua_part "$W/part-tree2" "$W/lua-core-bad.tar.gz" "$OTHER_INT"
 part_lock "$W/lua.bad.lock" "$W/lua-core-bad.tar.gz" "$OTHER_INT"
 bash scripts/version-sequence.sh --install "$I7" --candidate "$I7/wa" --commit "$COMMIT_P2" --root "$W/root" \
