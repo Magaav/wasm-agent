@@ -28,7 +28,15 @@ pub const ROWS: &[crate::capabilities::Capability] = &[
     plain!("whatsapp_message", ReadOnly, crate::whatsapp_query::message, "One exact WhatsApp message by chat and id, with its full stored text - what an exact reply source and a sent-message echo are compared against"),
     plain!("whatsapp_reactions", ReadOnly, crate::whatsapp_query::reactions, "Who reacted to one WhatsApp message, with which emoji"),
     plain!("whatsapp_media", ReadOnly, crate::whatsapp_query::media, "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration, pages"),
+    // One row for every read-only question a component can grow on its own: the op travels in the
+    // request (`{op, ...args}`), so a new read answer needs no host change and this list stops being
+    // a place a WhatsApp change lands (2026-11-25, "WhatsApp leaves the host"). ReadOnly, because
+    // every op it can carry is: the effect class is what the sandbox joins and serializes on.
+    plain!("whatsapp_index", ReadOnly, crate::whatsapp_query::index, "Ask the WhatsApp index one read-only question the wa-whatsapp component knows: {op, ...args}, op being search, read, contacts, message, reactions or media; the answer is the one whatsapp_<op> gives"),
     plain!("whatsapp_download", WritesFiles, crate::whatsapp_query::download, "Decrypt one WhatsApp message's media into this node's bounded download folder and return the path"),
+    // The third class, the same shape: the questions whose answer is a file this node writes ({op,
+    // ...args}, today `download`). `WritesFiles` is what a sandbox must not join as a read.
+    plain!("whatsapp_file", WritesFiles, crate::whatsapp_query::file, "Ask the wa-whatsapp component to write one thing into this node's bounded download folder: {op, ...args}, op being download; the answer is the path, or the one whatsapp_download gives"),
     // The one query that asks the phone: it enqueues on the same `whatsapp.query` queue, and the
     // component's answer is the history request it made (ids and counts), never a message.
     // Retention's other half: the monthly cut into a compressed and sealed archive file, the push to
@@ -37,4 +45,8 @@ pub const ROWS: &[crate::capabilities::Capability] = &[
     // components directory (`docs/WHATSAPP-ARCHIVE.md`).
     plain!("whatsapp_archive", WritesFiles, crate::whatsapp_archive::capability, "WhatsApp index archives: cut a month that left the window into one sealed file, list, push with its sha256 verified, restore, unload, expire"),
     plain!("whatsapp_backfill", Network, crate::whatsapp_query::backfill, "Ask the primary phone for WhatsApp messages older than the index holds, so a search can reach the account's past"),
+    // The same generic door as `whatsapp_index`, declaring the other effect: the ops that ASK THE PHONE
+    // ({op, ...args}, today `backfill`). A read must not ride it and a phone request must not ride the
+    // read door - `seam::Op::effect` decides, and the refusal names the right row (2026-11-25).
+    plain!("whatsapp_request", Network, crate::whatsapp_query::request, "Ask the wa-whatsapp component one question that reaches the phone: {op, ...args}, op being backfill; the answer is the one whatsapp_<op> gives"),
 ];
