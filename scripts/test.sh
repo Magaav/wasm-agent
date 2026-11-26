@@ -373,6 +373,11 @@ fi
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime -- components::tests services::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests drain::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-governance -- node_policy::tests node_telemetry::tests store::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities -- capabilities::tests
+# A capability's registration is DATA (mission capability-registration-is-data): every row lives in a
+# file under src/capability_rows/, one file per area, and capabilities.rs declares none - so adding or
+# moving a capability never edits the file every other capability edits. Both rows read the sources on
+# disk. The first fails on the code before that change, by name: 152 rows were still in capabilities.rs.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities --test capability_registration --test capability_row_discovery
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
