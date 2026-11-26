@@ -3152,3 +3152,46 @@ fn subjects_seed_from_what_the_node_holds_and_the_rest_are_listed() {
     block_on(put(&store, &direct(other, "", "G13", base(), "oi"))).unwrap();
     assert_eq!(block_on(subjects_missing(&store)).unwrap(), vec![other.to_string()], "what a sync must fetch");
 }
+
+/// The decided limit rule (26/11): over the cap is CLAMPED AND SAID, never a refusal, and the same shape in
+/// all three list tools. Under the cap nothing is said - behaviour beyond the rule is identical.
+#[test]
+fn a_limit_over_the_cap_is_clamped_and_said_in_every_list_tool() {
+    let store = Memory::new();
+    for i in 0..25u32 {
+        let chat = format!("55119777100{i:02}@s.whatsapp.net");
+        block_on(put(&store, &direct(&chat, &format!("Contato {i:02}"), &format!("P{i:02}"), base() + i as i64 * 1000, "boleto"))).unwrap();
+    }
+    let run = |op: &str, limit: u32| -> serde_json::Value {
+        let request = match op {
+            "contacts" => verified(seam::Request { op: "contacts".into(), q: Some("Contato".into()), limit: Some(limit), ..Default::default() }),
+            "search" => verified(seam::Request { op: "search".into(), q: Some("Contato".into()), limit: Some(limit), ..Default::default() }),
+            _ => verified(seam::Request { op: "read".into(), chat: Some(CHAT.into()), limit: Some(limit), ..Default::default() }),
+        };
+        let answer = match op {
+            "contacts" => block_on(contacts(&store, &request)),
+            "search" => block_on(search(&store, &request)),
+            _ => block_on(read(&store, &request)),
+        };
+        answer.unwrap()
+    };
+
+    // Contacts keeps 20 of the 50 asked, and says which it asked for.
+    let over = run("contacts", 50);
+    assert_eq!(over["limit_asked"]["asked"], 50, "{over}");
+    assert_eq!(over["limit_asked"]["kept"], seam::CONTACTS_MAX);
+    assert!(over["limit_asked"]["said"].as_str().unwrap_or_default().contains("of 50 asked"), "the sentence names the ask");
+    assert_eq!(over["ok"], true, "clamped is not refused: {over}");
+
+    // Search keeps 50 of 80, read keeps 100 of 200: the same block, the same sentence shape.
+    let search_over = run("search", 80);
+    assert_eq!(search_over["limit_asked"]["asked"], 80, "{search_over}");
+    assert_eq!(search_over["limit_asked"]["kept"], seam::SEARCH_MAX);
+    let read_over = run("read", 200);
+    assert_eq!(read_over["limit_asked"]["kept"], seam::READ_MAX);
+    assert_eq!(read_over["limit_asked"]["asked"], 200);
+
+    // Under the cap: nothing is said, and the old shape is untouched.
+    let under = run("contacts", 5);
+    assert!(under.get("limit_asked").is_none(), "a kept limit is not a clamp: {under}");
+}

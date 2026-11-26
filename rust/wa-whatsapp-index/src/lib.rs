@@ -344,6 +344,10 @@ pub struct Verified {
     pub max_bytes: u64,
     /// How a `search` orders its hits (`None` = the op's default, see [`Request::order`]).
     pub order: Option<Order>,
+    /// The count the caller ASKED for, when it was over this op's cap: the answer then says what it kept
+    /// (`keeper`'s sentence), because a silently clamped list reads as "that is everything there is".
+    /// Decided 26/11: over the cap is clamped AND said, never refused.
+    pub limit_asked: Option<u32>,
 }
 
 impl Request {
@@ -474,7 +478,17 @@ impl Request {
             }
             Op::Contacts => (clamp_limit(self.limit, CONTACTS_MAX, CONTACTS_MAX), 0),
         };
-        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order })
+        // What the caller asked for, when it was more than this op keeps: the answer says so.
+        let cap = match op {
+            Op::Search => SEARCH_MAX,
+            Op::Read => READ_MAX,
+            Op::Contacts => CONTACTS_MAX,
+            Op::Backfill => BACKFILL_MAX,
+            Op::Message | Op::Reactions | Op::Media | Op::Download => 1,
+        };
+        let limit_asked = self.limit.filter(|asked| *asked > cap);
+        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order, limit_asked })
+
     }
 
     /// The payload bytes for the queue.
@@ -771,6 +785,21 @@ pub fn answer(op: Op, body: serde_json::Value) -> serde_json::Value {
     answer["ok"] = serde_json::Value::Bool(true);
     answer["op"] = serde_json::Value::String(op.as_str().to_string());
     bound(answer)
+}
+
+/// Put the clamp into an answer, when there was one: `limit: {asked, kept, said}` - the count the caller
+/// named, the count this node keeps, and the sentence a reader can act on. Called by every list answer
+/// (search, read, contacts), so the rule is one shape everywhere and never a refusal.
+pub fn say_limit(answer: &mut serde_json::Value, request: &Verified) {
+    let Some(asked) = request.limit_asked else { return };
+    let kept = request.limit;
+    // A SEPARATE key, never a change of type: `search` and `read` already carry `limit` as the number they
+    // kept, and turning that into an object would move more bytes than the rule asks for.
+    answer["limit_asked"] = serde_json::json!({
+        "asked": asked,
+        "kept": kept,
+        "said": format!("limit: {kept} of {asked} asked; ask for less, or page with the cursor this answer carries"),
+    });
 }
 
 /// The answer of a query that was refused or failed: a word, one line of detail, no text, and never

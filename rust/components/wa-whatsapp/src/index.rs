@@ -2053,6 +2053,9 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     // `next` is the cursor for the page after this one (empty when this is the last page). It is the
     // answer's own last candidate, so `before: next` continues exactly where this page stopped.
     answer["next"] = if next.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(next) };
+    // Over the cap is CLAMPED AND SAID (decided 26/11), never a refusal: the answer carries what was asked
+    // and what this node keeps, so a short list never reads as "that is all there is".
+    seam::say_limit(&mut answer, request);
     if top_count == 1 {
         if let Some(first) = answer["candidates"].as_array().and_then(|list| list.first()).cloned() {
             answer["chat"] = first["chat"].clone();
@@ -2806,7 +2809,7 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
         .unwrap_or(0)
         .max(0);
     let kept: Vec<serde_json::Value> = hits.into_iter().take(request.limit as usize).map(|(_, hit)| hit).collect();
-    Ok(seam::answer(
+    let mut answer = seam::answer(
         seam::Op::Search,
         serde_json::json!({
             "q": request.q.clone(),
@@ -2822,7 +2825,9 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
             "order": search_order_block(order),
             "index": index_state(pace, as_of),
         }),
-    ))
+    );
+    seam::say_limit(&mut answer, request);
+    Ok(answer)
 }
 
 /// How current the writer was when an answer was built.
@@ -3242,6 +3247,8 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
     if let Some(regressed) = regressed {
         answer["as_of_regressed"] = regressed;
     }
+    // Over the cap is clamped and said, here as in search and contacts.
+    seam::say_limit(&mut answer, request);
     Ok(answer)
 }
 
