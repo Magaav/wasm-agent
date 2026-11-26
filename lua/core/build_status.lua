@@ -25,6 +25,22 @@ end
 -- The paths whose bytes the binary embeds: an edit there makes a same-commit binary not this tree.
 local EMBEDDED = { 'lua/', 'rust/' }
 
+-- THE INSTALL RECORD, for a node with no tree (26/11, openclaw): a release install writes
+-- <config>/installed.txt (short form for a build, full id for a prebuilt install), the file the supervisor
+-- writes and lua/core/font_setup.lua reads. That commit is what a tree-less node CAN prove: its binary own
+-- build commit against the record, which is the target the installer was asked for.
+function M.recorded_commit(config_root)
+  local paths = dofile('lua/core/paths.lua')
+  local root = config_root or paths.config()
+  for _, name in ipairs({ '/installed.txt', '/startup/installed.txt' }) do
+    local ok, text = pcall(host.read_file, tostring(root) .. name)
+    if ok and type(text) == 'string' then
+      local sha = text:match('%x%x%x%x%x%x%x%x%x%x%x%x+')
+      if sha then return sha end
+    end
+  end
+  return nil
+end
 -- The relation, and every branch is a REFUSAL to say fresh when a fact is missing or disagrees.
 --
 -- Item 7 of the node-ops round (#45). The four facts, in the order they can rule a build out:
@@ -39,8 +55,24 @@ local EMBEDDED = { 'lua/', 'rust/' }
 function M.relation(tree, binary)
   local relation, why
   if not tree.head then
-    relation = 'unknown'
-    why = 'the tree ' .. tostring(tree.root or '(none)') .. ' is not a git work tree this node can read, so its commit cannot be compared with the binary'
+    -- A TREE-LESS NODE IS NOT AN UNKNOWN NODE (26/11). A release install has no checkout; the identity it can
+    -- prove is its binary build commit against the install record - the target. Equal is fresh, different is
+    -- stale, and only a missing record is unknown. Measured on openclaw: the canary went red on a node that was
+    -- running exactly the bytes it had just been installed with.
+    local recorded = binary.commit and M.recorded_commit(tree.config_root) or nil
+    if recorded and binary.commit then
+      local a, b = tostring(recorded):lower(), tostring(binary.commit):lower()
+      if a == b or a:sub(1, #b) == b or b:sub(1, #a) == a then
+        relation = 'fresh'
+        why = 'the binary was built from ' .. b .. ' and the install record names ' .. a .. ': this node has no tree and runs the bytes it was installed with'
+      else
+        relation = 'stale'
+        why = 'the binary was built from ' .. b .. ', the install record names ' .. a .. ': the node is not running what it was installed with'
+      end
+    else
+      relation = 'unknown'
+      why = 'the tree ' .. tostring(tree.root or '(none)') .. ' is not a git work tree this node can read, and no install record names a commit, so its identity cannot be proven'
+    end
   elseif not binary.commit then
     relation = 'unknown'
     why = 'the binary does not say which commit it was built from, so it cannot be shown to be this tree'

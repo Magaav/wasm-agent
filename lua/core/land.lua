@@ -4532,12 +4532,12 @@ impl.deploy = function(run, options)
     row.verified = (status and status.verified == true) or false
     row.detail = status and status.detail or row.detail
     row.seconds = now() - (row.started_at or now())
-    if state == "unknown" and row.retry_unknown then
-      -- The node has the id (the request named it) and has not written its deploy record yet: that is
-      -- the pre-update backup running, not a node that lost the request. Keep reading until the deploy
-      -- deadline, and only then say the phase is unknown (unknown is not yes, and not a no either).
-      return false
-    end
+    -- AN UNKNOWN FROM THE RELAY IS NOT A VERDICT (26/11, openclaw). It was installing: the request was
+    -- accepted, the download ran on a slow node, one status call did not answer inside the relay's deadline,
+    -- and the round called the node "unknown after 186s: node_no_answer" while that node then finished and
+    -- came up on node-6b6afc72f188. A status that says node_no_answer / unknown says ONLY that this read did
+    -- not arrive; the wait keeps reading the node's own record until the deploy deadline.
+    if state == "unknown" then return false end
     return state == "installed" or state == "failed" or state == "silent" or state == "unknown"
   end
   local function failure_for(row)
@@ -4649,10 +4649,19 @@ impl.deploy = function(run, options)
         end
       end
       for _, row in ipairs(pending) do
-        -- The deadline passed with the node still working: say `unknown`, never `installed`. Its own records
-        -- are the truth and `wa update <node> --status` reads them.
-        row.state = "unknown"
-        row.detail = "not settled within " .. tostring(deadline) .. "s; read it with: wa update " .. row.node .. " --status"
+        -- THE NODE'S OWN RECORD DECIDES BEFORE "unknown" IS WRITTEN (26/11). A last read can name the commit it
+        -- installed even when the wait ran out: an install that finished is never reported as unknown.
+        local last = remote_update.status(M.call(), row.node, { id = row.record, session = options.session })
+        if last and tostring(last.installed_commit or "") ~= "" and tostring(last.installed_commit) == tostring(sha) then
+          row.state = "installed"
+          row.installed_commit = tostring(last.installed_commit)
+          row.detail = "installed (read back on the node's own record after the wait)"
+        else
+          -- The deadline passed with the node still working: say `unknown`, never `installed`. Its own records
+          -- are the truth and `wa update <node> --status` reads them.
+          row.state = "unknown"
+          row.detail = "not settled within " .. tostring(deadline) .. "s; read it with: wa update " .. row.node .. " --status"
+        end
         row.seconds = now() - (row.started_at or now())
       end
       for _, row in ipairs(asked) do
