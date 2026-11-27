@@ -56,6 +56,22 @@ for f = 1, 80 do
 end
 
 local first = decode(host.graph_index(json.encode({root = root, wait_ms = 120000})), 'the first index')
+-- A COMPONENT THE RUNNER DID NOT PROVISION IS A SKIP, NEVER THIS ROW'S VERDICT (mission flaky-twice).
+-- `scripts/fast.sh` builds `graph` from this tree and installs it in each row's own home; when that build
+-- fails it says so and downgrades to a skip - "rows that need one print SKIP with that reason; a skip is
+-- counted as a skip, not a pass". This row used to hard-fail instead, so a machine too busy to build a
+-- component went red against the CODE: flaky.tsv has it on 04:08Z (hang) and 06:27Z (load 2.55 ... the
+-- verdict was `graph_component_unavailable: component_not_installed:graph`, which is the runner's promise
+-- and not a fact about the store). The absence is the runner's answer and it already gave it; a component
+-- that IS installed and then misbehaves is still this row's failure, and still fails below.
+local function component_not_installed(answer)
+  local text = json.encode(answer or {})
+  return text:find('component_not_installed:graph', 1, true) ~= nil
+end
+if not first.ok and component_not_installed(first) then
+  print('SKIP test-graph-quarantine-evidence: the `graph` component is not installed in this home - the runner builds it from this tree (scripts/build-components.sh) and says so when it cannot; this row has nothing to quarantine without it')
+  return
+end
 assert(first.ok and (first.nodes or 0) > 0, 'the first index did not build: ' .. json.encode(first.error or first))
 local db = assert(first.db, 'the index answer does not name its store')
 local dir = assert(db:match('^(.*)[/\\][^/\\]+$'), 'the store path has no directory')
