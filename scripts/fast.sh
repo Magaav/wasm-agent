@@ -947,6 +947,10 @@ if command -v node >/dev/null 2>&1; then
   # for exactly (branch, sha, policy-hash) - a new sha voids it, and only the review lane may write one.
   check queue-policy node scripts/test-queue-policy.mjs
   check queue-approval node scripts/test-queue-approval.mjs
+  # THE RUNNER STATE MACHINE (hunk 3): a crash mid-landing resumes from main, and the order is priority then
+  # the id. Neither row pushes anything - the steps are injected - so both are shelf rows.
+  check queue-resume node scripts/test-queue-resume.mjs
+  check queue-order node scripts/test-queue-order.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...
