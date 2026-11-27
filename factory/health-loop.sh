@@ -21,8 +21,16 @@ while true; do
   if [ "$N" = "$(cat $M/_orch/health-last 2>/dev/null)" ]; then sleep 300; continue; fi
   if ! WA_BIN=$(wa_main_binary "$N"); then
     echo "$(date -u +%H:%MZ) orch(health): NOT GRADED for ${N:0:8}: no binary of main's own (the installed one is not used)" >> $H
+    # A WATCHDOG THAT NEVER BARKS IS WORSE THAN NONE: one ungraded tip can be a release still publishing, two in
+    # a row is a resolver that cannot see anything, and that must reach the operator instead of scrolling by in
+    # HANDOVER (27/11: every tip from 18:23 to 18:34 was NOT GRADED and nothing said so).
+    if ! n=$(wa_note_ungraded "$N" $M/_orch); then
+      m="$(date -u +%H:%MZ) WATCHDOG: health has not graded the last $n tips (newest ${N:0:8}) - the loop is blind, not idle"
+      echo "$m" >> $M/ATTENTION; echo "$m" >> $H
+    fi
     sleep 300; continue
   fi
+  wa_note_graded $M/_orch
   export WA_BIN
   bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1
   S=$(jq -r .sha $M/main-health.json); echo $S > $M/_orch/health-last

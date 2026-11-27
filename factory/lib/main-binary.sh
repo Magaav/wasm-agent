@@ -1,53 +1,97 @@
 #!/bin/bash
-# WHICH BINARY MAY GRADE MAIN (Victor 27/11: no laptop install by default).
+# WHICH BINARY MAY GRADE MAIN (Victor 27/11: no laptop install by default; order 27/11 18:40).
 #
-# The health loop judges main's tip by running main's own rows. It used to hand them `~/.local/bin/wa`,
-# which is THE LAPTOP'S INSTALLED BUILD - and with the new rule that a landing does not install, that binary
-# lags main, so a row that needs the new code goes red for a reason that has nothing to do with the tip. This
-# file is the one answer to "which binary is main's": never the installed one.
+# The health loop judges main's tip by running main's own rows, so it needs a binary OF THAT TIP. It used to hand
+# them ~/.local/bin/wa, the laptop's installed build, which lags main now that a landing does not install - so a
+# row that needed the new code went red for a reason that had nothing to do with the tip. Then the first version
+# of this file refused too eagerly: every tip came out "NOT GRADED: no binary of main's own" (18:23, 18:29, 18:34
+# on fdeda1b8), and a loop that never grades is a watchdog that never barks.
 #
-#   wa_main_binary <sha>      prints the path, or nothing and a named reason on stderr; rc 1 when it cannot
-#                             name one. Order:
-#                             1. a PUBLISHED bundle for that sha (a node-<sha12> release on this host);
-#                             2. the tree's own build, when its recorded build commit IS that sha;
-#                             3. build it, in its own target dir (never in the checkout's release dir, so a
-#                                health run cannot replace the binary a person is using);
-#                             4. otherwise refuse, naming what was tried - a verdict from an unknown binary
-#                                is worse than no verdict.
+#   wa_main_binary <sha>      prints the path of a binary of that tip, or nothing and a named reason on stderr
+#                             (rc 1). NEVER ~/.local/bin. Order:
+#                             1. the PUBLISHED release for the tip, or the newest release covering the tip's
+#                                COMPILED INPUTS - asked of the deploy's own resolver
+#                                (scripts/lib/node-binaries.sh: wa_node_binary_source_resolve), law 17: a
+#                                second resolver would drift from the one that decides what a node runs;
+#                             2. a build in this file's own target dir: niced, one at a time (flock), capped;
+#                             3. a named refusal naming both attempts, and the caller alarms after 2 tips in a
+#                                row that could not be graded.
 set -uo pipefail
 
-wa_main_binary() { # <sha> [release-dir] [target-dir]
-  local sha=${1:?usage: wa_main_binary <sha> [release-dir] [target-dir]}
-  local rel=${2:-$HOME/.wasm-agent/releases}
-  local target=${3:-$HOME/wasm-agent/health-target}
-  local short=${sha:0:12} candidate=""
-
-  # 1. A published bundle for exactly this sha. The release is named after the commit and carries the node
-  #    built from it, so it is the tip's own bytes without a build here.
-  for candidate in "$rel/node-$short/wa-x86_64-unknown-linux-gnu-$short" "$rel/node-$short/wa-x86_64-unknown-linux-gnu"; do
-    if [ -x "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+# The tip's own bytes from the release side, through the deploy's resolver.
+wa_main_binary_release() { # <sha> <root> <stage>
+  local sha=$1 root=$2 stage=$3 lib triple out dir
+  lib=${WA_NODE_BINARIES_LIB:-$root/scripts/lib/node-binaries.sh}
+  [ -r "$lib" ] || { echo "wa_main_binary: no release resolver at $lib" >&2; return 1; }
+  # shellcheck disable=SC1090
+  . "$lib" || { echo "wa_main_binary: could not source $lib" >&2; return 1; }
+  command -v wa_node_binary_source_resolve >/dev/null 2>&1 || {
+    echo "wa_main_binary: $lib defines no wa_node_binary_source_resolve" >&2; return 1; }
+  # The deploy bounds its digest scan at 20 s because a deploy has a build waiting behind it. THIS caller's
+  # fallback is a ten-minute build, so a slow scan is the cheaper answer: measured 27/11 - the first scan in a
+  # fresh stage stopped at 23 releases inside its 20 s bound and reported "no release", and the same scan a
+  # minute later, with the list warm, found the one covering the tip (fdeda1b8).
+  export WA_NODE_RELEASE_DIGEST_SECONDS=${WA_NODE_RELEASE_DIGEST_SECONDS:-60}
+  triple=$(wa_node_target_triple 2>/dev/null) || triple=""
+  [ -n "$triple" ] || { echo "wa_main_binary: no prebuilt target triple on this machine" >&2; return 1; }
+  mkdir -p "$stage" 2>/dev/null || true
+  out=$(wa_node_binary_source_resolve "$root" "$sha" "$triple" "$stage" 2>/dev/null) || out=""
+  dir=$(printf '%s\n' "$out" | head -1)
+  [ -n "$dir" ] || { echo "wa_main_binary: the resolver named no release for ${sha:0:12}" >&2; return 1; }
+  local f
+  for f in "$dir/wa" "$dir/wa-$triple-${sha:0:12}" "$dir"/wa-"$triple"-*; do
+    [ -x "$f" ] && { printf '%s\n' "$f"; return 0; }
   done
-
-  # 2. The tree's own build, when it says it is THIS commit. A build of another commit is exactly the
-  #    failure this file exists to prevent, so it is not "close enough".
-  local built="$target/release/wa"
-  if [ -x "$built" ]; then
-    local have
-    have=$(WA_BIN="$built" "$built" --build-info 2>/dev/null | sed -n 's/^commit=//p' | head -1)
-    if [ "$have" = "$sha" ]; then printf '%s\n' "$built"; return 0; fi
-  fi
-
-  # 3. Build it, in the target dir this file owns.
-  if command -v cargo >/dev/null 2>&1; then
-    local root
-    root=$(git -C "${4:-$PWD}" rev-parse --show-toplevel 2>/dev/null) || root=""
-    if [ -n "$root" ] && CARGO_TARGET_DIR="$target" cargo build --release --offline -p wa --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1; then
-      if [ -x "$built" ]; then printf '%s\n' "$built"; return 0; fi
-    fi
-    echo "wa_main_binary: tried the published bundle ${rel}/node-${short} and a build in ${target}, and neither produced ${short}" >&2
-    return 1
-  fi
-
-  echo "wa_main_binary: no published bundle for ${short} and no cargo to build one; the installed binary (~/.local/bin/wa) is NOT used" >&2
+  echo "wa_main_binary: the resolver's dir $dir holds no binary of ${sha:0:12}" >&2
   return 1
 }
+
+# The tip's own bytes from this machine, in a target dir nobody else uses.
+wa_main_binary_build() { # <sha> <root> <target>
+  local sha=$1 root=$2 target=$3 built=""
+  built=$target/release/wa
+  command -v cargo >/dev/null 2>&1 || { echo "wa_main_binary: no cargo to build ${sha:0:12}" >&2; return 1; }
+  mkdir -p "$target" 2>/dev/null || { echo "wa_main_binary: cannot create $target" >&2; return 1; }
+  # ONE AT A TIME: two health runs must not build into the same target dir, and the loop has better things to do
+  # than queue - the next tick picks it up.
+  if command -v flock >/dev/null 2>&1; then
+    exec 8>"$target/.build.lock"
+    flock -n 8 || { echo "wa_main_binary: another build into $target is running" >&2; return 1; }
+  fi
+  local cap=${WA_MAIN_BUILD_CAP_SECONDS:-900} nice_level=${WA_MAIN_BUILD_NICE:-10} rc=0
+  CARGO_TARGET_DIR="$target" nice -n "$nice_level" timeout "$cap" \
+    cargo build --release --offline -p wa --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" = 0 ] && [ -x "$built" ]; then printf '%s\n' "$built"; return 0; fi
+  echo "wa_main_binary: the build of ${sha:0:12} in $target failed (rc $rc, cap ${cap}s)" >&2
+  return 1
+}
+
+wa_main_binary() { # <sha> [release-stage] [target-dir] [repo-root]
+  local sha=${1:?usage: wa_main_binary <sha> [release-stage] [target-dir] [repo-root]}
+  local stage=${2:-$HOME/.wasm-agent/health-releases}
+  local target=${3:-$HOME/wasm-agent/health-target}
+  local root=${4:-$HOME/wasm-agent/checkout} out=""
+  case "$sha" in [0-9a-f][0-9a-f]*) ;; *) echo "wa_main_binary: $sha is not a commit id" >&2; return 1;; esac
+
+  # ONE call: the resolver is not free (it may look at the network), and asking twice could get two answers.
+  local rerr; mkdir -p "$target" 2>/dev/null || true; rerr=$(mktemp -u "/tmp/wa-main-release.XXXXXX")
+  local why_release
+  if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>"$rerr"); then rm -f "$rerr"; printf '%s\n' "$out"; return 0; fi
+  why_release=$(tail -1 "$rerr" 2>/dev/null); rm -f "$rerr"
+  if out=$(wa_main_binary_build "$sha" "$root" "$target"); then printf '%s\n' "$out"; return 0; fi
+  echo "wa_main_binary: NO BINARY OF ${sha:0:12} - release: ${why_release:-none}; build: ${target}; the installed binary (~/.local/bin/wa) is NOT used" >&2
+  return 1
+}
+
+# A LOOP THAT NEVER GRADES MUST BARK. Two tips in a row that could not be graded is the alarm, because one can
+# be a release that is still publishing; two is a resolver that cannot see anything.
+wa_note_ungraded() { # <sha> [state-dir]  -> rc 0 quietly, rc 1 when ATTENTION is due (and prints the count)
+  local sha=$1 dir=${2:-$HOME/.wasm-agent/health} f n
+  mkdir -p "$dir" 2>/dev/null || true
+  f=$dir/health-ungraded; touch "$f"
+  grep -qx "${sha:0:12}" "$f" || printf '%s\n' "${sha:0:12}" >> "$f"
+  n=$(grep -c . "$f")
+  if [ "$n" -ge 2 ]; then printf '%s\n' "$n"; return 1; fi
+  return 0
+}
+wa_note_graded() { rm -f "${1:-$HOME/.wasm-agent/health}/health-ungraded"; }
