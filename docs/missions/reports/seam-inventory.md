@@ -1,0 +1,55 @@
+# seam-inventory - every boundary between parts of wa that is not WIT yet (Victor 27/11)
+
+Tree: this branch, cut from `origin/main` `04b7a38b`. The law: `ARCHITECTURE.md` **"Seams are WIT, and async by default"** - "a
+boundary between parts of wa (host <-> component, component <-> component, a node <-> the fabric API) is defined in `wit/`.
+Work that takes time returns a `future`; output that keeps coming is a `stream`; dropping either cancels interest. Nothing
+new exposes a status to poll." The shared wait is one place: `lua/core/codemode_pending.lua:54-55` - `DEFAULT_WAIT_S = 60`,
+`MAX_WAIT_S = 300`, then a pending handle.
+
+**What is WIT today** (`wit/`, 27 `.wit` files, worlds): agent-control, bus, codemode, fabric, hooks, kernel,
+kernel-v2, memory, mesh, model (+ router), queue (`producer-consumer`, `worker-consumer`, `admin-consumer`, `consumer`,
+`queue-provider`), seams (`stt-provider`, `ocr-provider`, `tool-component`), selfloop, telemetry, vault.
+
+**The pattern this inventory is about:** a `host.*` capability that is really a request to a *component*, sent as a job
+on the durable queue (`wit/queue`'s `producer-consumer`) and then **waited for in the host** with a private constant
+(2 s), falling back to a job id when the wait expires. It is not a WIT seam (the host is not a component, and the
+question never becomes a `future`), and the wait is a number nobody shares.
+
+## The inventory
+
+| # | surface | file:line | what crosses | sync/async | private wait | callers | measured cost (cited) | verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `host.whatsapp_search` / `whatsapp_read` / `whatsapp_reactions` / `whatsapp_media` / `whatsapp_download` / `whatsapp_backfill` | `rust/wa-capabilities/src/whatsapp_query.rs:3-7` (the crossing), `:45` (`DOWNLOAD_WAIT_MS = 10_000`), `:168` (the ask) | a question is a **job on the shared durable queue** to the `wa-whatsapp` component, then the host waits | sync, with a poll fallback (a job id is returned when the wait expires, `rust/wa-whatsapp-index/src/lib.rs:700`) | **2 000 ms** (`rust/wa-whatsapp-index/src/lib.rs:75 WAIT_MS`), **10 000 ms** for a download (`whatsapp_query.rs:45`) | 6 host capabilities, reached from Lua by `whatsapp_search`, `whatsapp_read`, `whatsapp_reactions`, `whatsapp_media`, `whatsapp_download`, `whatsapp_backfill` (plus `whatsapp_contacts`, `whatsapp_message`, `whatsapp_native` around the same index) | whatsapp_query is 3 218 lines with 15 commits in 30 days (`_orch/move-list.md` item 9); the wait itself is 2 s, and past it the caller is handed a job id to poll - the law's "nothing exposes a status to poll" | **MOVE** - brief queued: `whatsapp-read-waits-on-a-future.md` (priority 1: a slow read today reaches the model as a job id) |
+| 2 | `host.email_query` (the mail index) | `rust/wa-capabilities/src/email_query.rs:3` (says it follows the WhatsApp architecture) | the same queue job into `wa-email-index` | sync, with the same poll fallback | **2 000 ms** (`rust/wa-email-index/src/lib.rs:47 WAIT_MS`) | Lua `email_query` and the mail canary (`lua/core/canaries/mail.lua`) | `wa-email-index` 2 119 lines (`_orch/move-list.md` item 2) | **MOVE** - brief queued: `email-read-waits-on-a-future.md` (priority 2) |
+| 3 | `host.stt_*` (the speech queue's node half) | `rust/wa-capabilities/src/stt.rs:1` ("the node half of queue phase 2 for speech"), `rust/wa-capabilities/src/whatsapp_send.rs:485` (`wa.stt` enqueued with `fresh_for(60_000)`) | a transcription request is a queue job into `wa-stt-remote`; the *provider* direction already has a WIT world (`wit/seams/seams.wit:67 world stt-provider`) | sync enqueue (the enqueue itself is fine) + a per-job freshness constant | `fresh_for(60_000)` inline at `whatsapp_send.rs:485` (a literal, not a named constant) | Lua `stt_submit`, `stt_pending`, `stt_answer`, `stt_tick`, `stt_worker`, `stt_admin` | `wa-stt-remote` has **no** WIT world of its own (move-list item 6: "Gap = no world for: terminal, OS process, whatsapp, email, stt, audio, plugins/client") | **MOVE (partial)** - the request/answer half should be the seam, the enqueue stays; brief queued: `stt-question-returns-a-future.md` (priority 2) |
+| 4 | `host.whatsapp_send`, `host.email_send` | `rust/wa-capabilities/src/whatsapp_send.rs:474`, `rust/wa-capabilities/src/email_send.rs:126` | an outbox job (`outbox::QUEUE`, `fresh_for(outbox::FRESH_MS)`, `max_attempts`) | async by nature: the caller gets an id and never waits | none on the caller's side (`FRESH_MS` is the job's own lifetime) | Lua `whatsapp_send`, `email_send` | the same `move-list` rows as 1-2 | **KEEP** - a send is a durable job and its id is the answer; nothing waits, so the async law has nothing to fix here. The constant's lifetime is a queue policy, not a seam |
+| 5 | code graph (`host.graph_*`) | `rust/wa-capabilities/src/graph.rs:1` ("served by the `graph` WASI component"), `:37` (the measured crossing) | the host -> `rust/components/graph` through the kernel's `service-component` world (`wit/kernel/kernel.wit:151`); the component keeps its own store | sync calls into a component | none named; the cost is the call itself | every `host.graph_*` caller (Lua `graph_*`, the indexer) | **~51 s in-process vs ~578 s through the component** (measured 05/11, quoted at `graph.rs:37`) | **ALREADY WIT** - the boundary is a WIT world today; the row that should exist is a *cost* row (578 s), and `graph-dormant.md` / `graph-index-tear-cause.md` / `graph-one-store-per-root.md` already sit in the queue for that surface |
+| 6 | terminal and operations (`wa-term`, `wa-operation`) | `rust/wa-term/src/lib.rs:1`, `rust/wa-operation/src/lib.rs:1` | console state and operation supervision, reached from the host as **crates in-process** (no world, no component) | sync in-process calls | n/a (in-process) | the chat/CLI surface, the tool runner | 14 154 lines (terminal) and 8 772 (operations), 95 and 57 commits in 30 days (`_orch/move-list.md` item 4) - the two biggest single levers, and neither has a WIT world | **MOVE to WIT** (they are the `move-list`'s own top levers; the world gap is item 6 of that file) - brief queued: `terminal-and-operations-need-a-world.md` (priority 2); `everything-is-a-component.md` (priority 0) moves the *components* and does not name these two worlds |
+| 7 | sentinel <-> node | `rust/wa-sentinel/src/main.rs` (the request box, signal files) | the sentinel writes request files and signals a pid; the node reads them on its next tick | async by design, file-based | the sentinel's own bounds (`ALIVE_BOUND`, the deploy bound) | `wa-sentinel request`, the node's tick | not measured here | **KEEP** - the two processes must work while one of them is *down*, which a WIT seam cannot do (a component is only callable while the host runs it); the drop-box is the mechanism, documented in the sentinel's own header |
+| 8 | Lua -> CLI subprocess | `rg 'host\.exec\("wa ' lua/core/*.lua` | nothing crosses this way today | - | - | - | **0 hits** | **KEEP (nothing to move)** - the Lua core does not shell out to `wa`; the calls it makes are `host.*` capabilities |
+
+| 9 | the component hosts' own waits: hooks, mesh, selfloop | `rust/wa-kernel-runtime/src/hooks_host.rs`, `rust/wa-kernel-runtime/src/mesh_host.rs`, `rust/wa-kernel-runtime/src/selfloop_host.rs` (`DEFAULT_TIMEOUT_MS = 2_000` in each) | the host half of the `hooks`, `mesh` and `selfloop` worlds - a WIT seam already, with a private poll window | sync, then a timeout | **2 000 ms in three files** (`DEFAULT_TIMEOUT_MS`), the same 2 s as the index reads | the host bindings of those worlds | not measured here | **MOVE the WAIT (the seam is already WIT)** - brief queued: `component-hosts-share-the-wait.md` (priority 2) |
+| 10 | browser control (CDP) in `wa-window` | `rust/wa-window/src/cdp.rs` (`LAUNCH_WAIT_MS = 40_000`, `PROBE_TIMEOUT_MS = 1_200`, `REQUEST_TIMEOUT_MS = 15_000`) | a websocket to a browser process the node launched - the outside world's protocol, like provider HTTP | sync request/response over a socket | three constants, none shared | the `wa-window` users (the UI's browser control) | not measured here | **KEEP** - the far side is a browser speaking CDP, not a part of wa; the law's own exception ("JSON stays where it is the outside world's format") applies, and a WIT seam cannot replace a protocol a third party owns |
+| 11 | the queue crate itself, the fabric, the kv tests | `rust/wa-queue/src` (the durable queue `wit/queue` binds), `rust/wa-fabric/src/sim.rs:246` (a simulation), `rust/wa-kv/src/tests.rs:103` (tests only) | the queue is the *mechanism* these other rows use; the fabric's queue use is a simulation, and kv's is a test | - | - | - | - | **ALREADY WIT / KEEP** - `wa-queue` IS the `wit/queue` seam (`queue-provider`, `producer-consumer`); `wa-fabric`'s boundary is `wit/fabric/fabric.wit:305,312` (`fabric-client`, `fabric-admin`) and its only queue use is `sim.rs`; `wa-kv`'s is in `tests.rs`, so nothing crosses in product code |
+
+## What is already queued on these surfaces (so nothing is queued twice)
+
+* `everything-is-a-component.md` (priority 0) - the component move itself; it does not name the terminal/operations
+  **worlds**, which is why row 6 is queued separately.
+* `whatsapp-transcription-works.md` (priority 1) - the transcription *feature*; row 3 is about the **seam shape** of the same
+  request, not the feature.
+* `whatsapp-read-is-consistent.md`, `search-messages-finds-a-path.md`, `whatsapp-hold-not-silent.md` - the read's
+  correctness; row 1 is about the boundary, not the answer.
+* `graph-dormant.md`, `graph-index-tear-cause.md`, `graph-one-store-per-root.md` - the graph surface, already WIT (row 5).
+* `operations-explain-and-survive.md`, `chat-view-round-2.md`, `esc-socket-per-thread.md` - terminal/operations behaviour;
+  row 6 is about giving them a world.
+* `wasi-only-plan.md` (priority 2) - the general plan; this inventory is the queue it asks for, surface by surface.
+* `_orch/move-list.md` - measured line/churn counts per capability; every "measured cost" above that cites it is that
+  file's number, not a new measurement.
+
+## What this inventory does NOT claim
+
+* It does not measure new costs. The numbers above are the tree's own (`graph.rs:37`) or `_orch/move-list.md`'s; the
+  per-surface ledger counts (how often a caller past the 2 s wait was handed a job id) were **not** measured here, and a
+  brief that moves row 1 should measure them first.
+* It does not decide the WIT shape of a new world (terminal, OS process). That is the brief's job.
