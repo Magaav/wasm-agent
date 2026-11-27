@@ -20,9 +20,21 @@ fn c_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("vendor/ffmpeg");
+    // The vendored tree says which sources are COMPILED (`compiled.txt`, written by
+    // scripts/vendor-ffmpeg-source.sh): some of the .c beside them are INCLUDED textually and compiling one
+    // of those on its own produces a page of nonsense errors, which is how this was learned.
     let mut sources = Vec::new();
-    for library in ["libavutil", "libswresample", "libswscale", "libavcodec", "libavformat"] {
-        c_files(&root.join(library), &mut sources);
+    let list = root.join("compiled.txt");
+    if list.is_file() {
+        for line in std::fs::read_to_string(&list).unwrap_or_default().lines() {
+            let line = line.trim();
+            if !line.is_empty() { sources.push(root.join(line)); }
+        }
+    }
+    if sources.is_empty() {
+        for library in ["libavutil", "libswresample", "libswscale", "libavcodec", "libavformat"] {
+            c_files(&root.join(library), &mut sources);
+        }
     }
     if sources.is_empty() {
         panic!("no vendored ffmpeg sources under {}: run scripts/vendor-ffmpeg-source.sh", root.display());
