@@ -319,6 +319,19 @@ function M.record(note, ctx)
   if type(note) ~= "table" then return nil, "turn_note_missing" end
   local ok, id = pcall(function()
     M.setup()
+    -- NOT TWICE IN ONE SESSION FOR THE SAME CAUSE (27/11, turn-note-is-lean item c). A model that hits the same wall
+    -- twice in a session wrote the same note twice, and the feed then counted one friction as two. The key is
+    -- (session, tool, hurt): the SAME cause in the SAME session is journalled once, and the second attempt is
+    -- answered by name instead of being silently dropped. A different cause, or the same cause in another session,
+    -- still records.
+    local tool = tostring(note.tool or "")
+    local hurt = tostring(note.hurt or "")
+    if hurt ~= "" then
+      local seen = sql("sql_query", [[SELECT id FROM turn_notes WHERE session_id=? AND tool=? AND hurts=? LIMIT 1]],
+        { tostring(ctx.session_id or ""), tool, hurt })
+      local rows = seen.rows or seen
+      if type(rows) == "table" and #rows > 0 then return nil, "turn_note_duplicate" end
+    end
     local row_id = host.uuid()
     sql("sql_exec", [[INSERT INTO turn_notes(id,session_id,run_id,message_id,mission,build,mode,model,
         tool,cost,hurts,buys,focus,block,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)]], {
@@ -331,6 +344,9 @@ function M.record(note, ctx)
     return row_id
   end)
   if not ok then return nil, "turn_journal_store: " .. tostring(id) end
+  -- The pcall carries the duplicate answer out as its VALUE, not as an error: it is a fact about the note, not a store
+  -- failure.
+  if id == nil then return nil, "turn_note_duplicate" end
   return id
 end
 

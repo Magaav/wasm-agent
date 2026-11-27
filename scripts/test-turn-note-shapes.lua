@@ -68,5 +68,17 @@ for _, row in ipairs(list) do
 end
 check(saw_old and saw_lean, 'both shapes are in the journal')
 
+-- 6. NOT TWICE IN ONE SESSION FOR THE SAME CAUSE (item c)
+local first_id, first_why = journal.record(lean.note, {session_id = 's-dup', build = 'b1', mode = 'm', block = lean.block})
+check(type(first_id) == 'string', 'the first note records: ' .. tostring(first_why))
+local again_id, again_why = journal.record(lean.note, {session_id = 's-dup', build = 'b1', mode = 'm', block = lean.block})
+check(again_id == nil, 'the same cause in the same session is not journalled twice')
+check(again_why == 'turn_note_duplicate', 'and the refusal is named: ' .. tostring(again_why))
+local other = {tool = lean.note.tool, cost = '1 round', hurt = 'a different wall altogether'}
+local other_id = journal.record(other, {session_id = 's-dup', build = 'b1', mode = 'm', block = lean.block})
+check(type(other_id) == 'string', 'a DIFFERENT cause in the same session still records')
+local elsewhere = journal.record(lean.note, {session_id = 's-other', build = 'b1', mode = 'm', block = lean.block})
+check(type(elsewhere) == 'string', 'and the same cause in ANOTHER session still records')
+
 print(string.format('turn note shapes ok (%d checks; the journal reads the old block, the lean block, and no block)', checks))
 
