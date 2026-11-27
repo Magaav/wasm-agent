@@ -1065,6 +1065,43 @@ function M.is_stalled(problem)
   return tostring(problem or ""):find("provider_stalled", 1, true) ~= nil
 end
 
+-- A STALL IS A PAUSE, NOT AN ENDING (mission turn-survives-a-provider-stall, item 1).
+--
+-- `is_transient` refuses a response timeout on purpose: the short replay inside this module already
+-- fired, so what is left is the provider needing longer than its deadline. That refusal is why a stall
+-- used to END the run - and, one self-wake later, the turn. The retry now happens INSIDE the same run
+-- (agent.lua's transient loop takes this class), so the turn id, its step count, its clock and its
+-- deltas continue, and the person reads one pause instead of a new prompt row.
+--
+-- The budget is stated here and nowhere else: the default is the original request plus one
+-- pause-retry; 1 turns the pause off explicitly, and anything below 1 or above 4 is clamped rather than
+-- trusted (a stall with "no retry" must be said on purpose).
+M.STALLED_ATTEMPTS = 2
+
+-- The clamp, as a pure function of a value: no environment read in product code, ever - a budget that can
+-- be changed by whoever starts the process is not a budget anyone can reason about. A row hands this a
+-- number directly, which is how the bounds are pinned.
+function M.clamped_stalled_attempts(value)
+  local n = tonumber(value)
+  if n == nil then return M.STALLED_ATTEMPTS end
+  n = math.floor(n)
+  if n < 1 then return 1 end
+  if n > 4 then return 4 end
+  return n
+end
+
+function M.stalled_attempts()
+  return M.STALLED_ATTEMPTS
+end
+
+-- The pause before the next attempt: 2 s, 4 s, 8 s ... capped at 30 s and jittered, so two nodes that
+-- stall together do not re-ask together.
+function M.stalled_backoff_ms(attempt)
+  local step = math.max(0, (tonumber(attempt) or 1) - 1)
+  local base = math.min(30000, 2000 * (2 ^ step))
+  return math.floor(base * (0.75 + math.random() * 0.5))
+end
+
 -- The named event. Same shape as the update banner's bus fact (schema + version + ids + a bounded
 -- excerpt), published to the durable bus so a hook or a wake can subscribe to it, and best effort:
 -- an event that cannot be published must not replace the failure it reports.

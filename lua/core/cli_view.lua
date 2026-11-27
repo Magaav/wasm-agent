@@ -3708,7 +3708,23 @@ function METHODS:replay(rows, opts)
       local ok, calls = pcall(json.decode, row.tool_calls or "[]")
       calls = (ok and type(calls) == "table") and calls or {}
       local content = tostring(row.content or "")
-      if #calls > 0 or row.phase == "commentary" then
+      -- A turn that ran ELSEWHERE (the node, a sentinel wake) is drawn with the same blocks a typed turn
+      -- uses (mission turn-survives-a-provider-stall, item 3 / report §4.3): its answer is an answer,
+      -- not the Commentary topic it was filed under because it happened to carry tool calls. `opts.answer`
+      -- is set by `chat.lua catch_up` for exactly those rows, and never for the history a `--continue`
+      -- replays, where the commentary treatment is the truthful one.
+      local said_as_answer = opts.answer and row.phase ~= "commentary" and content ~= ""
+      if said_as_answer then
+        local rendered = self:markdown(text_of(content), {
+          paint = function(plain, style) return paint(plain, style, self.live) end,
+          width = self.limit - 2, indent = "", reflow = self:transcript(),
+        })
+        if rendered == "" then rendered = text_of(content) end
+        rendered = bulletize(rendered, paint(DOT, "text", self.live))
+        if rendered:sub(-1) ~= "\n" then rendered = rendered .. "\n" end
+        self:topic(false)
+        self:write(rendered .. "\n")
+      elseif #calls > 0 or row.phase == "commentary" then
         if content ~= "" then self:commentary_block(text_of(content)) end
       elseif content ~= "" then
         local rendered = self:markdown(text_of(content), {

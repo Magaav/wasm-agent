@@ -11,6 +11,7 @@ local paths = dofile("lua/core/paths.lua")
 -- Everything this REPL prints is captured by whatever launched it (a terminal,
 -- an orchestrator, a test), so it all goes out through the redactor.
 local redact = dofile("lua/core/redact.lua")
+local run_failure = dofile("lua/core/run_failure.lua")
 local updater = dofile("lua/core/update.lua")
 -- What a run looks like while it is running. The view owns the status line, the tool
 -- lines and the footer; this file owns the session, the commands and the prompt.
@@ -719,7 +720,9 @@ function M.run(argv)
       -- A STOP IS A STOP: if this run came back cancelled, its key is recorded here, at the end of the
       -- run it ended, before anything else can go wrong (change/esc-stops-now, item 3).
       if tostring(reply):find('run_cancelled', 1, true) then record_interrupt() end
-      view:failed(redact.text(tostring(reply)))
+      -- The failure, not the three paths Lua prefixed it with (item 2): `human_line` is the same
+      -- classification the row carries, with its leading locations stripped.
+      view:failed(redact.text(run_failure.human_line(tostring(reply))))
     else
       -- The view prints the reply when nothing streamed (an error before the first
       -- token, or a provider without streaming), so the turn is never silent.
@@ -884,6 +887,34 @@ function M.run(argv)
     seen_seq = ok and tonumber(bounds and bounds.last_seq) or seen_seq
   end
   mark_seen()
+  -- The facts of a turn this process is NOT running (a node wake): the CLI attaches by cursor and draws
+  -- them as they happen (mission turn-survives-a-provider-stall, item 3 / C2), instead of waiting for the
+  -- turn to end and replaying it as history. The cursor starts at the NEWEST fact so a fresh CLI does not
+  -- redraw a session's past; `catch_up` below keeps drawing the rows this does not cover (the answer).
+  local turn_tail = dofile("lua/core/turn_tail.lua")
+  local tail_state = nil
+  local function attach()
+    if not (view.editor and view.stdout) then return end
+    if not tail_state then
+      local telemetry = dofile("lua/core/telemetry.lua")
+      local newest = telemetry.events(agent.session_id, 0, 1)
+      local cursor = 0
+      if newest and newest.available then
+        local batch = telemetry.events(agent.session_id, 0, 1000)
+        for _, row in ipairs((batch and batch.events) or {}) do cursor = math.max(cursor, tonumber(row.seq) or 0) end
+      end
+      tail_state = { cursor = cursor }
+    end
+    local hold = host.transcript_hold
+    if hold then pcall(hold, true) end
+    pcall(turn_tail.poll, view, agent.session_id, tail_state)
+    -- Esc while attached (mission turn-survives-a-provider-stall, item 3 / C2b): the turn is not ours,
+    -- so the flag this process reads cannot stop it - the node's own POST /runs can. One key, one line,
+    -- and a local turn's Esc is untouched because this needs a run id the tail drew.
+    pcall(turn_tail.cancel_on_interrupt, view, agent.session_id, tail_state, input)
+    if hold then pcall(hold, false) end
+  end
+
   local function catch_up()
     if not (view.editor and view.stdout) then return end
     local ok, bounds = pcall(memory.session_message_bounds, agent.session_id)
@@ -899,7 +930,9 @@ function M.run(argv)
     last_caught = host.now()
     local hold = host.transcript_hold
     if hold then pcall(hold, true) end
-    pcall(view.replay, view, rows, { rule = false })
+    -- `answer = true`: this is a TURN, not history (mission turn-survives-a-provider-stall, item 3) - the
+    -- same blocks a typed turn shows, not the Commentary topic a replayed transcript uses.
+    pcall(view.replay, view, rows, { rule = false, answer = true })
     if hold then pcall(hold, false) end
   end
 
@@ -954,6 +987,7 @@ function M.run(argv)
     while true do
       record_interrupt()
       restart_if_due()
+      attach()
       catch_up()
       idle_refresh()
       sweep_handles_if_due()
