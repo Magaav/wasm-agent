@@ -47,19 +47,6 @@ pub mod host;
 pub mod http_transport;
 pub mod limits;
 // The runner itself, from its own crate (`ready-operations-slice-2.md`): the host no longer carries it.
-pub use wa_operations_runner::operations;
-/// This process's answers to the runner's seam questions (run/cancel state, progress rows, subagent
-/// context, disk cap). Installed once at startup; stage B implements the same trait over the wire.
-pub mod operations_seam;
-/// The runner's host-dependent tests: they need THIS process's facts, so they live where those are.
-#[cfg(test)]
-mod operations_host_tests;
-/// The operations supervisor (slice 1 of `ready-operations-own-program.md`): the node's supervised
-/// children owned by their own process, reached through `WASM_AGENT_OPERATIONS_SUPERVISOR`.
-pub mod operations_supervisor;
-=======
-pub mod limits;
->>>>>>> faa4327 (operations: the node stops carrying the runner (slice 2 complete - the commit that pays))
 pub mod plugins;
 pub mod quickjs;
 /// The build-time scan behind the capability registry (`src/capability_rows/`): which files declare
