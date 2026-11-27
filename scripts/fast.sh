@@ -1202,6 +1202,10 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # origin), the scratch HOME and the key; its Lua half is excluded from the bare loop for that reason.
   WA_BIN="$bin" check status-limits-security node scripts/test-status-limits-security.mjs
   WA_BIN="$bin" check status-midrun-pty node scripts/test-status-midrun-pty.mjs
+# THE RESET TIME HAS TO SURVIVE THE PANEL (/status, Victor 27/11): a limits row is measured at the room a console
+# panel really gives (PANEL_ROOM cells after the box chrome) and must still say when it resets - the text is the LAST
+# field on the row, so it is the first thing a narrow panel cuts.
+check status-resets env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-status-resets.lua" "$bin" --db "$work/status-resets.db"
   WA_BIN="$bin" check status-limits-pty node scripts/test-status-limits-pty.mjs
   # A COMMAND A RUN BLOCK RAN SAYS WHICH FILES IT CHANGED (chat-view-round-2, item 2): a scratch git
   # work tree, a run block whose `tools.bash` CREATES a file, and the card that names it - the base

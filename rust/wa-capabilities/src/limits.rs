@@ -493,7 +493,11 @@ pub fn row_texts(provider: &str, now: u64) -> Vec<String> {
     for (label, key) in [("5h", "rolling"), ("7d", "weekly"), ("30d", "monthly")] {
         let Some(entry) = usage.and_then(|usage| usage.get(key)).filter(|entry| entry.is_object()) else { continue };
         let percent = entry.get("percent").and_then(Value::as_f64).unwrap_or(0.0);
-        rows.push(format!("  {:<4} {} {:>4.0}%{}", label, bar(percent, 24), percent, resets(entry.get("resetsAt"), now)));
+        // THE SAME ROW LUA BUILDS, CELL FOR CELL (status.M.limit_rows): a 16-cell bar and the reset time as the
+        // last field, so the row is 43 cells and still inside a narrow panel's room (52). At a 24-cell bar it
+        // measured 53 and the console cut the reset off - the one part of the row a reader cannot infer.
+        rows.push(format!("  {:<3} {} {:>3.0}%  {}", label, bar(percent, 16), percent,
+            resets(entry.get("resetsAt"), now).trim()).trim_end().to_string());
         shown += 1;
     }
     if shown == 0 {
