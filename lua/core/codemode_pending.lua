@@ -1106,7 +1106,14 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   -- 40 BYTES, because the row's own bound is bytes and the ellipsis is three of them: clipping to 39
   -- characters and appending the ellipsis made 42 bytes, which is what row 7 caught.
   if #what > 40 then what = what:sub(1, 37) .. "…" end
-  local record = { op = started.op, tool = name, what = what, kind = executor.kind or "operation", scope = scope,
+  -- A REMOTE JOB SAYS WHERE (Fable 28/11): the row reads `remote work . bash`, so a reader knows the work is
+  -- on another machine. Every other call keeps the tool name it already had.
+  local label = name
+  if name == "remote" and type(params) == "table" then
+    local capability = tostring(params.capability or "")
+    if capability ~= "" then label = "remote work · " .. capability end
+  end
+  local record = { op = started.op, tool = label, what = what, kind = executor.kind or "operation", scope = scope,
     started_at = started_at, state = "running", reported = false, id = started.id,
     -- The shell command's before-snapshot, kept with the handle it belongs to and read once, when
     -- that handle settles (watch_settle). It is this call's own evidence: a map of path -> porcelain
