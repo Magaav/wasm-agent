@@ -24,6 +24,19 @@ TARGET="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
 artifact="$TARGET/wasm32-wasip2/release/stt.wasm"
 status=0
 
+# 0b. **No env override in the seam's product code** (the rule the branch was stopped on): the artifact
+#     comes from the installed set and the deadline is a constant, so a product file that reads the
+#     environment at all is a regression, not a style choice. Tests may read WA_COMPONENTS_DIR - that is
+#     the node's component dir, the same channel every other row uses - so only product files are judged.
+env_reads=$(rg -n 'std::env::var|env::var_os' "$ROOT/rust/wa-kernel-runtime/src/stt_host.rs" "$ROOT"/rust/components/stt/src/*.rs 2>/dev/null | grep -v '#\[cfg(test)\]' || true)
+if [ -n "$env_reads" ]; then
+  echo "FAIL the stt seam reads the environment in product code:" >&2
+  printf '%s\n' "$env_reads" >&2
+  status=1
+elif [ "$status" -eq 0 ]; then
+  echo "  no env override: the seam's product files read no environment"
+fi
+
 # 0. **The async rule as a row, not a reading** (Victor 26/11): every export in the interface is an
 #    \`async func\`, or a sync \`func\` with a "SYNC ON PURPOSE" reason line above it; and the world either
 #    declares an output/progress stream or writes why it has none. Static: no build, no toolkit.
