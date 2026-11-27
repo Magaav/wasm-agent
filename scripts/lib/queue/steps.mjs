@@ -55,21 +55,38 @@ export async function pinRequest({repo, request}) {
 }
 /// The default executor: the mission tree's own lander, which merges in a worktree, runs the branch's own
 /// rows, pushes last and prints its phases with `+Ns:` stamps.
-export function landQuick({missionsDir, repo, dryRun = false}) {
+/// WHERE THE PIN IS WRITTEN. `land-quick.sh` merges and pushes from ITS OWN tree (`R=$HOME/wasm-agent/checkout`,
+/// line 20) by branch NAME, so a ref pinned only in the runner s clone is "no branch" for the lander - the swap
+/// steps cloned `~/wasm-agent/q-clone`, which is an independent repository and shares no refs with it. The pin
+/// therefore belongs in the lander s tree: `landerRepo` (default: the lander s own default), and `repo` stays the
+/// runner s own clone, used only for the resume question "is this sha on main?".
+export function landQuick({missionsDir, repo, landerRepo = null, dryRun = false}) {
+  const pinRepo = landerRepo || path.join(process.env.HOME || "", "wasm-agent", "checkout");
   const script = path.join(missionsDir, 'land-quick.sh');
   return async ({request}) => {
     if (!fs.existsSync(script)) return {ok: false, cause: 'other', detail: `no ${script}`};
     // THE SHA THAT WAS READ IS THE SHA THAT LANDS. The lander is given a ref pinned at the request's sha,
     // never the branch name: a branch that moved after submit makes the lander refuse (stale_sha), and a
     // branch that moved and somehow still pointed here cannot make it land bytes nobody read.
-    const pin = await pinRequest({repo, request});
+    const pin = await pinRequest({repo: pinRepo, request});
     if (!pin.ok) return {ok: false, cause: 'stale_sha', detail: `could not pin ${request.sha.slice(0, 12)}: ${pin.why}`};
     const started = Date.now();
-    const out = await run('bash', [script, pin.ref, ...(dryRun ? ['--dry-run'] : [])], {timeoutMs: CAPS.rows});
+    // NO LAPTOP INSTALL BY DEFAULT (Victor 27/11): the queue pushes and publishes; an install runs only when
+    // the request itself asks for one. LQ_NO_INSTALL=1 is the lander s own switch for that (22/11).
+    const asksInstall = request.kind === "install" || Number(request.install || 0) === 1;
+    const env = asksInstall ? {} : { LQ_NO_INSTALL: "1" };
+    const out = await run('bash', [script, pin.ref, ...(dryRun ? ['--dry-run'] : [])], {timeoutMs: CAPS.rows, env});
     const text = `${out.stdout}${out.stderr}`;
     const base = {seconds: Math.round((Date.now() - started) / 1000), tail: text.trim().split('\n').slice(-6).join('\n')};
     if (out.timedOut) return {ok: false, cause: 'other', detail: `land-quick.sh hit its ${CAPS.rows / 60000} min cap`, ...base};
-    if (out.code === 0) return {ok: true, cause: null, detail: 'landed', ...base};
+    if (out.code === 0) return {ok: true, cause: null, detail: 'landed', installPending: false, ...base};
+    // PUSHED, THEN SOMETHING FAILED AFTER IT. The landing HAPPENED (main moved) and what is left is an
+    // install that did not run; calling that "rejected" would send a worker back to redo a landing that is
+    // on main, which is what v0 got wrong twice on 27/11. main is the only authority: if the sha is in it,
+    // the verdict is landed with install_pending, and the failure text is carried for whoever runs the
+    // install.
+    const landedAnyway = await mainContains(pinRepo, pin.sha);
+    if (landedAnyway) return {ok: true, cause: null, detail: 'landed; install pending', installPending: true, installError: text.trim().split("\n").slice(-3).join(" "), installAsked: asksInstall, ...base};
     const cause = /CONFLICT \(/.test(text) ? 'conflict'
       : /own tests are red|own rows are red|FAIL /.test(text) ? 'own_rows_red'
       : /REFUSED|refused/.test(text) ? 'policy_refused'

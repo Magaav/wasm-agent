@@ -15,7 +15,7 @@
 // poll) instead of `sleep 20`. A wait that wakes on the database write is the same loop with a smaller floor,
 // and it cannot drift into polling the filesystem for hours.
 //
-// Usage: node scripts/q-runner.mjs [--repo <dir>] [--db <file>] [--missions <dir>] [--once] [--dry-run]
+// Usage: node scripts/q-runner.mjs [--repo <dir>] [--lander-repo <dir>] [--db <file>] [--missions <dir>] [--once] [--dry-run]
 // Exit codes: 0 stopped cleanly (--once: nothing left to do); 1 a step failed in a way that is not a verdict.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -169,7 +169,8 @@ if (invokedDirectly) {
     process.exit(2);
   }
   const db = openJournal(dbFile);
-  const step = landQuick({missionsDir: missions, repo, dryRun: Boolean(flags['dry-run'])});
+  // The lander's tree is where the pin must live (see steps.mjs): its own default unless --lander-repo names it.
+  const step = landQuick({missionsDir: missions, repo, landerRepo: flags['lander-repo'] || null, dryRun: Boolean(flags['dry-run'])});
   // The lander is one program: it merges, regenerates, runs the branch's own rows and pushes last. The queue's
   // three transitions still bracket it, because the phases it reports are what a reader wants to see, and the
   // caps belong to the rows above.
