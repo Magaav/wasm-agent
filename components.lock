@@ -308,9 +308,13 @@ wa-email 44c73d1b1df0f3d62362b5f99d56b183f5793f7f6ec2343aac5180d7e9890db8 565827
 # script warns is NOT the pinned compiler (scripts/build-components.sh:30). The tree built with its OWN
 # pinned toolchain (1.99.1) gives these bytes, so every publish after the read-slow landing was refused
 # `artifact_not_pinned: wa-whatsapp`. No source moved: components-lock-follows-source was already 5/0.
-wa-whatsapp ab97eb8013e25a80b5e8674fe8c576040535c0fe0216fe4017a57b84be017afa 8939566
+# 27/11 whatsapp-media-of-any-size, rebased on main that carries the lock fix: the component writes a
+# downloaded file into the directory the node grants it (`/downloads`, capabilities.dirs) instead of
+# pushing the bytes through the job's progress stream, so media is bounded by what the node KEEPS
+# (64 MB) and not by the queue (1 MiB). Built at the pinned root with the tree's OWN toolchain.
+wa-whatsapp b92137035ff30b79e654047e450b335283fd22e2c9f5922796c65a7ccfcf44b6 8957816
 # SOURCES agent-core 7e841b7234b00801ecee490bc07f5c702b596d68228a5bf8c5298040d7f5fd4a
-# SOURCES codemode 4456e8599617fd853f7013cc1ec8e65623a45613163b76b13d19e280726a41e1
+# SOURCES codemode a88a41d057f15ead5266aec40cbce9cd6079a96b9c697af8bf65fe60c0aa0544
 # SOURCES graph 963d98538e92d3d7b12b7df989369636f8b2a4a7308b0791c19c6aae0de8beb5
 # SOURCES hooks c2e4583da7364bc8963e3e0d79bc2749c6d93412eaabd3229e7b5422eed3a143
 # SOURCES memory 0f970ab90801c636a5ed6d7beeacabe43df5d725c068a08ad7f35517d26d9eeb
@@ -320,4 +324,4 @@ wa-whatsapp ab97eb8013e25a80b5e8674fe8c576040535c0fe0216fe4017a57b84be017afa 893
 # SOURCES stt 646efcd5dc6663bafaa4fbba3645ff6fc0b856934e311eddbc28f1b9ae33e62f
 # SOURCES telemetry-sink a05024a258ef6d406635aad7f2926e88056001d725c280c619c14c12f3b75849
 # SOURCES wa-email 0770be529a0b6ed5b9cab5318dd2ac8fd5b64856c4a87f55da6c33c49c7d35b2
-# SOURCES wa-whatsapp 3ed628395e5d0940f75d5ea592d751b8f4f33130194309afa1637785da2d0762
+# SOURCES wa-whatsapp 436c0aec8ce931250a226263fdb356be8cf3c492c965217447fbdca3c633e6b2
