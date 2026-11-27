@@ -38,7 +38,6 @@ pub const COMPONENT: &str = "selfloop";
 /// How long one seam call may take end to end. A self-loop call is a handful of indexed statements;
 /// a component that has not answered by then is wedged, and the caller's native fallback is better
 /// than a node stuck on its own scheduler.
-const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 /// The component's own memory cap, from `limits.memory_mb` in its manifest when present.
 const DEFAULT_MEMORY_MB: u64 = 64;
 
@@ -65,11 +64,7 @@ impl Config {
             db: sql_host::database_path(),
             wasm: env_path("WA_SELFLOOP_COMPONENT_WASM"),
             manifest: env_path("WA_SELFLOOP_COMPONENT_MANIFEST"),
-            timeout_ms: std::env::var("WA_SELFLOOP_COMPONENT_TIMEOUT_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
+            timeout_ms: wa_component_wait::wait_ms(),
         }
     }
 
@@ -303,7 +298,7 @@ fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String>
         .map_err(|error| format!("component_grant_invalid:{error}"))?
         .with_audit_file(config.components_dir.join(format!("{COMPONENT}.sql-audit.log")));
     let started = Instant::now();
-    let answer = run_once(&installed, scope, op, request, config.timeout_ms)?;
+    let answer = run_once(&installed, scope, op, request, config.timeout_ms).map_err(expiry_counted)?;
     let mut answer = answer;
     answer["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
     Ok(answer)
@@ -311,6 +306,15 @@ fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String>
 
 /// One instance, one call. The store is dropped at the end, which also closes the SQL session and
 /// rolls back a transaction the component left open.
+/// One deadline, counted where it is seen (the question "how often does the window expire?" is answered once,
+/// in `wa-component-wait`, by every host that asks it).
+fn expiry_counted(error: String) -> String {
+    if wa_component_wait::is_expiry(&error) {
+        wa_component_wait::note_expiry();
+    }
+    error
+}
+
 fn run_once(
     installed: &Installed,
     scope: SqlScope,

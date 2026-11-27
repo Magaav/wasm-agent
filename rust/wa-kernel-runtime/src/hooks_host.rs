@@ -35,7 +35,6 @@ pub const COMPONENT: &str = "hooks";
 /// How long one seam call may take end to end. A decide step is one row and a few string operations;
 /// a component that has not answered in this window is wedged, and the native fallback is better than
 /// a turn stuck in a hook engine.
-const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 /// The component's own memory cap, from `limits.memory_mb` in its manifest when present.
 const DEFAULT_MEMORY_MB: u64 = 32;
 
@@ -66,11 +65,7 @@ impl Config {
             components_dir: component_dir(),
             wasm: env_path("WA_HOOKS_COMPONENT_WASM"),
             manifest: env_path("WA_HOOKS_COMPONENT_MANIFEST"),
-            timeout_ms: std::env::var("WA_HOOKS_COMPONENT_TIMEOUT_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
+            timeout_ms: wa_component_wait::wait_ms(),
         }
     }
 
@@ -158,13 +153,22 @@ fn hex_of(bytes: &[u8]) -> String {
 fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String> {
     let installed = component(config).map_err(|error| format!("component_unavailable:{error}"))?;
     let started = Instant::now();
-    let mut answer = run_once(&installed, op, request, config.timeout_ms)?;
+    let mut answer = run_once(&installed, op, request, config.timeout_ms).map_err(expiry_counted)?;
     answer["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
     Ok(answer)
 }
 
 /// One instance, one call. The store is dropped at the end, which is what keeps a decision from
 /// depending on another one having run in the same guest.
+/// One deadline, counted where it is seen (the question "how often does the window expire?" is answered once,
+/// in `wa-component-wait`, by every host that asks it).
+fn expiry_counted(error: String) -> String {
+    if wa_component_wait::is_expiry(&error) {
+        wa_component_wait::note_expiry();
+    }
+    error
+}
+
 fn run_once(installed: &Installed, op: &str, request: &Value, timeout_ms: u64) -> Result<Value, String> {
     let engine = crate::components::engine().map_err(|error| format!("component_engine:{error}"))?;
     let component = compiled(&engine, &installed.sha256, &installed.bytes)

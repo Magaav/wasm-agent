@@ -2155,6 +2155,7 @@ dependencies = [
  "tokio",
  "ureq",
  "wa-cli-views",
+ "wa-component-wait",
  "wa-disk",
  "wa-email-index",
  "wa-email-outbox",
@@ -2193,6 +2194,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "wa-component-wait"
+version = "0.1.0"
 
 [[package]]
 name = "wa-core-pool-bench"
@@ -2372,6 +2377,7 @@ dependencies = [
  "tungstenite",
  "ureq",
  "wa-bus",
+ "wa-component-wait",
  "wa-fabric",
  "wa-features",
  "wa-governance",

@@ -13,6 +13,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+# The one number for "how long may a component call wait" (ARCHITECTURE.md law 17): this component clamped its caller
+# at its own MAX_TIMEOUT_MS = 60 000, the same 60 s the shared budget names.
+wa-component-wait = { path = "../../wa-component-wait" }
 # Bindings for `wa:hooks` (exported), from the world in `wit/hooks`.
 wit-bindgen = "0.63"
 # One dependency, and the reason it is here: the protocol's own two documents are JSON — the payload

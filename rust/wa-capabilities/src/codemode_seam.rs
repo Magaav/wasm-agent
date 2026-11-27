@@ -40,10 +40,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// The installed name this seam is served from (`<components>/codemode.wasm`).
 pub const COMPONENT: &str = "codemode";
-/// How long one seam call may take end to end. The *script's* deadline is the sandbox's own
-/// (`timeout_ms`, 30 s by default); this one only bounds a component that has stopped answering, so a
-/// single `deliver` that runs the guest for the rest of its fuel is not cut short.
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+// How long one seam call may take end to end is NOT decided here: `rust/wa-component-wait` owns it (ARCHITECTURE.md
+// law 17). This seam used to answer 120 000 while the five kernel hosts answered 2 000 for the same question.
 /// The component's own memory cap, from `limits.memory_mb` in its manifest when present.
 const DEFAULT_MEMORY_MB: u64 = 64;
 const TICK: Duration = Duration::from_millis(10);
@@ -93,11 +91,7 @@ impl Config {
             components_dir: wa_host_support::paths::component_dir(),
             wasm: env_path("WA_CODEMODE_COMPONENT_WASM"),
             manifest: env_path("WA_CODEMODE_COMPONENT_MANIFEST"),
-            timeout_ms: std::env::var("WA_CODEMODE_COMPONENT_TIMEOUT_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
+            timeout_ms: wa_component_wait::wait_ms(),
             sandbox: if stub { Sandbox::Stub } else { Sandbox::Kernel },
         }
     }

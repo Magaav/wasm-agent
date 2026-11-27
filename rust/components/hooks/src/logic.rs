@@ -24,8 +24,11 @@ use crate::wa::hooks::types::{
 use serde_json::{Map, Value};
 
 pub const VERSION: u32 = 1;
+/// How long a hook COMMAND may run when the caller names no timeout - a subprocess on this machine, not a
+/// component call, so it is kept here with its reason (docs/missions/reports/seam-inventory.md, KEEP list).
 pub const DEFAULT_TIMEOUT_MS: f64 = 5000.0;
-pub const MAX_TIMEOUT_MS: f64 = 60000.0;
+/// The clamp on what a caller may ask for: the shared component wait, from its one owner (`rust/wa-component-wait`).
+pub const MAX_TIMEOUT_MS: f64 = wa_component_wait::DEFAULT_WAIT_MS as f64;
 pub const MAX_STDOUT_BYTES: usize = 8192;
 pub const MAX_STDERR_BYTES: usize = 2048;
 pub const MAX_CONTEXT_BYTES: usize = 4000;

@@ -34,7 +34,6 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 pub const COMPONENT: &str = "mesh";
 /// How long one seam call may take end to end. A decision is a hash and a signature check over a
 /// document of a few kilobytes; a component that has not answered by then is wedged.
-const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 /// The component's own memory cap, from `limits.memory_mb` in its manifest when present.
 const DEFAULT_MEMORY_MB: u64 = 32;
 /// One engine tick is this long (`components::engine`'s ticker), so a deadline is counted in ticks.
@@ -85,11 +84,7 @@ impl Config {
             components_dir: component_dir(),
             wasm: env_path("WA_MESH_COMPONENT_WASM"),
             manifest: env_path("WA_MESH_COMPONENT_MANIFEST"),
-            timeout_ms: std::env::var("WA_MESH_COMPONENT_TIMEOUT_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
+            timeout_ms: wa_component_wait::wait_ms(),
             instance: match std::env::var("WA_MESH_COMPONENT_INSTANCE").as_deref().map(str::trim) {
                 Ok("call") => Instance::PerCall,
                 _ => Instance::Thread,
@@ -207,7 +202,7 @@ fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String>
         Instance::Thread => held(&installed, config, op, request),
         Instance::PerCall => {
             let engine = crate::components::engine().map_err(|error| format!("component_engine:{error}"))?;
-            let mut served = fresh(&engine, &installed, config.timeout_ms)?;
+            let mut served = fresh(&engine, &installed, config.timeout_ms).map_err(expiry_counted)?;
             invoke(&mut served, op, request)
         }
     }
@@ -525,4 +520,13 @@ pub extern "C-unwind" fn capability(l: *mut wa_host_support::lua::LuaState) -> s
 /// The deadline a pooled call re-arms, exposed for the benchmark's warm-up to read.
 pub fn timeout() -> Duration {
     Duration::from_millis(Config::from_env().timeout_ms)
+}
+
+/// One deadline, counted where it is seen (the question "how often does the window expire?" is answered once,
+/// in `wa-component-wait`, by every host that asks it).
+fn expiry_counted(error: String) -> String {
+    if wa_component_wait::is_expiry(&error) {
+        wa_component_wait::note_expiry();
+    }
+    error
 }
