@@ -45,11 +45,23 @@ impl HasData for Job {
 /// The store data this world is bound against.
 pub struct Host {
     pub table: ResourceTable,
+    pub wasi: wasmtime_wasi::WasiCtx,
 }
 
 impl Host {
     pub fn new() -> Host {
-        Host { table: ResourceTable::new() }
+        Host {
+            table: ResourceTable::new(),
+            wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
+        }
+    }
+}
+
+/// A `wasm32-wasip2` guest imports `wasi:cli` and `wasi:io/poll` whether it uses them or not, so the store carries
+/// a WASI context; without it the linker has nothing to grant those imports from.
+impl wasmtime_wasi::WasiView for Host {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
     }
 }
 
@@ -58,6 +70,8 @@ impl HasData for Host {
 }
 
 impl wa::process::child::Host for Host {}
+
+impl wa::process::types::Host for Host {}
 
 impl wa::process::child::HostProcess for Host {
     fn drop(&mut self, _rep: Resource<Job>) -> wasmtime::Result<()> {
@@ -292,6 +306,62 @@ mod rows {
                 "a test fixture must never be in components.lock: {line}"
             );
         }
+    }
+
+
+    /// ROW: a component importing `wa:process/child` LINKS and instantiates when the host is granted - the other
+    /// half of `a_component_is_refused_without_its_grant`, measured on the real fixture crate.
+    ///
+    /// This store is built with `component-model-async`, so `Linker::instantiate` is refused and the async call is
+    /// driven by `block_on` below; a `wasm32-wasip2` guest also imports `wasi:cli`/`wasi:io/poll` implicitly, so WASI
+    /// is granted first.
+    #[test]
+    fn a_granted_component_links_against_this_host() {
+        fn block_on<F: std::future::Future>(future: F) -> F::Output {
+            struct Noop;
+            impl Wake for Noop {
+                fn wake(self: Arc<Self>) {}
+            }
+            let waker = Waker::from(Arc::new(Noop));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(future);
+            loop {
+                match future.as_mut().poll(&mut cx) {
+                    Poll::Ready(value) => return value,
+                    Poll::Pending => std::thread::yield_now(),
+                }
+            }
+        }
+
+        let fixture = std::path::Path::new("../components/test-process-child");
+        assert!(fixture.is_dir(), "the fixture crate must exist");
+
+        let target = std::env::temp_dir().join("wa-fixture-target");
+        let built = std::process::Command::new("cargo")
+            .current_dir(fixture)
+            .env("CARGO_TARGET_DIR", &target)
+            .args(["build", "--offline", "--target", "wasm32-wasip2", "--release"])
+            .output()
+            .expect("cargo must run");
+        assert!(
+            built.status.success(),
+            "the fixture must build: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+
+        let artifact = target.join("wasm32-wasip2/release/test_process_child.wasm");
+        let engine = wasmtime::Engine::default();
+        let component = wasmtime::component::Component::from_file(&engine, &artifact)
+            .expect("the fixture must load as a component");
+
+        let mut linker = wasmtime::component::Linker::<Host>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("WASI must link");
+        ProcessClient::add_to_linker::<Host, Host>(&mut linker, |host: &mut Host| host)
+            .expect("the host must be grantable");
+        let mut store = wasmtime::Store::new(&engine, Host::new());
+
+        let instance = block_on(linker.instantiate_async(&mut store, &component));
+        instance.unwrap_or_else(|error| panic!("a GRANTED component must instantiate: {error:?}"));
     }
 
     /// ROW: an argument with a space or a quote reaches the program as ONE argument - asserted by running a real
