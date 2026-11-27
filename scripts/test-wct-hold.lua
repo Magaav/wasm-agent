@@ -176,4 +176,30 @@ print('ROW7 record_bytes='..#record7)
 
 
 
+
+-- ROW 8: a REMOTE job costs one result (step 2 - the complaint was ten polls for one remote test run behind the
+-- 60 s relay hold). The peer is this node itself (`nodes.lua:1548`: a `remote` call naming the local node
+-- dispatches in process), so the executor and the hold are proved with no mesh. What this row does NOT prove is
+-- the WIRE (the signed round trip, the relay hold) - that belongs in scripts/test-peer-sync.cjs.
+--
+-- The shape is `capability:'bash'`, because that is what the existing remote executor serves: it adopts the
+-- peer's operation (`state == "pending"` -> `{op, node}`) and routes every later wait back to the machine the
+-- work is on. My first attempt added a second executor for `capability:'operation'` and it was dead code - the
+-- existing one is bound after mine and `applies` only to bash, which is how the probe at M.invoke found it.
+local nodeslib8=dofile('lua/core/nodes.lua')
+local self8=nil
+local ok8,list8=pcall(nodeslib8.list)
+if ok8 and type(list8)=='table' then for _,n in ipairs(list8) do if type(n)=='table' and n.local_node then self8=n.name or n.node_id end end end
+if self8 then
+  local r8,secs8=run("const h = await tools.remote({node:'"..self8.."', capability:'bash', command:'sleep 3; echo wct-peer-done', wait_s: 0}); return h;", 'remote')
+  check(secs8>=2.5,'row 8: the peer job did not hold ('..string.format('%.2f',secs8)..'s for a 3 s job)')
+  local text8=''
+  local evidence=type(r8)=='table' and type(r8.calls)=='table' and type(r8.calls[1])=='table' and r8.calls[1].evidence or nil
+  if type(evidence)=='table' and type(evidence.path)=='string' then text8=tostring(host.read_file(evidence.path) or '') end
+  check(text8:find('wct%-peer%-done')~=nil,'row 8: the peer job answer did not carry its output')
+  print('ROW8 secs='..string.format('%.2f',secs8)..' bytes='..#text8)
+else
+  print('ROW8 skipped: this node does not list itself')
+end
+
 print('wct-hold: '..checks..' checks passed')

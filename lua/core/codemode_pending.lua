@@ -545,59 +545,6 @@ do
     end,
   }
 end
--- A REMOTE JOB IS ONE RESULT (step 2, the original complaint: ten polls for one remote test run behind the
--- 60 s relay hold). A peer's own operation is the same kind of work as a local one - it has an id, a
--- supervisor, a durable record and byte cursors - so it is the same executor, one hop out: every poll,
--- progress and settle goes through the `remote` capability instead of the local `operation` tool, and
--- nothing else changes. Measured before writing (remote to this node's own name, `operation start`): the peer
--- answers the SAME flat receipt and the same `wait`/`read` rows, so the local logic is reused rather than
--- re-derived against a wrapper that turned out not to exist.
---
--- `applies` is deliberately narrow: only a peer OPERATION start/await is a job. A peer read/ls/grep answers at
--- once, and a handle for it would be a promise this node cannot keep.
-local function remote_node_dispatch(dispatch, node)
-  return function(name, params, raw)
-    if name ~= "operation" then return dispatch(name, params, raw) end
-    local payload = { node = node, capability = "operation" }
-    for key, value in pairs(type(params) == "table" and params or {}) do payload[key] = value end
-    return dispatch("remote", payload, raw)
-  end
-end
-
-M.EXECUTORS["remote"] = {
-  kind = "operation",
-  applies = function(params)
-    if type(params) ~= "table" then return false end
-    if tostring(params.capability or "") ~= "operation" then return false end
-    local action = tostring(params.action or "")
-    return action == "start" or action == "await"
-  end,
-  start = function(dispatch, opts, params, raw)
-    local node = tostring(params.node or "")
-    if node == "" then return { result = { error = "node_required" } } end
-    if params.action == "start" then
-      local ok, result = pcall(dispatch, "remote", params, raw)
-      if not ok then return { result = { error = tostring(result) } } end
-      if type(result) == "table" and type(result.operation_id) == "string" then
-        return { op = result.operation_id, node = node, register = true, result = result }
-      end
-      return { result = result }
-    end
-    local id = tostring(params.id or "")
-    if id == "" then return { result = { error = "id_required" } } end
-    return { op = id, node = node, attach = true }
-  end,
-  poll = function(dispatch, opts, record, ms)
-    return operation_poll(remote_node_dispatch(dispatch, record.node), opts, record, ms)
-  end,
-  progress = function(dispatch, opts, record, state)
-    return operation_progress(remote_node_dispatch(dispatch, record.node), opts, record, state)
-  end,
-  settle = function(dispatch, opts, record, state)
-    return operation_result(remote_node_dispatch(dispatch, record.node), record.op, state)
-  end,
-}
-
 for _, name in ipairs({ "bash", "operation" }) do
   M.EXECUTORS[name].poll = operation_poll
   M.EXECUTORS[name].progress = operation_progress
