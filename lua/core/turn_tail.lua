@@ -59,14 +59,16 @@ end
 -- cancel is in-process memory, so the only door to a run owned by a SERVED node is that node's own route:
 -- `POST /runs` with an `action` body (`serve.rs:2931`, dispatched at `:2453`), authenticated with the
 -- session credential the window already sends (`X-WA-Session`, `ui/app.js:230-233`). The base is the
--- node's documented port: `WASM_AGENT_PORT`, 8799 by default (`docs/INSTANCES.md:18`, `--port`).
+-- node's documented port: 8799 by default (`docs/INSTANCES.md:18`, `--port`), passed in by a caller that
+-- knows better.
 -- Literal loopback only - `docs/BINDING.md:24` permits HTTP exactly there.
 local DEFAULT_PORT = 8799
 
--- The URL the request goes to, so a row can pin it and a reader can see the contract in one line.
+-- The URL the request goes to, so a row can pin it and a reader can see the contract in one line. The port is
+-- the documented default unless a caller names one: nothing here reads the environment - a node on another
+-- port passes it in.
 function M.cancel_url(port)
-  local chosen = tonumber(port) or tonumber(host.getenv("WASM_AGENT_PORT") or "") or DEFAULT_PORT
-  return string.format("http://127.0.0.1:%d/runs", chosen)
+  return string.format("http://127.0.0.1:%d/runs", tonumber(port) or DEFAULT_PORT)
 end
 
 -- Ask the node that owns `run_id` to stop it. The answer is `{ok=true, ...}` when the request was

@@ -163,7 +163,7 @@ check(not off_ok,'the operator off-switch still fails the turn')
 check(off_calls==3,'the stall pause survives the response-replay off-switch: '..tostring(off_calls))
 
 -- ------------------------------------------------------------------ both switches off = fail fast
-overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS='1'
+provider.STALLED_ATTEMPTS=1
 local fast=session('provider-stall-off-both')
 local fast_bot=agentlib.new(fast,function() end,'master','master','')
 local fast_calls=0
@@ -173,7 +173,7 @@ check(not fast_ok,'with both switches off the stall fails fast')
 -- Two, not one: the retry loop asks once, and the run's own re-drive of a failed step asks once more -
 -- landed behaviour this change does not own, which is why the number is pinned exactly instead of assumed.
 check(fast_calls==2,'and the retry loop itself asks once (plus the re-drive): '..tostring(fast_calls))
-overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS=nil
+provider.STALLED_ATTEMPTS=2
 
 host.sleep=real_sleep
 print(string.format('ok provider-stall-replay: %d checks',checks))

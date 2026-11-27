@@ -1073,18 +1073,25 @@ end
 -- (agent.lua's transient loop takes this class), so the turn id, its step count, its clock and its
 -- deltas continue, and the person reads one pause instead of a new prompt row.
 --
--- The budget is the operator's and it is stated: the default is the original request plus one
+-- The budget is stated here and nowhere else: the default is the original request plus one
 -- pause-retry; 1 turns the pause off explicitly, and anything below 1 or above 4 is clamped rather than
 -- trusted (a stall with "no retry" must be said on purpose).
 M.STALLED_ATTEMPTS = 2
 
-function M.stalled_attempts()
-  local value = tonumber(host.getenv("WASM_AGENT_PROVIDER_STALL_ATTEMPTS") or "")
-  if value == nil then return M.STALLED_ATTEMPTS end
-  local n = math.floor(value)
+-- The clamp, as a pure function of a value: no environment read in product code, ever - a budget that can
+-- be changed by whoever starts the process is not a budget anyone can reason about. A row hands this a
+-- number directly, which is how the bounds are pinned.
+function M.clamped_stalled_attempts(value)
+  local n = tonumber(value)
+  if n == nil then return M.STALLED_ATTEMPTS end
+  n = math.floor(n)
   if n < 1 then return 1 end
   if n > 4 then return 4 end
   return n
+end
+
+function M.stalled_attempts()
+  return M.STALLED_ATTEMPTS
 end
 
 -- The pause before the next attempt: 2 s, 4 s, 8 s ... capped at 30 s and jittered, so two nodes that

@@ -24,7 +24,7 @@ local native_getenv = host.getenv
 local overrides = { WASM_AGENT_LLM_API_KEY = 'test-only', WASM_AGENT_PROVIDER = 'opencode-go',
   WASM_AGENT_LLM_MODEL = 'deepseek-v4.1-flash', WASM_AGENT_PI_MODELS_STORE = 'missing-stall-turn',
   WASM_AGENT_CONTEXT_BUDGET = '0', WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS = '0' }
-local cleared = { WASM_AGENT_PROVIDER_RESPONSE_RETRIES = true, WASM_AGENT_PROVIDER_STALL_ATTEMPTS = true }
+local cleared = { WASM_AGENT_PROVIDER_RESPONSE_RETRIES = true }
 host.getenv = function(key)
   if overrides[key] ~= nil then return overrides[key] end
   if cleared[key] then return nil end
@@ -114,13 +114,14 @@ end
 -- Measured while writing this row: counting provider asks or provider_retry ROWS is not this change's
 -- ground - the identical-repeat ceiling and the run's own re-drive call the provider too and write rows
 -- of the same kind. So the control pins the two things the change actually introduces.
-overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS = '1'
+-- The budget is a constant the module carries, so a row hands it DATA - it used to be set through the
+-- environment, which is the override product code may not have.
+local was_attempts = provider.STALLED_ATTEMPTS
+provider.STALLED_ATTEMPTS = 1
 check(provider.stalled_attempts() == 1, 'the budget is read by name')
-overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS = '0'
-check(provider.stalled_attempts() == 1, 'zero is clamped up to one: a stall is never "no retry" by accident')
-overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS = '9'
-check(provider.stalled_attempts() == 4, 'and above four it is clamped down')
-overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS = nil
+check(provider.clamped_stalled_attempts(0) == 1, 'zero is clamped up to one: a stall is never "no retry" by accident')
+check(provider.clamped_stalled_attempts(9) == 4, 'and above four it is clamped down')
+provider.STALLED_ATTEMPTS = was_attempts
 check(provider.stalled_attempts() == provider.STALLED_ATTEMPTS, 'the default is stated beside it: ' .. tostring(provider.STALLED_ATTEMPTS))
 check(provider.stalled_backoff_ms(1) >= 1500 and provider.stalled_backoff_ms(1) <= 2500,
   'the first pause is 2 s, jittered (got ' .. tostring(provider.stalled_backoff_ms(1)) .. ' ms)')

@@ -33,16 +33,13 @@ host.http = function(method, url, headers, body)
 end
 
 -- ---- the documented default port ---------------------------------------------------------
-env.WASM_AGENT_PORT = nil
 check(turn_tail.cancel_url() == 'http://127.0.0.1:8799/runs', 'no port named: the documented 8799: ' .. turn_tail.cancel_url())
-env.WASM_AGENT_PORT = '9123'
-check(turn_tail.cancel_url() == 'http://127.0.0.1:9123/runs', 'the node own port is honoured: ' .. turn_tail.cancel_url())
-check(turn_tail.cancel_url(9500) == 'http://127.0.0.1:9500/runs', 'and an explicit one wins')
+check(turn_tail.cancel_url('9123') == 'http://127.0.0.1:9123/runs', 'a node on its own port passes it in: ' .. turn_tail.cancel_url('9123'))
+check(turn_tail.cancel_url(9500) == 'http://127.0.0.1:9500/runs', 'and a number too')
 
 -- ---- the request the node receives -------------------------------------------------------
-env.WASM_AGENT_PORT = '9123'
 seen = nil
-local answer = turn_tail.cancel('session-abc', 7, { owner = 'master' })
+local answer = turn_tail.cancel('session-abc', 7, { owner = 'master', port = 9123 })
 check(seen ~= nil, 'one request was made')
 check(seen and seen.method == 'POST', 'by POST')
 check(seen and seen.url == 'http://127.0.0.1:9123/runs', 'to /runs on the node port')
