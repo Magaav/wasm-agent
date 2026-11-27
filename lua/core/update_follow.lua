@@ -254,9 +254,16 @@ function M.state(options)
         body = "installed " .. (commit ~= "" and commit:sub(1, 12) or "(the installer named no commit)"),
         detail = detail, commit = commit, sources = { p.deploy_result } })
     end
+    -- The deploy's own refused(...) sentence rides along when the record's detail does not already carry it: the
+    -- operator reads one line, and that line has to be the installer's reason rather than a summary of it.
+    local refused = M.refused_line(o, p)
+    local why = detail
+    if why == "" then why = refused end
+    if why == "" then why = "the installer exited without a reason" end
+    if refused ~= "" and not why:find(refused, 1, true) then why = why .. " - " .. refused end
     return snap({ key = "failed", terminal = true, ok = false, clock_from = origin,
-      body = "failed: " .. (detail ~= "" and detail or "the installer exited without a reason"),
-      detail = detail, commit = commit, sources = { p.deploy_result } })
+      body = "failed: " .. why,
+      detail = why, refused = refused, commit = commit, sources = { p.deploy_result } })
   end
 
   -- 2. THE BUILD'S OWN RECORD. A build that ended writes state=installed|failed with its phase as the
@@ -269,7 +276,8 @@ function M.state(options)
     if state == "failed" then
       return snap({ key = "failed", terminal = true, ok = false,
         clock_from = tonumber(build.started_at) or origin,
-        body = "failed: " .. (phase ~= "" and phase or "the build ended without a reason"),
+        body = "failed: " .. (phase ~= "" and phase or "the build ended without a reason")
+          .. M.refused_join(o, p, phase),
         detail = phase, commit = trim(build.commit), sources = { p.build } })
     end
     if state == "installed" and same_commit(build.commit, o.target) then
@@ -427,6 +435,32 @@ function M.build_reason(options, paths_in)
   local line = last:match("deploy: no published binary for this commit[^\r\n]*")
   if not line then return "" end
   return trim(line:gsub("^deploy: ", ""):gsub("%s*%b()%s*$", ""))
+end
+
+-- THE INSTALLER LAST VERDICT, from its own log (work retry #3, 27/11: the status line said "no installer block ...
+-- names 82f57859" while deploy.out held `refused(canonical runtime binding ...)` - the reason existed and the surface
+-- did not carry it). Empty when the log holds none, so a caller never shows a sentence the deploy did not say.
+function M.refused_line(options, paths_in)
+  local p = paths_in or M.paths(options)
+  local text = read(p.deploy_out)
+  if not text then return "" end
+  local last = text:match("%-%-%- deploy [^\r\n]*%-%-%-(.*)$") or text
+  local found = nil
+  for line in last:gmatch("[^\r\n]+") do
+    local s = trim(line)
+    local hit = s:match("refused%([^%)]*%)[^\r\n]*")
+    if hit then found = hit end
+  end
+  return found and trim(found) or ""
+end
+
+-- The deploy own refused(...) sentence, or "" - joined onto a failure line that came from another record (the build
+-- status, the queue) so the one line a person reads still carries the installer reason (work retry #3, 27/11).
+function M.refused_join(options, paths_in, existing)
+  local refused = M.refused_line(options, paths_in)
+  if refused == "" then return "" end
+  if existing and existing:find(refused, 1, true) then return "" end
+  return " - " .. refused
 end
 
 function M.declared(options, paths_in)
