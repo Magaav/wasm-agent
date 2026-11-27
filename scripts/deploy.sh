@@ -1215,7 +1215,11 @@ BINARY_LINES
       # refuse a good binary, and the prove gate below executes it anyway - a file that cannot run fails there.
       NEW_TERM="$BINARY_STAGE/wa-term"
       [ -f "$NEW_TERM" ] || NEW_TERM="$BINARY_STAGE/wa-term.exe"
-      [ -f "$NEW" ] && [ -f "$NEW_SENTINEL" ] && [ -f "$NEW_TERM" ] || fail "refused(prebuilt_binary_incomplete): the staged set is missing $NEW, $NEW_SENTINEL or $NEW_TERM. The program that draws the terminal ships WITH the node - both, or neither - so nothing was installed."
+      # THE SUPERVISOR SHIPS WITH wa TOO (P0, 27/11): since 03579b19 `wa` runs it for every bash/operations call, so a
+      # set staged without it installs a node that answers nothing. Same refusal shape as wa-term above.
+      NEW_SUPERVISOR="$BINARY_STAGE/wa-operations-supervisor"
+      [ -f "$NEW_SUPERVISOR" ] || NEW_SUPERVISOR="$BINARY_STAGE/wa-operations-supervisor.exe"
+      [ -f "$NEW" ] && [ -f "$NEW_SENTINEL" ] && [ -f "$NEW_TERM" ] && [ -f "$NEW_SUPERVISOR" ] || fail "refused(prebuilt_binary_incomplete): the staged set is missing $NEW, $NEW_SENTINEL or $NEW_TERM. The program that draws the terminal ships WITH the node - both, or neither - so nothing was installed."
       SENTINEL_NAME="wa-sentinel"
       if [ -n "${WA_DEPLOY_BINARY_SOURCE:-}" ]; then
         BINARY_PROVENANCE="prebuilt-source"
@@ -1579,8 +1583,13 @@ esac
 # of this work was reverted for exactly this: the installed `wa` had no `wa-term` beside it.)
 NEW_TERM="$DEPLOY_BUILD_TARGET/release/wa-term.exe"
 [ -f "$NEW_TERM" ] || NEW_TERM="$DEPLOY_BUILD_TARGET/release/wa-term"
+# AND THE SUPERVISOR (P0, 27/11): `wa` runs `wa-operations-supervisor` for every bash/operations call; a deploy that
+# builds one and not the other installs a node whose commands all refuse (operations_supervisor_missing).
+NEW_SUPERVISOR="$DEPLOY_BUILD_TARGET/release/wa-operations-supervisor.exe"
+[ -f "$NEW_SUPERVISOR" ] || NEW_SUPERVISOR="$DEPLOY_BUILD_TARGET/release/wa-operations-supervisor"
 [ -x "$NEW_TERM" ] || fail "refused(term_program_missing): no built program at $NEW_TERM. The workspace builds it (cargo build --release --manifest-path rust/Cargo.toml produces wa-term beside wa) and the node cannot draw a prompt without it; nothing was built into the install and nothing was installed."
 WA_UPGRADE_TERM="$NEW_TERM"; export WA_UPGRADE_TERM
+WA_UPGRADE_SUPERVISOR="$NEW_SUPERVISOR"; export WA_UPGRADE_SUPERVISOR
 fi
 
 # 5. Prove it answers before it goes near the running node. A build that cannot start must not replace one

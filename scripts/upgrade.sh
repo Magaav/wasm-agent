@@ -173,6 +173,16 @@ if [ -z "$NEW_TERM" ]; then
   esac
 fi
 [ -f "$NEW_TERM" ] || { say "refused(term_program_missing): $NEW_TERM is not beside $NEW. The program that draws the terminal ships with the node and is installed with it - both, or neither - so nothing was installed. Build it (cargo build --release -p wa-term) beside the node binary, or name it with WA_UPGRADE_TERM."; exit 2; }
+
+# THE SUPERVISOR SHIPS WITH wa (P0, 27/11): `wa` runs it for every bash/operations call.
+NEW_SUPERVISOR="${WA_UPGRADE_SUPERVISOR:-}"
+if [ -z "$NEW_SUPERVISOR" ]; then
+  case "$NEW" in
+    *.exe) NEW_SUPERVISOR="$(dirname "$NEW")/wa-operations-supervisor.exe" ;;
+    *) NEW_SUPERVISOR="$(dirname "$NEW")/wa-operations-supervisor" ;;
+  esac
+fi
+[ -f "$NEW_SUPERVISOR" ] || { say "refused(operations_supervisor_missing): $NEW_SUPERVISOR is not beside $NEW. Since 03579b19 every bash/operations call runs it, so a node installed without it answers nothing; nothing was installed"; exit 1; }
 [ -x "$INSTALLED" ] || { say "nothing installed at $INSTALLED - this upgrades a running node, it does not create one"; exit 2; }
 
 # SIGNED BEFORE ANY SWAP. These bytes are about to replace the running node, so they must be the bytes a
