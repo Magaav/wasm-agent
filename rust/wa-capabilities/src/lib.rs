@@ -43,6 +43,7 @@ pub mod host;
 /// terminal program, over `wa-term-proto`: the wire is the only path.
 pub mod screen;
 pub mod http_transport;
+pub mod limits;
 pub mod operations;
 pub mod plugins;
 pub mod quickjs;
