@@ -63,7 +63,7 @@ pub struct Config {
 impl Config {
     /// The installed set and the default deadline: what the node uses.
     pub fn installed() -> Config {
-        Config { components_dir: component_dir(), timeout_ms: wa_component_wait::wait_ms() }
+        Config { components_dir: component_dir(), timeout_ms: wa_component_wait::DEFAULT_WAIT_MS }
     }
 
     pub fn with_components(mut self, dir: impl Into<std::path::PathBuf>) -> Config {

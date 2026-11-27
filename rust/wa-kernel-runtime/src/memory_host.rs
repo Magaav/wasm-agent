@@ -107,7 +107,7 @@ pub fn measured_deadline_ms(op: &str) -> u64 {
         // An operation this table has never measured takes the node's ONE component wait (rust/wa-component-wait,
         // ARCHITECTURE.md law 17) rather than an invented small number: an unknown op is a bug in the caller, and the
         // deadline is not where it lands.
-        _ => wa_component_wait::wait_ms(),
+        _ => wa_component_wait::DEFAULT_WAIT_MS,
     };
     measured.max(DEADLINE_FLOOR_MS)
 }
@@ -140,7 +140,7 @@ impl Config {
             db: sql_host::database_path(),
             wasm: env_path("WA_MEMORY_COMPONENT_WASM"),
             manifest: env_path("WA_MEMORY_COMPONENT_MANIFEST"),
-            timeout_ms: wa_component_wait::override_ms(),
+            timeout_ms: None,
         }
     }
 

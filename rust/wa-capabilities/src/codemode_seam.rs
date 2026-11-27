@@ -91,7 +91,7 @@ impl Config {
             components_dir: wa_host_support::paths::component_dir(),
             wasm: env_path("WA_CODEMODE_COMPONENT_WASM"),
             manifest: env_path("WA_CODEMODE_COMPONENT_MANIFEST"),
-            timeout_ms: wa_component_wait::wait_ms(),
+            timeout_ms: wa_component_wait::DEFAULT_WAIT_MS,
             sandbox: if stub { Sandbox::Stub } else { Sandbox::Kernel },
         }
     }

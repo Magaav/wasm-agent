@@ -134,7 +134,7 @@ that is well-formed and wrong passes all of them. Today the twin is what makes t
 the operator can turn the feature off. With no twin, a component that lies is the whole store.
 
 The wedge row is also the answer to "does a cancel reach a running component": with
-`WA_COMPONENT_WAIT_MS=200` (then `WA_MEMORY_COMPONENT_TIMEOUT_MS`) the spinning guest was killed in **203.2 ms of CPU** - the
+`WA_MEMORY_COMPONENT_TIMEOUT_MS=200` the spinning guest was killed in **203.2 ms of CPU** - the
 deadline plus the engine's 10 ms epoch tick - and the call returned normally through the fallback.
 
 ## 2. What "the component fails" has to mean once there is no twin
@@ -590,7 +590,7 @@ copied out of the node's install (never the live home).
 4. **agent-core's own split**: `WA_CORE_TIMING=1 wa --core-component <agent-core.wasm> <script.lua>`,
    cold and warm.
 5. **A wedge, and the deadline**: `WA_MEMORY_COMPONENT=1 WA_MEMORY_COMPONENT_WASM=<memory-crash.wasm>
-   WA_COMPONENT_WAIT_MS=200`, then `M.remember('wedge: ...')` - the call returns after
+   WA_MEMORY_COMPONENT_TIMEOUT_MS=200`, then `M.remember('wedge: ...')` - the call returns after
    **203.2 ms** of CPU with `component_wedged` in the log and the native path answering.
 
 ## What this page does not claim

@@ -84,7 +84,7 @@ impl Config {
             components_dir: component_dir(),
             wasm: env_path("WA_MESH_COMPONENT_WASM"),
             manifest: env_path("WA_MESH_COMPONENT_MANIFEST"),
-            timeout_ms: wa_component_wait::wait_ms(),
+            timeout_ms: wa_component_wait::DEFAULT_WAIT_MS,
             instance: match std::env::var("WA_MESH_COMPONENT_INSTANCE").as_deref().map(str::trim) {
                 Ok("call") => Instance::PerCall,
                 _ => Instance::Thread,

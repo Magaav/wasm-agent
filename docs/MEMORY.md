@@ -470,7 +470,7 @@ The single 2 s default it replaces was wrong in both directions: `search_message
 transcript is full of one word measured p99 455 ms, so a 2 s call was only 4 × p99 and a loaded node
 would have pushed a legitimate query to the native fallback, while a `remember` (p99 7 ms) had 300 ×
 more room than it needed. The seam's own cost — instantiate, link, open the scoped connection, cross
-the boundary — is 5-15 ms of each call; the rest is SQLite. `WA_COMPONENT_WAIT_MS` (the one component-wait knob, `rust/wa-component-wait`)
+the boundary — is 5-15 ms of each call; the rest is SQLite. `WA_MEMORY_COMPONENT_TIMEOUT_MS` (that knob is gone: `rust/wa-component-wait` owns the window, and it reads no environment)
 overrides the table for an unusual store; the risk that carries is named in the module, and a deadline
 that fires is not data loss (the native path answers with one log line) but the same query run twice.
 

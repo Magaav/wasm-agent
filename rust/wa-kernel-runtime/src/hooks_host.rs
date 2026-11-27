@@ -65,7 +65,7 @@ impl Config {
             components_dir: component_dir(),
             wasm: env_path("WA_HOOKS_COMPONENT_WASM"),
             manifest: env_path("WA_HOOKS_COMPONENT_MANIFEST"),
-            timeout_ms: wa_component_wait::wait_ms(),
+            timeout_ms: wa_component_wait::DEFAULT_WAIT_MS,
         }
     }
 

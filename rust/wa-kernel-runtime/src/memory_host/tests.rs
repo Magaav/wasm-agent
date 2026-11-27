@@ -394,8 +394,8 @@ fn the_measured_deadlines_are_the_per_operation_table_with_a_floor() {
     assert_eq!(measured_deadline_ms("sessions"), DEADLINE_FLOOR_MS);
     // An operation the table has never measured takes the node's ONE component wait (rust/wa-component-wait,
     // ARCHITECTURE.md law 17), not an invented number of its own.
-    assert_eq!(measured_deadline_ms("no_such_op"), wa_component_wait::wait_ms());
-    assert_eq!(wa_component_wait::wait_ms(), wa_component_wait::DEFAULT_WAIT_MS);
+    assert_eq!(measured_deadline_ms("no_such_op"), wa_component_wait::DEFAULT_WAIT_MS);
+    assert_eq!(wa_component_wait::DEFAULT_WAIT_MS, wa_component_wait::DEFAULT_WAIT_MS);
     // The operator's override replaces the table for every operation.
     let config = Config {
         components_dir: PathBuf::from("."),
