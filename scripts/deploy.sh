@@ -110,8 +110,17 @@ wa_node_path >/dev/null \
 NODE_BIN="$(wa_node_require)" \
   || { printf 'deploy: refused(node_runtime_missing): %s\n' "$(wa_node_refusal)" >&2; exit 2; }
 EXPLICIT_INSTALL="${WA_INSTALL_DIR:-}"
-PORT="${WA_PORT:-8799}"
-CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
+# WHICH NODE THIS DEPLOY TALKS TO (25/11). These two lines used to read `WA_PORT`/`WA_CLIENT_PORT` alone, so a
+# runner that exports the node's own spelling (`WASM_AGENT_PORT` - what rust/wa-sentinel reads and
+# scripts/lib/sentinel-unit.sh writes) had this deploy probing the LIVE 8799 node while it installed a scratch
+# one. `service-target.sh` (sourced above) now holds the one expression, and both spellings are honoured.
+if command -v wa_node_port >/dev/null 2>&1; then
+  PORT="$(wa_node_port)"
+  CLIENT_PORT="$(wa_node_client_port)"
+else
+  PORT="${WA_PORT:-${WASM_AGENT_PORT:-8799}}"
+  CLIENT_PORT="${WA_CLIENT_PORT:-${WASM_AGENT_CLIENT_PORT:-8800}}"
+fi
 if command -v wa_install_target >/dev/null 2>&1; then
   INSTALL_DIR="$(wa_install_target)"
   wa_read_service_claim || true

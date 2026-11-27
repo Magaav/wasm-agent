@@ -202,6 +202,33 @@ lua() { # <mode> [extra env...]
 counts() { lua count | sed -n 's/.*\(sessions=[0-9]* messages=[0-9]* resume_wakes=[0-9]*\).*/\1/p' | tail -1; }
 field() { printf '%s' "$1" | sed -n "s/.*$2=\\([0-9]*\\).*/\\1/p"; }
 
+# WAIT FOR THE RECORD, NOT FOR A SLEEP (Fable 26/11: the gate failed TWICE under load on "the held wakes run once
+# the deploy ends: still 0", and main-health once, and each time the row passed alone).
+#
+# The cause is a race, not a slow machine: this row boots a REAL node at its first step, and that node has its own
+# tick loop. When the deploy ends, EITHER ticker may perform the held wakes - the node's 2-second loop between this
+# shell's steps, or the `lua tick` this row runs - so `dispatched=0` from the row's own tick can be the right answer
+# to the wrong question. The row used to read that single number, once, as the whole claim.
+#
+# So the claim is now read from the ledger it is about, and the row keeps asking until the ledger agrees or its
+# deadline passes. Each round runs the row's own tick first, so a node that is NOT ticking still gets the wakes
+# performed by this row - the assertion cannot pass by waiting for something nobody does. The deadline is wall
+# clock, not a sleep: a loaded machine spends more rounds on the same correct state, and a real regression costs the
+# deadline and then fails with the ledger's own number.
+LAST_TICK=""
+LAST_VALUE=""
+await_zero() { # <lua mode> <field> -> 0 when the ledger says zero, polling with a deadline; 1 at the deadline
+  local mode=$1 fld=$2 deadline=$(( $(date +%s) + ${WA_DEPLOY_WAIT_DEADLINE:-60} )) value
+  while :; do
+    LAST_TICK="$(lua tick)"
+    value="$(field "$(lua "$mode")" "$fld")"
+    LAST_VALUE="${value:-0}"
+    [ "${value:-0}" = "0" ] && return 0
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 0.2
+  done
+}
+
 # A request in the box, and the installer's own marker file: the two states a deploy goes through.
 write_request() {
   mkdir -p "$BOX"
@@ -463,12 +490,24 @@ same "$(field "$tick" dispatched)" "0" "a CLAIMED request holds the wakes too: t
 step "6. the deploy ends: the node performs the held wakes, the resume among them, exactly once"
 marker_down
 clear_request
-tick="$(lua tick)"
-neq "$(field "$tick" dispatched)" "0" "the held wakes run once the deploy ends"
-if [ "$(field "$tick" runs)" = "$(field "$tick" dispatched)" ]; then ok "each dispatch reached the scheduler"; else fail "dispatch and runs disagree: $tick"; fi
+# THE WAKE RUNS ONCE THE DEPLOY ENDS, AND EITHER TICKER MAY BE THE ONE THAT RUNS IT (Fable 26/11). See await_zero
+# above: the claim is about the LEDGER, and the row asks it until it agrees or the deadline passes - each round
+# asking its own tick first, so nothing here passes by waiting for a ticker nobody started.
+if await_zero pending due; then
+  dispatched="$(field "$LAST_TICK" dispatched)"
+  if [ "${dispatched:-0}" != "0" ]; then
+    ok "the held wakes run once the deploy ends (this row's tick dispatched $dispatched; the ledger holds no due wake)"
+  else
+    ok "the held wakes run once the deploy ends (the served node's own tick performed them; this tick dispatched 0 and the ledger holds none due)"
+  fi
+else
+  fail "the held wakes run once the deploy ends: still ${LAST_VALUE:-?} due wake(s) pending after ${WA_DEPLOY_WAIT_DEADLINE:-60}s ($LAST_TICK)"
+fi
+if [ "$(field "$LAST_TICK" runs)" = "$(field "$LAST_TICK" dispatched)" ]; then ok "each dispatch reached the scheduler"; else fail "dispatch and runs disagree: $LAST_TICK"; fi
 tick="$(lua tick)"
 same "$(field "$tick" dispatched)" "0" "and exactly once: a second tick dispatches nothing"
-same "$(field "$(lua count)" resume_wakes)" "0" "the resumed session's wake is settled, not left pending"
+if await_zero count resume_wakes; then ok "the resumed session's wake is settled, not left pending";
+else fail "the resumed session's wake is still pending after ${WA_DEPLOY_WAIT_DEADLINE:-60}s (${LAST_VALUE:-?})"; fi
 
 step "7b. a pause whose RESUME WAS LOST is re-armed and resumed: three session kinds, both endings"
 # THE G BLOCKER (Fable, 23/11 ~22:00Z). MEASURED on this laptop: session 603425eb paused at 19:29:43Z and sat TWO

@@ -112,6 +112,22 @@ if mode == "pause-lost" then
   return
 end
 
+-- THE ONE FACT STEP 6 WAITS FOR (Fable 26/11). "The held wakes run once the deploy ends" is a claim about the
+-- RECORD, and TWO tickers can make it true: this row's own `lua tick`, and the SERVED node's own 2-second loop
+-- (the node the row boots at its first step is a real node with a real tick). MEASURED: under load the node had
+-- already performed the held wakes before the row's tick ran, so that tick answered `dispatched=0` - the right
+-- answer to the wrong question - and the gate went red twice with "still 0". So the row asks the ledger how many
+-- wakes are due NOW and still pending, and keeps asking until that number is 0 or its deadline passes.
+if mode == "pending" then
+  local found = rows([[SELECT count(*) AS n FROM self_wakes WHERE status='pending' AND due_at IS NOT NULL AND due_at<=?]],
+    { os.time() })
+  local due = tonumber(type(found) == "table" and found[1] and found[1].n) or 0
+  local all = rows([[SELECT count(*) AS n FROM self_wakes WHERE status='pending' AND due_at IS NOT NULL]])
+  print(string.format("due=%d pending=%d", due,
+    tonumber(type(all) == "table" and all[1] and all[1].n) or 0))
+  return
+end
+
 if mode == "tick" then
   local runs = 0
   local out = selfloop.tick({ now = os.time(), dispatch = function(row)

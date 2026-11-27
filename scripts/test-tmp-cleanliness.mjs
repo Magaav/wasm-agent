@@ -354,7 +354,18 @@ function watchdogProbe() {
     return;
   }
   const block = source.slice(opened + 1, end + endMark.length);
-  const before = longSleeps();
+  // THE LEAK IS JUDGED INSIDE THE PROBE'S OWN PROCESS GROUP (26/11, main-health on e64ab009).
+  //
+  // MEASURED on this node, reproducing exactly the red main-health reported: the probe compared a MACHINE-WIDE set
+  // of long sleeps before and after its seven-second window, so any stranger that started a `sleep 1800` inside that
+  // window was reported as "the mission runner's watchdog left 1 long sleep(s) behind" - which is what happened here
+  // (pid 4167578, a `setsid sleep 1800` started three seconds into the window, in another session).
+  // `lua/core/mission.lua` has counted its deadline in 5-second steps since 4098c6ca, which is in origin/main before
+  // e64ab009, so the code was already right and the MEASUREMENT was not: a busy node fails a correct row.
+  //
+  // A detached `bash` is its own process-group leader and every process the probe starts inherits that group, so a
+  // sleep the watchdog really left behind is in `probe.pid`'s group and a stranger's is not. The threshold is
+  // unchanged (ten minutes or more), and the witness below keeps the detector able to fail.
   const script = [
     'cli=$$',
     'wa_deadline=${MISSION_TIMEOUT_SECONDS:-21600}',
@@ -367,9 +378,8 @@ function watchdogProbe() {
     // first run, where the node refused the call for leaving a background descendant.
     'sleep 6',
   ].join('\n');
-  spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 60000 });
-  const after = longSleeps();
-  const leaked = [...after].filter(pid => !before.has(pid));
+  const probe = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 60000, detached: true });
+  const leaked = [...longSleepsInGroup(probe.pid || 0)];
   if (leaked.length) {
     fail(`the mission runner's watchdog left ${leaked.length} long sleep(s) behind on its normal exit`,
       'pids ' + leaked.join(', ') + ' - kill $watchdog ends the subshell, never the sleep inside it: count the deadline in short steps (lua/core/mission.lua)');
@@ -379,17 +389,36 @@ function watchdogProbe() {
   pass('the mission runner leaves no long sleep behind when its watchdog is killed the way the runner kills it');
 }
 
-// Every sleep whose argument is 10 minutes or more, by pid: a deadline that outlives its process would be a
-// sleep this long, and a fixture's own short sleep is not a leak.
-function longSleeps() {
-  const ps = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
+// Every sleep of TEN MINUTES OR MORE in ONE PROCESS GROUP, by pid: a deadline that outlives its process would be a
+// sleep this long, a fixture's own short sleep is not a leak, and a sleep started by some other program on this
+// machine is not this row's business (26/11: the machine-wide version of this function reported a stranger's
+// `setsid sleep 1800` as the mission runner's leftover).
+function longSleepsInGroup(pgid) {
   const pids = new Set();
+  if (!pgid) return pids;
+  const ps = spawnSync('ps', ['-eo', 'pid=,pgid=,args='], { encoding: 'utf8' });
   for (const line of String(ps.stdout || '').split('\n')) {
-    const match = /^\s*(\d+)\s+sleep\s+(\d+)\s*$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+sleep\s+(\d+)\s*$/.exec(line);
     if (!match) continue;
-    if (Number(match[2]) >= 600) pids.add(Number(match[1]));
+    if (Number(match[2]) !== Number(pgid)) continue;
+    if (Number(match[3]) >= 600) pids.add(Number(match[1]));
   }
   return pids;
+}
+
+// THE DETECTOR CAN STILL FAIL (rule: a check that cannot fail catches nothing). A group of our own that really
+// does hold a long sleep must be reported by the same function the watchdog probe uses, or the green above would
+// only mean the probe stopped looking.
+function longSleepWitness() {
+  const witness = spawnSync('bash', ['-c', '( sleep 1800 ) & sleep 0.3'], { encoding: 'utf8', timeout: 20000, detached: true });
+  const found = longSleepsInGroup(witness.pid || 0);
+  for (const pid of found) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  if (found.size === 0) {
+    fail('the long-sleep detector found nothing in a group it had just started a 30-minute sleep in',
+      'without this, "the watchdog leaves no long sleep" would pass for a probe that stopped looking');
+    return;
+  }
+  pass(`the leak detector still finds a long sleep in its own process group (${found.size} found, killed)`);
 }
 
 console.log('test-tmp-cleanliness: a row cleans up after itself, never mints under a literal /tmp, and the suite refuses a full machine');
@@ -399,6 +428,7 @@ floorScan();
 ptyRowsScan();
 tmuxKillProbe();
 watchdogProbe();
+longSleepWitness();
 for (const c of checks) console.log(`  ${c.ok ? 'ok  ' : 'FAIL'} - ${c.label}`);
 const failedRows = checks.filter(c => !c.ok).length;
 console.log(`test-tmp-cleanliness: ${failedRows ? 'FAIL' : 'PASS'} (${checks.length} checks${failedRows ? ', ' + failedRows + ' failed' : ''})`);

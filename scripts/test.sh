@@ -577,6 +577,8 @@ gate_run bash scripts/test-cut-builds-own.sh                                # th
 # bytes - refuses a cover on a tree-less node unless that tree equals the target commit's, by name.
 gate_run bash scripts/test-cover-lua.sh                                    # a cover carries another commit Lua: the tree-less door refuses it, by name
 gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
+gate_run bash scripts/test-installer-doors.sh                              # a scratch run reads its OWN unit and its OWN port, never the operator's (Fable 25/11)
+gate_run bash scripts/test-broken-pipe.sh                                  # a reader that walks away (head, a pager) is a quiet 141, never a panic (Fable 25/11)
 
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 # NOTHING A ROW RUNS MAY REACH THE OPERATOR'S INSTALL (25/11, Fable's G condition). A harness of 24/11 replaced
@@ -1584,6 +1586,11 @@ WA_BIN="$BIN" gate_run bash scripts/test-deploy-target.sh
 # "[deploy] installed", a marker gone with nothing installed says "[deploy] the update did not happen", the resume
 # queue is collapsed PER SESSION, and a parked session's rows are left alone.
 GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-release-honest.lua" "$BIN" --db "$DB.deploy-release-honest" | grep 'deploy release ok'
+# THE RULE EVERY LEDGER-WRITING ROW PASSES FIRST, AND THE ROOT A RUNNER GIVES IT (factory-small-items, 25/11): the
+# allow-list admits a home under GATE_ROOT/TMPDIR or the row contract's WA_ROW_SCRATCH_ROOT, refuses one under
+# neither by name, and still refuses a home that carries the live node's own markers. Measured: the row runner gives
+# HOME=<root>/home with TMPDIR=<root>/tmp, and the old guard refused every Lua row there (row 20261125T223107Z-6213).
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-home-guard.lua" "$BIN" --db "$DB.home-guard" | grep 'home guard ok'
 # ONE KEPT TURN PER SESSION, AND A DIFFERENT MESSAGE IS APPENDED (r8c 2): the real writer into the real ledger, the
 # bound on what a kept prompt holds, and the line that says the bound cut.
 GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-kept-message-one.lua" "$BIN" --db "$DB.kept-message-one" | grep 'kept-message-one ok'
