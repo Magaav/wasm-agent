@@ -271,6 +271,28 @@ asks for, and repairing it is its own item. What IS proved for item 2 on this br
 itself, in the capture-based row C1 added to `scripts/test-cli-view.lua`: the same rows drawn as history
 say Commentary, drawn as a turn do not, and the answer reaches the reader at the width the view is given.
 
+## 13. Rows re-run around item B (the retry-loop change), all green
+
+Item B changes the loop every provider failure goes through, so the rows that pin it were run on this
+tree's Lua (scratch home, stubbed provider, no network):
+
+| row | result |
+|---|---|
+| `test-provider-stall.lua` / `-marker` / `-replay` | 17 / 6 / **35** (two exact counts changed on purpose, named in its diff) |
+| `test-no-silent-stops.lua` | 154 |
+| `test-cancel-not-retry.lua` | 15 |
+| `test-empty-reply.lua` | 51 |
+| `test-run-lease-order.lua` | 6 |
+| `test-answer-not-fake-tool-result.lua` | 31 |
+| `test-operation-survives-turn.lua` | 16 |
+| `test-provider-rate-limit-recovery.lua` | 46 |
+| `test-retry-context.lua` | 7 |
+| this branch's own rows: `stall-pauses-the-turn`, `stall-line`, `turn-time-split`, `turn-tail`, `cli-view` | 13, 13, 12, 10, 569 |
+
+No adjacent row regressed. The one row whose numbers changed states the new numbers, the reason, and the
+arithmetic (`1 try + 2 replays + the pause = 5`; both switches off = `2`, the loop once plus the run's own
+re-drive) - it was tightened, not loosened.
+
 ## 10. Every claim, and the check behind it
 
 | claim | checked by |
