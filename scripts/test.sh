@@ -2576,6 +2576,10 @@ WA_BIN="$BIN" bash scripts/test-serve-cwd-boot.sh > "$DB.cwd-boot.log" 2>&1 || {
   echo "the serve-cwd boot fixture failed; its output:"; tail -20 "$DB.cwd-boot.log"; exit 1; }
 # A skip is named, never silently a pass: the row needs python3 and curl.
 grep -E "^(serve cwd boot ok|SKIP test-serve-cwd-boot)" "$DB.cwd-boot.log"
+# Slice 1 of ready-serve-own-program.md: the door's static tier answered by its own program
+# (`wa serve-static`) - two real processes, identical bytes, identical refusal, and a named refusal once the
+# program is gone.
+gate_run node scripts/test-serve-static.cjs "$BIN"
 ISOLATION_PORT=$(node scripts/free-test-port-block.cjs)
 WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolation.log" 2>&1 || {
   echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }

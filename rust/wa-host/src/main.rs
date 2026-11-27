@@ -194,7 +194,8 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn db_path(args: &[String]) -> String {
     flag(args, "--db").unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        // The node home by the product rule, never by the environment: the host reads the same file.
+        let home = wa_host_support::paths::resolve_home();
         format!("{home}/.wasm-agent/memory.db")
     })
 }
@@ -764,6 +765,25 @@ fn main() {
         return;
     }
 
+    // THE DOOR’S STATIC TIER (slice 1 of ready-serve-own-program.md): this binary in a second mode, owning
+    // the UI file bytes the door answers before admission. Its own process, its own files.
+    if command == "serve-static" {
+        if lua_args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h") {
+            println!("usage: wa serve-static [--root <ui dir>] [--port 8792] [--rendezvous <file>]\n  serve the web UI files as their own program (blocks until stopped)\n  the node reaches it through <home>/.wasm-agent/serve-static.json, which this program writes (no environment variable decides it)");
+            return;
+        }
+        let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8792);
+        let root = flag(&lua_args, "--root").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("ui"));
+        let home = wa_host_support::paths::resolve_home();
+        let rendezvous = flag(&lua_args, "--rendezvous").map(PathBuf::from).unwrap_or_else(|| {
+            PathBuf::from(home).join(".wasm-agent/serve-static.json")
+        });
+        if let Err(error) = wa_capabilities::serve_static::serve(root, port, rendezvous) {
+            eprintln!("serve-static: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if command == "serve" {
         if let Err(error) = lua.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
             eprintln!("lua error: {error}");
