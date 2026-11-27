@@ -325,3 +325,10 @@ wa-whatsapp b92137035ff30b79e654047e450b335283fd22e2c9f5922796c65a7ccfcf44b6 895
 # SOURCES telemetry-sink a05024a258ef6d406635aad7f2926e88056001d725c280c619c14c12f3b75849
 # SOURCES wa-email 0770be529a0b6ed5b9cab5318dd2ac8fd5b64856c4a87f55da6c33c49c7d35b2
 # SOURCES wa-whatsapp 436c0aec8ce931250a226263fdb356be8cf3c492c965217447fbdca3c633e6b2
+# 27/11 first pin of vision (change/vision-is-a-component): the reading of an image becomes a component
+# (wit/vision: async read -> words, boxes and confidence; models.lock carries the model pins). The engine is
+# rten 0.28 on the PP-OCRv3 det+rec pair the node already ships, and the model bytes are HOST-SUPPLIED - they
+# are not inside this artifact. Feature `vision` (wa-features) decides; the kernel reader in
+# rust/wa-kernel-runtime/src/vision_host.rs stays the fallback until the flip after round 2. Built by
+# cargo build --release --target wasm32-wasip2 in rust/components/vision.
+vision ccb5c45265fd30fbc135e2052f080563a50c9de9d85a816bccffd38a6609348a 3669932

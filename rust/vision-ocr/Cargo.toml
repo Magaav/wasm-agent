@@ -1,0 +1,12 @@
+[package]
+name = "vision-ocr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+rten = "0.28.0"
+rten-tensor = "0.28.0"
+
+[dev-dependencies]
+serde_json = "1"

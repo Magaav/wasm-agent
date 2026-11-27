@@ -72,6 +72,7 @@ pub mod sql_host;
 pub mod supervisor;
 // `wa:kernel/vision`: the OCR reader bound from `world service-vision`, served to a 0.2 guest that
 // opts in by importing it (docs/WHATSAPP-OCR.md).
+pub mod vision_component_host;
 pub mod vision_host;
 // Which WASI interfaces a `wa:kernel@0.2` component gets and with what scope (docs/WASI-INTERFACES.md).
 pub mod wasi_ext_host;
