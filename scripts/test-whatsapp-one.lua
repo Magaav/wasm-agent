@@ -126,7 +126,10 @@ local function stub(capability, answer)
 end
 local absent = { ok = false, error = "whatsapp_component_absent", state = "disabled", owner = "openclaw", effect = "none" }
 
-stub("whatsapp_read", absent)
+-- Which capability a tool calls is a catalog fact now: the reads go through `whatsapp_index` with the op
+-- in the request (the op is data, not a row per question), so the stub follows the row instead of naming
+-- a second spelling that would silently stop being the one called.
+stub(whatsapp.by_verb.read.capability, absent)
 local asked = nil
 local routed = whatsapp.call("mcp_whatsapp_read", { chat = "Laura" }, {
   remote_call = function(node, name, args)
@@ -219,7 +222,7 @@ ok(send_unreachable.effect == "unknown" and tostring(send_unreachable.note):find
 
 -- Nobody named, nobody found: the refusal says how to fix it instead of queueing.
 env_with("")
-stub("whatsapp_read", { ok = false, error = "whatsapp_component_absent", state = "disabled", effect = "none" })
+stub(whatsapp.by_verb.read.capability, { ok = false, error = "whatsapp_component_absent", state = "disabled", effect = "none" })
 local orphan = whatsapp.call("mcp_whatsapp_read", { chat = "Laura" }, { owner_catalog = catalog_with({}) })
 ok(orphan.error == "whatsapp_component_absent", "no component and no owner is still one honest word")
 ok(orphan.owner == nil and orphan.effect == "none", "with no owner invented")

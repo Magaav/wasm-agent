@@ -1,0 +1,97 @@
+/// One WhatsApp component, one contract: the index questions, the send, and the archive.
+///
+/// Why one world and not three: the three surfaces share one component (`wa-whatsapp`), one queue
+/// namespace family (`whatsapp.query`, `whatsapp.outbox`) and one request/answer contract
+/// (`rust/wa-whatsapp-index`, `rust/wa-whatsapp-outbox`). Splitting them would make a caller compose
+/// three imports to ask one question.
+///
+/// THE OP SET IS DATA (`ops.registry`), and that is the point of this seam: an op is a word with an
+/// effect class the PROVIDER declares, so a new question is the component's business and never a change
+/// to this file - which is what keeps a WhatsApp change out of the host build
+/// (`docs/missions/reports/whatsapp-leaves-the-host.md`, sections 8 and 9; the design and the open
+/// questions are in `ready-whatsapp-world.md`).
+///
+/// Status 2026-11-25: SPECIFICATION. Nothing imports or exports this world yet; the component still
+/// serves `whatsapp.query` through `wa:queue` and the host still holds the request/answer contract.
+/// Two facts measured before it can be wired, both in `ready-whatsapp-world.md` §4.2: the kernel has no
+/// way to invoke an export on an ALREADY RUNNING service instance (only `graph.rs`'s per-call instance),
+/// so `ask` rides the queue for now; and the component must grow the `ops` export before a build can
+/// prove this file.
+package wa:whatsapp@0.2.0;
+
+interface types {
+    /// What an op does to the world outside this component. Declared by the PROVIDER in `ops.registry`
+    /// and never taken from a caller: a read must not be able to ask the primary phone or write a file
+    /// into the node (`seam::Op::effect`, commit d1266ca8, is where this lives today).
+    enum effect {
+        /// Reads the index the component already holds. Nothing leaves the node.
+        read-only,
+        /// Reaches WhatsApp: it asks the primary phone for history, or it sends a message.
+        network,
+        /// The answer is bytes the CALLER writes into its own bounded folder.
+        writes-files,
+    }
+
+    /// One question this build can answer, as a catalogue row.
+    record op {
+        /// The word that selects the question: `search`, `read`, `contacts`, `backfill`, `download`, ... It
+        /// travels in the request under the key the caller builds.
+        name: string,
+        effect: effect,
+        /// One line for an operator reading `wa capabilities`; never shown to a model.
+        summary: string,
+    }
+
+    /// Why a question was not answered. `code` is the seam's own stable word (`bad_chat`, `bad_op`,
+    /// `queue_failed`, ...) - the same word a tool answer has carried since the first read.
+    record failure {
+        code: string,
+        detail: string,
+    }
+
+    /// A tool answer document, verbatim: `{"ok":true,...}` or `{"ok":false,"error":"...","effect":"none"}`.
+    /// Named `*-json` because it is JSON crossing a seam (scripts/wit-lint.sh, rule 1).
+    record answer {
+        doc-json: string,
+    }
+
+    /// An answer whose payload is bytes. Bounded, not streamed, because the seam already bounds a
+    /// download (`wa-whatsapp-index`'s MAX_DOWNLOAD_BYTES) and the queue already carries the bytes in
+    /// one value; a stream can replace this field without changing any op.
+    record chunked {
+        doc-json: string,
+        bytes: list<u8>,
+    }
+}
+
+interface ops {
+    use types.{op, failure, answer, chunked};
+
+    /// Every op this build answers, with its effect class. The caller gates its own capability on the
+    /// class it reads here, so the mapping lives on the side that knows it.
+    registry: func() -> list<op>;
+
+    /// One question, answered. The first argument is the op; the second carries the tool's own arguments
+    /// exactly as its catalogue row builds them. The returned document is byte for byte what the tool
+    /// answers today.
+    ask: async func(op: string, args-json: string) -> result<answer, failure>;
+
+    /// One question whose answer is bytes this node writes into its own bounded folder (`download`, and
+    /// an archive export). The document names what the bytes are; the caller owns the path and the prune.
+    ask-bytes: async func(op: string, args-json: string) -> result<chunked, failure>;
+
+    /// One outgoing message, AFTER the caller's own policy: the rate limit, the daily cap and the audit
+    /// stay in the host, because they must be enforced where the account is and no governance world
+    /// exists (`ready-whatsapp-world.md` §4.3). Resolves with what WhatsApp did with it - a future, not
+    /// a handle to poll.
+    send: async func(args-json: string) -> result<answer, failure>;
+}
+
+world whatsapp {
+    import wa:kernel/log@0.2.0;
+    import wa:kernel/kv@0.2.0;
+    import wa:kernel/keystore@0.2.0;
+    // Its own outbox durability, inside the component: the node's queue producer stays where it is.
+    import wa:queue/worker@0.1.0;
+    export ops;
+}

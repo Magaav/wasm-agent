@@ -447,6 +447,236 @@ fn a_job_that_died_on_an_older_component_is_not_the_answer_a_new_call_reads() {
     assert_eq!(again["id"].as_u64(), Some(fresh));
 }
 
+/// The op carried as data answers the SAME bytes as the typed-op path it replaces, and asks the
+/// component the SAME question.
+///
+/// `reactions` is the first op moved onto the data seam (`answer_text`): the host stops naming a variant
+/// per op, which is the coupling that made every WhatsApp change a host rebuild. A move like that is only
+/// safe if it is invisible - the request on the wire, and the answer the tool gives, stay byte for byte
+/// what they were. This test cannot pass on the tree before the change (`ask_text_in` does not exist
+/// there), and on the tree after it fails if either drifts.
+#[test]
+fn the_op_named_as_data_answers_the_same_bytes_as_the_typed_op() {
+    let args = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"});
+    let (_h1, typed_q) = queue("opdata-typed");
+    let (_h2, data_q) = queue("opdata-data");
+
+    // 1. Nothing has answered yet: "still running", byte for byte (it carries the job id, so this also
+    //    pins that both paths queued the same request).
+    let typed = ask_in(&typed_q, seam::Op::Reactions, &args, 1, BUILD);
+    let as_data = ask_text_in(&data_q, "reactions", &args, 1, BUILD);
+    assert_eq!(typed["error"], "whatsapp_reactions_slow");
+    assert_eq!(json_text(&typed), json_text(&as_data));
+
+    // 2. The same question on the wire: the payload the component validates.
+    let typed_job = typed_q.job(wa_queue::JobId(typed["id"].as_u64().expect("typed job id"))).unwrap().unwrap();
+    let data_job = data_q.job(wa_queue::JobId(as_data["id"].as_u64().expect("data job id"))).unwrap().unwrap();
+    assert_eq!(typed_job.payload, data_job.payload, "the component is asked the same bytes");
+    assert_eq!(seam::Request::decode(&data_job.payload).unwrap().op, "reactions");
+
+    // 3. A refusal before anything is queued: the same word, the same sentence.
+    let bad = serde_json::json!({"chat": "not a chat", "id": "3EB0C0FFEE11"});
+    let typed_bad = ask_in(&typed_q, seam::Op::Reactions, &bad, 1, BUILD);
+    let data_bad = ask_text_in(&data_q, "reactions", &bad, 1, BUILD);
+    assert_eq!(data_bad["error"], "whatsapp_reactions_bad_chat");
+    assert_eq!(json_text(&typed_bad), json_text(&data_bad));
+
+    // 4. An op nobody knows is refused by name and writes no job: the typed path cannot even spell it,
+    //    and the data path must not let the word through to the component.
+    let ready_before = data_q.stats(seam::QUEUE).unwrap().ready;
+    let unknown = ask_text_in(&data_q, "nope", &args, 1, BUILD);
+    assert_eq!(unknown["error"], "whatsapp_nope_bad_op");
+    assert_eq!(unknown["ok"], false);
+    assert_eq!(data_q.stats(seam::QUEUE).unwrap().ready, ready_before, "no job for an op nothing can answer");
+
+    // 5. A settled answer is the tool answer, through the same shaper: the data path's job, answered by
+    //    the component, comes back as the component wrote it (never as a slow query).
+    let wa_queue::TakeOutcome::Job(taken) = data_q.take(seam::QUEUE, COMPONENT, None).unwrap() else {
+        panic!("the data path's job must be takeable");
+    };
+    let component_answer = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11", "count": 0, "reactions": []});
+    let settled = seam::answer(seam::Op::Reactions, component_answer.clone());
+    data_q.done_by(taken.id, COMPONENT, &serde_json::to_vec(&settled).unwrap()).unwrap();
+    let answered = settle(&data_q, seam::Op::Reactions, taken.id.0, 1);
+    assert_eq!(json_text(&answered), json_text(&settled), "the tool answer is the component's answer");
+    assert_eq!(answered["ok"], true);
+}
+
+/// One answer as the bytes it leaves the host as: key order is the encoder's, and the comparison is of
+/// the document.
+fn json_text(value: &Value) -> String {
+    serde_json::to_string(value).expect("a JSON value")
+}
+
+/// The generic row (`whatsapp_index`, the op in the request) answers byte for byte what the named row
+/// of the same op answers, and queues the same job - for every read op it carries.
+///
+/// This is what lets the hub stop naming read ops: once a tool row points at the generic door, a new
+/// read-only op is the component's business, and no row, description or digest in `wa-capabilities`
+/// moves for it. The equality is asserted per op before any tool row is repointed, so the repoint has
+/// something to keep.
+#[test]
+fn the_generic_row_answers_the_same_bytes_as_the_named_row_for_every_read_op() {
+    let cases: [(&str, seam::Op, Value); 6] = [
+        ("search", seam::Op::Search, serde_json::json!({"q": "boleto", "chat": "15550000001@lid", "limit": 5})),
+        ("read", seam::Op::Read, serde_json::json!({"chat": "15550000001@lid", "limit": 3})),
+        ("contacts", seam::Op::Contacts, serde_json::json!({"q": "1555"})),
+        ("message", seam::Op::Message, serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"})),
+        ("reactions", seam::Op::Reactions, serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"})),
+        ("media", seam::Op::Media, serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"})),
+    ];
+    for (op_text, op, args) in cases {
+        let (_h1, named_q) = queue(&format!("generic-named-{op_text}"));
+        let (_h2, generic_q) = queue(&format!("generic-data-{op_text}"));
+        let named = ask_in(&named_q, op, &args, 1, BUILD);
+        // The generic door is handed the op in the request, as `M.invoke` hands it.
+        let mut with_op = args.clone();
+        with_op["op"] = serde_json::json!(op_text);
+        let generic = ask_index_in(&generic_q, &with_op, 1, BUILD);
+        assert_eq!(named["error"], format!("whatsapp_{op_text}_slow"), "{op_text}: nothing answered yet");
+        assert_eq!(json_text(&named), json_text(&generic), "{op_text}: the same answer bytes");
+        let named_job = named_q.job(wa_queue::JobId(named["id"].as_u64().expect("named job id"))).unwrap().unwrap();
+        let generic_job = generic_q.job(wa_queue::JobId(generic["id"].as_u64().expect("generic job id"))).unwrap().unwrap();
+        assert_eq!(named_job.payload, generic_job.payload, "{op_text}: the component is asked the same bytes");
+    }
+}
+
+/// The generic door refuses to guess: no `op` is a named refusal, not a queue write.
+#[test]
+fn the_generic_row_refuses_a_request_that_names_no_op() {
+    let (_host, q) = queue("generic-noop");
+    let ready_before = q.stats(seam::QUEUE).unwrap().ready;
+    let answer = ask_index_in(&q, &serde_json::json!({"q": "boleto"}), 1, BUILD);
+    assert_eq!(answer["error"], "whatsapp_index_op_required");
+    assert_eq!(answer["ok"], false);
+    assert_eq!(q.stats(seam::QUEUE).unwrap().ready, ready_before, "nothing is queued without an op");
+}
+
+/// The generic door carries the READS and nothing else: an op that asks the phone or writes a file is
+/// refused by name and queues nothing, because this row declares `read-only` and a sandbox joins it as
+/// one. Measured 25/11 before the fix: `whatsapp_index({op:"backfill"})` queued the phone request and
+/// `{op:"download"}` queued a file write, both through a capability the inventory calls ReadOnly.
+#[test]
+fn the_generic_door_carries_only_the_reads_and_refuses_a_network_or_file_op() {
+    let (_host, q) = queue("generic-effect");
+    for op in seam::Op::ALL {
+        let mut args = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11", "q": "boleto", "count": 5});
+        args["op"] = serde_json::json!(op.as_str());
+        let ready_before = q.stats(seam::QUEUE).unwrap().ready;
+        let answer = ask_index_in(&q, &args, 1, BUILD);
+        let own_door = format!("whatsapp_{}_use_its_own_door", op.as_str());
+        match op.effect() {
+            seam::Effect::ReadOnly => assert_ne!(answer["error"], own_door, "{} is a read and this door carries it", op.as_str()),
+            seam::Effect::Network | seam::Effect::WritesFiles => {
+                assert_eq!(answer["error"], own_door, "{} has an effect: this door must send it to its own row", op.as_str());
+                assert_eq!(answer["ok"], false);
+                assert_eq!(q.stats(seam::QUEUE).unwrap().ready, ready_before, "{} queued nothing through the read door", op.as_str());
+            }
+        }
+    }
+}
+
+/// The network door carries the question that reaches the phone, and only that: `backfill` answers
+/// through it byte for byte as through its named row, a read is refused by name, and nothing is queued
+/// for the op the door does not declare.
+#[test]
+fn the_network_door_carries_backfill_and_refuses_a_read() {
+    let (_h1, named_q) = queue("network-named");
+    let (_h2, door_q) = queue("network-door");
+    let args = serde_json::json!({"count": 5});
+    let named = ask_in(&named_q, seam::Op::Backfill, &args, 1, BUILD);
+    let mut with_op = args.clone();
+    with_op["op"] = serde_json::json!("backfill");
+    let through_door = ask_class_in(&door_q, &with_op, "request", seam::Effect::Network, 1, BUILD);
+    assert_eq!(named["error"], "whatsapp_backfill_slow");
+    assert_eq!(json_text(&named), json_text(&through_door), "the same answer bytes");
+    let named_job = named_q.job(wa_queue::JobId(named["id"].as_u64().expect("named id"))).unwrap().unwrap();
+    let door_job = door_q.job(wa_queue::JobId(through_door["id"].as_u64().expect("door id"))).unwrap().unwrap();
+    assert_eq!(named_job.payload, door_job.payload, "the component is asked the same bytes");
+
+    // A read through this door is refused by name, and queues nothing.
+    let ready_before = door_q.stats(seam::QUEUE).unwrap().ready;
+    let mut read_args = serde_json::json!({"q": "boleto"});
+    read_args["op"] = serde_json::json!("search");
+    let refused = ask_class_in(&door_q, &read_args, "request", seam::Effect::Network, 1, BUILD);
+    assert_eq!(refused["error"], "whatsapp_search_use_its_own_door");
+    assert_eq!(door_q.stats(seam::QUEUE).unwrap().ready, ready_before, "a read queued nothing through the network door");
+}
+
+/// The file door carries the op whose answer is a file this node writes, and only that class: `download`
+/// answers through it byte for byte as through its named row, in the class the row declares, at the
+/// download's own wait; a read and a phone request are refused by name and queue nothing.
+#[test]
+fn the_file_door_carries_download_and_refuses_the_other_classes() {
+    let (_h1, named_q) = queue("file-named");
+    let (_h2, door_q) = queue("file-door");
+    let args = serde_json::json!({"chat": "15550000001@lid", "id": "3EB0C0FFEE11"});
+    let named = ask_in(&named_q, seam::Op::Download, &args, 1, BUILD);
+    let mut with_op = args.clone();
+    with_op["op"] = serde_json::json!("download");
+    // The same call the door makes, through the same wait, so the two answers are comparable.
+    let through_door = ask_class_in(&door_q, &with_op, "file", seam::Effect::WritesFiles, 1, BUILD);
+    assert_eq!(named["error"], "whatsapp_download_slow");
+    assert_eq!(json_text(&named), json_text(&through_door), "the same answer bytes");
+    let named_job = named_q.job(wa_queue::JobId(named["id"].as_u64().expect("named id"))).unwrap().unwrap();
+    let door_job = door_q.job(wa_queue::JobId(through_door["id"].as_u64().expect("door id"))).unwrap().unwrap();
+    assert_eq!(named_job.payload, door_job.payload, "the component is asked the same bytes");
+
+    for (op, effect) in [("search", seam::Effect::ReadOnly), ("backfill", seam::Effect::Network)] {
+        let mut asked = serde_json::json!({"q": "boleto", "count": 5});
+        asked["op"] = serde_json::json!(op);
+        let ready_before = door_q.stats(seam::QUEUE).unwrap().ready;
+        let refused = ask_class_in(&door_q, &asked, "file", seam::Effect::WritesFiles, 1, BUILD);
+        assert_eq!(refused["error"], format!("whatsapp_{op}_use_its_own_door"), "{op} is not a file op");
+        assert_eq!(q_stats_ready(&door_q), ready_before, "{op} queued nothing through the file door");
+        let _ = effect;
+    }
+}
+
+/// The ready count of the query queue, as the tests above read it.
+fn q_stats_ready(q: &wa_queue::Queue) -> usize {
+    q.stats(seam::QUEUE).unwrap().ready
+}
+
+/// The registry is served by the READ door and only by it: the word travels on the same queue as every
+/// question, the component answers its own document, and the other two doors refuse it by name. It is
+/// the world's `ops.registry` (`wa:whatsapp@0.2.0`) arriving over the transport that exists today.
+#[test]
+fn the_read_door_serves_the_registry_and_the_other_doors_refuse_it() {
+    let (_host, q) = queue("registry");
+    let args = serde_json::json!({"op": "ops"});
+    // Nothing has answered yet: the registry's own slow answer, with the word it was asked with.
+    let slow = ask_registry_in(&q, &args, BUILD);
+    assert_eq!(slow["error"], "whatsapp_ops_slow");
+    assert_eq!(slow["op"], seam::REGISTRY_OP);
+    let id = slow["id"].as_u64().expect("the registry job id");
+    // The payload is the caller's own document, forwarded as it arrived: it is NOT an index request,
+    // so `Request::validate` - what every other question must survive - refuses it. That is the point.
+    let wa_queue::TakeOutcome::Job(taken) = q.take(seam::QUEUE, COMPONENT, None).unwrap() else {
+        panic!("the registry job must be takeable");
+    };
+    assert_eq!(taken.id.0, id);
+    assert_eq!(taken.payload, serde_json::to_vec(&args).unwrap(), "the word is forwarded untouched");
+    // `decode` is a parse; `validate` is the check every index question must survive, and the
+    // registry does not - which is why it is forwarded as it arrives instead.
+    let parsed = seam::Request::decode(&taken.payload).expect("it is a request document");
+    assert!(parsed.validate().is_err(), "the registry is not an index question");
+    // The component's answer is its registry document, and it is what a settled job carries.
+    let document = seam::registry();
+    q.done_by(taken.id, COMPONENT, &serde_json::to_vec(&document).unwrap()).unwrap();
+    let settled = q.job(wa_queue::JobId(id)).unwrap().unwrap();
+    assert_eq!(settled.result.as_deref(), Some(serde_json::to_vec(&document).unwrap().as_slice()),
+        "the tool answer is the component's own document, byte for byte");
+    assert_eq!(document["ops"].as_array().map(|ops| ops.len()), Some(seam::Op::ALL.len()));
+
+    // The other two doors declare another class, and say so rather than forwarding the word.
+    for (door, want) in [("request", seam::Effect::Network), ("file", seam::Effect::WritesFiles)] {
+        let refused = ask_class_in(&q, &args, door, want, 1, BUILD);
+        assert_eq!(refused["error"], "whatsapp_ops_use_its_own_door", "{door} refuses the registry");
+        assert_eq!(refused["effect"], "none");
+    }
+    }
+
 /// A date a model wrote reaches the wire as milliseconds, and a time nobody can read is refused by name
 /// with the forms - the host neither drops the string nor invents a rule of its own.
 #[test]

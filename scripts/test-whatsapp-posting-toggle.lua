@@ -163,7 +163,9 @@ end
 -- covers, and that count comes from the component's own index through the same `contacts` call
 -- `lua/core/whatsapp.lua` uses (`service_row`: no query, `limit: 1`, answer `index.chats`;
 -- rust/wa-capabilities/src/whatsapp_query.rs). A scratch node has no component to answer it.
-host.whatsapp_contacts = function(request)
+-- The contacts row is reached through `whatsapp_index` now (the op travels in the request), so the
+-- stand-in is installed under the capability the catalogue names - not a second spelling of it.
+host.whatsapp_index = function(request)
   runtime.index_calls = runtime.index_calls + 1
   if runtime.index_chats == "error" then
     return json.encode({ ok = false, error = "whatsapp_contacts_failed" })

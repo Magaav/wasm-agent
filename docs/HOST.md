@@ -953,12 +953,15 @@ whatsapp_send        network
 whatsapp_send_status read-only
 whatsapp_approve     network
 whatsapp_download    writes files
+whatsapp_file        writes files
 whatsapp_media       read-only
+whatsapp_index       read-only
 whatsapp_reactions   read-only
 whatsapp_read        read-only
 whatsapp_message     read-only
 whatsapp_search      read-only
 whatsapp_backfill    network
+whatsapp_request     network
 whatsapp_contacts    read-only
 whatsapp_archive     writes files
 email_send           network

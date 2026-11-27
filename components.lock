@@ -281,7 +281,6 @@ telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 
 #
 # Both artifact lines below are the builds of this tree; `scripts/test-components-lock-follows-source.lua` is
 # the guard that a future change cannot repeat this quietly.
-
 wa-email 44c73d1b1df0f3d62362b5f99d56b183f5793f7f6ec2343aac5180d7e9890db8 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
@@ -290,7 +289,7 @@ wa-email 44c73d1b1df0f3d62362b5f99d56b183f5793f7f6ec2343aac5180d7e9890db8 565827
 # (hidden/hidden_why) and this branch's paging (next, before) and clamp (say_limit) are one answer now, so
 # the bytes are the build of the merged source, not either side's. Built on avell in the pinned root
 # (/tmp/wa-component-build/src) with rustc 1.100.0, wasi-sdk 34.0.
-wa-whatsapp a7638f6f09c1a8a1f70334decfa4f66ec43622e459c35cb55c0d0461a8230c99 8930806
+wa-whatsapp 5befddd339618335b9dd1b54ef4c7ba36a2aeaf519ef66f711d17d68c36daefb 8932480
 # SOURCES agent-core 7e841b7234b00801ecee490bc07f5c702b596d68228a5bf8c5298040d7f5fd4a
 # SOURCES codemode 4456e8599617fd853f7013cc1ec8e65623a45613163b76b13d19e280726a41e1
 # SOURCES graph 963d98538e92d3d7b12b7df989369636f8b2a4a7308b0791c19c6aae0de8beb5
@@ -302,4 +301,4 @@ wa-whatsapp a7638f6f09c1a8a1f70334decfa4f66ec43622e459c35cb55c0d0461a8230c99 893
 # SOURCES stt 646efcd5dc6663bafaa4fbba3645ff6fc0b856934e311eddbc28f1b9ae33e62f
 # SOURCES telemetry-sink a05024a258ef6d406635aad7f2926e88056001d725c280c619c14c12f3b75849
 # SOURCES wa-email 0770be529a0b6ed5b9cab5318dd2ac8fd5b64856c4a87f55da6c33c49c7d35b2
-# SOURCES wa-whatsapp b420936ee58fbbeb8f6f85e161efdb1c610bc71567da9865f2cee30149bcc14b
+# SOURCES wa-whatsapp a87d8bd912017b80cc96cb0e33d022144ff21ec214d7c0b0db134f4304c0a0db

@@ -458,11 +458,19 @@ judge_bytes() {
   # The tool names first: they are what discriminates. The bare op name is not - measured, the build
   # pinned before waroute contains the word `contacts` three times already (from the map and the
   # protocol library) and `whatsapp_contacts` not once, so only the tool name tells the two builds apart.
+  # THE TOOL NAME IS BUILT AT RUNTIME SINCE whatsapp-leaves-the-host. That mission moved the ops from
+  # typed variants to `{op, ...}` data over the seam, so the joined literal `whatsapp_backfill` is no
+  # longer in the module: measured on the build of this tree, `whatsapp_` appears 66 times and `backfill`
+  # 5, and `whatsapp_backfill` 0. The promise this check makes - these bytes answer every op the seam
+  # defines - is unchanged; what changed is the shape it is checked against. The prefix is asserted once
+  # and each op's own wire word in the loop, which is what a payload actually carries. The two builds the
+  # note above tells apart are still told apart: the pre-waroute build has `contacts` three times and
+  # `whatsapp_` zero, this one has both.
+  contains "$wa_copy" 'whatsapp_' || fail "the pinned bytes carry no 'whatsapp_' name at all: they are not a build of the WhatsApp seam"
   local variant opname tool
   while IFS=' ' read -r variant opname tool; do
     [ -n "$variant" ] || continue
-    contains "$wa_copy" "$tool" || fail "the pinned bytes do not know $tool (Op::$variant): the build is older than the seam - rebuild and repin (scripts/publish-components.sh prints the line)"
-    contains "$wa_copy" "$opname" || fail "the pinned bytes do not carry the op name '$opname' (Op::$variant): rebuild and repin"
+    contains "$wa_copy" "$opname" || fail "the pinned bytes do not carry the op name '$opname' (Op::$variant): the build is older than the seam - rebuild and repin"
   done <<< "$ops"
   # The validation path itself, by a wording both builds carry: the refusal sentence a bad op answers.
   # (The sentence's own words are not pinned here - they are prose and were reworded on 13/11; the op

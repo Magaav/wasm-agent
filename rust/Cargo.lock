@@ -2170,6 +2170,7 @@ dependencies = [
  "wa-local-tz",
  "wa-mesh",
  "wa-operation",
+ "wa-operations-runner",
  "wa-queue",
  "wa-rendezvous",
  "wa-sqlite",
