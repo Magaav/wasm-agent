@@ -35,6 +35,24 @@ that draws them, and `wa_term::transcript` answers a mouse press in the icon's c
 (OSC 52, `wa_term::selection::osc52`) - a press anywhere else starts a selection, so one gesture has
 one meaning. The rows are the drawn frame's, so a scrolled or folded-away icon is not clickable.
 
+## The notice floats over the chat
+
+Every transient TUI message - `Copied 12 characters`, a paste, `Draft kept`, a refusal - is ONE
+thing in ONE place: `Transcript::notice` (`rust/wa-term/src/transcript.rs`), written by the host's
+`say` and by nothing else. It is an OVERLAY: painted over the top row of the output region, centred,
+`(width - len) / 2` blank cells to its left, for two seconds (`NOTICE_MS`) or until the next key
+when it is an error. It takes no row of its own.
+
+That is the whole point, and it was measured the hard way (Victor, 26/11): as a reserved row the
+message made the region one row shorter while it showed, so with the chat scrolled up out of the
+bottom the whole conversation moved down a row when it appeared and back up when it went - twice per
+copy. Now the chat's rows, the scroll position, the pinned request and the copy icons' click targets
+are the bytes they were before the message and after it; only the cells the message covers change.
+
+Its row is the region's top row, or - while the pinned request holds that row - the row just under
+it. Only the message moves for the request; the request never moves for the message. A press on the
+row takes it away (`on_notice`), the same way a key does.
+
 ## Layout
 
 Bottom up on a screen of `H` rows (`Console::frame` pins the editor and takes the rest):

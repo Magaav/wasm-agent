@@ -11,9 +11,11 @@
 // looks at it:
 //   1. a session with no request yet has no pinned row at all;
 //   2. during the run the request is the top row of the window, and the row under it is the chat's;
-//   3. a copy is announced on the notice row, ABOVE the pinned request, and the session status bar
-//      keeps its own line in every frame of that window;
-//   4. the message goes after about two seconds and the pinned request is the top row again;
+//   3. a copy FLOATS under the pinned request, centred, and nothing on the screen moves for it -
+//      not the pin, not one chat row - while the session status bar keeps its own line in every frame
+//      (Victor, 26/11: it used to take a reserved row above the pin, which shifted the whole
+//      conversation by a row, twice per copy);
+//   4. the message goes after about two seconds and the frame is the one from before it;
 //   5. an ERROR stays until the next key;
 //   6. a resize keeps both rows and the status bar;
 //   7. a wide-character request is pinned on one row;
@@ -192,19 +194,30 @@ try {
   check('the session status bar keeps its line during the run', footer().includes(STATUS), footer());
   check('and the run’s own line is above the box, untouched', runRow().includes('Δ↑'), runRow());
 
-  // ---- a copy is announced ABOVE the pinned request ----------------------------------------------
+  // ---- a copy FLOATS under the pinned request, centred, and moves nothing ------------------------
   type('hello world');
   key(['C-a']);   // select the draft
-  key(['C-c']);   // copy it (OSC 52) -> the notice row
-  let sawNotice = null;
+  key(['C-c']);   // copy it (OSC 52) -> the message over the chat
+  const noticeRow = () => rows().findIndex(row => row.includes('Copied 11 characters'));
+  let sawAt = -2;
   try {
-    await waitFor(() => (veryTop().includes('Copied 11 characters') ? veryTop() : null), 'the copy notice', 6000);
-    sawNotice = veryTop();
-  } catch { sawNotice = null; }
-  check('the copy is announced on the very top row', !!sawNotice, rows().slice(0, 3).join('\n'));
+    await waitFor(() => (noticeRow() >= 0 ? true : null), 'the copy notice', 6000);
+    sawAt = noticeRow();
+  } catch { sawAt = -2; }
+  check('the copy is announced on the row just under the pinned request', sawAt === 1,
+    'the message is on row ' + sawAt + ' (0-based), not 1:\n' + rows().slice(0, 3).join('\n'));
+  check('and the pinned request STAYS on the top row',
+    veryTop().startsWith('\u276f stream me a long answer'), rows().slice(0, 3).join('\n'));
   const withNotice = rows();
-  check('the pinned request is the row UNDER the message',
-    (withNotice[1] || '').startsWith('\u276f stream me a long answer'), withNotice.slice(0, 3).join('\n'));
+  // Centred: the message's first cell is (width - len) / 2, within one.
+  {
+    const row = withNotice[1] || '';
+    const at = row.indexOf('Copied 11 characters');
+    const expected = Math.floor((COLS - 'Copied 11 characters'.length) / 2);
+    check('the message is centred on its row', Math.abs(at - expected) <= 1,
+      'starts at ' + at + ', expected ' + expected + ' in ' + JSON.stringify(row));
+  }
+
   check('the session status bar is untouched by the message',
     footer().includes(STATUS) && !footer().includes('Copied'), footer());
   check('and so is the run’s own line', runRow().includes('Δ↑') && !runRow().includes('Copied'), runRow());
@@ -219,28 +232,61 @@ try {
   check('the status bar keeps its text in every frame the message is up',
     framesOk === frames, framesOk + '/' + frames);
 
-  // ---- about two seconds later it is gone, and the pin is the top row again ----------------------
+  // ---- about two seconds later it is gone, and the frame is the one from before it ---------------
   await waitFor(() => (!screen().includes('Copied 11 characters') ? true : null), 'the message to go', 8000);
   check('the message goes after about two seconds', true);
-  check('and the pinned request is the top row again',
+  check('and the pinned request is still the top row',
     veryTop().startsWith('\u276f stream me a long answer'), rows().slice(0, 3).join('\n'));
+
+  // ---- NOTHING MOVES: the same question on a screen that has stopped changing -------------------
+  //
+  // The byte comparison cannot be made while the answer is still streaming (every new line pushes
+  // the chat up, and that is the chat, not the message). So it is made here: the run has finished,
+  // the request is pinned on the top row, a copy is what changes.
+  await waitFor(() => (screen().includes('answer 69 to') ? true : null), 'the last line of the stream', 30000);
+  let settled = null;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const now = rows();
+    if (settled && settled.join('\n') === now.join('\n')) break;
+    settled = now;
+    await sleep(250);
+  }
+  key(['C-c']);   // the same 11 characters again: the message floats, nothing else may move
+  await waitFor(() => (rows().some(row => row.includes('Copied 11 characters')) ? true : null), 'the second copy notice', 6000);
+  const floated = rows();
+  check('the pinned row is byte-identical while the message floats',
+    floated[0] === settled[0], JSON.stringify(floated[0]) + '\n' + JSON.stringify(settled[0]));
+  check('every chat row under the message is byte-identical, and in the same place',
+    floated.slice(2, ROWS - 5).join('\n') === settled.slice(2, ROWS - 5).join('\n'),
+    'before:\n' + settled.slice(2, 6).join('\n') + '\nduring:\n' + floated.slice(2, 6).join('\n'));
+  check('and the message is still centred', Math.abs((floated[1] || '').indexOf('Copied 11 characters')
+    - Math.floor((COLS - 'Copied 11 characters'.length) / 2)) <= 1, JSON.stringify(floated[1]));
+  await waitFor(() => (!screen().includes('Copied 11 characters') ? true : null), 'the second message to go', 8000);
+  const after = rows();
+  check('and it goes back to exactly the frame it had before it',
+    after.join('\n') === settled.join('\n'),
+    'before:\n' + settled.slice(0, 4).join('\n') + '\nafter:\n' + after.slice(0, 4).join('\n'));
 
   // ---- an ERROR stays until the next key ---------------------------------------------------------
   key(['C-v']);  // no WAYLAND_DISPLAY/DISPLAY in this scratch env: the clipboard refuses
+  // The message's row is the one it floats over: row 1 of the region while the request pins row 0.
+  const noticeRowText = () => rows()[1] || '';
   let sawError = null;
   try {
-    await waitFor(() => (/DISPLAY/.test(veryTop()) ? veryTop() : null), 'the clipboard refusal', 8000);
-    sawError = veryTop();
+    await waitFor(() => (/DISPLAY/.test(noticeRowText()) ? noticeRowText() : null), 'the clipboard refusal', 8000);
+    sawError = noticeRowText();
   } catch { sawError = null; }
-  check('a refused paste says so on the notice row', !!sawError, rows().slice(0, 3).join('\n'));
+  check('a refused paste says so on the row under the pinned request', !!sawError, rows().slice(0, 3).join('\n'));
+  check('and the pinned request is still the top row', veryTop().startsWith('\u276f stream me a long answer'),
+    rows().slice(0, 3).join('\n'));
   check('and the status bar keeps its line under the error', footer().includes(STATUS), footer());
   check('and the run’s own line is not replaced either', runRow().includes('Δ↑') && !runRow().includes('DISPLAY'), runRow());
   await sleep(3000);
   check('an error does not time out: it is still there after three seconds',
-    /DISPLAY/.test(veryTop()), rows().slice(0, 3).join('\n'));
+    /DISPLAY/.test(noticeRowText()), rows().slice(0, 3).join('\n'));
   type('x');
-  await waitFor(() => (!/DISPLAY/.test(veryTop()) ? true : null), 'the error to go on the next key', 6000);
-  check('the next key takes it away', !/DISPLAY/.test(veryTop()), rows().slice(0, 3).join('\n'));
+  await waitFor(() => (!/DISPLAY/.test(noticeRowText()) ? true : null), 'the error to go on the next key', 6000);
+  check('the next key takes it away', !/DISPLAY/.test(noticeRowText()), rows().slice(0, 3).join('\n'));
   key(['C-u']);
 
   // ---- a resize keeps the pin and the status bar -------------------------------------------------

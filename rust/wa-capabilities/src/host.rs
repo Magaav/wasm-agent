@@ -4331,7 +4331,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
                             return;
                         }
                     }
-                    // The notice row: a press takes the message away now.
+                    // The row the message floats over: a press there takes it away now.
                     Gesture::NoticeDismiss => {
                         if !over_transcript { return; }
                         if state.transcript.on_notice(row) && state.transcript.clear_notice() {
@@ -4588,17 +4588,19 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
 /// written - a copy, a paste, an attachment, the editor's own one-keystroke notes, a refusal. It
 /// used to live in `Editor::notice`, on the session status bar's row, which is exactly what Victor
 /// asked to stop (23/11 11:20Z: "so we never lose vision of the session status bar"): a message
-/// there pushed the run's own line aside. The row is above the pinned request at the top of the
-/// transcript, it is nobody else's, and it goes after about two seconds - or, when `sticky`, on the
-/// next key (an error the reader has to see).
+/// there pushed the run's own line aside. It FLOATS over the chat now, on the region's top row -
+/// the row under the pinned request while that one holds row 0 - so it takes no row and moves
+/// nothing (26/11: as a reserved row it shifted the whole conversation by one, twice per copy), and
+/// it goes after about two seconds - or, when `sticky`, on the next key (an error the reader has to
+/// see).
 fn say(state: &mut ConsoleInput, text: impl Into<String>, sticky: bool) -> bool {
     let text = text.into();
     state.transcript.notice(&text, std::time::Instant::now(), sticky)
 }
 
 /// The editor still composes its own one-keystroke notes in `Editor::notice` (`Interrupting\u{2026}`,
-/// `Draft kept`); they are TUI messages like any other, so they are handed to the notice row before
-/// the frame is drawn. `Editor::render` no longer paints that field, so the row it used to overwrite
+/// `Draft kept`); they are TUI messages like any other, so they are handed to the notice (the
+/// message that floats over the chat) before the frame is drawn. `Editor::render` no longer paints that field, so the row it used to overwrite
 /// - the session status bar - cannot be taken by a message again.
 fn flush_editor_notice(state: &mut ConsoleInput) -> bool {
     if state.editor.is_none() { return false }
@@ -4880,7 +4882,7 @@ fn console_reader() {
                     data.extend_from_slice(&chunk[..n]);
                     let (keys, mice, pending) = crate::selection::take(&data);
                     state.mouse_pending = pending;
-                    // An error on the notice row stays until the next KEY. A mouse report is not one:
+                    // An error on the notice stays until the next KEY. A mouse report is not one:
                     // the release of the very click that copied something arrives a few milliseconds
                     // after the press that set the message, and clearing on it made "Copied N
                     // characters" vanish before a reader could see it (measured: the tui-chrome row's
