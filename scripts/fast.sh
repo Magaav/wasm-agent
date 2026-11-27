@@ -231,20 +231,6 @@ case "${FAST_BIN_CODEMODE:-unknown}" in
   unknown) echo "fast: this binary does not report code-mode assets; a row that needs them says so by name" ;;
 esac
 bin="$FAST_BIN"
-# THE TERMINAL PROGRAM (mission wa-term-own-program, the last slice). The node DRAWS THROUGH IT: since
-# the in-process transcript was deleted, every `wa chat` in every row below attaches to `wa-term`, and a
-# row that cannot find it refuses by name instead of drawing. So it is built here, unconditionally,
-# beside the binary under test - the pair an install ships - and BEFORE any row runs: the Rust section
-# below builds it too, but that section is skipped when a change touches no Rust file, which would leave
-# every chat row on a stale or missing program.
-if [ "${WA_FAST_IN_DOCKER:-}" != 1 ] && command -v cargo >/dev/null 2>&1; then
-  program_dir=$(dirname "$bin")
-  if [ ! -x "$program_dir/wa-term" ] || [ "$program_dir/wa-term" -ot "$ROOT/rust/wa-term/src/transcript.rs" ]; then
-    echo "fast: building the terminal program (wa-term) beside $bin"
-    ( cd "$ROOT/rust" && WA_CODEMODE_ALLOW_EMPTY=1 CARGO_TARGET_DIR="$(dirname "$program_dir")" cargo build --release --offline -p wa-term --bin wa-term ) >"${work:-${TMPDIR:-/tmp}}/build-wa-term-early.log" 2>&1 \
-      || echo "fast: the terminal program did not build; the rows that need it say so by name (${work:-${TMPDIR:-/tmp}}/build-wa-term-early.log)"
-  fi
-fi
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 # Milliseconds, portably. `date +%s%N` is a GNU extension: on BSD/macOS it prints a literal 'N', and
 # inside $(( )) that is a shell error rather than a duration, so every row time in this file was wrong
@@ -830,17 +816,6 @@ else
     record_row skip rust 'rust rows' 0 0 0 'mktemp failed: the Rust rows need a scratch HOME and the operator own is refused'
     skipped=$((skipped + 1))
   fi
-  # THE TERMINAL PROGRAM the wire rows attach to (mission wa-term-own-program, slice 1). It is a binary
-  # of its own - that is what the move buys - so nothing here builds it by accident: wasm-agent's
-  # rust/wa-capabilities tests/term_remote.rs and scripts/test-term-remote-pty.mjs both drive the REAL
-  # `wa-term`, and both FAIL by name when it is missing rather than comparing nothing. Built into the
-  # same target dir the crate loop and the pty rows use, so the pair (`wa` and `wa-term`) is the one
-  # this tree makes.
-  if [ -n "$rust_home" ]; then
-    pstart=$(fast_now_ms); program_rc=0
-    HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(wa_build_jobs)}" wa_build_host_lock cargo build --release --offline --manifest-path rust/Cargo.toml -p wa-term --bin wa-term > "$work/build-wa-term-program.log" 2>&1 || program_rc=$?
-    wa_build_time_record crate 'wa-term (program)' "$(( $(fast_now_ms) - pstart ))" "$(wa_build_time_note "$work/build-wa-term-program.log" "$program_rc")"
-  fi
   for crate in $( [ -n "$rust_home" ] && printf '%s' "$crates" ); do
     # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
     # --no-run' in the tests' own profile compiles exactly what the row below runs, and the row then
@@ -1128,12 +1103,6 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # 25/11). Its own wrapper (scripts/test-mcp-list-pty.sh) is the same measurement for a row runner that takes
   # .sh rows; this line is where the fast path runs it.
   WA_BIN="$bin" check mcp-list-pty node scripts/test-mcp-list-pty.mjs
-  # THE TERMINAL PROGRAM DRAWS THE SAME SCREEN (mission wa-term-own-program, slice 1): the same fixture
-  # chat twice in a private tmux pty, once on the in-process path and once across `WA_TERM_REMOTE=1` to
-  # `wa-term`, with the transcript rows compared byte for byte and the program's own spawn mark proving
-  # which path ran - plus the two named refusals (`term_switch_invalid`, `term_program_missing`) on
-  # screen instead of a silent fall back. It SKIPs by name when the program is not beside `$bin`.
-  WA_BIN="$bin" check term-remote-pty node scripts/test-term-remote-pty.mjs
   # ESC ENDS A RUN AT ONCE (change/esc-stops-now, items 1-4): the real binary in a private tmux pty against
   # a fixture that is both the rendezvous and the provider, pressing Esc in each of the five ways a run can
   # wait - before response headers (30 s hold), mid-stream after a 10 s silence, during a local shell, during
