@@ -36,7 +36,14 @@ Victor's call, which is the open question in the ready file.
   tarball carries no `configure` (a repo snapshot that expects cmake), the SourceForge artifact did not
   download to a working tree in two attempts, and the node has neither cmake nor ninja. Two ways out, in
   order of cost: install cmake (then `-DWITH_SIMD=0 -DENABLE_SHARED=off` builds it), or `autoreconf` the
-  source tree. Until one is done, stills stay PPM.
+  source tree. Cmake is now INSTALLED at user level (`~/wasm-agent/toolchain/cmake`, nothing system-wide),
+  and with it libjpeg-turbo 3.0.4 configures and builds for wasm32-wasip1 until it reaches its own wall:
+  `setjmp.h: Setjmp/longjmp support requires Exception handling support` - libjpeg handles errors with
+  setjmp/longjmp, which wasi-sdk allows only with `-mllvm -wasm-enable-sjlj` AND an engine implementing
+  the exception-handling proposal. So JPEG is a RUNTIME compatibility question, not a build-tool one.
+  Three ways out: the node's wasmtime built with SJLJ and the component compiled with that flag; a small
+  pure JPEG encoder without setjmp; or ffmpeg's own mjpeg once its wasm trap is understood. Until one is
+  done, stills stay PPM.
 * **Not done: the component itself.** No Rust crate, no build wiring, no rows. `wit/media/media.wit` is the
   contract they will be written against.
 * wasi-sdk 34's wasip2 components import `wasi:cli/exit@0.2.12`, which neither wasmtime 27 nor 36 implements,
