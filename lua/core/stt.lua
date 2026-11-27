@@ -475,6 +475,47 @@ function M.submit(request)
   return decoded and json.decode(raw) or { error = 'stt_answer_unreadable' }
 end
 
+-- The handle a submit answers, and the ONE call that settles it. A submit enqueues (a queue job, as it
+-- should) and answers its job id; `wait_for(id, wait_s)` returns as soon as the job leaves the queue or
+-- the wait runs out, so a caller never writes a poll loop of its own (Victor's test: "the answer arrives,
+-- or says pending and then arrives, with no poll loop in the caller"). The state it returns is the node's
+-- own word for the job, never a guess: `queued`, `running`, `done`, `failed`, `stale` or `empty`.
+local SETTLED = { done = true, failed = true, stale = true, empty = true }
+function M.wait_for(id, wait_s)
+  local job = tonumber(id) or 0
+  if job <= 0 then return { error = 'stt_no_job' } end
+  local budget = math.max(0, math.floor(tonumber(wait_s) or 60)) * 1000
+  local waited = 0
+  local step = 250
+  while true do
+    local row = M.job(job)
+    local state = row and ((row.ok and row.ok.state) or row.state)
+    if state and SETTLED[state] then
+      row.settled = true
+      return row
+    end
+    if waited >= budget then
+      row = row or {}
+      row.settled = false
+      row.paused_ms = waited
+      return row
+    end
+    if type(host.sleep) == 'function' then host.sleep(step) end
+    waited = waited + step
+  end
+end
+
+-- A submit that answers the settled row: the same two calls in the order every caller writes them.
+function M.submit_and_wait(request, wait_s)
+  local submitted = M.submit(request)
+  if not submitted or submitted.error then return submitted end
+  local id = submitted.ok and submitted.ok.job or submitted.job
+  if not id then return submitted end
+  local settled = M.wait_for(id, wait_s)
+  settled.submitted = submitted
+  return settled
+end
+
 -- The tick the node's housekeeping loop calls, guarded: a failing relay round must not take the
 -- node thread down, and it must not log the same line every second either. The operator view shows
 -- the last failure (`M.view().last_error`).
