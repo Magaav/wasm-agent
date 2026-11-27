@@ -118,9 +118,19 @@ echo 'deploy: looking for a published binary for this commit'
 case "${FIXTURE_DECLARE:-none}" in
   build) echo 'deploy: no published binary for this commit; building this tree (disk floor ok)' ;;
   published) echo 'deploy: installing the published binary; the prove gate below runs on it, then upgrade.sh' ;;
+  # THE DISAGREEMENT THIS CASE EXISTS FOR (Victor on work, 27/11): the installer announced the published path
+  # and then compiled for 1961 s. Its log keeps saying "published", so only the build status tells the truth.
+  published-compiles) echo 'deploy: installing the published binary; the prove gate below runs on it, then upgrade.sh' ;;
 esac
-if [ "${FIXTURE_DECLARE:-none}" != "published" ]; then
+if [ "${FIXTURE_DECLARE:-none}" != "published" ] && [ "${FIXTURE_DECLARE:-none}" != "published-compiles" ]; then
   write_status building preflight 0 ""
+  sleep 1
+  write_status building compiling 12 "provisioning"
+  sleep 1
+  write_status building compiling 48 "wa-host"
+  sleep 1
+elif [ "${FIXTURE_DECLARE:-none}" = "published-compiles" ]; then
+  write_status building installing 0 ""
   sleep 1
   write_status building compiling 12 "provisioning"
   sleep 1
@@ -336,6 +346,22 @@ grep -q '/456' "$W/out.txt" && fail 'a published install printed a build bar; th
 grep -q "building from source, minutes" "$W/out.txt" && fail 'the published path claimed a build'
 grep -Eq "^updated to .* in [0-9]+:[0-9][0-9]$" "$W/out.txt" || fail 'the published install must print its last line'
 echo '  ok: the published path printed "installing the published binary (no build)", no bar, and its last line'
+
+# ---- 3b. THE LABEL FOLLOWS THE WORK (Victor on work, 27/11) ---------------------------------------
+# "installing the published binary (no build)" was on screen for 32 minutes while deploy.sh compiled for 1961 s.
+export FIXTURE_OUTCOME=ok FIXTURE_LEAD=1 FIXTURE_DECLARE=published-compiles
+reset_fixture
+run_update
+[ "$CODE" = 0 ] || fail "a published-then-compiled install must exit 0 (it exited $CODE)"
+# The label IS honest for the moment before anything compiles (the fixture writes `building installing` first);
+# THE BUG was that it stayed there while cargo ran, and the build's own lines never arrived. So: the last
+# progress line before the update must be the build's, and the build must have been shown at all.
+LAST_PROGRESS="$(tail -2 "$W/out.txt" | head -1)"
+printf '%s' "$LAST_PROGRESS" | grep -q 'installing the published binary (no build)' \
+  && fail 'the last line before the update still said "no build" while the installer was compiling (bug 1 is back)'
+grep -q '/456' "$W/out.txt" || fail 'a compiling install must show its n/m progress'
+grep -q 'compiling' "$W/out.txt" || fail 'a compiling install must name the phase that is really running'
+echo '  ok: a published declaration followed by a real compile prints the build, never "(no build)"'
 
 # ---- 4. a deploy that FAILS: one line with the reason, and the installer's own words in the log -----
 export FIXTURE_OUTCOME=fail FIXTURE_DECLARE=build

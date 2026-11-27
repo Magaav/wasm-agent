@@ -323,7 +323,21 @@ function M.state(options)
   -- 5. THE INSTALLER SAID IT IS INSTALLING A PUBLISHED BINARY: there is no n/total to show, because there
   --    is no build. "building 456/456 proving (published binary, no build)" contradicted itself (Fable
   --    24/11, B): the published path says what it is doing and drops the bar.
-  if declared == "published" then
+  -- THE LIVE BUILD OUTRANKS THE DECLARATION (Victor's update on work, 27/11: the screen said "installing the
+  -- published binary (no build)" for 32 minutes while deploy.sh compiled for 1961 s, and the deploy then failed).
+  -- `declared` is what the installer SAID it would do, read from its log; a fresh building record is what it IS
+  -- doing, read from its own status file. When the two disagree the status file is right, so the published
+  -- label is only reached when nothing is building now - and then step 6 shows the real phase and n/m.
+  -- What contradicts the declaration is COMPILING, not merely a status file: a real published install writes
+  -- `building installing` too (its own row, scripts/test-update-follow.sh case 3). So the test is the phase and
+  -- the count, which only a source build produces.
+  local compiling_now = false
+  if type(build) == "table" and trim(build.state) == "building"
+    and fresh_epoch(build.at, started and (started - 1)) then
+    local bphase, bdone = trim(build.phase), tonumber(build.done) or 0
+    compiling_now = bphase:match("^compil") ~= nil or bdone > 0
+  end
+  if declared == "published" and not compiling_now then
     return snap({ key = "downloading", body = "installing the published binary (no build)", sources = { p.deploy_out } })
   end
 
