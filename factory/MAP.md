@@ -23,10 +23,11 @@ factory/
 | script | lines | started by | writes | alarms on | swap check |
 | --- | --- | --- | --- | --- | --- |
 | `disk-watch.sh` | 8 | `orch-disk.timer` | `_orch/disk.state`, `_orch/disk.warned`, a `DISK:` line in `ATTENTION` at 70% (once an hour) | `/` at or over 70% (the node's disk_cap refuses work at 85%) | after the swap, `_orch/disk.state` keeps its clock and no `DISK:` line appears under 70% |
+| `health-loop.sh` | 28 + `lib/main-binary.sh` 47 | `orch-health-loop.service` | `_orch/health-last`, `health-green`, `REVERT-PROPOSAL-<sha>.txt`, a HANDOVER line | a new red on main (after one rerun alone) | after the swap: the first loop turn prints a HANDOVER line naming the binary it graded with, and that path is under `~/.wasm-agent/releases` or `~/wasm-agent/health-target` - never `~/.local/bin` |
 | `daily-line.sh` | 24 | `orch-daily.timer` (08:00 local) | one `DAILY <day>:` line in `HANDOVER.md`, and a notification | never alarms; it is the daily line | after the swap, run it once with `DAY=<yesterday>` and read the line: the counts must match the day, and a row stamped 03:30Z must be counted on the LOCAL day it happened |
 | `what-hurt-loop.sh` | 2 | `orch-what-hurt.service` | nothing itself; the harvester writes the run journal's feed | never - it is a loop, and the unit restarts it | the unit stays active and `harvest-what-hurt.py` keeps being called every 30 min |
 
-All copies are byte-identical to `_orch/`, and both tests pass with them; each test was also proved able to
+Copies are byte-identical to `_orch/` except `health-loop.sh`, whose ONE change is documented in its header (main own binary, never the installed one) to `_orch/`, and both tests pass with them; each test was also proved able to
 fail by mutating the script (a threshold moved from 70 to 50, the hourly rule removed, the loop's interval; and for the daily line, the day window computed in UTC instead of the local day).
 
 ## Where the runtime data stays
