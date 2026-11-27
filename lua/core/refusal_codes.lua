@@ -506,6 +506,7 @@ return {
   ['stt_admin_failed']='stt.lua',
   ['stt_answer_unreadable']='stt.lua',
   ['stt_no_answer']='stt.lua',
+  ['stt_no_job']='stt.lua',
   ['stt_producer_unknown']='stt.lua',
   ['stt_submit_failed']='stt.lua',
   ['stt_unavailable']='stt.lua',
