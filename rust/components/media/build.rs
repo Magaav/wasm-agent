@@ -45,7 +45,12 @@ fn main() {
                 build.include(root.join(other));
             }
         }
+        // wasi-libc hides `struct tm` and `gmtime_r` behind the POSIX/XOPEN feature macros: without them
+        // libavutil/dict.c sees an incomplete `struct tm` and a missing `gmtime_r`, which reads like a
+        // broken header rather than a missing -D.
         build.define("HAVE_AV_CONFIG_H", None).define("_GNU_SOURCE", None);
+        build.define("_POSIX_C_SOURCE", "200809L").define("_XOPEN_SOURCE", "700");
+        build.define("_DEFAULT_SOURCE", None);
         build.warnings(false);
         build.flag_if_supported("-w");
         for file in &files {
