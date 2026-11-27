@@ -520,7 +520,10 @@ wa_node_release_list() {
 wa_node_asset_names() {
   local commit="$1" triple="$2" short
   short="$(wa_node_short_sha "$commit")" || return 2
-  printf 'node-%s.manifest\nwa-%s-%s\nwa-sentinel-%s-%s\nwa-term-%s-%s\n' "$short" "$triple" "$short" "$triple" "$short" "$triple" "$short"
+  # ONE MEMBER LIST (law 17): every asset the bundle carries comes from here, so adding the supervisor did not
+  # add a fourth hand-written pair to each loop.
+  printf 'node-%s.manifest\nwa-%s-%s\nwa-sentinel-%s-%s\nwa-term-%s-%s\nwa-operations-supervisor-%s-%s\n' \
+    "$short" "$triple" "$short" "$triple" "$short" "$triple" "$short" "$triple" "$short""
 }
 
 # <repo> <tag> <asset> <dest> [base]
@@ -1098,7 +1101,7 @@ wa_node_binary_stage() {
   # THE PROGRAM IS PART OF THE SET (wa-term-own-program): `wa` opens its terminal by running `wa-term`
   # from beside itself, so a release that carries one binary and not the other installs a node that
   # cannot open a terminal at all (the reason the first landing was reverted). Both, or the staging fails.
-  for file in wa wa-sentinel wa-term; do
+  for file in wa wa-sentinel wa-term wa-operations-supervisor; do
     src="$dir/$file-$triple-$short"
     [ -f "$src" ] || src="$dir/$file"          # a source directory may name the plain `wa`/`wa-sentinel`/`wa-term`
     [ -f "$src" ] || { printf 'node_binary_missing: %s\n' "$src" >&2; return 2; }

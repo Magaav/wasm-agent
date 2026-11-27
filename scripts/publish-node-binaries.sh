@@ -417,7 +417,10 @@ fi
 asset_list() {
   local triple
   for triple in $MANIFEST_TRIPLES; do
-    printf 'wa-%s-%s wa-sentinel-%s-%s wa-term-%s-%s\n' "$triple" "$SHORT" "$triple" "$SHORT" "$triple" "$SHORT"
+    # THE MEMBER LIST IS ONE PLACE (law 17). A member added here is published, verified, staged and installed by
+    # every loop that reads WA_BUNDLE_MEMBERS, instead of a new hand-written pair in each of them.
+    members=""; for m in wa-sentinel wa-term wa-operations-supervisor; do members="$members wa-$m-$triple-$SHORT"; done
+    printf 'wa-%s-%s%s\n' "$triple" "$SHORT" "$members"
   done
 }
 
@@ -479,13 +482,21 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     echo '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes'
     for triple in $MANIFEST_TRIPLES; do
       local wa="$dir/wa-$triple-$SHORT" sentinel="$dir/wa-sentinel-$triple-$SHORT" program="$dir/wa-term-$triple-$SHORT"
+      local supervisor="$dir/wa-operations-supervisor-$triple-$SHORT"
       [ -f "$wa" ] || fail "binary_missing: $wa" 2
       [ -f "$sentinel" ] || fail "binary_missing: $sentinel" 2
       [ -f "$program" ] || fail "binary_missing: $program" 2
-      printf '%s %s %s %s %s %s %s\n' "$triple" \
+      # A BUNDLE WITHOUT THE SUPERVISOR IS REFUSED HERE (P0, 27/11): since 03579b19 `wa` needs its sibling and
+      # nothing shipped it, so every node installing such a build lost every command. Refusing at PUBLISH is the
+      # only place that stops one existing.
+      [ -f "$supervisor" ] || fail "binary_missing: $supervisor (wa-operations-supervisor: a node that installs without it loses every bash/operations call)" 2
+      # THE SUPERVISOR IS TWO TRAILING COLUMNS, NEVER INSERTED: a reader that predates them still parses the first seven
+      # fields, which is how wa-term became a column and how this stays a format old nodes can read.
+      printf '%s %s %s %s %s %s %s %s %s\n' "$triple" \
         "$(wa_node_sha256 "$wa")" "$(wc -c < "$wa" | tr -d '[:space:]')" \
         "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')" \
-        "$(wa_node_sha256 "$program")" "$(wc -c < "$program" | tr -d '[:space:]')"
+        "$(wa_node_sha256 "$program")" "$(wc -c < "$program" | tr -d '[:space:]')" \
+        "$(wa_node_sha256 "$supervisor")" "$(wc -c < "$supervisor" | tr -d '[:space:]')"
     done
   } > "$tmp" || fail "manifest_unwritable: $tmp"
   mv -f "$tmp" "$manifest" || fail "manifest_unwritable: $manifest"
