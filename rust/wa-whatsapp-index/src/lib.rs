@@ -87,6 +87,14 @@ pub const MAX_ATTEMPTS: u32 = 2;
 /// says `download_too_large` with the size instead of pretending.
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024;
 
+/// Largest media this node will KEEP, which is a different question from what it can hand back through a
+/// queue. The component writes the decrypted file into the directory the node grants it
+/// (`/downloads`, `rust/wa-kernel-runtime/src/services.rs`) and answers with the path, so a 4.3 MB video
+/// or a 40 MB one is a download and not `download_too_large`. The number matches the host's own
+/// retention bound (`DOWNLOAD_KEEP_BYTES`, 64 MB): media bigger than what the directory will keep could
+/// not survive the prune that runs before the write.
+pub const MAX_STORED_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Largest answer the component will settle with. `wa:queue`'s own cap is 64 KiB; the margin is the
 /// job record around the result.
 pub const MAX_RESULT_BYTES: usize = 56 * 1024;
@@ -509,7 +517,7 @@ impl Request {
                 if chat.is_none() || id.is_none() {
                     return Err(Refusal::new("chat_and_id_required", "one message: pass chat and id"));
                 }
-                let bytes = self.max_bytes.unwrap_or(MAX_DOWNLOAD_BYTES).clamp(1, MAX_DOWNLOAD_BYTES);
+                let bytes = self.max_bytes.unwrap_or(MAX_STORED_BYTES).clamp(1, MAX_STORED_BYTES);
                 (1, bytes)
             }
             Op::Backfill => {
@@ -1163,7 +1171,7 @@ mod tests {
                 ..request(op)
             };
             let verified = both.validate().unwrap();
-            assert_eq!(verified.max_bytes, MAX_DOWNLOAD_BYTES, "{op}");
+            assert_eq!(verified.max_bytes, MAX_STORED_BYTES, "{op}");
         }
         assert_eq!(request("").validate().unwrap_err().code, "bad_op");
         assert_eq!(request("delete).drop table").validate().unwrap_err().code, "bad_op");

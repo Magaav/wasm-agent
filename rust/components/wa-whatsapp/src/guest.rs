@@ -2231,7 +2231,9 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
 /// is only the client half.
 async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Result<serde_json::Value, String> {
     use crate::wa::queue::worker;
-    let (chat, id, media, limit) = match index::download_plan(&IndexKv, request, cfg.download_max).await? {
+    // `limit` is the plan itself: `download_plan` already refuses media bigger than what this node will
+    // keep (`MAX_STORED_BYTES`), so what is left to decide here is only HOW the bytes travel.
+    let (chat, id, media, _limit) = match index::download_plan(&IndexKv, request, cfg.download_max).await? {
         index::DownloadPlan::Refused(answer) => return Ok(answer),
         index::DownloadPlan::Fetch(target) => (target.chat, target.id, target.media, target.limit),
     };
@@ -2255,21 +2257,35 @@ async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Resu
         Err(error) => return Err(format!("download:{}", one_line(&error.to_string()))),
     };
     let took = now_ms() - started;
-    if bytes.len() as u64 > limit {
-        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the decrypted media is larger than this node will hand back");
+    // THE FILE, NOT A QUEUE PAYLOAD. The node grants this component a directory to write in (`/downloads`,
+    // the manifest's `capabilities.dirs`, mapped to a directory the node owns by
+    // `rust/wa-kernel-runtime/src/services.rs`), so a 4.3 MB video - or a 40 MB one - is a download.
+    // A node that granted nothing, or a disk that refused, keeps the old path, and there the transport is
+    // the bound: the bytes ride the job's progress stream, which `wa:queue` caps at 1 MiB.
+    let stored = store_at_downloads(&bytes, &id, &media.filename, &media.mime);
+    if stored.is_none() && bytes.len() as u64 > seam::MAX_DOWNLOAD_BYTES {
+        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the decrypted media is larger than this node will hand back through the job's progress stream, and it granted no directory to write it in");
         answer["size"] = serde_json::Value::from(bytes.len());
-        answer["max_bytes"] = serde_json::Value::from(limit);
+        answer["max_bytes"] = serde_json::Value::from(seam::MAX_DOWNLOAD_BYTES);
+        // A refusal that names no way forward is what made a model invent one (shell on another node,
+        // ffmpeg, a store read by hand). This is the exact next call.
+        answer["next"] = serde_json::Value::from("enable the component with a definition that grants it a directory (`wa services enable wa-whatsapp`, the manifest's `capabilities.dirs`), and this same call returns the file's path");
         return Ok(answer);
     }
-    let chunks = bytes.len().div_ceil(DOWNLOAD_CHUNK).max(1) as u32;
+    let chunks = match stored {
+        Some(_) => 0,
+        None => bytes.len().div_ceil(DOWNLOAD_CHUNK).max(1) as u32,
+    };
     // The first entry of each attempt is a header naming the job, so a retried download can be told
     // apart from the chunks a failed attempt already wrote: the reader takes the *last* header.
-    if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, seam::download_header(job)).await {
-        return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
-    }
-    for chunk in bytes.chunks(DOWNLOAD_CHUNK) {
-        if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, chunk.to_vec()).await {
+    if stored.is_none() {
+        if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, seam::download_header(job)).await {
             return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
+        }
+        for chunk in bytes.chunks(DOWNLOAD_CHUNK) {
+            if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, chunk.to_vec()).await {
+                return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
+            }
         }
     }
     let manifest = seam::Download {
@@ -2281,11 +2297,56 @@ async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Resu
         sha256: media.sha256.clone(),
         bytes: bytes.len() as u64,
         chunks,
+        path: stored.clone(),
     };
     say!("download: ok job={job} kind={} bytes={} chunks={chunks} took_ms={took}", manifest.kind, manifest.bytes);
     let mut answer = seam::answer(seam::Op::Download, serde_json::to_value(&manifest).unwrap_or_default());
     answer["bytes"] = serde_json::Value::from(manifest.bytes);
     Ok(answer)
+}
+
+/// Where the node lets this component put a downloaded file: the `/downloads` preopen the manifest
+/// declares (`capabilities.dirs`), which the node maps to a directory it owns. `Some(path)` means the
+/// bytes are ON DISK and nothing rides the queue; `None` means this node granted nothing or the write
+/// failed, and the caller falls back to the transport-bounded path.
+///
+/// The name is the message id plus what the sender called the file, sanitised the same way the host's
+/// own `file_name` does it: no separators, no leading dot, a short alphanumeric extension.
+fn store_at_downloads(bytes: &[u8], id: &str, filename: &str, mime: &str) -> Option<String> {
+    let safe_id: String = id.chars().filter(char::is_ascii_alphanumeric).take(24).collect();
+    let cleaned: String = filename
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') { ch } else { '_' })
+        .take(80)
+        .collect();
+    let (stem, extension) = match cleaned.rsplit_once('.') {
+        Some((stem, ext)) if !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|ch| ch.is_ascii_alphanumeric()) => {
+            (stem.to_string(), ext.to_ascii_lowercase())
+        }
+        _ => (cleaned.clone(), extension_for(mime).to_string()),
+    };
+    let stem: String = stem.trim_matches(|ch| ch == '.' || ch == '_').chars().map(|ch| if ch == '.' { '_' } else { ch }).take(60).collect();
+    let stem = if stem.is_empty() { "media".to_string() } else { stem };
+    let safe_id = if safe_id.is_empty() { "media".to_string() } else { safe_id };
+    let name = format!("{safe_id}-{stem}.{extension}");
+    let path = format!("/downloads/{name}");
+    std::fs::write(&path, bytes).ok().map(|()| path)
+}
+
+fn extension_for(mime: &str) -> &'static str {
+    match mime.split(';').next().unwrap_or("").trim() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "video/mp4" => "mp4",
+        "video/3gpp" => "3gp",
+        "audio/ogg" => "ogg",
+        "audio/mpeg" => "mp3",
+        "audio/mp4" => "m4a",
+        "application/pdf" => "pdf",
+        _ => "bin",
+    }
 }
 
 // ---- the past: history sync and the on-demand request ----------------------------------------
