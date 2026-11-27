@@ -83,8 +83,6 @@ mod watchdog;
 mod holders;
 #[cfg(test)]
 mod holders_tests;
-#[cfg(test)]
-mod held_job_tests;
 
 mod deploy_protocol;
 mod deploy_bootstrap;
@@ -2877,81 +2875,9 @@ pub(crate) fn replay_requeues() -> u32 {
     back
 }
 
-/// WHAT THE INSTALL IS WAITING FOR, in the operator's own words (Fable 27/11). A held install used to say only
-/// "waiting for idle; running turns pause at their next step" - true, and useless to a person who wants to know
-/// whether to wait or go and make coffee. A hold publishes one small record per job it is waiting on
-/// (`lua/core/codemode_pending.lua`, `codemode-hold-<op>.json` in the node's data directory), so this reads the
-/// newest of those and names it. A record that is not there, not readable, or older than the deploy's own bound
-/// answers nothing: a stale name is worse than no name.
-pub(crate) fn held_job_line(now: i64, bound_secs: i64) -> Option<String> {
-    held_job_line_in(&config_dir(), now, bound_secs)
-}
-
-pub(crate) fn held_job_line_in(dir: &std::path::Path, now: i64, bound_secs: i64) -> Option<String> {
-    let mut best: Option<(i64, String)> = None;
-    for entry in std::fs::read_dir(dir).ok()? {
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("codemode-hold-") || !name.ends_with(".json") {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(entry.path()) else { continue };
-        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else { continue };
-        let started = record["started_at"].as_i64().unwrap_or(0);
-        if started <= 0 || now - started > bound_secs {
-            continue;
-        }
-        let op = record["op"].as_str().unwrap_or("");
-        if op.is_empty() {
-            continue;
-        }
-        let line = format!(
-            "waiting for {} of session {}, up to {}",
-            op,
-            short_session(record["session"].as_str().unwrap_or("")),
-            mmss(remaining_ms(&record).unwrap_or(0)),
-        );
-        match &best {
-            Some((seen, _)) if *seen >= started => {}
-            _ => best = Some((started, line)),
-        }
-    }
-    best.map(|(_, line)| line)
-}
-
-/// The session as a person reads it: the first eight characters, or "unknown" when the record does not name one.
-fn short_session(session: &str) -> String {
-    if session.is_empty() {
-        "unknown".to_string()
-    } else {
-        session.chars().take(8).collect()
-    }
-}
-
-/// How long the job can still run: its own limit less what it has already spent.
-fn remaining_ms(record: &Value) -> Option<i64> {
-    let limit = record["limit_ms"].as_i64()?;
-    let spent = record["elapsed_ms"].as_i64().unwrap_or(0);
-    Some((limit - spent).max(0))
-}
-
-/// `m:ss`, because a person reads a held wait in minutes and seconds and never in milliseconds.
-fn mmss(ms: i64) -> String {
-    let total = (ms.max(0) + 999) / 1000;
-    format!("{}:{:02}", total / 60, total % 60)
-}
-
 fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str) {
     let bound = deploy_idle_bound_secs();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0);
-    let job = held_job_line(now, bound as i64);
-    let why = match job {
-        Some(job) => format!("{why} ({job}; running turns pause at their next step, bound {bound}s)"),
-        None => format!("{why} (waiting for idle; running turns pause at their next step, bound {bound}s)"),
-    };
+    let why = format!("{why} (waiting for idle; running turns pause at their next step, bound {bound}s)");
     if let Ok(bytes) = std::fs::read(sentinel_dir().join("requests").join(key)) {
         if let Ok(request) = serde_json::from_slice::<Value>(&bytes) {
             if let Err(error) = deploy_protocol::record(&request, key.trim_end_matches(".json"), "held", &why) {

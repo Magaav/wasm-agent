@@ -90,10 +90,7 @@ fn read_since(path: &str, cursor: u64) -> Option<(String, u64)> {
 /// runner writes its results to **stdout**. They are fed stderr first, so that when both wrote, the
 /// newest line the row falls back to is the one on stdout - what a reader watching a terminal would
 /// have seen last - while a build that says nothing on stdout still shows its compile progress.
-/// `limit_seconds` is the job's own limit when it has one: the row says it, and says that Esc stops the
-/// work, because a cancelled run cancels the foreground operation too (operations.rs).
-pub fn tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_path: &str, owner: &str,
-            limit_seconds: Option<f64>) -> Option<Value> {
+pub fn tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_path: &str, owner: &str) -> Option<Value> {
     // An owner nobody can name is nobody's row: publish nothing rather than a row no session can claim
     // (unknown is not yes). Every caller passes the operation's own `owner`, which for a session's work
     // is that session's id (`operations::configure_spec`).
@@ -118,8 +115,7 @@ pub fn tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_pat
     let now = now_epoch();
     let mut lives = LIVES.lock().unwrap_or_else(|e| e.into_inner());
     let fresh = |id: &str, owner: &str| Live {
-        id: id.to_string(), owner: owner.to_string(),
-            tracker: Tracker::new(tool, started_at).waiting(limit_seconds), cursor: 0, errors: 0,
+        id: id.to_string(), owner: owner.to_string(), tracker: Tracker::new(tool, started_at), cursor: 0, errors: 0,
     };
     let index = match lives.iter().position(|live| live.owner == owner) {
         Some(index) => index,
