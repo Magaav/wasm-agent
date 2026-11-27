@@ -1742,29 +1742,26 @@ function M.native_settle(handle, dispatch, outcome)
   record.detached = outcome.detached == true or record.detached == true
   if stopped then
     -- WHAT THE NODE SAW, not what we hoped: snapshot() is the operations layer's own answer for this op.
-    -- THE SUPERVISOR FINISHES THE KILL AFTER THE ANSWER (the runner says so in its own words:
-    -- cleanup="supervised"), so the signal and the survivors are not in the answer the tool got. Asking once
-    -- caught them `nil`; the managed path WAITS for them inside its own bounded grace (STOP_CONFIRM_MS) and
-    -- that is what this does too - bounded, because the reader's prompt must come back at once, and never
-    -- invented: what the record says is what the operations layer reported.
-    local observed, deadline = nil, now_seconds() + (M.STOP_CONFIRM_MS / 1000)
-    repeat
-      observed = (id ~= nil and dispatch ~= nil) and snapshot(dispatch, tostring(id)) or nil
-      if type(observed) == "table" and type(observed.stop) == "table" then break end
-      if type(observed) == "table" and tostring(observed.state or "") == "cancelled" and observed.settled == true then break end
-      if host.sleep then host.sleep(10) end
-    until now_seconds() >= deadline
+    -- NEVER WAIT FOR FACTS INSIDE THE ANSWER (orchestrator decision, 27/11). The supervisor finishes the kill
+    -- after the runner has answered, so the signal and the survivors are not knowable here without spending the
+    -- reader's prompt budget: asking and waiting inside the stop made the prompt late (measured: 20/9 with the
+    -- wait, against 22/7 without). The record is written at once with what IS known, and the facts are read on
+    -- demand from the record - which is what `snapshot` below fills the moment the node reports them.
+    local observed = (id ~= nil and dispatch ~= nil) and snapshot(dispatch, tostring(id)) or nil
     local facts = type(observed) == "table" and type(observed.stop) == "table" and observed.stop or nil
     local survivors = facts and facts.survivors or outcome.survivors
     local signal = facts and facts.signal or outcome.signal
     local grace = facts and facts.grace_ms or outcome.grace_ms
+    -- THE ANSWER NAMES THE WORK AND POINTS AT THE RECORD, it does not carry the record: "stopped 1: bash;
+    -- record <id>". One line that fits any budget, and the facts (signal, survivors, how long the group
+    -- survived) are read from the store by whoever wants them.
     local head
     if record.detached then
       head = "still running: " .. tostring(record.command) .. " (op " .. tostring(record.op)
         .. "), left alone because it was started detached"
       signal = nil   -- nothing was signalled for it; saying otherwise is the lie the row checks for
     else
-      head = "stopped: " .. tostring(record.command) .. ", after " .. string.format("%.1f", after) .. " s"
+      head = "stopped 1: " .. tostring(record.tool or record.kind or "call") .. "; record " .. tostring(handle.id)
     end
     local note = head
     if not record.detached and signal == "TERM" then
