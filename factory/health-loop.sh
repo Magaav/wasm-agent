@@ -19,6 +19,12 @@ GREEN=$(cat $M/_orch/health-green 2>/dev/null); KNOWN=" $(cat $M/_orch/health-kn
 while true; do
   $G fetch -q origin; N=$($G rev-parse origin/main)
   if [ "$N" = "$(cat $M/_orch/health-last 2>/dev/null)" ]; then sleep 300; continue; fi
+  # A COLD STAGE NEEDS MORE THAN THE DEFAULT BOUND (28/11: every tip NOT GRADED while c1fcda27 WAS published).
+  # MEASURED: the release resolver, asked for a tip whose bundle is on GitHub, stops its digest scan at
+  # WA_NODE_RELEASE_DIGEST_SECONDS and answers "no release" - and the default is 20 s. The SAME call with 60 s
+  # resolved the published bundle in 76 s, no build. This loop's fallback is a fifteen-minute cargo build, so a
+  # longer scan is the cheap answer; a warm stage is unaffected because it answers before the scan runs.
+  export WA_NODE_RELEASE_DIGEST_SECONDS=${WA_NODE_RELEASE_DIGEST_SECONDS:-120}
   if ! WA_BIN=$(wa_main_binary "$N"); then
     echo "$(date -u +%H:%MZ) orch(health): NOT GRADED for ${N:0:8}: no binary of main's own (the installed one is not used)" >> $H
     # A WATCHDOG THAT NEVER BARKS IS WORSE THAN NONE: one ungraded tip can be a release still publishing, two in
@@ -31,6 +37,8 @@ while true; do
     sleep 300; continue
   fi
   wa_note_graded $M/_orch
+  # WHICH STEP GAVE THE BINARY, on the line that records the grading, so "graded" is never mistaken for "built".
+  echo "$(date -u +%H:%MZ) orch(health): grading ${N:0:8} with ${WA_MAIN_BINARY_STEP:-unknown} (${WA_BIN})" >> $H
   export WA_BIN
   bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1
   S=$(jq -r .sha $M/main-health.json); echo $S > $M/_orch/health-last

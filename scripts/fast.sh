@@ -1218,6 +1218,10 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # origin), the scratch HOME and the key; its Lua half is excluded from the bare loop for that reason.
   WA_BIN="$bin" check status-limits-security node scripts/test-status-limits-security.mjs
   WA_BIN="$bin" check status-midrun-pty node scripts/test-status-midrun-pty.mjs
+# A TIP THAT IS ONLY PUBLISHED MUST STILL BE GRADED (28/11): the health loop read "no release" because its digest
+# scan ran at the 20 s default on a cold stage, and the bundle it would have used carries no wa-term and no
+# wa-operations-supervisor. This row is the guard on the bound, the named step and the built sidecars.
+check health-graded bash scripts/test-health-graded.sh
 # THE REPORT CITED A QUERY THAT DID NOT EXIST (27/11): docs/missions/reports/waiting-costs-no-turns.md names
 # wct-query.sql as its after-measurement, and the file was never in the tree. The row checks the query exists,
 # parses, still counts the four numbers the before was taken with, and answers a real 1-day window.

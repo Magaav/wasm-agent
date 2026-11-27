@@ -103,8 +103,35 @@ wa_main_binary_build() { # <sha> <root> <target>
 # so each row's first command produced nothing and the row failed on its own fixture ('the scratch checkout has a
 # commit to read' with an empty sha). 135 rows in the run that measured it. A pin is therefore a DIRECTORY per tip
 # that holds the pair, never a lone file.
-wa_main_binary_pin() { # <binary> <sha> <target> -> prints the path of the pinned wa
-  local bin=$1 sha=$2 target=$3 dir stage tmp
+# The one program a released bundle does not carry. Built in this file's own target, capped and niced like the
+# whole-node build, and reused forever after because a tip's supervisor never changes.
+wa_main_binary_supervisor() { # <sha> <target> [root] -> prints the built program
+  local sha=$1 target=$2 root=${3:-$HOME/wasm-agent/checkout} cargo_bin dir built
+  dir=$target/supervisor
+  built=$dir/release/wa-operations-supervisor
+  if [ -x "$built" ]; then printf '%s\n' "$built"; return 0; fi
+  for cargo_bin in "${WA_MAIN_CARGO:-}" "$HOME/wasm-agent/toolchain/cargo/bin/cargo" "$HOME/.cargo/bin/cargo" \
+                   "$HOME/.local/share/mise/shims/cargo"; do
+    [ -n "$cargo_bin" ] && [ -x "$cargo_bin" ] && break
+  done
+  [ -n "$cargo_bin" ] && [ -x "$cargo_bin" ] || cargo_bin=$(command -v cargo 2>/dev/null || true)
+  [ -n "$cargo_bin" ] || { echo "wa_main_binary: no cargo to build the supervisor for ${sha:0:12}" >&2; return 1; }
+  mkdir -p "$dir" 2>/dev/null || return 1
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$dir/.build.lock"
+    flock -n 9 || { echo "wa_main_binary: another supervisor build is running" >&2; return 1; }
+  fi
+  local cap=${WA_MAIN_SUPERVISOR_CAP_SECONDS:-600}
+  CARGO_TARGET_DIR="$dir" nice -n "${WA_MAIN_BUILD_NICE:-10}" timeout "$cap" \
+    "$cargo_bin" build --release --offline -p wa-operations-supervisor -p wa-term \
+      --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 \
+    || { echo "wa_main_binary: the sidecar build for ${sha:0:12} failed (cap ${cap}s)" >&2; return 1; }
+  [ -x "$built" ] && { printf '%s\n' "$built"; return 0; }
+  return 1
+}
+
+wa_main_binary_pin() { # <binary> <sha> <target> [root] -> prints the path of the pinned wa
+  local bin=$1 sha=$2 target=$3 root=${4:-$HOME/wasm-agent/checkout} dir stage tmp
   [ -x "$bin" ] || { echo "wa_main_binary: $bin is not executable" >&2; return 1; }
   dir=$target/pinned/${sha:0:12}
   if [ -x "$dir/wa" ]; then printf '%s\n' "$dir/wa"; return 0; fi
@@ -133,6 +160,24 @@ wa_main_binary_pin() { # <binary> <sha> <target> -> prints the path of the pinne
   if [ -x "$src" ]; then
     cp "$src" "$stage/wa-operations-supervisor" 2>/dev/null       && chmod +x "$stage/wa-operations-supervisor" 2>/dev/null || true
   fi
+  # A PUBLISHED BUNDLE HAS NO SUPERVISOR IN IT (28/11, measured on the real bundle for c1fcda27): the release holds
+  # wa-<triple>-<sha12>, wa-sentinel-<triple>-<sha12>, SHA256SUMS and the manifest - and NOT the program the node
+  # runs a command with. So a tip graded from step 1 would answer operations_supervisor_missing for every row, which
+  # is the storm again by another road. The pin therefore BUILDS just that crate beside the binary it pinned: three
+  # minutes against the fifteen a whole-node build costs, and it is the only step that can supply it.
+  if [ ! -x "$stage/wa-operations-supervisor" ] || [ ! -x "$stage/wa-term" ]; then
+    local built side built_any=""
+    if built=$(wa_main_binary_supervisor "$sha" "$target" "$root" 2>/dev/null) && [ -x "$built" ]; then
+      side=$(dirname "$built")
+      for pair in wa-operations-supervisor wa-term; do
+        [ -x "$stage/$pair" ] && continue
+        if [ -x "$side/$pair" ]; then
+          cp "$side/$pair" "$stage/$pair" 2>/dev/null && chmod +x "$stage/$pair" 2>/dev/null && built_any="-sidecars-built"
+        fi
+      done
+    fi
+    [ -n "$built_any" ] && WA_MAIN_BINARY_STEP="${WA_MAIN_BINARY_STEP}${built_any}"
+  fi
   # SAY WHAT IS MISSING, by name: a pin without these runs a node that refuses every command, and a reader must not
   # have to learn that from a hundred red rows (the first version of this function sent a run that way).
   for sibling in wa-term wa-operations-supervisor; do
@@ -155,9 +200,23 @@ wa_main_binary() { # <sha> [release-stage] [target-dir] [repo-root]
   # ONE call: the resolver is not free (it may look at the network), and asking twice could get two answers.
   local rerr; mkdir -p "$target" 2>/dev/null || true; rerr=$(mktemp -u "/tmp/wa-main-release.XXXXXX")
   local why_release
-  if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>"$rerr"); then rm -f "$rerr"; wa_main_binary_pin "$out" "$sha" "$target"; return $?; fi
+  if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>"$rerr"); then
+    rm -f "$rerr"
+    # WHICH STEP ANSWERED, said by the lib that knows (28/11). The caller writes it on its health line, so a tip that
+    # was graded from a PUBLISHED bundle is never read as tip that did not need one.
+    case "$out" in
+      *"${sha:0:12}"*) WA_MAIN_BINARY_STEP="release-this-commit" ;;
+      *) WA_MAIN_BINARY_STEP="release-covering-commit" ;;
+    esac
+    export WA_MAIN_BINARY_STEP
+    wa_main_binary_pin "$out" "$sha" "$target" "$root"; return $?
+  fi
   why_release=$(tail -1 "$rerr" 2>/dev/null); rm -f "$rerr"
-  if out=$(wa_main_binary_build "$sha" "$root" "$target"); then wa_main_binary_pin "$out" "$sha" "$target"; return $?; fi
+  if out=$(wa_main_binary_build "$sha" "$root" "$target"); then
+    WA_MAIN_BINARY_STEP="build"
+    export WA_MAIN_BINARY_STEP
+    wa_main_binary_pin "$out" "$sha" "$target" "$root"; return $?
+  fi
   echo "wa_main_binary: NO BINARY OF ${sha:0:12} - release: ${why_release:-none}; build: ${target}; the installed binary (~/.local/bin/wa) is NOT used" >&2
   return 1
 }
