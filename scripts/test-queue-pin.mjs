@@ -18,6 +18,13 @@ import {openJournal, submit} from './lib/queue/journal.mjs';
 import {pinRequest, pinRefName, landQuick} from './lib/queue/steps.mjs';
 import {runOnce} from './q-runner.mjs';
 
+// THE LANDER RUNS THESE ROWS WITH GIT_DIR EXPORTED (land-quick.sh sets it for its own tree), and `git -C`
+// does not override it: a row that spawns git would then read and write the CANONICAL checkout instead of
+// its fixture. That is what turned this row red inside the queue (q#42) while it was green by hand, so
+// every git call here runs with the workspace variables REMOVED.
+const GIT_ENV = {...process.env};
+for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete GIT_ENV[key];
+
 let checks = 0;
 const fail = (message) => { console.error(`FAIL test-queue-pin: ${message}`); process.exit(1); };
 const ok = (condition, message) => { if (!condition) fail(message); checks += 1; };
@@ -29,7 +36,7 @@ process.on('exit', () => { try { fs.rmSync(work, {recursive: true, force: true})
 // A clone-shaped fixture: main, a branch, and a commit to move it to.
 const repo = path.join(work, 'clone');
 fs.mkdirSync(repo, {recursive: true});
-const git = (...args) => execFileSync('git', ['-C', repo, ...args], {encoding: 'utf8'}).trim();
+const git = (...args) => execFileSync('git', ['-C', repo, ...args], {encoding: 'utf8', env: GIT_ENV}).trim();
 git('init', '-q', '--initial-branch=main');
 git('config', 'user.email', 'row@example.invalid');
 git('config', 'user.name', 'row');
@@ -78,7 +85,7 @@ const stub = path.join(missions, 'land-quick.sh');
 fs.writeFileSync(stub, '#!/bin/bash\necho "stub+"\necho "$1" > "$LANDER_ARG_FILE"\nexit 0\n');
 fs.chmodSync(stub, 0o755);
 process.env.LANDER_ARG_FILE = path.join(work, 'lander-arg.txt');
-const step = landQuick({missionsDir: missions, repo});
+const step = landQuick({missionsDir: missions, repo, landerRepo: repo});
 const result = await step({request: db.prepare('SELECT * FROM requests WHERE id = ?').get(req.id)});
 eq(result.ok, true, 'the stub lander succeeded');
 eq(fs.readFileSync(process.env.LANDER_ARG_FILE, 'utf8').trim(), pinRefName({id: req.id, branch: 'change/mover'}), 'and it was given the pinned ref, NOT change/mover');
@@ -110,6 +117,58 @@ const pin3 = await pinRequest({repo, request: db.prepare('SELECT * FROM requests
 eq(pin3.ok, true, 'the third request pins');
 const accepted = await runOnce(db, {repo, steps: {merge: step, rows: async () => ({ok: true}), push: async () => ({ok: true, mainSha: read.slice(0, 8)})}, missionsDir: missions});
 eq(accepted.outcome, 'landed', 'and the lander accepts the pinned ref that still holds the sha it read');
+
+// ---- 5. THE PIN LIVES WHERE THE LANDER MERGES (the swap, 27/11) ---------------------------------------
+// land-quick.sh merges and pushes from ITS OWN tree by branch name. The swap steps clone a runner tree
+// (~/wasm-agent/q-clone), which shares no refs with it, so a pin written only there is "no branch" for the
+// lander. This case drives landQuick with two DIFFERENT trees and asserts which one gets the ref.
+const clone = path.join(work, "clone2");
+fs.mkdirSync(clone, {recursive: true});
+execFileSync("git", ["-C", clone, "init", "-q", "--initial-branch=main"], {env: GIT_ENV});
+execFileSync("git", ["-C", clone, "-c", "user.email=r@e.invalid", "-c", "user.name=r", "commit", "-q", "--allow-empty", "-m", "one"], {env: GIT_ENV});
+// The sha the request names must exist in the LANDER tree, because that is where the pin is written.
+const _cloneSha = execFileSync("git", ["-C", clone, "rev-parse", "HEAD"], {encoding: "utf8", env: GIT_ENV}).trim();
+execFileSync("git", ["-C", clone, "update-ref", "refs/remotes/origin/main", _cloneSha], {env: GIT_ENV});
+const fourth = submit(db, {branch: "change/lander", sha: read, mission: "pin"});
+
+// A lander that records the ref it was handed and the environment it ran with, then succeeds.
+const seen = path.join(work, "seen.txt");
+fs.writeFileSync(stub, `#!/bin/bash
+echo "arg=$1" > ${seen}
+echo "noinstall=\${LQ_NO_INSTALL:-unset}" >> ${seen}
+exit 0
+`);
+fs.chmodSync(stub, 0o755);
+const twoTrees = landQuick({missionsDir: missions, repo: clone, landerRepo: repo, dryRun: true});
+const pinned = await twoTrees({request: db.prepare("SELECT * FROM requests WHERE id = ?").get(fourth.id)});
+eq(pinned.ok, true, "the two-tree run succeeds");
+eq(git("rev-parse", "refs/heads/" + pinRefName({id: fourth.id, branch: "change/lander"})), read, "the pin is written into the LANDER tree");
+ok(fs.existsSync(seen) && fs.readFileSync(seen, "utf8").includes("arg=change/lander-q"), "and the lander is handed that ref");
+
+// ---- 6. NO INSTALL BY DEFAULT, AND AN INSTALL FAILURE AFTER A PUSH IS NOT A REJECTION ------------------
+ok(fs.readFileSync(seen, "utf8").includes("noinstall=1"), "the default run tells the lander not to install (Victor 27/11)");
+const asksInstall = submit(db, {branch: "change/install-me", sha: read, mission: "pin", kind: "install"});
+const installStep = landQuick({missionsDir: missions, repo: clone, landerRepo: repo, dryRun: true});
+await installStep({request: db.prepare("SELECT * FROM requests WHERE id = ?").get(asksInstall.id)});
+// Empty, not absent: the child is spawned with the decision, and `empty` is what the lander reads as "install"
+// (`${LQ_NO_INSTALL:-}` = 1 is the suppression). The assertion is therefore "not 1", which is also what it
+// must say when this row runs inside a landing that exported LQ_NO_INSTALL=1 for its own reasons.
+const noinstallLine = (fs.readFileSync(seen, "utf8").match(/noinstall=(.*)/) || [])[1] ?? "missing";
+ok(noinstallLine !== "1", `a request that names an install is not told to suppress it (noinstall=${JSON.stringify(noinstallLine)})`);
+
+// Pushed, then the lander fails after the push: main moved, so the verdict is LANDED with the install pending.
+const afterPush = submit(db, {branch: "change/after-push", sha: read, mission: "pin", kind: "install"});
+fs.writeFileSync(stub, `#!/bin/bash
+git -C ${repo} update-ref refs/remotes/origin/main ${read}
+echo "landed on main"
+echo "install-local: FAILED to swap the unit" >&2
+exit 4
+`);
+fs.chmodSync(stub, 0o755);
+const post = await landQuick({missionsDir: missions, repo: clone, landerRepo: repo})({request: db.prepare("SELECT * FROM requests WHERE id = ?").get(afterPush.id)});
+eq(post.ok, true, "a failure AFTER main moved is not a rejection");
+eq(post.installPending, true, "it is a landing with an install pending");
+ok(/install-local/.test(post.installError || ""), `and it carries why the install failed (${(post.installError || "").slice(0, 60)})`);
 
 db.close();
 console.log(`queue pin ok (${checks} checks)`);

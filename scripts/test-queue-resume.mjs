@@ -15,6 +15,13 @@ import {openJournal, submit, transition, verdict, lastState, show} from './lib/q
 import {resumeInFlight, runOnce, runRequest} from './q-runner.mjs';
 import {mainContains, CAPS} from './lib/queue/steps.mjs';
 
+// THE LANDER RUNS THESE ROWS WITH GIT_DIR EXPORTED (land-quick.sh sets it for its own tree), and `git -C`
+// does not override it: a row that spawns git would then read and write the CANONICAL checkout instead of
+// its fixture. That is what turned this row red inside the queue (q#42) while it was green by hand, so
+// every git call here runs with the workspace variables REMOVED.
+const GIT_ENV = {...process.env};
+for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete GIT_ENV[key];
+
 let checks = 0;
 const fail = (message) => { console.error(`FAIL test-queue-resume: ${message}`); process.exit(1); };
 const ok = (condition, message) => { if (!condition) fail(message); checks += 1; };
@@ -27,7 +34,7 @@ process.on('exit', () => { try { fs.rmSync(work, {recursive: true, force: true})
 // main branch, and a sha that is in main versus one that is not.
 const repo = path.join(work, 'repo');
 fs.mkdirSync(repo, {recursive: true});
-const git = (...args) => execFileSync('git', ['-C', repo, ...args], {encoding: 'utf8'}).trim();
+const git = (...args) => execFileSync('git', ['-C', repo, ...args], {encoding: 'utf8', env: GIT_ENV}).trim();
 git('init', '-q', '--initial-branch=main');
 git('config', 'user.email', 'row@example.invalid');
 git('config', 'user.name', 'row');
