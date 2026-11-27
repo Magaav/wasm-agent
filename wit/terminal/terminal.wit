@@ -1,0 +1,59 @@
+/// wa:terminal@0.1.0 - the terminal seam as an async contract.
+///
+/// `wa-term` is 14,154 lines reached from the host as an in-process crate (`rust/wa-term/src/lib.rs:1`), so a change
+/// to it rebuilds the node's binary. This is the world that lets it be a component: one world per surface, and the
+/// shape the law asks for - work that takes time is a `future`, output that keeps coming is a `stream` (a
+/// terminal's output IS a stream), and dropping the handle cancels interest rather than leaving a reader behind.
+package wa:terminal@0.1.0;
+
+interface types {
+    variant error {
+        refused(string),
+        again,
+        closed,
+        failed(string),
+    }
+
+    record size {
+        columns: u16,
+        rows: u16,
+    }
+
+    /// One thing that happened in the surface: bytes arrived, the window changed shape, or the session ended.
+    variant event {
+        data(list<u8>),
+        resized(size),
+        closed(option<u32>),
+    }
+}
+
+/// One terminal session. Its output is a stream because that is what a terminal produces: an unbounded sequence of
+/// chunks that only ends when the session does.
+interface session {
+    use types.{error, size, event};
+
+    resource surface {
+        /// Open a surface at `size`. Suspends while the surface is created; a refusal names why (no tty, no grant).
+        open: static async func(size: size, title: string) -> result<surface, error>;
+
+        /// Write bytes to the surface. Suspends when the consumer is behind, so a writer cannot outrun a slow
+        /// reader and no bytes are dropped on the floor.
+        write: async func(data: list<u8>) -> result<u64, error>;
+
+        /// What the surface produces, in order, until it closes. Reading suspends the guest when there is nothing
+        /// ready; a reader that stops reading suspends the producer (backpressure, declared not assumed).
+        events: func() -> stream<event>;
+
+        /// Ask for a new shape. The next `event.resized` carries what the surface actually became, which is not
+        /// always what was asked for.
+        resize: async func(size: size) -> result<size, error>;
+
+        /// End the session. The stream ends after this, with `event.closed`.
+        close: async func() -> result<_, error>;
+    }
+}
+
+/// A guest that DRAWS a surface imports `session`; the host serves it. The guest owns bytes, the host owns the tty.
+world terminal-client {
+    import session;
+}
