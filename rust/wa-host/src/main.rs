@@ -194,7 +194,8 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn db_path(args: &[String]) -> String {
     flag(args, "--db").unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        // The node home by the product rule, never by the environment: the host reads the same file.
+        let home = wa_host_support::paths::resolve_home();
         format!("{home}/.wasm-agent/memory.db")
     })
 }
