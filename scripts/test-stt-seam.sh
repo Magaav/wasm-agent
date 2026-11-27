@@ -50,17 +50,28 @@ echo "== building rust/components/stt (wasm32-wasip2)"
   echo "FAIL the stt component did not build" >&2; exit 1; }
 [ -f "$artifact" ] || { echo "FAIL no artifact at $artifact" >&2; exit 1; }
 
+# The rows below get their artifact the way the node does: the installed component set. This script
+# prepares one (the built artifact, its pin, its manifest) and points the node's component dir at it.
+# No product code reads a path from the environment; the seam loads what is installed, pinned and
+# verified, exactly as it does on a real node.
+components=$(mktemp -d "${TMPDIR:-/tmp}/wa-stt-seam-components-XXXXXX")
+trap 'rm -rf "$components"' EXIT
+cp "$artifact" "$components/stt.wasm"
+sha256sum "$components/stt.wasm" | cut -d' ' -f1 > "$components/stt.wasm.sha256"
+cp rust/components/stt/manifest.json "$components/stt.json"
+export WA_COMPONENTS_DIR="$components"
+
 echo "== cargo test -p wa-stt-remote"
 cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-stt-remote || status=1
 
-echo "== cargo test -p wa-kernel-runtime stt_host:: (the seam's happy path, against the built artifact)"
-WA_STT_COMPONENT_WASM="$artifact" cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime stt_host:: || status=1
+echo "== cargo test -p wa-kernel-runtime stt_host:: (the seam's happy path, against the installed set)"
+cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime stt_host:: || status=1
 
 # The node-level case the module test binary cannot hold: the switch is process-global, so it lives in
 # a test target of its own. A configured node take is admitted by the guest, its replay is refused from
 # the component ledger, and no fallback line may appear.
 echo "== cargo test -p wa-kernel-runtime --test stt_node_routed (a configured node, routed)"
-WA_STT_COMPONENT_WASM="$artifact" cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime --test stt_node_routed || status=1
+cargo test --release $offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime --test stt_node_routed || status=1
 bin="${WA_BIN:-}"
 for c in "$TARGET/release/wa" "$ROOT/rust/target/release/wa" "$(command -v wa 2>/dev/null)"; do
   [ -n "$bin" ] && break; [ -n "$c" ] && [ -x "$c" ] && bin="$c"
@@ -70,18 +81,15 @@ if [ -z "$bin" ]; then
 else
   echo "== scripts/test-stt-seam-answers.lua"
   home=$(mktemp -d "${TMPDIR:-/tmp}/wa-stt-seam-XXXXXX")
-  components=$(mktemp -d "${TMPDIR:-/tmp}/wa-stt-seam-components-XXXXXX")
   trap 'rm -rf "$home" "$components"' EXIT
-  cp "$artifact" "$components/stt.wasm"
-  sha256sum "$components/stt.wasm" | cut -d' ' -f1 > "$components/stt.wasm.sha256"
-  cp rust/components/stt/manifest.json "$components/stt.json"
   # Twice: with no component (the native rule answering) and with it installed (the seam answering), so
   # the same bytes are held to both paths.
   for mode in native component; do
     dir=""
     [ "$mode" = component ] && dir="$components"
-    out=$(env "WASM_AGENT_LUA_ROOT=$ROOT" "WASM_AGENT_HOME=$home" WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
-      ${dir:+WA_COMPONENTS_DIR=$dir} "WA_SCRIPT=$ROOT/scripts/test-stt-seam-answers.lua" \
+    out=$($([ -n "$dir" ] && printf 'env WA_COMPONENTS_DIR=%s' "$dir" || printf 'env -u WA_COMPONENTS_DIR') \
+      "WASM_AGENT_LUA_ROOT=$ROOT" "WASM_AGENT_HOME=$home" WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
+      "WA_SCRIPT=$ROOT/scripts/test-stt-seam-answers.lua" \
       timeout 300 "$bin" --db "$home/t.db" 2>&1)
     echo "$out" | tail -2
     echo "$out" | grep -q 'stt seam answers ok' || { echo "  FAILED the $mode path"; status=1; }

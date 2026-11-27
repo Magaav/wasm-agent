@@ -48,28 +48,23 @@ wasmtime::component::bindgen!({
 
 use wa::stt::types as seam;
 
-/// Where one call gets what it needs: the components directory (or an explicit artifact) and the
-/// call's deadline — a value, not ambient environment, so a test can point two calls at two artifacts.
+/// Where one call gets what it needs: the node's component directory and the call's deadline.
+///
+/// **No ambient override.** The artifact is whatever the installed component set holds (the node's
+/// component dir, pinned by `components.lock`), and the deadline is a constant: a product path that
+/// reads its own environment cannot be reasoned about, and a row that needs another artifact points the
+/// node's component dir at a prepared set (`WA_COMPONENTS_DIR`) instead of naming a file behind the
+/// code's back.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub components_dir: std::path::PathBuf,
-    /// `WA_STT_COMPONENT_WASM`: an artifact from this checkout instead of the pinned install.
-    pub wasm: Option<std::path::PathBuf>,
     pub timeout_ms: u64,
 }
 
 impl Config {
-    pub fn from_env() -> Config {
-        let env_path = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
-        Config {
-            components_dir: component_dir(),
-            wasm: env_path("WA_STT_COMPONENT_WASM"),
-            timeout_ms: std::env::var("WA_STT_COMPONENT_TIMEOUT_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
-        }
+    /// The installed set and the default deadline: what the node uses.
+    pub fn installed() -> Config {
+        Config { components_dir: component_dir(), timeout_ms: DEFAULT_TIMEOUT_MS }
     }
 
     pub fn with_components(mut self, dir: impl Into<std::path::PathBuf>) -> Config {
@@ -127,27 +122,15 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
         .map_err(|error| error.clone())
 }
 
-/// The component this call runs: the pinned install, or the artifact `WA_STT_COMPONENT_WASM` names.
+/// The component this call runs: the node's installed set, read through the same loader every other
+/// seam uses (it verifies the pin, so a stale or half-installed artifact is a named failure, not a run).
 fn component(config: &Config) -> Result<Installed, String> {
-    let Some(path) = config.wasm.clone() else {
-        return load_in(&config.components_dir, COMPONENT).map_err(|error| error.to_string());
-    };
-    let bytes = std::fs::read(&path).map_err(|error| format!("component_not_installed:{}:{error}", path.display()))?;
-    let manifest: Value = std::fs::read_to_string(path.with_file_name(format!("{COMPONENT}.json")))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    Ok(Installed { name: COMPONENT.to_string(), sha256: hex_of(&bytes), bytes, manifest })
-}
-
-fn hex_of(bytes: &[u8]) -> String {
-    use ring::digest::{digest, SHA256};
-    digest(&SHA256, bytes).as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
+    load_in(&config.components_dir, COMPONENT).map_err(|error| error.to_string())
 }
 
 /// Whether the component is installed and loadable — what the router asks once, with a reason.
 pub fn available() -> Result<String, String> {
-    component(&Config::from_env())
+    component(&Config::installed())
         .map_err(|error| format!("component_unavailable:{error}"))
         .map(|installed| installed.sha256)
 }
@@ -229,7 +212,7 @@ fn with_instance<T>(
 /// wraps both. Each layer is named where it is handled, so "the guest refused" and "the guest could not
 /// answer" never collapse into one.
 pub fn admit(me: &str, owner_nodes: &[String], skew_ms: i64, bytes: &[u8], caller: &str, now_ms: i64) -> Result<Admit, String> {
-    admit_with(&Config::from_env(), me, owner_nodes, skew_ms, bytes, caller, now_ms)
+    admit_with(&Config::installed(), me, owner_nodes, skew_ms, bytes, caller, now_ms)
 }
 
 /// [`admit`] with a config, so a test can point it at an artifact it just built.
@@ -264,7 +247,7 @@ pub fn admit_with(config: &Config, me: &str, owner_nodes: &[String], skew_ms: i6
 
 /// One answer the node composed, as the wire carries it.
 pub fn reply_ok(body_json: &str) -> Result<Vec<u8>, String> {
-    let config = Config::from_env();
+    let config = Config::installed();
     with_instance(&config, |served, runtime| {
         let body = body_json.to_string();
         let timeout = Duration::from_millis(config.timeout_ms);
@@ -303,14 +286,14 @@ mod tests {
     use wa_stt_remote::protocol::{Envelope, Op};
 
     fn config() -> Option<Config> {
-        let path = std::env::var("WA_STT_COMPONENT_WASM").ok()?;
-        Some(Config { components_dir: std::path::PathBuf::from("/nonexistent"), wasm: Some(path.into()), timeout_ms: 5_000 })
+        let config = Config::installed();
+        component(&config).ok().map(|_| config)
     }
 
     #[test]
     fn the_guest_admits_one_call_and_refuses_its_own_replay() {
         let Some(config) = config() else {
-            eprintln!("SKIPPED: no WA_STT_COMPONENT_WASM (build the component and name it)");
+            eprintln!("SKIPPED: no stt component in the node component dir (scripts/test-stt-seam.sh installs one)");
             return;
         };
         let owners = vec!["node-a".to_string()];
