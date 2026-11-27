@@ -1079,16 +1079,14 @@ local function excerpt(origin,line,radius)
  return table.concat(out,'\n')
 end
 -- A MISSING GLOBAL IS ONE CLASS, AND ITS FIX LINE SAYS WHY (22/11). Counted over the retained ledger
--- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40,
+-- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40 (and 91
+-- over the last 7 days on 27/11, which is why the timers are real globals now - codemode_harness.lua),
 -- Buffer 17, HOME 16, location 12, require 6 - and btoa/atob 0: those two are already in the guest
 -- (the pinned QuickJS), which is why they are not in this table; the harness only wraps their message. A name below is not a typo:
 -- the script is running in the wrong runtime, so "Change line N" (which names where, not why) is
 -- replaced by the way that exists here. The table is an ALLOW-LIST on purpose - a name it does not
 -- hold (a script's own variable, `raw`, `wt`) keeps the plain sentence, because nothing here can say
 -- what the script meant (AGENTS.md: an allow-list for anything a refusal depends on).
-local NO_TIMERS = 'There are no timers in this sandbox: pause with await sleep(ms) - 0 to 5000 ms, in the '
-  ..'host, so it spends none of the script\'s budget - and wait on work with the call\'s wait_s option or '
-  ..'wait(op, {wait_s}).'
 local NO_NODE = 'This is not Node: a script has no require, module, process or fs. Run a command with '
   ..'await tools.bash({command: "..."}), and read, write or search files with tools.read, tools.write, '
   ..'tools.ls and tools.grep.'
@@ -1104,8 +1102,7 @@ local GLOBAL_FIX = {
     ..'argument (raw: {script: "..."}) and reach the script as raw.script. Base64 is built in: btoa, atob.',
   HOME = 'There are no environment variables in a script: read one with '
     ..'await tools.bash({command: "printenv HOME"}) - a command runs with this node\'s environment.',
-  setTimeout = NO_TIMERS, setInterval = NO_TIMERS, clearTimeout = NO_TIMERS, clearInterval = NO_TIMERS,
-  setImmediate = NO_TIMERS,
+
   require = NO_NODE, module = NO_NODE, exports = NO_NODE, process = NO_NODE, fs = NO_NODE, path = NO_NODE,
   __dirname = NO_NODE, __filename = NO_NODE,
   location = NO_BROWSER, window = NO_BROWSER, document = NO_BROWSER, navigator = NO_BROWSER,
