@@ -1231,6 +1231,42 @@ do
   ok(not drawn:find("<bash-input>", 1, true), "without its tags")
 end
 
+-- A turn that ran ELSEWHERE (the node, a sentinel wake) is drawn with the same blocks a typed turn uses
+-- (mission turn-survives-a-provider-stall, item 3 / report §4.3). Measured on work 24/11: the wake turn
+-- came back as the Commentary topic because it carried tool calls, and no typed turn ever reads that way.
+do
+  local rows = {
+    { role = "user", content = "[run failure] the previous run stopped" },
+    -- No escaped quotes inside the arguments: a tool_calls string that does not decode leaves `calls`
+    -- empty, and then neither the commentary branch nor the call itself is drawn - which is exactly what
+    -- this row caught on its first run.
+    { role = "assistant", content = "I read the config and fixed it.", reasoning = "",
+      tool_calls = '[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{}"}}]' },
+    -- A bash result, the shape the existing replay case above already proves is drawn: a tool row's own
+    -- renderer is a table per tool, and a shape it does not know draws nothing (learned here, not guessed).
+    { role = "tool", tool_call_id = "c1", tool_name = "bash", ok = 1, ms = 40,
+      content = '{"code":0,"stdout":"cfg fixed\n"}' },
+  }
+  -- As history (what --continue shows): the commentary treatment is the truthful one.
+  local hist_view, hist_written = capture({ live = false, limit = 100 })
+  hist_view:replay(rows, {})
+  local hist = table.concat(hist_written)
+  ok(hist:find("Commentary", 1, true) ~= nil, "replayed history still files tool-carrying text as commentary")
+  -- As a TURN (what catch_up draws for a node-run wake): the answer is an answer.
+  local turn_view, turn_written = capture({ live = false, limit = 100 })
+  turn_view:replay(rows, { rule = false, answer = true })
+  local turn = table.concat(turn_written)
+  ok(turn:find("I read the config and fixed it.", 1, true) ~= nil,
+    "a wake turn's text reaches the reader")
+  ok(turn:find("Commentary", 1, true) == nil,
+    "and not under the Commentary heading a typed turn never shows")
+  -- NOT asserted here, on purpose: whether the tool-call row inside this same capture is drawn. A
+  -- replayed partial row set (text, call, result, no trailing assistant row) does not flush the pending
+  -- call row in this capture, and I did not establish whether that is the fixture's shape or the
+  -- renderer's. The existing replay case above pins call rows, so nothing here regressed; this row pins
+  -- ONLY the thing the change is: the answer text and the absent Commentary heading.
+end
+
 -- ---- session-status-content: between the text area and the session status bar ---------
 -- The update notice used to compete with the session numbers on the status bar's own row; then it had
 -- ONE line directly above the bar. Victor's 08/11 position spec puts it BELOW the CLI's text area and

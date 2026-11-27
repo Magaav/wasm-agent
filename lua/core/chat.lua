@@ -902,7 +902,9 @@ function M.run(argv)
     last_caught = host.now()
     local hold = host.transcript_hold
     if hold then pcall(hold, true) end
-    pcall(view.replay, view, rows, { rule = false })
+    -- `answer = true`: this is a TURN, not history (mission turn-survives-a-provider-stall, item 3) - the
+    -- same blocks a typed turn shows, not the Commentary topic a replayed transcript uses.
+    pcall(view.replay, view, rows, { rule = false, answer = true })
     if hold then pcall(hold, false) end
   end
 
