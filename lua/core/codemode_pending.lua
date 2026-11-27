@@ -1707,12 +1707,20 @@ end
 -- started"), `native_settle` closes it - with the stop facts read from the operations layer, the same answer the
 -- managed executor reads, never a value invented here.
 
+local native_dir_ready = false
+
 function M.native_open(scope, tool, params, detached)
   -- THE DIRECTORY FIRST. M.save writes one file per scope and a write into a directory that does not exist
   -- fails silently (measured 27/11: the row's homes had no codemode-pending/ at all, so every native stop wrote
   -- nothing and the store answered `null`). The empty prefix is how lua/core/approve.lua creates its own dir -
   -- one call, no new host function.
-  pcall(host.write_file, M.dir() .. '/.keep', '')
+  -- THE DIRECTORY FIRST, by this tree's own way of making one: host.write_file does NOT create parents
+  -- (measured 27/11: nothing ever appeared under ~/.wasm-agent/codemode-pending/), and mission.lua,
+  -- font_setup.lua and feature_canary.lua all shell out to mkdir -p for exactly this. Once per process.
+  if not native_dir_ready then
+    native_dir_ready = true
+    if host.exec then pcall(host.exec, 'mkdir -p ' .. string.format('%q', M.dir()), '', 20) end
+  end
   local index = M.open(scope)
   local n = 0
   for _ in pairs(index.ops) do n = n + 1 end
