@@ -129,6 +129,28 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
             continue;
         }
         view[field] = serde_json::Value::String(crate::record::one_line(stored, seam::MAX_TEXT_CHARS));
+        // The store itself cut this text (`record::MAX_TEXT`): what the index holds is a PART, whatever
+        // its length says, and the whole is in the media file - so the pointer names both, and it appears
+        // even when the stored part is short enough that a snippet needed no cutting.
+        let cut_at_store = if field == "transcript" { record.transcript_cut } else { record.ocr_cut };
+        if cut_at_store {
+            view[format!("{field}_cut")] = serde_json::Value::Bool(true);
+            view[format!("{field}_full")] = serde_json::json!({
+                "tool": "whatsapp_message",
+                "chat": record.chat,
+                "id": record.id,
+                "field": field,
+                "chars": total,
+                "chars_stored": crate::record::MAX_TEXT,
+                "whole_in": {
+                    "tool": "whatsapp_download",
+                    "chat": record.chat,
+                    "id": record.id,
+                    "why": "the stored text was cut at the record bound; the file holds the whole",
+                },
+            });
+            continue;
+        }
         if total > seam::MAX_TEXT_CHARS {
             view[format!("{field}_truncated")] = serde_json::Value::Bool(true);
             view[format!("{field}_chars")] = serde_json::Value::from(total);

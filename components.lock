@@ -268,4 +268,8 @@ wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
 # its bytes are the ones published in components-033542eb9a37.
-wa-whatsapp f6975b5d5b956e0f8b15f936b1d684afb98e91226885af2492e1904bbe91910d 8866086
+# Repin for the merge of origin/main (617fed07) into whatsapp-index-heals-itself: main's contacts answer
+# (hidden/hidden_why) and this branch's paging (next, before) and clamp (say_limit) are one answer now, so
+# the bytes are the build of the merged source, not either side's. Built on avell in the pinned root
+# (/tmp/wa-component-build/src) with rustc 1.100.0, wasi-sdk 34.0.
+wa-whatsapp b896fd523d789f414284dc7a3f5824b0a05d2a779b66b70b6fc5d726bdb6bcf9 8928763

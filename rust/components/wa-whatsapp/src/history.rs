@@ -330,6 +330,16 @@ pub async fn drain_conversation<S: Store>(
     let oldest = plan.budget.oldest_ms(now_ms);
     let candidates = candidates(conversation, me);
     progress.seen = candidates.len();
+    // A reconnect delivers the recent messages and leaves a hole between where this index stopped and the
+    // oldest message the sync offered: the gap to heal (whatsapp-index-heals-itself item 1). Noted per
+    // chat, counts only, and only when the silence is longer than `index::GAP_MS`.
+    if let Some(batch_oldest) = candidates.iter().map(|candidate| candidate.envelope.ts).filter(|ts| *ts > 0).min() {
+        if let Err(reason) = index::note_gap(store, conversation.id.as_str(), batch_oldest).await {
+            progress.stopped = Some(Stop::Store);
+            progress.reason = one_word(&reason);
+            return progress;
+        }
+    }
     for (position, candidate) in candidates.iter().enumerate() {
         if plan.written >= plan.budget.per_sync {
             progress.stopped = Some(Stop::Sync);
@@ -431,8 +441,27 @@ pub async fn anchors<S: Store>(store: &S, chat: Option<&str>, count: u32) -> Res
     Ok(out)
 }
 
+/// How many messages one heal asks for per round, and how many chats one round may cover: both bounded so
+/// a heal is a rhythm, never a storm of requests to the phone.
+pub const HEAL_PER_CHAT: u32 = 100;
+pub const HEAL_PER_ROUND: usize = 3;
+
+/// The asks a heal round makes, from the holes the index recorded: per gap, the anchor the phone needs
+/// (`fetch_message_history` walks OLDER from a message at the gap's far edge) and the count. Pure: no
+/// client, no store write, so the plan is testable and the guest only has to send it.
+pub async fn heal_asks<S: Store>(store: &S) -> Result<Vec<Anchor>, String> {
+    let mut out = Vec::new();
+    for gap in index::gaps(store).await?.into_iter().take(HEAL_PER_ROUND) {
+        let Some((id, from_me, ts)) = index::oldest_at_or_after(store, &gap.chat, gap.to_ms).await? else {
+            continue;
+        };
+        out.push(Anchor { chat: gap.chat, id, ts, from_me, count: HEAL_PER_CHAT });
+    }
+    Ok(out)
+}
+
 /// A store's failure as one word for a log line: never a path, never a value.
-fn one_word(reason: &str) -> String {
+pub(crate) fn one_word(reason: &str) -> String {
     reason
         .chars()
         .take(64)

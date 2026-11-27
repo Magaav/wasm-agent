@@ -861,7 +861,25 @@ pub async fn put<S: Store>(store: &S, record: &Record) -> Result<(), String> {
             apply_delete(store, record).await
         }
         _ => put_message(store, record).await,
+    }?;
+    // A group's name, when the message itself carried one: the source the node already has. Only after the
+    // record landed - a refused write is an error to the caller, and it must not be masked by this.
+    learn_subject(store, record).await
+}
+
+/// The group subject a message carried, written beside the index when the card has none yet: the one source
+/// of a group's name the node does not have to ask for (`record::subject_of`). Never overwrites a subject
+/// this node already fetched, and costs nothing for the messages that carry no subject.
+async fn learn_subject<S: Store>(store: &S, record: &Record) -> Result<(), String> {
+    if !record.group || record.chat_subject.is_empty() {
+        return Ok(());
     }
+    if let Some(card) = card_of(store, &record.chat).await? {
+        if !card.subject.is_empty() {
+            return Ok(());
+        }
+    }
+    set_subject(store, &record.chat, &record.chat_subject).await
 }
 
 /// Store a message, after applying a mutation that arrived before it did.
@@ -1733,6 +1751,170 @@ pub async fn set_subject<S: Store>(store: &S, chat: &str, subject: &str) -> Resu
     store.set(key_card(chat).as_bytes(), &json).await
 }
 
+/// A hole the index knows about: the chat stopped being indexed at `from_ms` and the next message the
+/// phone offered was at `to_ms`. It is what a reconnect leaves when the node was offline, and what the
+/// healer (`Op::Backfill`, already wired to `fetch_message_history`) is asked to close.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Gap {
+    pub chat: String,
+    pub from_ms: i64,
+    pub to_ms: i64,
+}
+
+/// How long a silence has to be before it is a HOLE rather than a quiet chat. A chat can legitimately be
+/// quiet for a long time, so this is deliberately generous: the cost of a false gap is one backfill
+/// request for a chat that turns out to need nothing, and the cost of a missed one is a reader who never
+/// learns a message arrived.
+pub const GAP_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// Note the hole a sync just revealed for `chat`, if there is one: the index's newest message before this
+/// batch (`card.last`) and the oldest message the batch carried. Returns the hole it recorded.
+///
+/// It is a NO-OP when the index knows nothing about the chat yet (a first sync is not a gap), when the
+/// batch continues where the index stopped, or when the silence is shorter than [`GAP_MS`].
+pub async fn note_gap<S: Store>(store: &S, chat: &str, batch_oldest_ms: i64) -> Result<Option<Gap>, String> {
+    if batch_oldest_ms <= 0 || chat.is_empty() {
+        return Ok(None);
+    }
+    let Some(card) = card_of(store, chat).await? else { return Ok(None) };
+    if card.last <= 0 || batch_oldest_ms <= card.last + GAP_MS {
+        // This batch reaches back to (or past) what the index knew, so whatever hole was recorded for
+        // this chat is now filled - a fetched range arriving is exactly this case.
+        let _ = clear_gap(store, chat).await;
+        return Ok(None);
+    }
+    let gap = Gap { chat: chat.to_string(), from_ms: card.last, to_ms: batch_oldest_ms };
+    let json = serde_json::to_vec(&gap).map_err(|error| format!("gap encode: {error}"))?;
+    store.set(key_gap(chat).as_bytes(), &json).await?;
+    Ok(Some(gap))
+}
+
+/// The oldest message this chat holds at or after `ms`, with what the phone needs to find it: the anchor a
+/// heal asks from. `None` when the chat holds nothing that new (nothing was delivered yet, so there is
+/// nothing to walk back from).
+///
+/// The scan is the newest-first key order the index already keeps, bounded by the same budget a read uses:
+/// a gap's boundary is recent by construction, so its anchor is near the head.
+pub async fn oldest_at_or_after<S: Store>(store: &S, chat: &str, ms: i64) -> Result<Option<(String, bool, i64)>, String> {
+    let prefix = format!("{PREFIX}m/{chat}/");
+    let mut best: Option<(String, bool, i64)> = None;
+    for (key, value) in store.scan(prefix.as_bytes(), None, LOAD_BUDGET).await? {
+        let Some(candidate) = parse_candidate(&key) else { continue };
+        let Ok(inv) = u64::from_str_radix(&candidate.inv, 16) else { continue };
+        let ts = (u64::MAX - inv) as i64;
+        if ts < ms {
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<Record>(&value) else { continue };
+        if record.kind == "reaction" {
+            continue;
+        }
+        // The list is newest-first, so the LAST one at or after `ms` is the oldest such message.
+        best = Some((record.id, record.own, ts));
+    }
+    Ok(best)
+}
+
+/// How many chats one answer names as behind: the count is exact elsewhere, this is the tail.
+const GAPS_LISTED: usize = 8;
+
+/// Fold the holes the index recorded into what an answer says about being behind: a KNOWN hole means the
+/// index is catching up, whether or not a write is waiting right now - the item's own rule, "it never says
+/// current while catching up", and a recorded gap is the case where "catching up" is a fact rather than a
+/// guess. The chat named is the one that fell silent, and since when is where the index stopped.
+pub(crate) fn fold_gaps(
+    mut catching_up: bool,
+    mut behind: Vec<(String, i64)>,
+    gaps: &[Gap],
+) -> (bool, Vec<(String, i64)>) {
+    if gaps.is_empty() {
+        return (catching_up, behind);
+    }
+    catching_up = true;
+    for gap in gaps {
+        // One entry per chat: an unwritten record already names the instant, and it is the newer one.
+        if !behind.iter().any(|(chat, _)| *chat == gap.chat) {
+            behind.push((gap.chat.clone(), gap.from_ms));
+        }
+    }
+    behind.sort_by_key(|(_, since)| *since);
+    behind.truncate(GAPS_LISTED);
+    (catching_up, behind)
+}
+
+/// Every hole the index still has to heal, oldest first, so a healer asks for the longest-waiting first.
+pub async fn gaps<S: Store>(store: &S) -> Result<Vec<Gap>, String> {
+    let mut out = Vec::new();
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let page = store.scan(format!("{PREFIX}gp/").as_bytes(), cursor.clone(), PAGE).await?;
+        if page.is_empty() {
+            break;
+        }
+        for (_, value) in &page {
+            if let Ok(gap) = serde_json::from_slice::<Gap>(value) {
+                out.push(gap);
+            }
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+    }
+    out.sort_by_key(|gap| gap.from_ms);
+    Ok(out)
+}
+
+/// Forget one chat's hole, once its messages have been fetched.
+pub async fn clear_gap<S: Store>(store: &S, chat: &str) -> Result<(), String> {
+    store.del(key_gap(chat).as_bytes()).await
+}
+
+fn key_gap(chat: &str) -> String {
+    format!("{PREFIX}gp/{chat}")
+}
+
+/// Fill in group subjects from what this NODE already holds (the legacy journal's chat titles), and say
+/// what the index did: `(applied, kept, unknown)` - applied for a group that had no subject, kept for one
+/// whose subject this node already fetched (a fetched subject is newer and is never overwritten by an
+/// older journal), unknown for a chat the index has never seen (nothing to attach it to).
+///
+/// It is the healing half of P2.1: the sync asks `subjects_missing` which groups have no name, and this
+/// is what a reader for the journal (or an operator) calls with what it found. Counts only in the answer's
+/// caller; no title is ever logged here.
+pub async fn seed_subjects<S: Store>(store: &S, pairs: &[(String, String)]) -> Result<(usize, usize, usize), String> {
+    let (mut applied, mut kept, mut unknown) = (0, 0, 0);
+    for (chat, subject) in pairs {
+        let title = subject.replace(['\n', '\r'], " ");
+        let title = title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let Some(card) = card_of(store, chat).await? else {
+            unknown += 1;
+            continue;
+        };
+        if !card.subject.is_empty() {
+            kept += 1;
+            continue;
+        }
+        set_subject(store, chat, title).await?;
+        applied += 1;
+    }
+    Ok((applied, kept, unknown))
+}
+
+/// The groups this index knows with NO subject: what a sync has to fetch, in a stable order so two runs
+/// schedule the same work. A group is named by its subject and nothing else (a guess would point a reader
+/// at the wrong chat), so this list is the honest answer to "which names are still missing".
+pub async fn subjects_missing<S: Store>(store: &S) -> Result<Vec<String>, String> {
+    let mut missing: Vec<String> = cards(store)
+        .await?
+        .into_iter()
+        .filter(|card| card.group && card.subject.is_empty())
+        .map(|card| card.chat)
+        .collect();
+    missing.sort();
+    Ok(missing)
+}
+
 /// One candidate chat, as `whatsapp_contacts` lists it.
 fn candidate_json(score: u8, card: &ChatCard, matched: &str, matched_source: &'static str) -> serde_json::Value {
     let (name, source) = card.best_name();
@@ -1783,7 +1965,9 @@ fn rank(list: &[ChatCard], query: &str) -> Vec<(u8, ChatCard, String, &'static s
 
 /// What a name resolved to: one chat, several, or none. Never a guess.
 pub enum Resolved {
-    One(String, u8, String),
+    /// (chat, score, the text that matched, WHICH field it matched): the source is what tells a person's
+    /// name from a group's subject - a search filter accepts only the latter (P2.2).
+    One(String, u8, String, &'static str),
     Many(Vec<serde_json::Value>),
     None,
 }
@@ -1795,8 +1979,8 @@ async fn resolve_chat<S: Store>(store: &S, name: &str) -> Result<Resolved, Strin
     let Some(top) = matches.first().map(|(score, _, _, _)| *score) else { return Ok(Resolved::None) };
     let best: Vec<&(u8, ChatCard, String, &'static str)> = matches.iter().filter(|(score, _, _, _)| *score == top).collect();
     if best.len() == 1 {
-        let (score, card, matched, _) = best[0];
-        return Ok(Resolved::One(card.chat.clone(), *score, matched.clone()));
+        let (score, card, matched, source) = best[0];
+        return Ok(Resolved::One(card.chat.clone(), *score, matched.clone(), source));
     }
     Ok(Resolved::Many(
         best.iter()
@@ -1837,7 +2021,36 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     let chats = all.len();
     let matches = rank(&all, &query);
     let total = matches.len();
-    let kept: Vec<(u8, ChatCard, String, &'static str)> = matches.into_iter().take(request.limit as usize).collect();
+    // The cursor (`before`): the LAST candidate of the previous page, and this page continues after it in
+    // the same ranking - the ranking is deterministic for one index, so two pages never overlap. A cursor
+    // the index no longer ranks is not an empty answer: the page starts at the beginning and the counts
+    // (`matched`, `next`) still say what the index holds.
+    let cursor = request.before.as_deref().map(str::trim).filter(|cursor| !cursor.is_empty());
+    let after_cursor = match cursor {
+        Some(cursor) => {
+            // Starts at the beginning when the cursor names nothing this ranking holds: an index that
+            // moved under a caller should answer a page, not an empty one.
+            let mut skipped = 0usize;
+            for (at, (_, card, _, _)) in matches.iter().enumerate() {
+                if card.chat == cursor {
+                    skipped = at + 1;
+                    break;
+                }
+            }
+            skipped
+        }
+        None => 0,
+    };
+    let kept: Vec<(u8, ChatCard, String, &'static str)> =
+        matches.into_iter().skip(after_cursor).take(request.limit as usize).collect();
+    // One more candidate after this page? Then `next` names it, which is the whole point: chat 21 and
+    // beyond is a page away instead of unreachable.
+    let more = total.saturating_sub(after_cursor + kept.len());
+    let next = if more > 0 {
+        kept.last().map(|(_, card, _, _)| card.chat.clone()).unwrap_or_default()
+    } else {
+        String::new()
+    };
     // One person, one candidate (operator 17/11: "both pointers should point to same entity"). WhatsApp
     // journals the same person under a phone number AND a hidden `@lid`; the index learned that pair
     // (`ix/al/`), so a chat whose alias is also in the list is folded into the earlier - better ranked,
@@ -1883,15 +2096,26 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     // number and the sentence beside it are the fix: `hidden` is how many, `hidden_why` is what and how
     // to see them.
     let named = candidates.len() + folded.iter().filter(|folded| **folded).count();
-    let hidden = total.saturating_sub(named);
+    // Cursor-aware: a chat on a page behind `before` is not hidden, it is reachable in one step.
+    let hidden = total.saturating_sub(after_cursor + named);
     let mut answer = serde_json::json!({
         "q": query,
         "candidates": candidates,
         "count": candidates.len(),
         "matched": total,
-        "truncated": hidden > 0,
+        "truncated": total > after_cursor + kept.len(),
         "ambiguous": top_count > 1,
     });
+    // `next` is the cursor for the page after this one (empty when this is the last page). It is the
+    // answer's own last candidate, so `before: next` continues exactly where this page stopped.
+    answer["next"] = if next.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(next) };
+    // Over the cap is CLAMPED AND SAID (decided 26/11), never a refusal: the answer carries what was asked
+    // and what this node keeps, so a short list never reads as "that is all there is".
+    seam::say_limit(&mut answer, request);
+    // What the reader cannot reach FROM HERE, counted and explained (25/11: `matched: 3`, `count: 2` and a
+    // bare `truncated: true` made a reader count a list that did not add up). Two ways out, so the
+    // sentence names the one the answer carries: a bigger `limit`, and, when this is not the last page,
+    // `before: next`.
     if hidden > 0 {
         answer["hidden"] = serde_json::Value::from(hidden);
         answer["hidden_why"] = serde_json::Value::String(format!(
@@ -2180,10 +2404,19 @@ pub async fn attach_text<S: Store>(store: &S, chat: &str, id: &str, text: &str, 
     // A deleted message keeps what this node derived about it (`mark_deleted`): a transcript that lands
     // after the revoke is still the content of that one message, and the flag is what says it was deleted.
     let was = record.tokens();
+    let cut = text.chars().count() > record::MAX_TEXT;
     let bounded: String = text.chars().take(record::MAX_TEXT).collect();
+    // The cut is RECORDED, not silently applied: a text that was longer than a record keeps is a part,
+    // and the answer has to say so and say where the whole lives (`view`, `*_full.whole_in`).
     match source {
-        Source::Transcript => record.transcript = bounded,
-        Source::Ocr => record.ocr = bounded,
+        Source::Transcript => {
+            record.transcript = bounded;
+            record.transcript_cut = cut;
+        }
+        Source::Ocr => {
+            record.ocr = bounded;
+            record.ocr_cut = cut;
+        }
     }
     for token in was {
         store.del(key_token(&token, record.ts, &record.id, &record.chat).as_bytes()).await?;
@@ -2487,6 +2720,49 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
 /// The same search, told how caught up the writer is: the answer says it too (`index`), and how new the
 /// newest thing it matched is (`as_of`, scoped to the matches - a search is not one chat).
 pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pace) -> Result<serde_json::Value, String> {
+    // A `chat` that is a name (a person's, or a group's SUBJECT) is resolved the way `read` resolves one,
+    // and the search narrows to every address that chat is known by. Several chats carrying it is an
+    // answer with the candidates, never a silent pick - the wrong-recipient risk P2 puts in words.
+    let mut narrowed_to: Option<Vec<String>> = None;
+    if request.chat.is_none() {
+        if let Some(name) = request.chat_name.clone() {
+            match resolve_chat(store, &name).await? {
+                // ONLY a group's subject opens the filter: a search narrows by an exact chat, and a
+                // PERSON's name or a bare number stays refused `bad_chat`, which is the rule that keeps a
+                // filter from becoming a guess (an existing row pins it, and this must not loosen it).
+                Resolved::One(chat, _, _, "group_subject") => {
+                    narrowed_to = Some(addresses_of(store, &chat).await?);
+                }
+                Resolved::One(_, _, _, _) | Resolved::None => {
+                    return Ok(seam::refusal(
+                        seam::Op::Search,
+                        "bad_chat",
+                        "a search filter is an exact chat JID or a GROUP's subject; ask whatsapp_contacts for a person's chat",
+                    ));
+                }
+                Resolved::Many(candidates) => {
+                    // Several chats carry it: still not a pick, and still the old word when none of them
+                    // matched on a subject.
+                    let subjects = candidates.iter().filter(|c| c["matched_source"] == "group_subject").count();
+                    if subjects == 0 {
+                        return Ok(seam::refusal(
+                            seam::Op::Search,
+                            "bad_chat",
+                            "a search filter is an exact chat JID or a GROUP's subject; ask whatsapp_contacts for a person's chat",
+                        ));
+                    }
+                    let mut answer = seam::refusal(
+                        seam::Op::Search,
+                        "chat_ambiguous",
+                        "more than one group carries that subject; search one of the candidates by its exact JID",
+                    );
+                    answer["q"] = serde_json::Value::String(name);
+                    answer["candidates"] = serde_json::Value::Array(candidates);
+                    return Ok(answer);
+                }
+            }
+        }
+    }
     let tokens = request.q.as_deref().map(record::tokenize).unwrap_or_default();
     let mut narrowed_list: Option<Vec<Candidate>> = None;
     if !tokens.is_empty() {
@@ -2545,22 +2821,31 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
 
     let mut hits: Vec<(i64, serde_json::Value)> = Vec::new();
     // One card read per chat, not per hit: a page of twenty messages is usually three chats.
-    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // The chat's bad name AND how current its index is: `ChatCard.last` is read with the name, once per
+    // chat, so a hit can say `chat_newest_ts` without a second store read.
+    let mut names: std::collections::HashMap<String, (String, i64)> = std::collections::HashMap::new();
     for candidate in list {
         let Some(record) = load(store, &candidate.chat, &candidate.id).await? else { continue };
         if !matches(&record, request) {
             continue;
         }
+        if let Some(addresses) = &narrowed_to {
+            if !addresses.contains(&record.chat) {
+                continue;
+            }
+        }
         let score = score(&record, &tokens, request.q.as_deref());
-        let chat_name = match names.get(&record.chat) {
-            Some(name) => name.clone(),
+        let (chat_name, chat_newest_ts) = match names.get(&record.chat) {
+            Some(cached) => cached.clone(),
             None => {
-                let name = card_of(store, &record.chat).await?.map(|card| card.best_name().0.to_string()).unwrap_or_default();
-                names.insert(record.chat.clone(), name.clone());
-                name
+                let card = card_of(store, &record.chat).await?;
+                let name = card.as_ref().map(|card| card.best_name().0.to_string()).unwrap_or_default();
+                let last = card.as_ref().map(|card| card.last).unwrap_or(0);
+                names.insert(record.chat.clone(), (name.clone(), last));
+                (name, last)
             }
         };
-        hits.push((score, hit_json(&record, score, &chat_name)));
+        hits.push((score, hit_json(&record, score, &chat_name, chat_newest_ts)));
     }
     // The order this answer is in, decided once: `newest` for a chat-scoped search or one with no query
     // terms (what a person means by "what is new"), `relevance` otherwise (what a person means by
@@ -2590,7 +2875,7 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
         .unwrap_or(0)
         .max(0);
     let kept: Vec<serde_json::Value> = hits.into_iter().take(request.limit as usize).map(|(_, hit)| hit).collect();
-    Ok(seam::answer(
+    let mut answer = seam::answer(
         seam::Op::Search,
         serde_json::json!({
             "q": request.q.clone(),
@@ -2606,7 +2891,9 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
             "order": search_order_block(order),
             "index": index_state(pace, as_of),
         }),
-    ))
+    );
+    seam::say_limit(&mut answer, request);
+    Ok(answer)
 }
 
 /// How current the writer was when an answer was built.
@@ -2624,6 +2911,11 @@ pub struct Pace {
     /// True when a catch-up the component knows about is running (offline resume, history sync): the
     /// index is knowingly behind the phone.
     pub catching_up: bool,
+    /// WHICH chats are behind, and since when: (chat, the oldest time this chat has a record waiting at).
+    /// A state that says "catching up" without naming a chat is a word a reader cannot act on; one that
+    /// names the chat and the instant it fell behind can say "ask again in a minute" or "that chat is
+    /// ten minutes old" (whatsapp-index-heals-itself item 2).
+    pub behind: Vec<(String, i64)>,
 }
 
 thread_local! {
@@ -2668,11 +2960,28 @@ pub fn observe_as_of(chat: &str, as_of: i64) -> Option<(i64, i64)> {
 fn index_state(pace: &Pace, as_of: i64) -> serde_json::Value {
     let pending = pace.pending_total.max(pace.pending.len());
     let catching_up = pace.catching_up || pending > 0;
+    // The chats that are behind, oldest first: the one that has waited longest is the one a reader has
+    // been waiting on longest. Empty is honest - a queued history sync has no records yet to name.
+    let mut behind: Vec<&(String, i64)> = pace.behind.iter().filter(|(_, since)| *since > 0).collect();
+    behind.sort_by_key(|(_, since)| *since);
+    let behind_json: Vec<serde_json::Value> = behind
+        .into_iter()
+        .map(|(chat, since)| {
+            serde_json::json!({
+                "chat": chat,
+                "since_ms": since,
+                "since_local": crate::view::local(*since),
+            })
+        })
+        .collect();
     serde_json::json!({
         "state": if catching_up { "catching_up" } else { "current" },
         "pending": pending,
         "lag_ms": (pace.newest_seen - as_of).max(0),
         "newest_seen_ms": if pace.newest_seen > 0 { serde_json::Value::from(pace.newest_seen) } else { serde_json::Value::Null },
+        // Named only while catching up: a current answer that listed chats would be a claim about work
+        // that is not happening.
+        "behind": if catching_up { serde_json::Value::Array(behind_json) } else { serde_json::Value::Array(Vec::new()) },
     })
 }
 
@@ -2844,7 +3153,7 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
     let chat = match (&request.chat, &request.chat_name) {
         (Some(chat), _) => chat.jid(),
         (None, Some(name)) => match resolve_chat(store, name).await? {
-            Resolved::One(chat, score, matched) => {
+            Resolved::One(chat, score, matched, _source) => {
                 resolved = serde_json::json!({
                     "from": name, "to": chat, "matched": matched,
                     "confidence": match score { 3 => "exact", 2 => "prefix", _ => "partial" },
@@ -2931,6 +3240,8 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
         pending_total: pace.pending_total.saturating_sub(written),
         newest_seen: pace.newest_seen,
         catching_up: pace.catching_up,
+        // Whoever was behind is still behind: a read that answered a page did not write anybody's record.
+        behind: pace.behind.clone(),
     };
     // The header: which chat this is, in words. A card is what the index observed; an index written
     // before the card existed answers with the address and says so.
@@ -3002,6 +3313,8 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
     if let Some(regressed) = regressed {
         answer["as_of_regressed"] = regressed;
     }
+    // Over the cap is clamped and said, here as in search and contacts.
+    seam::say_limit(&mut answer, request);
     Ok(answer)
 }
 
@@ -3352,11 +3665,17 @@ fn score(record: &Record, tokens: &[String], q: Option<&str>) -> i64 {
 /// It is [`crate::view::message`] - the same object a thread read carries, so a hit and a bubble cannot
 /// describe one message two ways - plus the two things only a search knows: the score, and the name of
 /// the chat it was found in (a hit that says `5519…@s.whatsapp.net` makes a reader ask who that is).
-fn hit_json(record: &Record, score: i64, chat_name: &str) -> serde_json::Value {
+fn hit_json(record: &Record, score: i64, chat_name: &str, chat_newest_ts: i64) -> serde_json::Value {
     let mut hit = crate::view::message(record, None);
     hit["own"] = serde_json::Value::Bool(record.own);
     if !chat_name.is_empty() {
         hit["chat_name"] = serde_json::Value::String(chat_name.to_string());
+    }
+    // The newest time the INDEX holds for this hit's chat (not the hit's own `at`): a page from three
+    // chats is only readable when each says how current its chat is, which is what a reader comparing
+    // "what did they say recently" vs "when did I last hear from them" needs.
+    if chat_newest_ts > 0 {
+        hit["chat_newest_ts"] = serde_json::Value::from(chat_newest_ts);
     }
     if score != 0 {
         hit["score"] = serde_json::Value::from(score);
