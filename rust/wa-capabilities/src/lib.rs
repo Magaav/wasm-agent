@@ -39,9 +39,6 @@ pub mod file_search;
 pub mod features;
 pub mod graph;
 pub mod host;
-/// The console's transcript handle: the same calls in process (default) or across the wire to the
-/// terminal program, over `wa-term-proto`: the wire is the only path.
-pub mod screen;
 pub mod http_transport;
 pub mod limits;
 pub mod operations;
@@ -66,12 +63,6 @@ pub mod fabric;
 /// The live facts behind a long tool call's row (docs/TOOL-PROGRESS.md): fed by the operation wait
 /// loops, read by every renderer.
 pub mod tool_progress;
-/// The node's own tty: the funnel every screen byte goes through, the launch animation's hold and raw
-/// mode (moved out of `wa-term` in its last slice: it is I/O, not display).
-pub mod links;
-pub mod screen_guard;
-pub mod selection;
-pub mod tty;
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.

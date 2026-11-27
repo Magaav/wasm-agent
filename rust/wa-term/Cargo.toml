@@ -14,9 +14,6 @@ wa-host-support = { path = "../wa-host-support" }
 wa-tool-progress = { path = "../wa-tool-progress" }
 serde_json = "1"
 base64 = "0.23"
-# The wire to the node (`src/session.rs`, `src/bin/wa-term.rs`). A leaf with two dependencies, so the
-# node can keep speaking it after it stops linking this crate.
-wa-term-proto = { path = "../wa-term-proto" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
