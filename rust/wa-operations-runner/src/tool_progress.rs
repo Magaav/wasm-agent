@@ -133,7 +133,6 @@ pub fn tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_pat
     feed(current, stdout_path, stderr_path, now);
     let facts = current.tracker.facts(now, &wa_tool_progress::env_secrets());
     let _ = crate::node::publish_progress(owner, &facts);
->>>>>>> efa4ece7 (operations-runner: the progress rows and the terminal's live view follow the runner):rust/wa-operations-runner/src/tool_progress.rs
     Some(facts)
 }
 
@@ -161,7 +160,6 @@ pub fn finish(id: &str) {
     }
     // Only THAT session's file is removed: a settled call never blanks another session's row.
     crate::node::finish_progress(&ended.owner);
->>>>>>> efa4ece7 (operations-runner: the progress rows and the terminal's live view follow the runner):rust/wa-operations-runner/src/tool_progress.rs
 }
 
 #[cfg(test)]
