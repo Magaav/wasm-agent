@@ -11,6 +11,7 @@ local paths = dofile("lua/core/paths.lua")
 -- Everything this REPL prints is captured by whatever launched it (a terminal,
 -- an orchestrator, a test), so it all goes out through the redactor.
 local redact = dofile("lua/core/redact.lua")
+local run_failure = dofile("lua/core/run_failure.lua")
 local updater = dofile("lua/core/update.lua")
 -- What a run looks like while it is running. The view owns the status line, the tool
 -- lines and the footer; this file owns the session, the commands and the prompt.
@@ -719,7 +720,9 @@ function M.run(argv)
       -- A STOP IS A STOP: if this run came back cancelled, its key is recorded here, at the end of the
       -- run it ended, before anything else can go wrong (change/esc-stops-now, item 3).
       if tostring(reply):find('run_cancelled', 1, true) then record_interrupt() end
-      view:failed(redact.text(tostring(reply)))
+      -- The failure, not the three paths Lua prefixed it with (item 2): `human_line` is the same
+      -- classification the row carries, with its leading locations stripped.
+      view:failed(redact.text(run_failure.human_line(tostring(reply))))
     else
       -- The view prints the reply when nothing streamed (an error before the first
       -- token, or a provider without streaming), so the turn is never silent.
