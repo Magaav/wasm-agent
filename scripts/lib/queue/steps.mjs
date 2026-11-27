@@ -35,7 +35,14 @@ function run(cmd, args, {timeoutMs, env = {}} = {}) {
 /// `land-quick.sh` takes a branch NAME. This function pins the request sha at a ref of its own and hands the
 /// lander THAT ref - so a branch that moves after submit either lands the sha the queue read, or the lander
 /// refuses (its own tip check fails) and the request is rejected stale_sha. Never the moved tip.
-export function pinRefName({id, branch}) { return `change/q${id}-${String(branch || "branch").split("/").pop()}`; }
+/// THE PIN KEEPS THE BRANCH FAMILY (Fable 27/11, after v0 stopped q#23 as a foreign commit): land-quick
+/// compares the FIRST TWO dash-words of the branch name with the Agent: trailer of each non-merge commit,
+/// so a pin named `change/q<id>-<leaf>` reads as family `q<id>-<leaf>` and every landing stops foreign.
+/// The id goes on the END: `change/<leaf>-q<id>` keeps the family, and is still unique per request.
+export function pinRefName({id, branch}) {
+  const leaf = String(branch || "branch").split("/").pop();
+  return `change/${leaf}-q${id}`;
+}
 
 export async function pinRequest({repo, request}) {
   const ref = pinRefName({id: request.id, branch: request.branch});

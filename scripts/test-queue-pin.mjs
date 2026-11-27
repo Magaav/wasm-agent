@@ -49,7 +49,16 @@ const db = openJournal(path.join(work, 'journal.db'));
 const req = submit(db, {branch: 'change/mover', sha: read, mission: 'pin'});
 
 // ---- 1. the pin names the request, and points at the sha that was read ---------------------------------
-eq(pinRefName({id: req.id, branch: 'change/mover'}), `change/q${req.id}-mover`, 'the pin is named after the request and the branch leaf');
+eq(pinRefName({id: req.id, branch: 'change/mover'}), `change/mover-q${req.id}`, 'the pin is the branch leaf and the request id, in that order');
+
+// ---- 1b. THE PIN KEEPS THE BRANCH FAMILY (v0 stopped q#23 as a foreign commit on exactly this) ----------
+// land-quick.sh computes `fam` as the FIRST TWO dash-words of the branch name and holds every commit whose
+// Agent: trailer names a change/ branch to the same two words. The pin therefore has to name the same
+// family, which the id on the END preserves and an id on the FRONT destroys. Both directions are asserted,
+// so a future rename has to answer this rule rather than slip past it.
+const family = (branchName) => branchName.split("/").pop().split("-").slice(0, 2).join("-");
+eq(family(pinRefName({id: 23, branch: 'change/landing-queue-service'})), family('change/landing-queue-service'), 'the pinned name has the branch family, so land-quick foreign check passes');
+ok(family('change/q23-landing-queue-service') !== family('change/landing-queue-service'), 'an id on the FRONT would read as another family - which is the shape that stopped q#23');
 const pin = await pinRequest({repo, request: db.prepare('SELECT * FROM requests WHERE id = ?').get(req.id)});
 eq(pin.ok, true, 'the pin is written');
 eq(pin.sha, read, 'at the sha the request was submitted with');
