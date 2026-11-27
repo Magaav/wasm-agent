@@ -679,7 +679,9 @@ end
 function M.queue_job_family(tool, opts)
   opts = opts or {}
   return {
-      kind = "queue_job",
+      -- The kind is the caller's, so a family that already has a name keeps it (`whatsapp_query`): the shape
+      -- is shared, the label is not something this factory should decide for it.
+      kind = opts.kind or "queue_job",
       start = function(dispatch, opts, params, raw)
         -- Queue and answer at once: the wait is this layer's, the same one every other call gets. The
         -- two internal fields ride in the RAW argument text and never in `params` - an unknown name in a
@@ -717,8 +719,8 @@ function M.queue_job_family(tool, opts)
           why = "a query already queued is a read: it answers, and stopping the caller does not stop the index" }
       end,
       progress = function(dispatch, opts, record, state)
-        return { state = tostring(type(state) == "table" and state.state or "running"), kind = "queue_job",
-          job = record.id, tool = record.tool }
+        return { state = tostring(type(state) == "table" and state.state or "running"),
+          kind = opts.kind or "queue_job", job = record.id, tool = record.tool }
       end,
   }
 end
