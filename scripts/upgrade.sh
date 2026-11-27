@@ -77,6 +77,13 @@ SERVICE_LIB="$ROOT/scripts/lib/service-target.sh"
 . "$SERVICE_LIB"
 HOME_DIR="$(wa_config_dir)"
 INSTALLED="$INSTALL_DIR/$EXE"
+# THE STAGING HALF (Fable 25/11, approved). With WA_VERSION_STAGING set, the install is WRITTEN INTO THAT
+# DIRECTORY and this script stops there: the deploy seals it with scripts/version-install.sh and moves the
+# pointer BEFORE the restart, so a restart always runs a complete version and a rollback is a pointer move.
+# With it UNSET, TARGET_DIR is INSTALL_DIR and every branch below behaves exactly as it did before - the only
+# difference in this file is the guarded block that follows, and this variable.
+TARGET_DIR="$INSTALL_DIR"
+[ -z "${WA_VERSION_STAGING:-}" ] || TARGET_DIR="$WA_VERSION_STAGING"
 # The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh): this script
 # places bytes it did not build, so the only honest source for "which commit is installed" is the binary
 # itself. A missing lib is a refusal, never a silent fallback to the caller's belief.
@@ -94,6 +101,10 @@ done
 [ -n "$WA_NODE_PINS_LIB" ] \
   || { say "refused(node_pins_lib_missing): scripts/lib/node-pins.sh is not beside this script, and it is what reads this node's own pin; nothing was installed"; exit 2; }
 . "$WA_NODE_PINS_LIB"
+# The version folders (slice b). Sourced HERE, at the top with the others, never from inside a function: the
+# rollback below needs to know whether the program it restores is a real file or a link into a sealed version.
+WA_VERSIONS_LIB="$ROOT/scripts/lib/versions.sh"; [ -f "$WA_VERSIONS_LIB" ] || WA_VERSIONS_LIB="$(dirname "$0")/lib/versions.sh"
+[ ! -f "$WA_VERSIONS_LIB" ] || . "$WA_VERSIONS_LIB"
 UI_DIR="${WA_UI_DIR:-$INSTALL_DIR/ui}"
 RUNTIME_ROOT="${WA_RUNTIME_WORKTREE:-$ROOT}"
 if [ -z "${WA_RUNTIME_WORKTREE:-}" ] && [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
@@ -529,7 +540,17 @@ record_install() {
     if [ "${ANCESTRY:-0}" = 2 ]; then printf 'ancestry_unverified=yes\n'; fi
     true
   } >> "$record" \
-    && mv -f "$record" "$INSTALL_DIR/installed.txt"
+    && { if [ -L "${TARGET_DIR:-$INSTALL_DIR}/installed.txt" ]; then
+           # A node on a version folder holds the record as a LINK into current (slice (b), requirement 4). Writing
+           # over it would replace the link with a regular file and let the pointer and the record disagree again, so
+           # this refuses BY NAME - and it does it with a plain test, not by sourcing a library from inside a
+           # function (Fable 25/11: the source and the call ran on every install, switch off included, and a
+           # tree-less release bundle has no lib/versions.sh).
+           rm -f "$record"
+           say "version_record_is_a_link: ${TARGET_DIR:-$INSTALL_DIR}/installed.txt points at the current version; write the record into the staging tree (WA_VERSION_STAGING)"
+           return 1
+         fi
+         mv -f "$record" "${TARGET_DIR:-$INSTALL_DIR}/installed.txt"; }
 }
 
 health() { curl -s -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
@@ -1096,6 +1117,25 @@ wait_health() {
   return 1
 }
 
+# STAGE ONLY (WA_VERSION_STAGING set): write the program, this very script and the install's record into the
+# staging tree, then stop. NOTHING of the live install is touched and the node is NOT restarted here: the deploy
+# seals the staging tree (scripts/version-install.sh: one folder, one pointer rename) and restarts the node after
+# the pointer already names the new version, which is what makes the rollback a pointer move instead of a copy.
+if [ "$TARGET_DIR" != "$INSTALL_DIR" ]; then
+  [ -d "$TARGET_DIR" ] || { say "WA_VERSION_STAGING=$TARGET_DIR is not a directory"; exit 1; }
+  mkdir -p "$TARGET_DIR/scripts" || { say "cannot write the staging tree $TARGET_DIR"; exit 1; }
+  { cp -f "$NEW" "$TARGET_DIR/$EXE.new" && mv -f "$TARGET_DIR/$EXE.new" "$TARGET_DIR/$EXE"; } \
+    || { rm -f "$TARGET_DIR/$EXE.new"; say "cannot stage the program in $TARGET_DIR"; exit 1; }
+  chmod 0755 "$TARGET_DIR/$EXE" 2>/dev/null || true
+  { cp -f "$0" "$TARGET_DIR/scripts/upgrade.sh.new.$$" \
+      && mv -f "$TARGET_DIR/scripts/upgrade.sh.new.$$" "$TARGET_DIR/scripts/upgrade.sh"; } 2>/dev/null || true
+  # THE RECORD is written by the SAME writer as the live path (record_installed), which targets TARGET_DIR: with
+  # staging it lands as a real file in the tree that will be sealed, and it is never written over a link (fix 6).
+  record_installed || { say "cannot stage the install record in $TARGET_DIR"; exit 1; }
+  say "staged in $TARGET_DIR (program, upgrade.sh, record); the deploy seals it and moves the pointer before the restart"
+  exit 0
+fi
+
 # Copy rather than move: the caller's build tree keeps its binary, and a failed swap has something to
 # roll back to. If they are already the same file - a hard link, which is how an installed binary and
 # its build output often relate - there is nothing to copy and `cp` says so as an error.
@@ -1220,7 +1260,9 @@ if [ "$WATCHDOG" = "1" ]; then
   # files this script replaced before asking (the binary and the UI assets), which go back to the backup it
   # took for exactly this.
   if [ -f "$BACKUP" ]; then
-    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    command -v wa_version_restore_program >/dev/null 2>&1 \
+      && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+      || cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
     for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
@@ -1232,7 +1274,9 @@ if [ "$WATCHDOG" = "1" ]; then
 fi
 if [ -n "$MANAGED_UNIT" ]; then
   if [ -f "$BACKUP" ]; then
-    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    command -v wa_version_restore_program >/dev/null 2>&1 \
+      && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+      || cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
     for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
@@ -1247,7 +1291,9 @@ if [ -n "$MANAGED_UNIT" ]; then
 fi
 if [ "$SUPERVISED" = "1" ]; then
   if [ -f "$BACKUP" ]; then
-    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    command -v wa_version_restore_program >/dev/null 2>&1 \
+      && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+      || cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
     for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
@@ -1270,7 +1316,9 @@ for _ in $(seq 1 100); do
 done
 if port_busy "$PORT"; then say "port $PORT is still occupied; recovery requires checking the listener"; exit 1; fi
 if [ -f "$BACKUP" ]; then
-  cp -f "$BACKUP" "$INSTALLED"
+  command -v wa_version_restore_program >/dev/null 2>&1 \
+    && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+    || cp -f "$BACKUP" "$INSTALLED"
   for asset in $(ui_closure recoverable); do
     [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
   done
