@@ -9,6 +9,14 @@
 /// reader is. It does not decide *whether* a message may be read (that is the connector's), it does not store
 /// anything, and it never echoes a path it was given.
 ///
+/// **The models are HOST-SUPPLIED, not embedded** (Victor 27/11). A 13.1 MB model pair inside the artifact
+/// would ride every component build, every publish and every install, and a model change would be a new
+/// component rather than new assets. Instead the world imports `assets`: the host fetches the pair **once**,
+/// keeps it beside the component set, and hands the bytes in; the component verifies them against the sha256
+/// pins that ship beside `components.lock` (`models.lock`) and refuses by name if a byte does not match. So
+/// the component stays small, the models are versioned by hash where the other pins live, and a model update
+/// is a fetch, not a rebuild.
+///
 /// **Every waiting call here is async** (the async rule, Victor 26/11): a model run suspends the guest's
 /// task and the runtime keeps serving other tasks; there is no sync export and therefore no reason line.
 package wa:vision@0.1.0;
@@ -41,7 +49,18 @@ interface types {
         text-too-long(u64),
         /// The engine itself could not answer, carrying its short reason. Never a silent empty answer.
         engine-failed(string),
+        /// A model the host handed in does not match the sha256 pin this build ships. The component will not
+        /// run on bytes nobody hashed, which is the same rule the component set itself follows.
+        model-hash-mismatch(string),
     }
+}
+
+/// What the host gives the component instead of the component carrying it: the model assets, fetched once
+/// and kept beside the component set. `load` answers the bytes of one named asset (`vision.det`, `vision.rec`,
+/// `vision.dict`); the component holds the expected sha256 of each and refuses `model-hash-mismatch` on any
+/// other bytes.
+interface assets {
+    load: func(name: string) -> result<list<u8>, string>;
 }
 
 interface vision {
@@ -50,8 +69,14 @@ interface vision {
     /// Read one image (PNG or JPEG bytes; the component sniffs the format rather than trusting a name).
     /// Lines come back in reading order: top to bottom, then left to right.
     read: async func(image: list<u8>) -> result<list<line>, refusal>;
+
+    /// The sha256 the assets were verified against, in the order det, rec, dict. An operator asking
+    /// "which models is this reader using" gets the answer from the component, not from a guess about
+    /// what the host had on disk.
+    models: func() -> list<string>;
 }
 
 world vision-component {
+    import assets;
     export vision;
 }

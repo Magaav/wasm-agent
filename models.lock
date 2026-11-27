@@ -1,0 +1,14 @@
+# The model assets the vision component is handed by the host, pinned by sha256 beside the component
+# pins in components.lock (Victor 27/11: host-supplied, fetched once, never embedded in the artifact).
+#
+# The component refuses a byte that does not hash to the value here (model-hash-mismatch), and
+# wa:vision models() answers these three hashes in this order, so an operator asking which reader is
+# running gets the answer from the reader itself.
+#
+# source: the model pair ships inside rapidocr_onnxruntime (the engine this seam replaces); the dictionary
+# is read from the rec model own ONNX metadata, so the three files cannot drift apart.
+#
+# name  sha256  bytes  origin
+vision.det 3439588c030faea393a54515f51e983d8e155b19a2e8aba7891934c1cf0de526 2432880 ch_PP-OCRv3_det_infer.onnx
+vision.rec 897a3ededb38fee0dae2c1ccee38241f37df202c9509e3abca02e9217c5ee615 10690752 ch_PP-OCRv3_rec_infer.onnx
+vision.dict a1c84d9bdb9ab29043c58896224d32941783eb821629618416dcb08f12886492 26250 ppocr_keys.txt
