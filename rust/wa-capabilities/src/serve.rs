@@ -419,11 +419,13 @@ pub(crate) fn test_set_run_cancel(flag: Option<Arc<AtomicBool>>) {
 ///
 /// `scripts/test-waits-follow-the-shared-rule.lua` refuses any capability that keeps a private wait
 /// BELOW this one; this function is the only place a capability may read a wait from.
-pub fn tool_wait_ms(args: &serde_json::Value) -> u64 {
-    if let Some(ms) = args.get("__wait_ms").and_then(serde_json::Value::as_u64) {
-        return ms.max(1);
-    }
-    (env_usize("WASM_AGENT_WAIT_SECONDS", 60) as u64).saturating_mul(1000)
+pub fn wait_ms(args: &serde_json::Value) -> u64 {
+    // The budget the CALL named, and 0 when it named none: 0 is "queue the job and answer at once with
+    // its id", which is a real answer (the handle) rather than a guess at how long to hold the node.
+    // The shared bound - 60 s, 300 s at most - is `lua/core/codemode_pending.lua`'s, and the executor
+    // there is what spends it. main's `email_query.rs` carried this function; it lives here now so both
+    // the mail and the WhatsApp doors obey ONE rule.
+    args.get("__wait_ms").and_then(serde_json::Value::as_u64).unwrap_or(0)
 }
 
 fn env_usize(name: &str, fallback: usize) -> usize {

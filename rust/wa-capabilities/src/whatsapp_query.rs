@@ -17,7 +17,7 @@
 //!
 //! Why the node waits instead of answering "queued": a search is a local kv read in a component that
 //! is already running, and a model that has to poll for the answer to "what did they say" would spend a
-//! turn doing it. The wait is the ONE shared one ([`crate::serve::tool_wait_ms`], 60 s by default
+//! turn doing it. The wait is the ONE shared one ([`crate::serve::wait_ms`], 60 s by default
 //! with the 300 s ceiling `lua/core/codemode_pending.lua` enforces) and it heartbeats the node
 //! (`serve::beat`) while it waits, so a slow answer is an answer ("still running, here is the id") and
 //! never a frozen node. The dedupe key is the request itself, so a caller that asks again after a slow
@@ -166,7 +166,7 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(args) => component_absent(op)
-            .unwrap_or_else(|| ask(op, &args, crate::serve::tool_wait_ms(&args))),
+            .unwrap_or_else(|| ask(op, &args, crate::serve::wait_ms(&args))),
         Err(_) => seam::refusal(op, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
@@ -181,7 +181,20 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
 /// search or `limit` to a backfill is understood instead of silently getting the default.
 fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusal> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
-    let number = |key: &str| args.get(key).and_then(Value::as_i64);
+    // A time is passed through in the form the caller wrote it: the FORMS are the shared seam's
+    // (`seam::TIME_FORMS`, `seam::parse_time`), so the host neither repeats the rule nor lets a date
+    // string fall on the floor of an `as_i64` that answers `None`.
+    let time = |key: &str| -> Result<Option<i64>, seam::Refusal> {
+        let code = if key == "since" { "bad_since" } else { "bad_until" };
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(number)) => Ok(number.as_i64()),
+            Some(Value::String(text)) => {
+                seam::parse_time(text).map(Some).ok_or_else(|| seam::Refusal::new(code, seam::TIME_FORMS))
+            }
+            Some(_) => Err(seam::Refusal::new(code, seam::TIME_FORMS)),
+        }
+    };
     let limit = match op {
         seam::Op::Backfill => args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64)),
         _ => args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64)),
@@ -193,8 +206,8 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
         id: text("id"),
         kind: text("kind"),
         from: text("from"),
-        since: number("since"),
-        until: number("until"),
+        since: time("since")?,
+        until: time("until")?,
         before: text("before"),
         limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
         max_bytes: args.get("max_bytes").and_then(Value::as_u64),
@@ -355,7 +368,7 @@ fn refused(op: seam::Op, code: &str, detail: &str, asked_op: Option<&str>) -> Va
 // ---- download ----------------------------------------------------------------------------------
 
 fn ask_download(args: &Value) -> Value {
-    ask_download_in(&queue(), args, crate::serve::tool_wait_ms(&args), &component_build())
+    ask_download_in(&queue(), args, crate::serve::wait_ms(&args), &component_build())
 }
 
 fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {

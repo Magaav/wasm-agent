@@ -393,6 +393,22 @@ printf '%s\n' "$out" | grep -qF 'release_unsigned' && fail "the refusal did not 
 ok
 [ -z "$(git ls-remote "$dropbox" 'refs/heads/artifacts/*')" ] || fail "an unsigned set reached the drop box"
 ok
+# LET THE PUBLISHER WRITE THE SUMS IT SHIPS, THEN SIGN THEM (27/11). MEASURED on main 04b7a38b: the fixture built a
+# set and signed it by hand, then the publisher RE-WROTE SHA256SUMS from the bytes it ships (it adds the
+# node-<sha>.manifest row) - so the signature was stale by construction and the case could never pass:
+#   release_signature_invalid: ...SHA256SUMS.sig is about <a>, the sums here are <b>
+#   publish-node-binaries: signature_stale: ... sign the new SHA256SUMS where the vault is ... (exit 6)
+# The real order is build -> sign -> ship, so the fixture follows it now instead of signing a set the publisher
+# then changes. This is the rot an unwired row grows: nothing ran scripts/test-release-sign.log on main.
+env ALLOW_UNPUSHED_COMMIT=1 ALLOW_UNPUSHED_REASON="a fixture release for scripts/test-release-signing.sh: its payloads are ELF headers this test writes, and no node installs them" \
+  WA_RELEASE_SIGN_DEFER=1 WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" WA_PUBLISH_RUNNER=true \
+  bash "$ROOT/scripts/publish-node-binaries.sh" --commit "$COMMIT" --out "$WORK/release-yes" \
+  --target "$TRIPLE" --from "$WORK/release-yes" >"$WORK/publish.log" 2>&1 \
+  || fail "the fixture publisher could not write the set: $(tail -3 "$WORK/publish.log" | tr '\n' ' ')"
+ok
+sign_with_vault "$WORK/release-yes/SHA256SUMS" "$WORK/release-yes/SHA256SUMS.sig" >/dev/null 2>&1 \
+  || fail "the vault could not sign the sums the publisher itself wrote"
+ok
 out="$(ship "$WORK/release-yes" "$dropbox" with)"; code=$?
 expect 0 "$code" "a signed set ships" "$out"
 refs="$(git ls-remote "$dropbox" 'refs/heads/artifacts/*' | awk '{print $2}')"

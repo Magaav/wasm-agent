@@ -118,9 +118,19 @@ echo 'deploy: looking for a published binary for this commit'
 case "${FIXTURE_DECLARE:-none}" in
   build) echo 'deploy: no published binary for this commit; building this tree (disk floor ok)' ;;
   published) echo 'deploy: installing the published binary; the prove gate below runs on it, then upgrade.sh' ;;
+  # THE DISAGREEMENT THIS CASE EXISTS FOR (Victor on work, 27/11): the installer announced the published path
+  # and then compiled for 1961 s. Its log keeps saying "published", so only the build status tells the truth.
+  published-compiles) echo 'deploy: installing the published binary; the prove gate below runs on it, then upgrade.sh' ;;
 esac
-if [ "${FIXTURE_DECLARE:-none}" != "published" ]; then
+if [ "${FIXTURE_DECLARE:-none}" != "published" ] && [ "${FIXTURE_DECLARE:-none}" != "published-compiles" ]; then
   write_status building preflight 0 ""
+  sleep 1
+  write_status building compiling 12 "provisioning"
+  sleep 1
+  write_status building compiling 48 "wa-host"
+  sleep 1
+elif [ "${FIXTURE_DECLARE:-none}" = "published-compiles" ]; then
+  write_status building installing 0 ""
   sleep 1
   write_status building compiling 12 "provisioning"
   sleep 1
@@ -201,8 +211,25 @@ run_update() { # <args...> -> output in $W/out.txt, exit code in $CODE
   # WASM_AGENT_DATA is pinned as well as WASM_AGENT_HOME: `paths.data()` prefers it when a caller's
   # environment exports it, and a row that inherited it would read and write a REAL store while every
   # other path in it was a fixture (the class of accident the orchestrator's 24/11 note names).
+  # THE FIRST BYTE IS A MEASUREMENT, NOT AN IMPRESSION (bug 4, Victor 27/11: "we need instantaneous"). The command
+  # runs in the background and this polls the file it writes, so FIRST_BYTE_MS is the time from spawn to the first
+  # byte a person would see - the same thing `WA_FIRST_BYTE` measures by hand on a node.
+  local t0 t1 pid
+  # THE FILE MUST BE EMPTY FIRST: the previous case left its output there, and the poll below then read the old
+  # bytes and reported "first byte: 1 ms" - a measurement of nothing (caught by reading the number, not the ok).
+  : > "$W/out.txt"
+  t0=$(date +%s%N)
   WASM_AGENT_DATA="$SANDBOX" WASM_AGENT_HOME="$HOMEDIR" WA_INSTALL_DIR="$INST" WASM_AGENT_LUA_ROOT="$ROOT" \
-    "$BIN" --db "$W/node.db" update "$@" > "$W/out.txt" 2>&1
+    "$BIN" --db "$W/node.db" update "$@" > "$W/out.txt" 2>&1 &
+  pid=$!
+  while :; do
+    [ -s "$W/out.txt" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.005
+  done
+  t1=$(date +%s%N)
+  FIRST_BYTE_MS=$(( (t1 - t0) / 1000000 ))
+  wait "$pid" 2>/dev/null
   CODE=$?
 }
 reset_fixture() { rm -f "$SANDBOX/build-status.json" "$INST/deploy-result.json" "$SENTINEL/deploy.out"; }
@@ -290,7 +317,10 @@ printf '%s' "$FINAL" | grep -Eq "^updated to (v[0-9][^ ]* \\()?${T12%????}\\)? i
 # THE BUILD IS DECLARED ONCE, by the phase itself, and only when the installer said so.
 DECLARED="$(grep -c "from source, on this machine" "$W/out.txt")"
 [ "$DECLARED" -ge 1 ] || fail 'the phases must say the build runs from source on this machine'
-grep -Eq "building [0-9]+/456 compiling wa-host .*from source, on this machine\)  [0-9]+:[0-9][0-9]" "$W/out.txt" \
+# THE CONTRACT CHANGED ON PURPOSE (bug 2, Victor 27/11): the phase must now also say WHY it is building, not only
+# that it is. The reason comes from the installer's own log line; the estimate is named so the wait is not a
+# surprise. The clock still closes the line.
+grep -Eq "building [0-9]+/456 compiling wa-host .*(from source, on this machine: no published binary for this commit[,;]? [^)]*)\)  [0-9]+:[0-9][0-9]" "$W/out.txt" \
   || fail 'a building phase with n/m, its source and its elapsed time was not printed'
 grep -q 'proving' "$W/out.txt" || fail 'the later phases were not printed'
 # NOTHING OF THE INSTALLER'S OWN OUTPUT REACHES THE SCREEN - that is the whole complaint.
@@ -336,6 +366,35 @@ grep -q '/456' "$W/out.txt" && fail 'a published install printed a build bar; th
 grep -q "building from source, minutes" "$W/out.txt" && fail 'the published path claimed a build'
 grep -Eq "^updated to .* in [0-9]+:[0-9][0-9]$" "$W/out.txt" || fail 'the published install must print its last line'
 echo '  ok: the published path printed "installing the published binary (no build)", no bar, and its last line'
+
+# ---- 3b. THE LABEL FOLLOWS THE WORK (Victor on work, 27/11) ---------------------------------------
+# "installing the published binary (no build)" was on screen for 32 minutes while deploy.sh compiled for 1961 s.
+export FIXTURE_OUTCOME=ok FIXTURE_LEAD=1 FIXTURE_DECLARE=published-compiles
+reset_fixture
+run_update
+[ "$CODE" = 0 ] || fail "a published-then-compiled install must exit 0 (it exited $CODE)"
+# The label IS honest for the moment before anything compiles (the fixture writes `building installing` first);
+# THE BUG was that it stayed there while cargo ran, and the build's own lines never arrived. So: the last
+# progress line before the update must be the build's, and the build must have been shown at all.
+LAST_PROGRESS="$(tail -2 "$W/out.txt" | head -1)"
+printf '%s' "$LAST_PROGRESS" | grep -q 'installing the published binary (no build)' \
+  && fail 'the last line before the update still said "no build" while the installer was compiling (bug 1 is back)'
+grep -q '/456' "$W/out.txt" || fail 'a compiling install must show its n/m progress'
+grep -q 'compiling' "$W/out.txt" || fail 'a compiling install must name the phase that is really running'
+echo '  ok: a published declaration followed by a real compile prints the build, never "(no build)"'
+
+# ---- 3c. THE FIRST BYTE IS QUICK, AND THE LINE IS THE START (bug 4) -------------------------------
+# Measured by hand on this node, 27/11: 204 ms from the installed binary, 180 ms with the screen opened before the
+# update modules load, 585 ms with a full real home. The row asserts a generous ceiling so a real regression (a
+# network call before the line, which was 1.2-1.6 s on the old path) reds it, and prints the number either way.
+export FIXTURE_OUTCOME=ok FIXTURE_LEAD=1 FIXTURE_DECLARE=build
+reset_fixture
+run_update
+printf '  first byte: %s ms
+' "$FIRST_BYTE_MS"
+[ "$FIRST_BYTE_MS" -lt 1000 ] || fail "the first byte came at ${FIRST_BYTE_MS} ms; something runs before the line"
+head -1 "$W/out.txt" | grep -q 'checking for updates' || fail 'the first line must be the start line'
+echo '  ok: the first byte arrived in the first second and it was the start line'
 
 # ---- 4. a deploy that FAILS: one line with the reason, and the installer's own words in the log -----
 export FIXTURE_OUTCOME=fail FIXTURE_DECLARE=build

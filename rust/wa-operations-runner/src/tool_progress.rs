@@ -132,7 +132,7 @@ pub fn tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_pat
     let current = &mut lives[index];
     feed(current, stdout_path, stderr_path, now);
     let facts = current.tracker.facts(now, &wa_tool_progress::env_secrets());
-    let _ = wa_term::tool_progress::publish(owner, &facts);
+    let _ = crate::node::publish_progress(owner, &facts);
     Some(facts)
 }
 
@@ -159,7 +159,7 @@ pub fn finish(id: &str) {
         LAST.lock().unwrap_or_else(|e| e.into_inner()).retain(|(name, _)| *name != key);
     }
     // Only THAT session's file is removed: a settled call never blanks another session's row.
-    wa_term::tool_progress::finish(&ended.owner);
+    crate::node::finish_progress(&ended.owner);
 }
 
 #[cfg(test)]

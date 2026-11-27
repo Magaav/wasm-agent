@@ -273,16 +273,14 @@ local function global_params(raw)
   return json.decode(text)
 end
 
--- The longest a script may pause in one sleep(ms). A pause is not work, so it is not charged to the
--- script's computing budget; the cap is what keeps one script from holding the node's thread (a pause
--- really does sleep the host - rust/wa-capabilities/src/host.rs host.sleep). A longer wait belongs to a
--- call's own wait_s, where a managed operation runs while the script waits (22/11).
-local SLEEP_MS_MAX = 5000
--- ...and a script's pause in TOTAL is bounded too: one CALL may sleep 5 s, one SCRIPT may sleep 30 s.
--- Without this cap the per-call bound said nothing - 100 calls of 5 s held the node's thread for eight
--- minutes (22/11 review, MUST). The count lives on this script's own handle table, so a new script
--- starts at zero and neither loop can be talked into a longer one.
-local SLEEP_TOTAL_MS = 30000
+-- How long a script may pause is ONE surface, and it is owned by lua/core/codemode_pending.lua: the
+-- per-pause ceiling (PAUSE_MS_MAX) and the budget a script may pause in total (MAX_WAIT_S). sleep(ms),
+-- every timer built on it, and wait(op) all read those two fields, so a change there reaches all three
+-- and there is no second limit to drift out of step (Victor 27/11). A pause is not work: it is not
+-- charged to the script's computing budget (the host sleeps, rust/wa-capabilities/src/host.rs).
+local function pause_limits()
+  return tonumber(pending_calls.PAUSE_MS_MAX) or 5000, (tonumber(pending_calls.MAX_WAIT_S) or 0) * 1000
+end
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
@@ -324,7 +322,8 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     if not asked or asked ~= asked or asked < 0 then
       return { error = 'codemode_sleep_requires_milliseconds' }, false
     end
-    if asked > SLEEP_MS_MAX then
+    local pause_max, budget_ms = pause_limits()
+    if asked > pause_max then
       return { error = 'codemode_sleep_too_long' }, false
     end
     -- The pause of THIS SCRIPT, not of this call (MUST, 22/11 review): a cap per call says nothing
@@ -332,7 +331,7 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     -- count stands and what to use instead - a pause spaces retries, it never waits for work.
     local spent = tonumber(popts and popts.slept_ms) or 0
     local slept = math.floor(asked)
-    if spent + slept > SLEEP_TOTAL_MS then
+    if spent + slept > budget_ms then
       return { error = 'codemode_sleep_total_too_long', paused_ms = spent, asked_ms = slept }, false
     end
     if type(host.sleep) == 'function' then pcall(host.sleep, slept) end
@@ -1079,16 +1078,14 @@ local function excerpt(origin,line,radius)
  return table.concat(out,'\n')
 end
 -- A MISSING GLOBAL IS ONE CLASS, AND ITS FIX LINE SAYS WHY (22/11). Counted over the retained ledger
--- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40,
+-- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40 (and 91
+-- over the last 7 days on 27/11, which is why the timers are real globals now - codemode_harness.lua),
 -- Buffer 17, HOME 16, location 12, require 6 - and btoa/atob 0: those two are already in the guest
 -- (the pinned QuickJS), which is why they are not in this table; the harness only wraps their message. A name below is not a typo:
 -- the script is running in the wrong runtime, so "Change line N" (which names where, not why) is
 -- replaced by the way that exists here. The table is an ALLOW-LIST on purpose - a name it does not
 -- hold (a script's own variable, `raw`, `wt`) keeps the plain sentence, because nothing here can say
 -- what the script meant (AGENTS.md: an allow-list for anything a refusal depends on).
-local NO_TIMERS = 'There are no timers in this sandbox: pause with await sleep(ms) - 0 to 5000 ms, in the '
-  ..'host, so it spends none of the script\'s budget - and wait on work with the call\'s wait_s option or '
-  ..'wait(op, {wait_s}).'
 local NO_NODE = 'This is not Node: a script has no require, module, process or fs. Run a command with '
   ..'await tools.bash({command: "..."}), and read, write or search files with tools.read, tools.write, '
   ..'tools.ls and tools.grep.'
@@ -1104,8 +1101,7 @@ local GLOBAL_FIX = {
     ..'argument (raw: {script: "..."}) and reach the script as raw.script. Base64 is built in: btoa, atob.',
   HOME = 'There are no environment variables in a script: read one with '
     ..'await tools.bash({command: "printenv HOME"}) - a command runs with this node\'s environment.',
-  setTimeout = NO_TIMERS, setInterval = NO_TIMERS, clearTimeout = NO_TIMERS, clearInterval = NO_TIMERS,
-  setImmediate = NO_TIMERS,
+
   require = NO_NODE, module = NO_NODE, exports = NO_NODE, process = NO_NODE, fs = NO_NODE, path = NO_NODE,
   __dirname = NO_NODE, __filename = NO_NODE,
   location = NO_BROWSER, window = NO_BROWSER, document = NO_BROWSER, navigator = NO_BROWSER,
@@ -1337,7 +1333,7 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local session_key=type(ctx.session_id)=='string' and ctx.session_id~='' and ctx.session_id
    or ('no-session:'..tostring(host.uuid and host.uuid() or '')..':'..tostring(host.now and host.now() or 0))
  local scope=host.sha256(json.encode({session=session_key,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
- args={code=harness.decorate(args.code,session_vars(memory,scope)),timeout_ms=args.timeout_ms}
+ args={code=harness.decorate(args.code,session_vars(memory,scope),select(1,pause_limits()),select(2,pause_limits())),timeout_ms=args.timeout_ms}
  -- One handle table for this script, on either loop: a call that outlives its wait answers
  -- {state:"pending", op} and wait(op)/cancel(op) answer it. A wait is bounded by its own wait_s and by
  -- the sandbox's CPU guard, never by a wall clock (18/11: a script is not killed for waiting).

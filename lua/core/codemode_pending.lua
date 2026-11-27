@@ -45,6 +45,10 @@
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
+-- ONE instance, so the pause budget below can be moved in a fixture and every reader sees it: dofile
+-- re-evaluates a file, which would give each caller its own numbers and make the shared budget
+-- untestable. The idiom is lua/core/refusal.lua's (package.loaded, published once).
+if package.loaded['codemode_pending'] then return package.loaded['codemode_pending'] end
 local M = {}
 
 -- The wait a call gets when it names none, and the ceiling on any wait. There is no third bound from
@@ -52,7 +56,13 @@ local M = {}
 -- script time" for a wait to outlive (the loop sets neither remaining_ms nor remaining). A caller
 -- that passes one still gets the old clamp (M.effective_ms); the only other stop is the CPU guard.
 M.DEFAULT_WAIT_S = 60
+-- THE ONE PAUSE BUDGET (Victor 27/11). “how long may this script pause” is ONE number, owned here: a
+-- single pause (the 5 s of one sleep(ms), and so of every timer built on it) and the total a script may
+-- pause across all of its pauses (the wait ceiling). sleep(ms), setTimeout/setInterval and wait(op) all
+-- read THESE two fields - a change to either reaches all three with no other edit, and a script can never
+-- be talked into a longer pause than a call's own wait by mixing them.
 M.MAX_WAIT_S = 300
+M.PAUSE_MS_MAX = 5000
 -- Reserved for the answer itself, the delivery into the guest and the script's return: a wait that
 -- spent the script's last millisecond would answer a handle nobody could read.
 M.MARGIN_MS = 2000
@@ -719,6 +729,78 @@ do
       return entry
     end,
   }
+end
+
+-- The mail index family: a query is a durable queue job on `email.query`, and the id the connector
+-- answers IS the handle - the same shape as a WhatsApp send's outbox job above, because it is the same
+-- question (how long may a call wait before it is a handle instead of an answer).
+--
+-- The rule it obeys (Victor, 27/11: a slow answer is not an error): a crate may not keep a private wait.
+-- `rust/wa-email-index` had `WAIT_MS = 2_000` and `rust/wa-capabilities/src/email_query.rs` spent it on
+-- every call, so a busy index turned a read into a 2 s deadline that then crossed the seam as a throw.
+-- Now the crate waits for nobody, the caller's wait is this file's shared one (`DEFAULT_WAIT_S`, 60 s,
+-- `MAX_WAIT_S`, 300 s), and a slow query answers a handle here and settles through `wait` like every
+-- other call that outlives its wait.
+--
+-- The three tools are one family on purpose: `email_search`, `email_read` and `email_media` are the same
+-- job on the same queue, so they cannot drift into three different waits.
+-- The factory both queue-job families use (the mail index here, the WhatsApp index in its own change): a
+-- tool that ENQUEUES a durable job and answers its id is the same question wherever it lives, so the answer
+-- - a handle named after the job, polled by id, never cancellable - is written once and registered per tool.
+-- A second copy would drift, and drift is how two crates ended up with two private 2 s waits.
+function M.queue_job_family(tool, opts)
+  opts = opts or {}
+  return {
+      -- The kind is the caller's, so a family that already has a name keeps it (`whatsapp_query`): the shape
+      -- is shared, the label is not something this factory should decide for it.
+      kind = opts.kind or "queue_job",
+      start = function(dispatch, opts, params, raw)
+        -- Queue and answer at once: the wait is this layer's, the same one every other call gets. The
+        -- two internal fields ride in the RAW argument text and never in `params` - an unknown name in a
+        -- tool's arguments is refused by name (`tool_arguments.lua`), so a closed schema stays closed.
+        local wire = {}
+        for key, value in pairs(type(params) == "table" and params or {}) do wire[key] = value end
+        wire.__wait_ms = 0
+        local ok, answer = pcall(dispatch, tool, params or {}, json.encode(wire))
+        if not ok then return { result = { error = tostring(answer), effect = "unknown", replay_allowed = false } } end
+        if type(answer) ~= "table" then return { result = answer } end
+        local id = tonumber(answer.id)
+        -- Only a still-running query becomes a handle: anything the connector already answered (a hit
+        -- list, a refusal by name, a lost job) is the answer and stays one.
+        if answer.state == "running" and id then
+          return { op = "email-" .. tostring(id), id = id, tool = tool }
+        end
+        return { result = answer }
+      end,
+      poll = function(dispatch, opts, record, ms)
+        -- The crate's own bounded read: `{job: <id>, wait_ms: <slice>}` answers the job's state, and one
+        -- short slice at a time keeps the wait interruptible by a stop.
+        local asked = { __job = record.id, __wait_ms = math.max(0, math.floor(tonumber(ms) or 0)) }
+        local ok, answer = pcall(dispatch, record.tool, {}, json.encode(asked))
+        if not ok then return nil, tostring(answer) end
+        if type(answer) ~= "table" then return nil, "email_answer_malformed" end
+        local running = answer.state == "running"
+        answer.settled = not running
+        return answer, (running and "still_running" or nil)
+      end,
+      settle = function(dispatch, opts, record, state) return state end,
+      -- A query is a read: it is already on the queue and it will answer. Saying so is different from
+      -- pretending it was stopped.
+      cancel = function(dispatch, opts, record)
+        return { op = record.op, tool = record.tool, cancelled = false, error = "not_cancellable",
+          why = "a query already queued is a read: it answers, and stopping the caller does not stop the index" }
+      end,
+      progress = function(dispatch, opts, record, state)
+        return { state = tostring(type(state) == "table" and state.state or "running"),
+          kind = opts.kind or "queue_job", job = record.id, tool = record.tool }
+      end,
+  }
+end
+
+do
+  for _, tool in ipairs({ "email_search", "email_read", "email_media" }) do
+    M.EXECUTORS[tool] = M.queue_job_family(tool)
+  end
 end
 
 -- The peer family (change/remote-pending, item 1): a remote bash is ADOPTED, not killed.
@@ -1655,4 +1737,5 @@ M.CANCEL_HELP = {
   code = "const started = await tools.bash({command:'sleep 300', wait_s:0});\nconst stopped = await cancel(started.op);\nreturn {op: started.op, cancelled: stopped.cancelled};",
 }
 
+package.loaded['codemode_pending']=M
 return M

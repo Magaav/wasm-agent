@@ -84,7 +84,10 @@ end
 M.elapsed = elapsed
 
 M.POLL = 1        -- seconds between reads; the deploy writes build-status.json many times a second
-M.HEARTBEAT = 30  -- seconds: an unchanged phase says so again at this interval, and only then
+M.HEARTBEAT = 30
+-- A full compile of this tree on a node like work, said out loud while it runs (Victor, 27/11: "we need
+-- instantaneous" - so at least the wait must be named, in seconds of reading, not discovered after 32 minutes).
+BUILD_MINUTES = 30  -- seconds: an unchanged phase says so again at this interval, and only then
 -- HOW LONG A FOLLOW WAITS FOR A REQUEST THE SENTINEL HAS NOT STARTED. A queued deploy can be held by
 -- design (the node is busy, a turn is finishing), so the bound is the installer's OWN idle bound -
 -- `WA_DEPLOY_IDLE_BOUND`, 1800 s, the number `scripts/upgrade.sh` writes into deploy-pending.json - and
@@ -323,7 +326,21 @@ function M.state(options)
   -- 5. THE INSTALLER SAID IT IS INSTALLING A PUBLISHED BINARY: there is no n/total to show, because there
   --    is no build. "building 456/456 proving (published binary, no build)" contradicted itself (Fable
   --    24/11, B): the published path says what it is doing and drops the bar.
-  if declared == "published" then
+  -- THE LIVE BUILD OUTRANKS THE DECLARATION (Victor's update on work, 27/11: the screen said "installing the
+  -- published binary (no build)" for 32 minutes while deploy.sh compiled for 1961 s, and the deploy then failed).
+  -- `declared` is what the installer SAID it would do, read from its log; a fresh building record is what it IS
+  -- doing, read from its own status file. When the two disagree the status file is right, so the published
+  -- label is only reached when nothing is building now - and then step 6 shows the real phase and n/m.
+  -- What contradicts the declaration is COMPILING, not merely a status file: a real published install writes
+  -- `building installing` too (its own row, scripts/test-update-follow.sh case 3). So the test is the phase and
+  -- the count, which only a source build produces.
+  local compiling_now = false
+  if type(build) == "table" and trim(build.state) == "building"
+    and fresh_epoch(build.at, started and (started - 1)) then
+    local bphase, bdone = trim(build.phase), tonumber(build.done) or 0
+    compiling_now = bphase:match("^compil") ~= nil or bdone > 0
+  end
+  if declared == "published" and not compiling_now then
     return snap({ key = "downloading", body = "installing the published binary (no build)", sources = { p.deploy_out } })
   end
 
@@ -335,7 +352,16 @@ function M.state(options)
     local crate = trim(build.crate)
     local body = "building " .. duration(build) .. (phase ~= "" and phase or "working")
     if crate ~= "" and phase == "compiling" then body = body .. " " .. crate end
-    if declared == "build" then body = body .. " (from source, on this machine)" end
+    -- WHY IT IS BUILDING, not only that it is (Victor on work, 27/11: 32 minutes of cargo behind a line that never
+    -- said why a published binary was not used, and the answer - "no published binary for this commit" - was in
+    -- the installer's own log the whole time). The reason comes from that log; the estimate is the honest one for
+    -- a full compile on a machine like this, and it says "~" because it is an estimate.
+    if declared == "build" then
+      local why = M.build_reason(o, p)
+      body = body .. " (from source, on this machine: "
+        .. (why ~= "" and why or "no published binary for this commit")
+        .. ", ~" .. BUILD_MINUTES .. " min)"
+    end
     return snap({ key = "building", clock_from = tonumber(build.started_at) or started, body = body,
       done = tonumber(build.done), total = tonumber(build.total), sources = { p.build } })
   end
@@ -391,6 +417,18 @@ end
 -- binary` / `deploy: no published binary for this commit; building this tree`). `nil` until it says - and
 -- nil is NOT "build": the plan line says the installer looks for a covered release first, and the word
 -- "build" is printed only when the installer itself says so (Fable 24/11, A).
+-- The installer's own reason for building instead of installing, read from the same deploy output `declared()`
+-- reads. Empty when the log does not say - the caller then states the fact without inventing a cause.
+function M.build_reason(options, paths_in)
+  local p = paths_in or M.paths(options)
+  local text = read(p.deploy_out)
+  if not text then return "" end
+  local last = text:match("%-%-%- deploy [^\r\n]*%-%-%-(.*)$") or text
+  local line = last:match("deploy: no published binary for this commit[^\r\n]*")
+  if not line then return "" end
+  return trim(line:gsub("^deploy: ", ""):gsub("%s*%b()%s*$", ""))
+end
+
 function M.declared(options, paths_in)
   local p = paths_in or M.paths(options)
   local text = read(p.deploy_out)

@@ -247,6 +247,68 @@ var results=Object.freeze({
  last:function(count,options){ return track('results.last('+preview(count)+')',rawResults({ op:'last', n:count, tool:options&&options.tool })); },
  diff:function(before,after){ return track('results.diff('+preview(before)+', '+preview(after)+')',rawResults({ op:'diff', a:before, b:after })); }
 });
+var TIMER_CAP=(typeof TIMER_PAUSE_MS==='number'&&TIMER_PAUSE_MS>0)?TIMER_PAUSE_MS:5000;
+var TIMER_CEILING=(typeof TIMER_BUDGET_MS==='number')?TIMER_BUDGET_MS:300000;
+/* Timers are the one pause this sandbox has: setTimeout was its largest missing global (91 failures in 7 days, 27 of 36 recoverable scripts writing "await new Promise(r => setTimeout(r, ms))"), so every timer is a due time on a clock the script pause advances - the host sleep is the only place JS yields here - and a timer that would outlive the script is never kept implicitly: persistence is declared with tools.wake, not implied. */
+var timers={ next:1, entries:[], spent:0, wake:null, stopped:false, notes:[], firing:false };
+var timerSignal=function(){ var wake=timers.wake; timers.wake=null; if(wake){ wake(); } };
+var timerNote=function(line){ if(timers.notes.indexOf(line)<0){ timers.notes.push(line); } };
+var timerRemove=function(id){ timers.entries=timers.entries.filter(function(entry){ return entry.id!==id; }); };
+var timerSchedule=function(fn, ms, args, repeat){
+ var asked=Number(ms);
+ var delay=isFinite(asked)?Math.max(0, Math.min(TIMER_CAP, Math.floor(asked))):0;
+ var entry={ id:timers.next++, due:Date.now()+delay, ms:delay, fn:fn, args:args||[], repeat:!!repeat };
+ timers.entries.push(entry);
+ timerSignal();
+ return entry.id;
+};
+var TIMER_CEILING_LINE='the '+String(Math.round(TIMER_CEILING/1000))+' s wait ceiling of one script: end it yourself with clearInterval(id) (or clearTimeout(id)), and if the work should outlive the script, schedule it with await tools.wake({in_seconds: <n>, reason: "<why>"}) - a wait inside a script ends with the script, a wake does not.';
+var timerFire=function(entry){
+ timerRemove(entry.id);
+ if(entry.repeat){
+  if(timers.spent+entry.ms>TIMER_CEILING){ timerNote('setInterval stopped at '+TIMER_CEILING_LINE); return; }
+  timers.spent+=entry.ms;
+  entry.due=entry.due+entry.ms;
+  timers.entries.push(entry);
+ }
+ try{ var ran=entry.fn.apply(null, entry.args); if(ran&&typeof ran.then==='function'){ ran.catch(function(error){ timerNote('a timer callback failed: '+String((error&&error.message)||error)); }); } }catch(error){ timerNote('a timer callback failed: '+String((error&&error.message)||error)); }
+};
+var timerDue=function(){
+ if(timers.firing){ return; }
+ timers.firing=true;
+ var guard=0;
+ while(guard++<100000){
+  if(!timers.entries.length){ break; }
+  timers.entries.sort(function(a,b){ return a.due-b.due; });
+  if(timers.entries[0].due>Date.now()){ break; }
+  timerFire(timers.entries[0]);
+ }
+ timers.firing=false;
+};
+var timerDrain=async function(){
+ while(!timers.stopped){
+  timerDue();
+  if(!timers.entries.length){ await new Promise(function(resolve){ timers.wake=resolve; }); continue; }
+  timers.entries.sort(function(a,b){ return a.due-b.due; });
+  var wait=Math.max(0, timers.entries[0].due-Date.now());
+  if(wait>0){
+   if(timers.spent+wait>TIMER_CEILING){ timerRemove(timers.entries[0].id); timerNote('a timer stopped at '+TIMER_CEILING_LINE); continue; }
+   timers.spent+=wait;
+   try{ await sleepVia(wait); }catch(error){ var went=timers.entries[0]; timerRemove(went.id); timerNote((went.repeat?'setInterval':(went.ms===0?'setTimeout':('a timer'))) + ' could not wait: '+String((error&&error.message)||error)+' - one pause is 0 to 5000 ms and a script pauses 30000 ms in total, so end a repeating timer with clearInterval(id), and if the work should outlive the script schedule it with await tools.wake({in_seconds: <n>, reason: "<why>"}) - a wait inside a script ends with the script, a wake does not.'); }
+  }
+ }
+};
+var sleepVia=(typeof G.sleep==='function')?G.sleep.bind(G):(typeof sleep==='function'?sleep:null);
+var timerSleep=async function(ms){
+ if(!sleepVia){ throw new TypeError('this sandbox has no sleep: a timer cannot pause here.'); }
+ var slept=await sleepVia(ms);
+ timerDue();
+ return slept;
+};
+var setTimeoutFn=function(fn, ms){ if(typeof fn!=='function'){ throw new TypeError('setTimeout takes a function first: setTimeout(() => { ... }, ms) - use await sleep(ms) to pause without one.'); } return timerSchedule(fn, ms, Array.prototype.slice.call(arguments,2), false); };
+var clearTimerFn=function(id){ timerRemove(Number(id)); };
+var setIntervalFn=function(fn, ms){ if(typeof fn!=='function'){ throw new TypeError('setInterval takes a function first: setInterval(() => { ... }, ms) - clear it with clearInterval(id).'); } return timerSchedule(fn, ms, Array.prototype.slice.call(arguments,2), true); };
+var setImmediateFn=function(fn){ return setTimeoutFn.apply(null, [fn, 0].concat(Array.prototype.slice.call(arguments,1))); };
 return {
  enter:async function(index,body){
   var vars=makeVars(index);
@@ -254,8 +316,16 @@ return {
   var helpers={ searchTools:makeGlobal('searchTools',G.searchTools), describeTool:makeGlobal('describeTool',G.describeTool), showCall:makeGlobal('showCall',G.showCall), describe:makeGlobal('describe',G.describe), results:results, parallel:parallel, vars:vars.proxy };
   var boundTools=wrapTools(G.tools,helpers), boundConsole=makeConsole(G.console);
   vars.bind({ tools:boundTools, console:boundConsole, results:results, parallel:parallel, searchTools:helpers.searchTools });
-  var value=await body(boundTools,boundConsole,helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS,vars.proxy,btoa,atob);
+  var drain=timerDrain();
+  var value=await body(boundTools,boundConsole,helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS,vars.proxy,btoa,atob,setTimeoutFn,clearTimerFn,setIntervalFn,clearTimerFn,setImmediateFn,timerSleep);
   var out=await settleAll(value);
+  timers.stopped=true;
+  timerSignal();
+  if(timers.entries.length){
+   timerNote('timers still queued when the script ended were dropped: a wait inside a script ends with the script - schedule the work with await tools.wake({in_seconds: <n>, reason: "<why>"}) if it should outlive it.');
+   timers.entries=[];
+  }
+  for(var noteIndex=0;noteIndex<timers.notes.length;noteIndex++){ boundConsole.warn(timers.notes[noteIndex]); }
   vars.flush();
   return out;
  }
@@ -290,7 +360,7 @@ local ONE = join(SOURCE)
 -- The session's variables arrive as `{name: bytes}` on line 1 (names are identifiers and sizes integers,
 -- so the text holds no newline and the script's line numbers do not move).
 local OPEN = ONE .. ";return await __h.enter("
-local BODY = ",async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS, vars, btoa, atob){{"
+local BODY = ",async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS, vars, btoa, atob, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, sleep){{"
 M.prologue = OPEN .. "{}" .. BODY
 M.epilogue = "\n}});"
 
@@ -306,9 +376,14 @@ end
 
 -- The script the node sends: the harness on line 1, the model's code from line 2. `vars` is the
 -- session's variable index, `{ {name=, bytes=} ... }` (lua/core/codemode.lua `session_vars`).
-function M.decorate(code, vars)
+-- The pause budget the timers obey, handed in by the caller (lua/core/codemode.lua reads it from
+-- lua/core/codemode_pending.lua, which owns it): one number for sleep, timers and wait, so a change
+-- there reaches all three with no edit here.
+function M.decorate(code, vars, pause_ms, budget_ms)
   if type(code) ~= "string" then return code end
-  return OPEN .. index_json(vars) .. BODY .. "\n" .. code .. M.epilogue
+  local limits = string.format("var TIMER_PAUSE_MS=%d;var TIMER_BUDGET_MS=%d;",
+    math.max(1, math.floor(tonumber(pause_ms) or 5000)), math.max(0, math.floor(tonumber(budget_ms) or 300000)))
+  return limits .. OPEN .. index_json(vars) .. BODY .. "\n" .. code .. M.epilogue
 end
 
 return M

@@ -82,8 +82,33 @@ check(tostring(r.fix):find('There is no Buffer in this sandbox', 1, true) ~= nil
   and tostring(r.fix):find('capability: "write"', 1, true) ~= nil
   and tostring(r.fix):find('btoa', 1, true) ~= nil, 'and its fix names the body route, the peer write and btoa: ' .. shown(r))
 check(r.line == 1, 'and the line it happened on: ' .. shown(r))
-r = run('setTimeout(() => {}, 10);\nreturn "done";')
-check(tostring(r.fix):find('await sleep(ms)', 1, true) ~= nil, 'setTimeout names sleep: ' .. shown(r))
+-- 3b. TIMERS (27/11): the largest missing-global class. Measured over 7 days of retained run results:
+-- 91 `ReferenceError: setTimeout is not defined`, and of the 36 whose script was recoverable, 27 wrote
+-- `await new Promise(r => setTimeout(r, ms))`. Every timer runs on the one pause the host answers
+-- (`sleep`), so a wait spends none of the script's budget, and nothing is promoted to a job silently.
+r = run('const t0=Date.now(); await new Promise(res => setTimeout(res, 60)); return Date.now()-t0;')
+check(r.ok == true and (tonumber((value_of(r))) or 0) >= 50,
+  'await new Promise(r => setTimeout(r, 60)) really pauses: ' .. shown(r))
+r = run('let seen=""; setTimeout(() => { seen="callback"; }, 10); await sleep(40); return seen;')
+check(r.ok == true and value_of(r) == 'callback', 'setTimeout(fn, ms) runs the callback: ' .. shown(r))
+r = run('let seen="never"; const id=setTimeout(() => { seen="fired"; }, 20); clearTimeout(id); await sleep(60); return seen;')
+check(r.ok == true and value_of(r) == 'never', 'clearTimeout stops it: ' .. shown(r))
+r = run('let n=0; const id=setInterval(() => { n++; }, 10); await sleep(80); clearInterval(id); return n;')
+check(r.ok == true and (tonumber((value_of(r))) or 0) >= 2, 'setInterval repeats and clearInterval stops it: ' .. shown(r))
+r = run('await new Promise(res => setImmediate(res)); return "immediate";')
+check(r.ok == true and value_of(r) == 'immediate', 'setImmediate is a zero-delay timer: ' .. shown(r))
+r = run('setTimeout("not a function", 10); return "done";')
+check(r.ok == false and tostring(r.error):find('setTimeout takes a function', 1, true) ~= nil,
+  'setTimeout with something else says the shape: ' .. shown(r))
+-- The ceiling an uncleared interval really meets in a script: one pause is 5 s and a script pauses 30 s in
+-- total (lua/core/codemode.lua), so a repeating timer that nobody clears is stopped by that budget and its
+-- line names clearInterval AND the call that makes the work outlive the script. 30 s of real waiting, so
+-- it is the slow half.
+if os.getenv('WA_TIMERS_SLOW') == '1' then
+  local began = os.time()
+  r = run('let n=0; setInterval(() => { n++; }, 5000); await sleep(5000); await sleep(5000); await sleep(5000); await sleep(5000); await sleep(5000); await sleep(5000); return n;')
+  check(r.ok == false and tostring(r.code) == 'codemode_sleep_total_too_long', 'the script pause budget stops it (' .. (os.time() - began) .. ' s): ' .. shown(r))
+end
 r = run('return HOME;')
 check(tostring(r.fix):find('printenv HOME', 1, true) ~= nil, 'HOME names the command that reads it: ' .. shown(r))
 r = run('const x = require("fs");\nreturn x;')
@@ -108,17 +133,30 @@ check(r.ok == false and tostring(r.error):find('^tools%.run failed: SyntaxError'
 check(occurrences(fix, 'No call had succeeded yet.') == 1,
   'and "No call had succeeded yet." is printed once (' .. occurrences(fix, 'No call had succeeded yet.') .. '): ' .. shown(r))
 
--- 5. The TOTAL pause of one script is bounded (MUST, 22/11 review): 5 s per call bounded one sleep, not
--- a loop of them, and a pause is not charged to the computing budget - so without this cap two hundred
--- calls of 5 s would hold the node's thread. The 7th call of 5000 ms is the one past 30 s.
-local started = os.time()
-r = run('for (let i = 0; i < 8; i++) { await sleep(5000); } return `slept`;')
-local wall = os.time() - started
+-- 5. ONE pause budget (Victor 27/11): there is no sleep limit and no timer limit of their own. sleep,
+-- every timer built on it and wait(op) read lua/core/codemode_pending.lua's two numbers - the per-pause
+-- ceiling (PAUSE_MS_MAX) and the budget a script may pause in total (MAX_WAIT_S). This row changes them
+-- in the fixture and watches BOTH move, which is the contract the follow-up asks for: one edit, no other
+-- file touched, sleep and timers answer the new numbers.
+local pending = dofile('lua/core/codemode_pending.lua')
+local pause_was, budget_was = pending.PAUSE_MS_MAX, pending.MAX_WAIT_S
+check(tonumber(pause_was) ~= nil and tonumber(budget_was) ~= nil, 'the shared numbers live in codemode_pending')
+pending.PAUSE_MS_MAX, pending.MAX_WAIT_S = 1000, 12
+r = run('await sleep(1500); return "slept";')
+check(r.ok == false and tostring(r.code) == 'codemode_sleep_too_long',
+  'the shared per-pause number refuses sleep(1500) at 1 s: ' .. shown(r))
+r = run('const t0=Date.now(); await new Promise(res => setTimeout(res, 1500)); return Date.now()-t0;')
+check(r.ok == true and (tonumber((value_of(r))) or 9999) < 1300,
+  'and the SAME number clamps a timer to it (a timer has no limit of its own): ' .. shown(r))
+-- The budget case needs the real per-pause ceiling, so only the total moves here.
+pending.PAUSE_MS_MAX, pending.MAX_WAIT_S = 5000, 12
+r = run('const a=Date.now(); await sleep(5000); await sleep(5000); await sleep(5000); return Date.now()-a;')
 check(r.ok == false and tostring(r.code) == 'codemode_sleep_total_too_long',
-  'a loop of sleep(5000) is refused on the call past 30 s: ' .. shown(r))
-check(tostring(r.fix):find('30 s in total', 1, true) ~= nil and tostring(r.fix):find('wait_s', 1, true) ~= nil,
-  'and its fix says how much this script has paused and what to use instead: ' .. shown(r))
-check(wall >= 25 and wall < 40, 'the six sleeps it DID run took about 30 s and no more (' .. wall .. ' s)')
+  'three 5 s sleeps pass a 12 s shared budget and the third is refused: ' .. shown(r))
+r = run('let n=0; setInterval(() => { n++; }, 5000); await sleep(5000); await sleep(5000); await sleep(5000); return n;')
+check(r.ok == false and tostring(r.code) == 'codemode_sleep_total_too_long',
+  'and a timer loop meets the same budget, not a timer one: ' .. shown(r))
+pending.PAUSE_MS_MAX, pending.MAX_WAIT_S = pause_was, budget_was
 
 -- 6. A sleeping script is still a cancelled one: the loop checks the run between two calls, so the
 -- cancel arrives at the next iteration instead of after the last sleep.

@@ -434,3 +434,114 @@ fn status_and_newsletter_traffic_is_not_a_chat() {
     let status = conversation("status@broadcast", vec![entry("status@broadcast", "S1", BASE_TS, "oi", false, None)]);
     assert!(candidates(&status, &me()).is_empty(), "the live path skips status, and so does the past");
 }
+
+// ---- MEASUREMENT (whatsapp-index-heals-itself, ready-heals.md §2) ----------------------------------
+
+/// What a reconnect delivers when one chat was offline for days: per chat, in counts, from a hand-built
+/// sync (no account, no socket). The index is the real `index::Memory`, the drain is the one the guest
+/// runs, and the budget is the node's own two-day window.
+///
+/// The fixture is one chat with: a message 72 hours old, one 47 hours old, a cluster 10/9/8 hours ago, a
+/// SEVEN-HOUR HOLE, then two messages in the last hour.
+#[test]
+fn measure_what_an_offline_gap_delivers_and_what_it_hides() {
+    let store = Memory::new();
+    let chat = conversation(
+        CHAT,
+        vec![
+            entry(CHAT, "OLD72", seconds_ago(72 * 3600), "x", false, None),
+            entry(CHAT, "OLD47", seconds_ago(47 * 3600), "x", false, None),
+            entry(CHAT, "C10", seconds_ago(10 * 3600), "x", false, None),
+            entry(CHAT, "C9", seconds_ago(9 * 3600), "x", false, None),
+            entry(CHAT, "C8", seconds_ago(8 * 3600), "x", false, None),
+            entry(CHAT, "N1", seconds_ago(3600), "x", false, None),
+            entry(CHAT, "N05", seconds_ago(1800), "x", false, None),
+        ],
+    );
+    let progress = drain(&store, &chat, keeping(1_000, 2));
+    println!(
+        "MEASURE delivered seen={} written={} too_old={} duplicate={} skipped={} remaining={}",
+        progress.seen, progress.written, progress.too_old, progress.duplicate, progress.skipped, progress.remaining
+    );
+    assert_eq!(progress.seen, 7, "every message the phone offered was seen");
+    assert_eq!(progress.too_old, 1, "the 72-hour message is outside a two-day window: seen, then refused");
+    assert_eq!(progress.written, 6, "the other six are in the index after one drain");
+    assert_eq!(progress.duplicate, 0);
+    assert_eq!(progress.skipped, 0);
+    assert_eq!(progress.remaining, 0, "the window's own budget did not cut this one");
+
+    // The same sync again: everything already there is a duplicate, which is how the measurement knows
+    // the index holds exactly those six and nothing invented.
+    let again = drain(&store, &chat, keeping(1_000, 2));
+    println!("MEASURE second_drain duplicate={} written={} too_old={}", again.duplicate, again.written, again.too_old);
+    assert_eq!((again.written, again.duplicate, again.too_old), (0, 6, 1));
+
+    // A tick cut short is the ONE thing that speaks about being behind: records left for the next tick.
+    let cut_store = Memory::new();
+    let cut = drain(&cut_store, &chat, budget(3));
+    println!("MEASURE tick_cut written={} remaining={} stopped={:?}", cut.written, cut.remaining, cut.stopped);
+    assert!(cut.remaining > 0, "a three-record tick leaves work behind: {cut:?}");
+
+    // And what NOTHING here says: the seven-hour hole. `Progress` has no field for an interval that is
+    // missing, and no answer carries one - which is the gap this mission exists to close.
+}
+
+/// P1.1 of whatsapp-index-heals-itself: a reconnect leaves a HOLE the index knows about, and the hole is
+/// what the healer is asked to close. Measured with the module's own fixture: the first sync stops three
+/// days back, the next one starts a day back.
+#[test]
+fn a_reconnect_records_the_hole_it_leaves_and_a_first_sync_is_not_one() {
+    let store = Memory::new();
+    // A first sync: one message three days ago. Nothing is known before it, so this is not a hole.
+    let first = conversation(CHAT, vec![entry(CHAT, "OLD", seconds_ago(3 * 86_400), "antes", false, None)]);
+    let progress = drain(&store, &first, Budget::default());
+    assert_eq!(progress.written, 1);
+    assert!(block_on(crate::index::gaps(&store)).unwrap().is_empty(), "a first sync is not a hole");
+
+    // The reconnect, one day later: the index stopped three days back, this batch starts one day back.
+    let reconnect = conversation(CHAT, vec![entry(CHAT, "NEW1", seconds_ago(86_400), "depois", false, None)]);
+    let progress = drain(&store, &reconnect, Budget::default());
+    assert_eq!(progress.written, 1, "the new message is written");
+    let gaps = block_on(crate::index::gaps(&store)).unwrap();
+    assert_eq!(gaps.len(), 1, "the hole is recorded, once: {gaps:?}");
+    assert_eq!(gaps[0].chat, CHAT);
+    assert_eq!(gaps[0].from_ms, seconds_ago(3 * 86_400) as i64 * 1000, "from where the index stopped");
+    assert_eq!(gaps[0].to_ms, seconds_ago(86_400) as i64 * 1000, "to the oldest message the batch offered");
+
+    // A batch that continues where the index stopped is not a second hole.
+    let next = conversation(CHAT, vec![entry(CHAT, "NEW2", seconds_ago(3600), "mais", false, None)]);
+    drain(&store, &next, Budget::default());
+    assert_eq!(block_on(crate::index::gaps(&store)).unwrap().len(), 1, "the same hole, not a second one");
+
+    // Once healed, the index forgets it.
+    block_on(crate::index::clear_gap(&store, CHAT)).unwrap();
+    assert!(block_on(crate::index::gaps(&store)).unwrap().is_empty(), "a healed chat has no hole");
+}
+
+/// P1.1's heal half, the part that can be tested without a phone: from the holes the index recorded, the
+/// round asks for the right anchor (the oldest message at the gap's far edge, which is what
+/// `fetch_message_history` wants), bounded to a few chats per round - and a batch that spans the hole
+/// clears it instead of asking again.
+#[test]
+fn a_heal_round_asks_from_the_gap_edge_and_a_spanning_batch_clears_it() {
+    let store = Memory::new();
+    let first = conversation(CHAT, vec![entry(CHAT, "OLD", seconds_ago(3 * 86_400), "antes", false, None)]);
+    drain(&store, &first, Budget::default());
+    let reconnect = conversation(CHAT, vec![entry(CHAT, "NEW1", seconds_ago(86_400), "depois", false, None)]);
+    drain(&store, &reconnect, Budget::default());
+    assert_eq!(block_on(crate::index::gaps(&store)).unwrap().len(), 1, "the hole is there");
+
+    // The round asks from the oldest message at the gap's far edge: the one the sync delivered.
+    let asks = block_on(heal_asks(&store)).unwrap();
+    assert_eq!(asks.len(), 1, "one chat to heal: {asks:?}");
+    assert_eq!(asks[0].chat, CHAT);
+    assert_eq!(asks[0].id, "NEW1", "the message at the far edge is the anchor");
+    assert_eq!(asks[0].ts, seconds_ago(86_400) as i64 * 1000);
+    assert_eq!(asks[0].count, HEAL_PER_CHAT, "bounded per round, not a storm");
+
+    // The fetched range arrives and reaches back into the hole: the gap is cleared, not asked again.
+    let fetched = conversation(CHAT, vec![entry(CHAT, "MID", seconds_ago(2 * 86_400), "no meio", false, None)]);
+    drain(&store, &fetched, Budget::default());
+    assert!(block_on(crate::index::gaps(&store)).unwrap().is_empty(), "a spanning batch fills the hole");
+    assert!(block_on(heal_asks(&store)).unwrap().is_empty(), "and nothing is asked again");
+}

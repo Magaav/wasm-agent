@@ -179,11 +179,21 @@ if command == "update" or command == "--update" then
     print(tostring(answered and (answered.detail or answered.error) or "the accepted request produced no answer"))
     os.exit((answered and answered.ok == true) and 0 or 1)
   end
+  -- THE SCREEN FIRST, THE MODULES AFTER (bug 4, Victor 27/11: "wa update took a really long time to output the
+  -- first line. We need instantaneous"). MEASURED before this reorder on this node: `wa update --follow` put its
+  -- first byte on a pipe at 585 ms, while `wa --version` answered in 6 ms - so the cost was this branch loading
+  -- update.lua, redact.lua and update_follow.lua (three dofiles) BEFORE the screen existed. The line is drawn
+  -- now, then the modules are read, because nothing on the first line depends on them.
+  -- the ONE line and the ONE last line (mission update-is-one-line); it decides nothing, it draws
+  local screen = dofile("lua/core/update_screen.lua")
+  local early_ui = nil
+  if not check then
+    early_ui = screen.new({ verbose = verbose })
+    early_ui:phase(screen.START)
+  end
   local updater = dofile("lua/core/update.lua")
   local redact = dofile("lua/core/redact.lua")
   local follow = dofile("lua/core/update_follow.lua")
-  -- the ONE line and the ONE last line (mission update-is-one-line); it decides nothing, it draws
-  local screen = dofile("lua/core/update_screen.lua")
   if check then
     local report = updater.check({})
     print(redact.text(report.message or json.encode(report)))
@@ -223,9 +233,9 @@ if command == "update" or command == "--update" then
   -- pre-update backup all ran before anything was printed - and on `work` those seconds are a network's.
   -- Nothing the installer says is printed: it goes to the log the last line names, and `--verbose` streams
   -- it for the person who asks for it.
-  local ui = screen.new({ verbose = verbose })
+  local ui = early_ui or screen.new({ verbose = verbose })
   local function now_s() return tonumber(host.now and host.now() or os.time()) or 0 end
-  ui:phase(screen.START)
+  if not early_ui then ui:phase(screen.START) end
   local asking_since = now_s()
   local report, plan
   -- `--verbose` notes: the sentences the quiet screen does not print (the install's plan, the sentinel's

@@ -939,6 +939,27 @@ if command -v node >/dev/null 2>&1; then
   # named here by its path (19-20/11: three of ten hidden tests did not discriminate, and every
   # review of that round carried a test MUST). Self-contained: a fixture repository, no binary.
   check discrimination node scripts/test-discriminates-test.mjs
+  # THE LANDING QUEUE ITSELF (hunk 1, 27/11): its journal is append-only and its submit is idempotent, and
+  # both facts are cheap shelf rows on a temp file - no node, no tree, no push.
+  check queue-journal node scripts/test-queue-journal.mjs
+  check queue-submit node scripts/test-queue-submit.mjs
+  # THE QUEUE TWO DECISIONS ABOUT A PERSON (hunk 2): what the path policy stops, and that an approval is
+  # for exactly (branch, sha, policy-hash) - a new sha voids it, and only the review lane may write one.
+  check queue-policy node scripts/test-queue-policy.mjs
+  check queue-approval node scripts/test-queue-approval.mjs
+  # THE RUNNER STATE MACHINE (hunk 3): a crash mid-landing resumes from main, and the order is priority then
+  # the id. Neither row pushes anything - the steps are injected - so both are shelf rows.
+  check queue-resume node scripts/test-queue-resume.mjs
+  check queue-order node scripts/test-queue-order.mjs
+  # THE DOOR IN THE FILE EVERY CALLER ALREADY KNOWS (hunk 4): submit queues and lands nothing, the policy
+  # applies at the door, and `land` is still there until hunk 5 retires it on purpose.
+  check queue-door node scripts/test-queue-door.mjs
+  # THE REJECTION REACHES ITS WORKER (hunk 5): the rework file, the wake through the carrier decision 4
+  # keeps (injected here), and the third rejection for a mission escalating in one line.
+  check queue-rework node scripts/test-queue-rework.mjs
+  # THE SHA THAT WAS READ IS THE SHA THAT LANDS: the queue pins a ref at the request s sha and hands the
+  # lander THAT, so a branch rewritten after submit is rejected stale_sha instead of landing a moved tip.
+  check queue-pin node scripts/test-queue-pin.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...
@@ -1381,8 +1402,13 @@ check wit-lint-selftest bash scripts/test-wit-lint.sh
 # file. Existing worlds are grandfathered by an explicit list (wit/async-grandfather.txt), never by a pattern.
 # The land path needs no separate hook: scripts/landing-queue.mjs defaults to `bash scripts/fast.sh` (its line 227),
 # so these two are what the landing gate runs. Proved by running them with the same argv fast.sh uses.
-check wit-async bash scripts/lint-wit-async.mjs
+check wit-async node scripts/lint-wit-async.mjs
 check wit-async-selftest bash scripts/test-wit-async-lint.sh
+# SIGNED RELEASES ON THE FAST PATH (27/11): scripts/test-release-sign.lua shipped from 5185436b and was wired into no
+# runner, so nothing judged it and it rotted - by the time this line existed the fixture signed a set the publisher
+# then rewrote (release_signature_invalid ... signature_stale). It is wired here, and green, so the next drift is a
+# red row instead of a surprise at a release.
+check release-sign env WASM_AGENT_LUA_ROOT="$PWD" WA_FAST_BIN="$bin" WA_SCRIPT="$PWD/scripts/test-release-sign.lua" "$bin" --db "$work/release-sign.db"
 # The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
 # manifest not at all), a win line and the flag for the modules without one, a ledger's seconds, a
 # co-change pair over 70% and a decision inside the 30-day / 100-commit cooldown - plus the exit code

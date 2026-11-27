@@ -1326,3 +1326,6 @@ pub extern "C-unwind" fn capability(l: *mut LuaState) -> std::ffi::c_int {
 #[cfg(test)]
 #[path = "disk_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod disk_tests;

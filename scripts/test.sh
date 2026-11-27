@@ -265,6 +265,10 @@ gate_run node scripts/test-gate-check.mjs
 # and no line saying why. Cheap: it never builds, and it keeps the fragile idiom from being copied.
 gate_run node scripts/test-main-module-entry.mjs
 gate_run node scripts/test-landing-queue.mjs
+# THE INVENTORY STAYS AN INVENTORY (Fable 27/11): every private wait below the shared 60 s and every crate that crosses a
+# queue or a socket must be named in docs/missions/reports/seam-inventory.md, and the inventory must carry at least one
+# KEEP with its reason. It derives the facts from the tree, so a new private wait cannot appear unlisted.
+gate_run node scripts/test-seam-inventory.mjs
 gate_run node scripts/test-deploy-pin-prune.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
 gate_run node scripts/test-full-gate-proof.mjs
@@ -346,6 +350,10 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-st
 # worker calls, the audio's lease rule, the component slot that mirrors a job, and the operator view.
 # The library above proves the two-node *logic*; these prove the host's dispatch and admission.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime stt_node::
+# The stt seam as a component (wit/stt): build the artifact, then prove the seam against it - the
+# guest admits a call, refuses its own replay from its own ledger, and the five capabilities answer
+# byte-identically with the component absent and installed (scripts/test-stt-seam.sh).
+gate_run bash scripts/test-stt-seam.sh --offline
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities graph::tests
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
 # fixtures, one per runner, each with its own end-to-end test in wa-kernel-runtime: `svc-echo-wasip1` (a plain
@@ -2334,6 +2342,10 @@ gate_run node tests/test-wa-fonts.mjs
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# A RESTART DRAWS THE SAME TRANSCRIPT A LIVE TURN DOES (Victor 27/11): one stored turn - text beside a
+# tool call, reasoning, and the model note - is drawn live and through every replay path (restart,
+# --continue, a node-run wake, a /sessions switch); no Commentary heading, no raw note tags, the same answer.
+WA_SCRIPT=scripts/test-restart-redraw.lua "$BIN" --db "$DB.view-redraw" | grep "restart redraw ok" || redraw=1
 # A STOP IS NOT A FAILURE TO REPLAY (change/esc-stops-now, item 4): a provider call that comes back
 # cancelled is asked exactly once, waits for nothing and writes no provider_retry row, while the
 # unclassified-provider bucket it used to fall into still replays its own kind of failure. Measured in
@@ -3052,6 +3064,10 @@ echo "attach tests ok"
 # Local mock provider only; no account, paid model or external browser required.
 gate_run node scripts/test-operation-control.cjs "$BIN"
 gate_run node scripts/test-operation-control.cjs "$BIN" --await
+# Slice 1 of ready-operations-own-program.md: the same operation verbs answered by the supervisor
+# (`wa operations-supervisor`) - two real processes, identical answers, identical cancellation, identical
+# env withholding.
+gate_run node scripts/test-operation-supervisor.cjs "$BIN"
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
 gate_phase_begin subagents

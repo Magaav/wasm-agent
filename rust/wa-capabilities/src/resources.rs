@@ -412,7 +412,7 @@ impl Store {
                 let pid = value.as_u64().and_then(|v| u32::try_from(v).ok())
                     .ok_or("child_process_id_required")?;
                 let operation_id=field(args,"operation_id")?;
-                let operation=crate::operations::manager().observe_owned_child(operation_id,pid,field(&owner,"run")?).map_err(err)?;
+                let operation=crate::operations::observe_owned_child(operation_id,pid,field(&owner,"run")?).map_err(err)?;
                 let mut child=child_observation(pid)?;
                 if child["creation_stamp"]!=operation["child"]["creation_stamp"] {return Err("current_executor_operation_generation_changed".into());}
                 child["operation_id"]=json!(operation_id);Some(child)

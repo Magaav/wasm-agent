@@ -531,10 +531,90 @@ pub fn call_on(runtime: &Arc<Runtime>, envelope_json: &str, caller: &str) -> Str
             Reply::Refused(refusal)
         }
     };
-    String::from_utf8_lossy(&reply.encode()).to_string()
+    // The reply is the other half of the wire this layer owns: when the seam is routed, the guest
+    // renders it, and a reply it cannot render falls back to the crate with one line.
+    let bytes = match &reply {
+        Reply::Ok(value) if routed() => match crate::stt_host::reply_ok(&value.to_string()) {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                note_fallback("reply", &reason);
+                reply.encode()
+            }
+        },
+        _ => reply.encode(),
+    };
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// Is the seam switched on, and is the component behind it? Asked per call through the feature
+/// resolver (policy.json features.stt decides, the pin verified) — the switch is the feature, there is no
+/// env override in product code, never an environment read of this module's own, and never a value
+/// cached for the life of the process.
+fn routed() -> bool {
+    matches!(wa_features::status("stt").map(|status| status.active), Some(wa_features::ActivePath::Component))
+}
+
+/// One line per (operation, reason): a component that cannot answer must be visible, and a log flooded
+/// with the same line on every call is not visible.
+fn fallback_log() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static LOGGED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn note_fallback(op: &str, reason: &str) {
+    let fresh = match fallback_log().lock() {
+        Ok(mut logged) => logged.insert(format!("{op}|{reason}")),
+        Err(_) => true,
+    };
+    if fresh {
+        eprintln!("[stt] {op} decided natively: {reason}");
+    }
+}
+
+/// The fallbacks reported so far, for a test that asserts a broken component is visible.
+pub fn fallbacks() -> Vec<String> {
+    fallback_log().lock().map(|logged| logged.iter().cloned().collect()).unwrap_or_default()
+}
+
+/// One call, answered by the guest: the decided envelope (dispatched by the same execute the native path
+/// uses) or the refusal. Err means the component could not answer at all — then the native rule runs,
+/// once, with a log line.
+fn routed_call(runtime: &Arc<Runtime>, envelope_json: &str, caller: &str) -> Result<Result<Reply, Refusal>, String> {
+    let (me, owners, skew) = {
+        let state = runtime.lock();
+        let Some(admission) = state.admission.as_ref() else {
+            return Err("component_not_configured".to_string());
+        };
+        (admission.me().to_string(), admission.owner_nodes(), admission.skew_ms())
+    };
+    let now = SystemClock.now_ms();
+    match crate::stt_host::admit(&me, &owners, skew, envelope_json.as_bytes(), caller, now)? {
+        crate::stt_host::Admit::Call { op, from, to, ts_ms, rid, body_json } => {
+            let Some(op) = Op::parse(&op) else {
+                return Err("component_answer_invalid:unknown_op".to_string());
+            };
+            let body: Value = serde_json::from_str(&body_json).unwrap_or(Value::Null);
+            Ok(execute(runtime, &Envelope { op, from, to, ts_ms, rid, body }, now))
+        }
+        crate::stt_host::Admit::Refused { word, bytes } => {
+            runtime.lock().metrics.record_refusal_word(&word);
+            match Reply::decode(&bytes) {
+                Ok(reply) => Ok(Ok(reply)),
+                // A reply the node cannot read is the component not answering, not a refusal:
+                // it falls back with a named reason rather than inventing a fault for the peer.
+                Err(_) => Err("component_answer_invalid:refusal".to_string()),
+            }
+        }
+    }
 }
 
 fn handle(runtime: &Arc<Runtime>, envelope_json: &str, caller: &str) -> Result<Reply, Refusal> {
+    if routed() {
+        match routed_call(runtime, envelope_json, caller) {
+            Ok(reply) => return reply,
+            Err(reason) => note_fallback("call", &reason),
+        }
+    }
     let envelope = Envelope::decode(envelope_json.as_bytes())?;
     if envelope.from != caller {
         return Err(Refusal::UnknownCaller);

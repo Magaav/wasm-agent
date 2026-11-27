@@ -627,6 +627,12 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_PREFLIGHT"
   fi
   note "runtime worktree resolved before the build: $WA_RUNTIME_PREFLIGHT"
+  # WHAT THE PREFLIGHT VERIFIED, kept for the install-time question (Victor on work, 27/11: the deploy passed
+  # here, compiled for 1961 s, then refused with `deploy source must be the exact fetched origin/main` - a
+  # sentence that cannot be acted on because it does not say WHAT moved). Both shas are recorded now, so the
+  # late refusal names the difference instead of repeating the rule.
+  WA_RUNTIME_PREFLIGHT_HEAD="$(git -C "$BINDING_PREFLIGHT_REPO" rev-parse HEAD 2>/dev/null || true)"
+  WA_RUNTIME_PREFLIGHT_MAIN="$(git -C "$BINDING_PREFLIGHT_REPO" rev-parse "${WA_DEPLOY_MAIN_REF:-origin/main}" 2>/dev/null || true)"
 fi
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
@@ -1898,7 +1904,7 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     BINDING_SCRIPT="$(cygpath -w "$BINDING_SCRIPT")"; BINDING_REPO="$(cygpath -w "$BINDING_REPO")"
   fi
   WA_RUNTIME_WORKTREE="$("$NODE_BIN" "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
-    || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE"
+    || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE$(wa_runtime_binding_moved_note "$BINDING_REPO" "$WA_RUNTIME_PREFLIGHT_HEAD" "$WA_RUNTIME_PREFLIGHT_MAIN")"
   # The same question asked again, now that the build is done, and compared with the preflight answer: the
   # binding must still be clean and equal to main, and it must still be the tree step 0c chose. Comparison
   # lives in scripts/lib/runtime-binding.sh so it can be tested without a build (review of 18/11, item 9).

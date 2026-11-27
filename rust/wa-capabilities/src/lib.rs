@@ -32,7 +32,12 @@ pub mod core_pool;
 /// One root, one `wa clean`, one disk cap (`docs/ONEROOT.md`): the layout inside the node's existing
 /// state root, the retention rules, the pins, and the refusal that stops a full disk instead of
 /// letting a build die on `os error 112`.
-pub mod disk;
+/// The disk subsystem (docs/ONEROOT.md) is a crate of its own now, shared with the operations
+/// supervisor so both enforce one cap. Re-exported here so every caller keeps the same path.
+pub use wa_disk as disk;
+/// The operations runner as this node speaks to it: a wire client to `wa-operations-supervisor`
+/// (`ready-operations-slice-2.md`, stage B). Same functions, same JSON, the runner itself is not here.
+pub mod operations;
 pub mod file_search;
 /// `host.features` (docs/FEATURES.md): the one door the Lua gates ask "is this feature on, and which
 /// path is live" through. The rule lives in `wa-features`; this crate only routes to it.
@@ -41,7 +46,7 @@ pub mod graph;
 pub mod host;
 pub mod http_transport;
 pub mod limits;
-pub mod operations;
+// The runner itself, from its own crate (`ready-operations-slice-2.md`): the host no longer carries it.
 pub mod plugins;
 pub mod quickjs;
 /// The build-time scan behind the capability registry (`src/capability_rows/`): which files declare
@@ -66,7 +71,10 @@ pub mod stt;
 pub mod fabric;
 /// The live facts behind a long tool call's row (docs/TOOL-PROGRESS.md): fed by the operation wait
 /// loops, read by every renderer.
-pub mod tool_progress;
+/// The node's own tty: the funnel every screen byte goes through, the launch animation's hold and raw
+/// mode (moved out of `wa-term` in its last slice: it is I/O, not display).
+/// The tool-progress rows are the runner's now (it waits on the child); the node reads the same store
+/// through `wa_tool_progress`, which both processes link.
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.

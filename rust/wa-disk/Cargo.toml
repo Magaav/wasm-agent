@@ -1,0 +1,16 @@
+[package]
+name = "wa-disk"
+version = "0.1.0"
+edition = "2021"
+
+# One root, one `wa clean`, one disk cap (docs/ONEROOT.md). A leaf crate so that BOTH the node and the
+# operations supervisor enforce the same cap: a check the host makes must not become a no-op in the process
+# that actually starts the child (ready-operations-slice-2.md).
+[dependencies]
+serde_json = "1"
+wa-features = { path = "../wa-features" }
+wa-host-support = { path = "../wa-host-support" }
+wa-operation = { path = "../wa-operation" }
+ring = "0.17"
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

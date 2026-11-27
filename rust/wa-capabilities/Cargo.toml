@@ -23,7 +23,9 @@ wa-kernel-runtime = { path = "../wa-kernel-runtime" }
 # The feature resolver behind the `features` capability (docs/FEATURES.md): the Lua gates ask through it,
 # so the env override, the policy file and the installed-component check are resolved in one place.
 wa-features = { path = "../wa-features" }
+wa-disk = { path = "../wa-disk" }
 wa-operation = { path = "../wa-operation" }
+wa-files = { path = "../wa-files" }
 # The row for a long tool call (`tool_progress.rs`, docs/TOOL-PROGRESS.md): the parsers, the tail and
 # the stall rule, shared with the two renderers so the CLI, the native editor and the window cannot
 # disagree about what a call is doing. A leaf crate; this adds no arrow the split did not have.
@@ -81,6 +83,10 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p
 tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
+# `host.rs`'s classify_magic_tests (main) import this crate and no configuration declared it, so
+# `cargo test -p wa-capabilities` did not compile on main itself. A path dev-dependency is what the
+# import always assumed.
+wa-operations-runner = { path = "../wa-operations-runner" }
 # The archive's node-side tests run against a real namespace and a real keystore in a temp directory,
 # so nothing they measure is a mock of the storage the node actually uses.
 tempfile = "3"

@@ -13,6 +13,8 @@
 //   node scripts/landing-queue.mjs prune-pins [--pin-dir <dir>] [--install-dir <dir>] [--keep <sha,...>]
 //                                            [--keep-max <n>] [--builds-excluded-by <reason>] [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs record --tree <ref> [--command "<what ran>"] [--owner <id>]
+//   node scripts/landing-queue.mjs submit --branch <name> --commit <sha> [--mission <name>] [--priority]
+//                                          [--note <text>] [--json] [--repo <dir>]
 //   node scripts/landing-queue.mjs land --branch <name> [--checks "<cmd>"] [--dry-run] [--no-push]
 //                                       [--owner <session id>] [--lease-seconds <s>] [--repo <dir>]
 //   node scripts/landing-queue.mjs preflight --branch <name> [--checks "<cmd>"] [--worktree <dir>]
@@ -30,7 +32,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import {spawn, spawnSync} from 'node:child_process';
+import {spawn, spawnSync, execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {
   QueueError, classifyDelta, treeDigest, candidateTree, canonicalDirt, describeDirt, git, gitOk,
@@ -1720,6 +1722,33 @@ function commandHistory(options) {
   return rows;
 }
 
+// ---- submit: THE DOOR, in the one file everybody already calls ----------------------------------
+//
+// `land` runs a landing as a side effect of being called - the caller waits, and a refusal comes back as
+// prose. `submit` puts the SAME request in the queue's journal and answers at once with a request id and a
+// position (scripts/queue.mjs, the queue's own command line). It is idempotent on (branch, sha), so a
+// session that submits twice has one request, and it NEVER lands anything itself: the runner does, in its
+// own clone, one at a time.
+//
+// `land` is left exactly as it is in this hunk. Retiring it - and the lane token with it - is the change
+// that makes submit the only door, and that is hunk 5, reviewed as its own step (Fable 27/11).
+async function commandSubmit(options) {
+  const branch = options.branch;
+  if (!branch) throw new QueueError('submit needs --branch <name> and --commit <sha>', 75, 'usage');
+  const sha = options.commit || options.sha;
+  if (!sha) throw new QueueError('submit needs --commit <sha>', 75, 'usage');
+  const repo = options.repo || process.cwd();
+  const args = [path.join(path.dirname(fileURLToPath(import.meta.url)), 'queue.mjs'), 'submit', branch, sha, options.mission || ''];
+  if (options.priority) args.push('--priority');
+  if (options.note) args.push('--note', options.note);
+  args.push('--repo', repo);
+  if (options.json) args.push('--json');
+  const out = execFileSync(process.execPath, args, {encoding: 'utf8'});
+  if (options.json) return {exit: 0, output: out.trim()};
+  process.stdout.write(out);
+  return {exit: 0};
+}
+
 // ---- main ---------------------------------------------------------------------------------------
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
@@ -1730,6 +1759,7 @@ async function main() {
   else if (command === 'pin') result = await commandPin(options);
   else if (command === 'prune-pins') result = commandPrunePins(options);
   else if (command === 'record') result = commandRecord(options);
+  else if (command === 'submit') result = await commandSubmit(options);
   else if (command === 'land') result = await commandLand(options);
   else if (command === 'preflight') result = await commandPreflight(options);
   else if (command === 'release') result = commandRelease(options);
@@ -1737,7 +1767,7 @@ async function main() {
   else if (command === 'classify') result = commandClassify(options);
   else if (command === 'baseline') result = commandBaseline(options);
   else if (command === 'history') result = commandHistory(options);
-  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|prune-pins|record|land|preflight|release|reconcile|classify|baseline|history [options]', 75, 'usage');
+  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|prune-pins|record|submit|land|preflight|release|reconcile|classify|baseline|history [options]', 75, 'usage');
   if (result && result.exit) process.exitCode = result.exit;
   // A preflight that ran the checks and found them red is the check's own result, not a refusal: exit 1
   // so a caller can tell it from `0 recorded` and from the named refusals (75) and lane errors (76).
