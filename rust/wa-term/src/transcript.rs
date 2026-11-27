@@ -60,6 +60,11 @@ const PILL: &str = "\x1b[38;2;230;230;230m\x1b[48;2;58;58;58m";
 /// How long a transient notice stays on the notice row: about two seconds (Victor, 23/11 11:20Z).
 /// An ERROR is not transient: it stays until the next key, because a message that says why nothing
 /// was pasted is worth more than the row it costs.
+/// The words the copy notice's balloon carries as its title.
+pub const BALLOON_TITLE: &str = "Copied";
+/// The frame's colour, the same value `terminal_editor::PANEL` uses: one look for every balloon.
+const BALLOON_BORDER: &str = "\x1b[38;2;177;185;249m";
+
 pub const NOTICE_MS: u64 = 2000;
 
 #[derive(Default, Clone)]
@@ -647,6 +652,20 @@ impl Transcript {
     /// It was right-aligned one column short of the edge until 26/11, and it was a row of its own -
     /// which is the other thing that changed: it is painted OVER a chat row now (`view_at`), so this
     /// string carries its own leading blanks up to the centre and nothing after it.
+    /// THE NOTICE AS A BALLOON (copied-notice-floats, Victor today): a TITLE, a DIVIDER, its own rows
+    /// - what the /nodes balloon is - instead of one line painted over a chat row. `view_at` reserves
+    /// these rows at the TOP of the region, so the chat and the pinned request move DOWN while it
+    /// shows, and the space comes back when it expires.
+    fn notice_balloon(&self, width: usize, now: std::time::Instant) -> Vec<String> {
+        let Some(text) = self.notice_text(now) else { return Vec::new() };
+        let width = width.max(1);
+        let divider = format!("{BALLOON_BORDER}{}{RESET}", "\u{2500}".repeat(width));
+        let title = format!("{BALLOON_BORDER} {} {RESET}", BALLOON_TITLE);
+        let text = clip_row(&text, width).trim_end().to_string();
+        let pad = width.saturating_sub(visible(&text)) / 2;
+        vec![divider.clone(), title, format!("{}{NOTICE}{text}{RESET}", " ".repeat(pad)), divider]
+    }
+
     fn notice_line(&self, width: usize, now: std::time::Instant) -> Option<String> {
         let width = width.max(1);
         let text = self.notice_text(now)?;
@@ -1872,6 +1891,39 @@ fn icon_at_band_end(row: &str, width: usize) -> Option<(String, usize)> {
     // One column short of the width, so the icon sits at the band's right edge with a cell to spare.
     let column = width.saturating_sub(1).max(1);
     Some((format!("{row}\u{1b}[{column}G{COPY_ICON}"), width))
+}
+
+#[cfg(test)]
+mod notice_balloon_tests {
+    use super::*;
+
+    /// THE BALLOON IS A BALLOON (copied-notice-floats, Victor today): a title, dividers, its own rows.
+    /// It is drawn, not painted over a chat row, so what it takes it also RESERVES - which is the next
+    /// test; this one is about its own shape.
+    #[test]
+    fn the_notice_is_a_balloon_with_a_title_and_dividers() {
+        let mut t = Transcript::default();
+        let now = std::time::Instant::now();
+        assert!(t.notice_balloon(40, now).is_empty(), "no notice, no rows");
+        t.notice("Copied 12 characters", now, false);
+        let rows = t.notice_balloon(40, now);
+        assert_eq!(rows.len(), 4, "divider, title, the words, divider: {rows:?}");
+        let plain = |s: &String| s.replace(RESET, "");
+        assert!(plain(&rows[1]).contains(BALLOON_TITLE), "the title is there: {:?}", plain(&rows[1]));
+        assert_eq!(visible(&plain(&rows[0])), 40, "the dividers span the width");
+        assert_eq!(visible(&plain(&rows[3])), 40);
+        // Centred to within a cell: left pad = (width - len) / 2.
+        // The row is `<spaces><colour><words><reset>`: the padding comes FIRST and the words after the
+        // colour escape, so each is measured on its own side (counting the escape as spaces is how the
+        // first version of this test got the arithmetic wrong).
+        let raw = plain(&rows[2]);
+        let pad = raw.len() - raw.trim_start().len();
+        let words = visible(raw.trim_start().rsplit('m').next().unwrap_or("").trim_end());
+        assert_eq!(pad, (40 - words) / 2, "centred on its row: pad {pad}, words {words}");
+        // And it goes when its time is up, with nothing else to reset.
+        let later = now + std::time::Duration::from_millis(NOTICE_MS + 50);
+        assert!(t.notice_balloon(40, later).is_empty(), "the rows come back on their own");
+    }
 }
 
 #[cfg(test)]
