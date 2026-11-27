@@ -37,7 +37,7 @@ interface probe {
         has-audio: bool,
         elapsed-ms: u64,
     }
-    describe: async func(source: file) -> result<description, error>;
+    describe: func(source: file) -> result<description, error>;
 }
 
 interface frames {
@@ -55,7 +55,7 @@ interface frames {
         at-ms: u64,
         image: file,
     }
-    take: async func(request: request) -> result<list<still>, error>;
+    take: func(request: request) -> result<list<still>, error>;
 }
 
 interface audio {
@@ -70,7 +70,7 @@ interface audio {
         duration-ms: u64,
         elapsed-ms: u64,
     }
-    extract: async func(request: request) -> result<track, error>;
+    extract: func(request: request) -> result<track, error>;
 }
 
 world media-service {

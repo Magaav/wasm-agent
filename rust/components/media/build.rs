@@ -71,52 +71,24 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ffmpeg_libswresample");
     println!("cargo:rustc-link-lib=static=ffmpeg_libavutil");
 
-    // Bindings from the vendored headers. `LIBCLANG_PATH` is the wasi-sdk's own libclang when the environment
-    // does not name another: the compiler that builds the C is the one that reads its declarations.
-    if std::env::var_os("LIBCLANG_PATH").is_none() {
-        let candidate = PathBuf::from("/home/victor/wasm-agent/toolchain/wasi-sdk-34/lib");
-        if candidate.is_dir() {
-            std::env::set_var("LIBCLANG_PATH", candidate);
-        }
-    }
-    // bindgen's clang has no idea what this crate is being built for: without the target and the sysroot it
-    // answers `stdio.h file not found` for a header that compiles perfectly two lines above. The sysroot comes
-    // from the C compiler in `CC` (wasi-sdk/bin/clang -> wasi-sdk/share/wasi-sysroot), so the same compiler
-    // builds the C and reads its declarations.
-    let mut clang_args = vec!["--target=wasm32-wasip2".to_string()];
-    // libclang also needs ITS OWN builtin headers (stddef.h lives there, not in the sysroot), and it does not
-    // find them on its own when the target and sysroot are handed to it explicitly.
-    if let Some(builtin) = std::env::var_os("CC")
-        .map(PathBuf::from)
-        .and_then(|cc| cc.parent().and_then(|bin| bin.parent()).map(|sdk| sdk.join("lib/clang")))
-        .filter(|path| path.is_dir())
+    // The struct fields are read in C (native/ffmpeg_access.c), so the Rust side needs no offsets and no
+    // generated bindings: see src/ffi.rs for the measurement that made bindgen unusable here.
     {
-        if let Ok(entries) = std::fs::read_dir(&builtin) {
-            if let Some(include) = entries.flatten().map(|e| e.path().join("include")).find(|p| p.is_dir()) {
-                clang_args.push(format!("-isystem", ) + &include.display().to_string());
-            }
+        let native = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("native");
+        let mut access = cc::Build::new();
+        access.include(&root);
+        for library in LIBRARIES {
+            access.flag(format!("-iquote{}", root.join(library).display()));
         }
+        access.warnings(false);
+        access.flag_if_supported("-w");
+        access.file(native.join("ffmpeg_access.c"));
+        // wasi-libc on wasm32-wasip2 has no `clock`, and libavutil/random_seed.c calls it.
+        access.file(native.join("wasi_compat.c"));
+        access.compile("ffmpeg_access");
+        println!("cargo:rustc-link-lib=static=ffmpeg_access");
+        println!("cargo:rerun-if-changed={}", native.join("ffmpeg_access.c").display());
+        println!("cargo:rerun-if-changed={}", native.join("wasi_compat.c").display());
     }
-    if let Some(sysroot) = std::env::var_os("CC")
-        .map(PathBuf::from)
-        .and_then(|cc| cc.parent().and_then(|bin| bin.parent()).map(|sdk| sdk.join("share/wasi-sysroot")))
-        .filter(|path| path.is_dir())
-    {
-        clang_args.push(format!("--sysroot={}", sysroot.display()));
-    }
-    let bindings = bindgen::Builder::default()
-        .header(root.join("libavformat/avformat.h").display().to_string())
-        .header(root.join("libavcodec/avcodec.h").display().to_string())
-        .clang_arg(format!("-I{}", root.display()))
-        .clang_arg(format!("-I{}", root.join("libavcodec").display()))
-        .clang_args(&clang_args)
-        .allowlist_function("av_.*")
-        .allowlist_type("AV.*")
-        .allowlist_var("AV.*")
-        .layout_tests(false)
-        .generate()
-        .expect("bindgen could not read the vendored ffmpeg headers");
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("out dir")).join("bindings.rs");
-    bindings.write_to_file(&out).expect("writing bindings");
     println!("cargo:rerun-if-changed={}", list.display());
 }
