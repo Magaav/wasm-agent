@@ -22,6 +22,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {openJournal, nextRunnable, transition, verdict, lastState, isOpen} from './lib/queue/journal.mjs';
 import {mainContains, landQuick, noopStep, CAPS} from './lib/queue/steps.mjs';
+import {writeRework, escalate, renderRework} from './lib/queue/rework.mjs';
+import {wakeSession} from './lib/queue/wake.mjs';
 
 function defaultDb() {
   const home = process.env.WASM_AGENT_HOME || path.join(os.homedir(), '.wasm-agent');
@@ -51,31 +53,59 @@ export async function resumeInFlight(db, {repo, log = () => {}} = {}) {
   return resolved;
 }
 
+/// DELIVERING A REJECTION, in one place (hunk 5). A rejected landing is rework: a file the mission owns, a
+/// wake that reaches the session even if its turn has ended, and - at the third rejection for a mission - a
+/// line in the orchestrator's ATTENTION. All three are best-effort and each says what it did, because a
+/// runner that dies delivering a message has turned a rejected landing into a stuck queue.
+export function deliverRejection(db, row, payload, opts = {}) {
+  const missionsDir = opts.missionsDir;
+  const out = {file: null, woke: false, escalated: null};
+  if (!missionsDir) return out;
+  const written = writeRework({missionsDir, mission: row.mission, id: row.id, payload, fsImpl: opts.fsImpl});
+  out.file = written.written ? written.file : null;
+  if (written.written) {
+    const woke = wakeSession({missionsDir, mission: row.mission, file: written.file, id: row.id, spawn: opts.spawn, dryRun: Boolean(opts.dryRunWake)});
+    out.woke = Boolean(woke.started);
+    out.wake = woke;
+  }
+  const count = db.prepare(`SELECT COUNT(*) AS n FROM verdicts v JOIN requests r ON r.id = v.req
+                             WHERE r.mission = ? AND v.verdict = 'rejected'`).get(row.mission || '').n;
+  out.escalated = escalate({missionsDir, mission: row.mission, id: row.id, cause: payload.cause, count, fsImpl: opts.fsImpl});
+  return out;
+}
+
 /// One request, end to end. `steps` is injected so a row can drive the state machine without pushing
 /// anything: production passes the lander's steps, the rows pass a scripted sequence.
-export async function runRequest(db, row, {repo, steps, log = () => {}} = {}) {
+export async function runRequest(db, row, opts = {}) {
+  const {repo, steps, log = () => {}} = opts;
   const branch = row.branch;
   transition(db, row.id, 'merging', 'runner took it');
   log(`#${row.id} ${branch}@${row.sha.slice(0, 12)}: merging`);
 
   const merge = await steps.merge({request: row, db});
   if (!merge.ok) {
-    verdict(db, row.id, {verdict: 'rejected', cause: merge.cause || 'other', payload: {cause: merge.cause || 'other', branch, sha: row.sha.slice(0, 12), detail: merge.detail ?? null, files: merge.files ?? [], rows: merge.rows ?? ''}});
-    return {outcome: 'rejected', cause: merge.cause || 'other'};
+    const payload = {cause: merge.cause || 'other', branch, sha: row.sha.slice(0, 12), detail: merge.detail ?? null, files: merge.files ?? [], rows: merge.rows ?? ''};
+    verdict(db, row.id, {verdict: 'rejected', cause: payload.cause, payload});
+    const delivered = deliverRejection(db, row, payload, opts);
+    return {outcome: 'rejected', cause: payload.cause, delivered};
   }
   transition(db, row.id, 'rows', 'merged onto the tip', merge.detail ?? null);
 
   const rows = await steps.rows({request: row, db});
   if (!rows.ok) {
-    verdict(db, row.id, {verdict: 'rejected', cause: rows.cause || 'own_rows_red', payload: {cause: rows.cause || 'own_rows_red', branch, sha: row.sha.slice(0, 12), detail: rows.detail ?? null, files: rows.files ?? [], rows: rows.rows ?? ''}});
-    return {outcome: 'rejected', cause: rows.cause || 'own_rows_red'};
+    const payload = {cause: rows.cause || 'own_rows_red', branch, sha: row.sha.slice(0, 12), detail: rows.detail ?? null, files: rows.files ?? [], rows: rows.rows ?? ''};
+    verdict(db, row.id, {verdict: 'rejected', cause: payload.cause, payload});
+    const delivered = deliverRejection(db, row, payload, opts);
+    return {outcome: 'rejected', cause: payload.cause, delivered};
   }
   transition(db, row.id, 'pushing', 'own rows green', rows.detail ?? null);
 
   const push = await steps.push({request: row, db});
   if (!push.ok) {
-    verdict(db, row.id, {verdict: 'rejected', cause: push.cause || 'stale_sha', payload: {cause: push.cause || 'stale_sha', branch, sha: row.sha.slice(0, 12), detail: push.detail ?? null}});
-    return {outcome: 'rejected', cause: push.cause || 'stale_sha'};
+    const payload = {cause: push.cause || 'stale_sha', branch, sha: row.sha.slice(0, 12), detail: push.detail ?? null, files: push.files ?? [], rows: push.rows ?? ''};
+    verdict(db, row.id, {verdict: 'rejected', cause: payload.cause, payload});
+    const delivered = deliverRejection(db, row, payload, opts);
+    return {outcome: 'rejected', cause: payload.cause, delivered};
   }
   verdict(db, row.id, {verdict: 'landed', cause: null, mainSha: push.mainSha ?? null});
   return {outcome: 'landed', mainSha: push.mainSha ?? null};
@@ -83,11 +113,12 @@ export async function runRequest(db, row, {repo, steps, log = () => {}} = {}) {
 
 /// Take one request if there is one. Returns null when the queue is empty or everything open is waiting on a
 /// person, so the caller decides whether to block.
-export async function runOnce(db, {repo, steps, log = () => {}} = {}) {
+export async function runOnce(db, opts = {}) {
+  const {repo, steps, log = () => {}} = opts;
   const row = nextRunnable(db);
   if (!row) return null;
   if (!isOpen(db, row.id)) return null;
-  return {id: row.id, ...(await runRequest(db, row, {repo, steps, log}))};
+  return {id: row.id, ...(await runRequest(db, row, {repo, steps, log, ...opts}))};
 }
 
 /// Block until something is queued - on the journal's own write, not on a clock. The fallback poll exists for

@@ -954,6 +954,9 @@ if command -v node >/dev/null 2>&1; then
   # THE DOOR IN THE FILE EVERY CALLER ALREADY KNOWS (hunk 4): submit queues and lands nothing, the policy
   # applies at the door, and `land` is still there until hunk 5 retires it on purpose.
   check queue-door node scripts/test-queue-door.mjs
+  # THE REJECTION REACHES ITS WORKER (hunk 5): the rework file, the wake through the carrier decision 4
+  # keeps (injected here), and the third rejection for a mission escalating in one line.
+  check queue-rework node scripts/test-queue-rework.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...

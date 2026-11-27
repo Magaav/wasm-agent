@@ -7,7 +7,7 @@
 //   node scripts/queue.mjs submit <branch> <sha> <mission> [--priority] [--note <text>] [--json] [--wait <s>]
 //   node scripts/queue.mjs status [--json]
 //   node scripts/queue.mjs show <id> [--json]
-//   node scripts/queue.mjs events [--since <id>] [--json]
+//   node scripts/queue.mjs events [--since <id>] [--json] [--follow [--for <s>] [--until <id>]]
 //   node scripts/queue.mjs approve <branch> <sha> [--repo <dir>]   (the review lane's token decides)
 //   node scripts/queue.mjs review [--json]                         (what waits on a person, and since when)
 //   node scripts/queue.mjs table
@@ -151,10 +151,28 @@ try {
   }
 
   if (cmd === 'events') {
-    const rows = events(db, Number(argv.flags.since || 0));
-    if (argv.flags.json) say(JSON.stringify(rows));
-    else for (const e of rows) say(`${e.id}  req ${e.req}  ${e.at}  ${e.state}${e.cause ? `  ${e.cause}` : ''}`);
-    process.exit(0);
+    const since = Number(argv.flags.since || 0);
+    const render = (e) => `${e.id}  req ${e.req}  ${e.at}  ${e.state}${e.cause ? `  ${e.cause}` : ''}`;
+    if (!argv.flags.follow) {
+      const rows = events(db, since);
+      if (argv.flags.json) say(JSON.stringify(rows));
+      else for (const e of rows) say(render(e));
+      process.exit(0);
+    }
+    // --follow IS THE STREAM (law 12's shape, carried by the CLI): it tails the journal by id, prints each new
+    // transition once, and ENDS at its own cap - `--for <s>`, default 900 - or at the verdict of `--until <id>`.
+    // A follow with no end would be the wait-without-a-cap the architecture forbids.
+    const capSeconds = Number(argv.flags.for || 900);
+    const deadline = Date.now() + capSeconds * 1000;
+    const until = argv.flags.until ? Number(argv.flags.until) : null;
+    let cursor = since;
+    for (;;) {
+      const fresh = events(db, cursor);
+      for (const e of fresh) { if (argv.flags.json) say(JSON.stringify(e)); else say(render(e)); cursor = e.id; }
+      if (until && db.prepare('SELECT 1 FROM verdicts WHERE req = ?').get(until)) process.exit(0);
+      if (Date.now() >= deadline) die(4, `follow ${capSeconds}s ran out after event ${cursor} (cap reached, nothing else is implied)`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
   }
 
   if (cmd === 'approve') {
