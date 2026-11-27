@@ -133,7 +133,10 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_VISION_COMPONENT",
         native: "rust/wa-kernel-runtime/src/vision_host.rs",
         summary: "a reading of an image (words, boxes, confidence) by the component instead of the kernel's worker",
-        default_enabled: DEFAULT_ENABLED,
+        // OFF until the row through the real caller (`wa:kernel/vision` -> the component) is green: a new path
+        // runs advisory first (ARCHITECTURE.md law 13), and a default that flips what the node does must not
+        // ride a landing that has not rehearsed it. Flip to DEFAULT_ENABLED in the commit that row lands.
+        default_enabled: false,
     },
     FeatureSpec {
         id: "agent_core",
