@@ -454,6 +454,22 @@ pub(crate) fn say(message: &str) {
     println!("  {message}");
 }
 
+/// A START THAT FAILS IS WRITTEN DOWN, NOT ONLY PRINTED (Fable 26/11, the work container).
+///
+/// MEASURED on work (a Docker container with no systemd), twice on 26/11 (10:36Z and 18:05Z): wa-entrypoint ran
+/// `wa-sentinel autostart on` and then `wa-sentinel start`, the start failed, and its reason went to the container's
+/// stdout only - the last "sentinel started" line in sentinel.log was 25/11 20:59Z. An hour later `wa update` answered
+/// "no sentinel watcher ownership was verified", so whoever read the node had two symptoms and no cause: the ONE file
+/// they read said nothing about either start.
+///
+/// The failure is therefore audited beside every other lifecycle fact, in the same tabbed shape (epoch, then
+/// `start_failed`, then the reason), and only for `start`: a `stop` that fails is already reported by the verb and by
+/// the exit code, and logging every verb's failure here would grow the file for reasons it was not written for.
+pub(crate) fn note_failed_start(verb: &str, error: &anyhow::Error) {
+    if verb != "start" { return; }
+    audit("start_failed", &format!("{error:#}"), "the watcher was not started; nothing is watching this node");
+}
+
 // ---------------------------------------------------------------- the node
 
 fn health_agent() -> ureq::Agent {
@@ -4491,6 +4507,12 @@ fn main() -> Result<()> {
         }
     };
     if let Err(error) = outcome {
+        // A START THAT FAILS IS WRITTEN DOWN, NOT ONLY PRINTED (Fable 26/11, the work container). MEASURED twice on
+        // 26/11 (10:36Z, 18:05Z): the entrypoint ran `wa-sentinel autostart on` then `wa-sentinel start`, the start
+        // failed, and the reason went to the container's stdout only - the last "sentinel started" line in
+        // sentinel.log was 25/11 20:59Z. An hour later `wa update` said "no sentinel watcher ownership was verified",
+        // so the operator had two symptoms and no cause: the one file they read said nothing about either start.
+        note_failed_start(service_args.first().map(String::as_str).unwrap_or(""), &error);
         eprintln!("  sentinel: {error:#}");
         std::process::exit(1);
     }

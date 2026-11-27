@@ -99,6 +99,45 @@ fn log_lines(kind: &str, id: &str) -> Vec<String> {
         .collect()
 }
 
+/// A FAILED START IS A NAMED LINE IN sentinel.log, WITH ITS REASON AND ITS TIME (Fable 26/11, the work container).
+///
+/// MEASURED on work: two starts at 10:36Z and 18:05Z failed, their reason went to the container's stdout only, and the
+/// last "sentinel started" line in the log was from the day before - so the log the operator reads said nothing about
+/// either start, and the `wa update` that followed could only say "no sentinel watcher ownership was verified".
+#[test]
+fn a_failed_start_is_written_to_the_sentinel_log() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _scratch = Scratch::new("start-failed");
+    let failed = |kind: &str| -> Vec<String> {
+        std::fs::read_to_string(log_path()).unwrap_or_default()
+            .lines()
+            .filter(|line| line.split('\t').nth(1) == Some(kind))
+            .map(str::to_string)
+            .collect()
+    };
+    assert!(failed("start_failed").is_empty(), "nothing is claimed before a start is attempted");
+
+    let error = anyhow::anyhow!("service stop in progress; no lifecycle replay");
+    crate::note_failed_start("start", &error);
+
+    let lines = failed("start_failed");
+    assert_eq!(lines.len(), 1, "one failed start, one line: {lines:?}");
+    let fields: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(fields.len(), 4, "the same tabbed shape every audit line has: {lines:?}");
+    assert!(
+        fields[0].parse::<u64>().is_ok() && *fields.first().unwrap() != "",
+        "the line carries the time it happened, as epoch seconds: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("service stop in progress"),
+        "and the reason the start gave, so the container's log answers 'why': {lines:?}"
+    );
+
+    // Only `start` is this line's business: another verb's failure keeps its own report.
+    crate::note_failed_start("stop", &error);
+    assert_eq!(failed("start_failed").len(), 1, "a failed stop is not a failed start: {:?}", failed("start_failed"));
+}
+
 /// 1. One line per (id, problem), naming the files it is missing, however many ticks go by.
 #[test]
 fn a_missing_file_is_reported_once_however_many_ticks_go_by() {
