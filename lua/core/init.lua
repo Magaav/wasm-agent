@@ -112,6 +112,13 @@ end
 -- first and falls through to this node's own update when the second word is not a node name.
 -- `wa update --all` is the read-only table of every node this node can see (lua/core/update_all.lua).
 if command == "update" or command == "--update" then
+  -- `wa update requests [--sweep]` FIRST: the record listing and the named sweep (update-requests-settle). Parsed here
+  -- because `requests` must never be mistaken for a node name by the fabric form below.
+  if args[2] == "requests" then
+    local rest = {}
+    for i = 2, #args do rest[#rest + 1] = args[i] end
+    os.exit(dofile("lua/core/update_requests_cli.lua").run(rest) or 0)
+  end
   -- `wa update --all`: one read-only table over the fabric (lua/core/update_all.lua). Parsed BEFORE the
   -- fabric form below, because that one reads its first word as a node name and falls through on a flag -
   -- and `--all` must never be mistaken for a node called `--all` on the path that installs things.
