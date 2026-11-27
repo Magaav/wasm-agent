@@ -1,0 +1,1 @@
+                        error|error| wasmtime::Error::msg(error.to_string()))?;
