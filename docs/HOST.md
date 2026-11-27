@@ -909,6 +909,7 @@ remove_file          writes files
 rename_file          writes files
 resource             writes files
 run_cancelled        read-only
+run_state            read-only
 build_identity       read-only
 runtime_info         read-only
 service              runs a process
