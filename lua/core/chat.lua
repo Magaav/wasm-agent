@@ -1020,7 +1020,83 @@ function M.run(argv)
   -- from the same renderer. No arm below calls `print`, `host.panel` or `io.write` itself, and
   -- `scripts/test-cli-balloon.lua` fails when one does.
   local balloon = reload.require("lua/core/balloon.lua")
+  -- SWITCHING THREADS IN THIS PROCESS (sessions-is-a-balloon, Victor + Fable 26/11).
+  --
+  -- A thread is entered at start and used to be left only by starting the CLI again: `/session` prints
+  -- the id and the resume line because there was nothing else it could do. A switch is that boot's
+  -- last third - take the id, remember where we came from, replay that thread's newest messages under
+  -- a line that says whose they are - without a new process. Nothing is stopped: a turn running in
+  -- another process (a served session, a worker) keeps running, which is why the row says its state.
+  local switched_from = nil
+  local function switch_to(target)
+    target = tostring(target or "")
+    if target == "" then return false, "no session given" end
+    if target == tostring(agent.session_id) then return true end
+    local session = memory.session(target)
+    if not session then return false, "no such session: " .. target end
+    local parked_hold = dofile("lua/core/selfloop.lua").hold(target)
+    if parked_hold and parked_hold.kind == "park" then
+      return false, "session " .. target .. " is parked (wa session release " .. target .. ")"
+    end
+    local came_from = tostring(agent.session_id)
+    agent.session_id = target
+    switched_from = came_from
+    local name = tostring(session.title or "")
+    if name == "" then name = "(unnamed) " .. target:sub(1, 8) .. "\u{2026}" end
+    print(cli_view.paint("  \u{2192} switched to " .. redact.text(name) .. "  " .. target:sub(1, 8)
+      .. "\u{2026}", "dim", view.live))
+    -- The thread's newest messages, drawn once (the resume path's replay, with its own window).
+    local REPLAY = tonumber(host.getenv("WASM_AGENT_CLI_REPLAY")) or 400
+    if REPLAY > 0 then
+      local total = memory.message_count(target)
+      local rows = memory.session_messages(target, { limit = REPLAY }) or {}
+      local skipped = math.max(0, total - #rows)
+      local hold = host.transcript_hold
+      if hold then pcall(hold, true) end
+      local replayed, problem = pcall(view.replay, view, rows, { skipped = skipped })
+      if hold then pcall(hold, false) end
+      if not replayed then view:warn(redact.text("could not draw the thread: " .. tostring(problem))) end
+    end
+    refresh_model()
+    return true
+  end
+
   local ui = balloon.for_view(view, { print = print, redact = redact })
+
+  -- The id on the clipboard: OSC 52, which every terminal this CLI runs in understands and which needs no
+  -- `wl-copy` beside it (the link click already copies this way). The base64 is the session's own id, so
+  -- nothing but an id can ever be put there.
+  local function copy_id(id)
+    id = tostring(id or "")
+    if id == "" then return false end
+    local encoded = memory.base64_encode(id)
+    view:control("\27]52;c;" .. encoded .. "\7")
+    -- THE SAME NOTICE THE CLICK USES (the brief: the line confirms "copied", using the copied-notice):
+    -- the host notice row, not a transcript line - a copy must not push the conversation down, and
+    -- both ways of copying say the same sentence.
+    if host and host.editor_notice then
+      pcall(host.editor_notice, string.format("Copied (%d characters)", #id))
+    end
+    return true
+  end
+  -- Rename through the panel's own field, then the ledger: the title is what every list shows.
+  local function rename_session(id)
+    local session = memory.session(tostring(id or ""))
+    if not session then ui.say("  no such session") return false end
+    local page = {
+      title = "Rename " .. (tostring(session.title or "") ~= "" and tostring(session.title) or tostring(id):sub(1, 8)),
+      lines = { "the name every list shows for this thread" },
+      input = "line",
+      placeholder = "name",
+      hint = "Enter saves \u{b7} Esc cancels",
+    }
+    local answer = ui.show({page})
+    local text = type(answer) == "table" and answer.action == "submit" and tostring(answer.text or "") or ""
+    if text == "" then return false end
+    if not memory.rename_session(id, text) then ui.say("  the name was empty; nothing changed") return false end
+    ui.say("  renamed to " .. text)
+    return true
+  end
 
 
   while true do
@@ -1209,6 +1285,54 @@ function M.run(argv)
       })
       refresh_model()
       if not done then ui.say(redact.text(tostring(problem))) end
+    elseif line == "/sessions" or line:sub(1, 10) == "/sessions " then
+      -- The sessions on this node, as a balloon (lua/core/sessions_view.lua): one row per session,
+      -- with its state and age. Picking one switches (the switch itself is the REPL's, below); a pipe
+      -- gets the plain list.
+      local sessions = reload.require("lua/core/sessions_view.lua")
+      -- The list comes back after an action: `c` and `r` finish the panel (a page whose answer has gone to
+      -- the caller reads keys and does nothing), so the reader gets the list again, on the same row.
+      local focus = nil
+      local notice = nil
+      local filter = line:sub(11):gsub("^%s+", ""):gsub("%s+$", "")
+      if filter == "" then filter = nil end
+      while true do
+        local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
+          back = switched_from, selected = focus, filter = filter, notice = notice })
+        if type(answer) ~= "table" then break end
+        if answer.action == "key" then
+          local option = (sessions.page({ session_id = agent.session_id, user_id = USER, limit = 200,
+            back = switched_from, filter = filter })).options[tonumber(answer.index) or 0] or {}
+          if answer.key == "copy" then
+            local copied = option.copy or option.session
+            if copy_id(copied) then notice = string.format("Copied (%d characters)", #tostring(copied)) end
+          elseif answer.key == "rename" then rename_session(option.session)
+          elseif answer.key == "filter" then
+            -- A field of its own: a name typed into the list would be read as letters (they are keys
+            -- there), so the filter is asked for on a page that has an input.
+            local asked = ui.show({ { title = "Filter sessions",
+              lines = { filter and ("now: " .. filter) or "the whole list" },
+              input = "line", placeholder = "a name, or the start of an id",
+              hint = "Enter filters \u{b7} Esc cancels" } })
+            local text = type(asked) == "table" and asked.action == "submit"
+              and (tostring(asked.text or ""):gsub("^%s+", ""):gsub("%s+$", "")) or nil
+            if text ~= nil then filter = (text ~= "") and text or nil end
+            focus = nil
+          end
+          focus = focus or tonumber(answer.index)
+        elseif answer.action == "select" then
+          -- { action = "select", page, index, option = <the chosen row> }: the id and the origin flag
+          -- live on the ROW, not on the answer.
+          local option = type(answer.option) == "table" and answer.option or {}
+          local chosen = tostring(option.session or "")
+          local ok, problem = switch_to(chosen)
+          if not ok then ui.say("  " .. tostring(problem)) end
+          if ok and option.origin then switched_from = nil end
+          break
+        else
+          break
+        end
+      end
     elseif line == "/login" or line == "/provider" then
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
       -- login is a device code entered in the browser, an API key is pasted in the balloon's secret

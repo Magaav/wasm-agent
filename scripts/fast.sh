@@ -1155,6 +1155,11 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # emitted nothing for a script's command (the watcher sat after the managed-operation return) and
   # `git status -uno` hid every created file even on the direct path.
   WA_BIN="$bin" check bash-changes-pty node scripts/test-bash-changes-pty.mjs
+  # /sessions SWITCHES THREADS IN ONE PROCESS (sessions-is-a-balloon, Victor + Fable 26/11): the real
+  # binary in a private tmux pty, two seeded sessions and a fixture provider, and the ledger read by a
+  # SECOND process - the turn after the switch lands in the new session and not the old one, going back
+  # reverses it, and the provider key is in no file.
+  WA_BIN="$bin" check sessions-switch-pty node scripts/test-sessions-switch-pty.mjs
   # THE WINDOW'S CHROME (change/tui-chrome, Victor 21/11): the input box grows to max(3, 30% of the
   # window), scrolls with the transcript's scrollbar and takes the wheel when the pointer is over it.
   # And a fenced card's copy icon sits after its corner, where a click on it still copies the content.
