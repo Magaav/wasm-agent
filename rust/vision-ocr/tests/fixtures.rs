@@ -38,11 +38,11 @@ fn the_words_match_the_engine_in_use() {
         let fixture = case["fixture"].as_str().expect("fixture");
         let img = image::open(root.join("fixtures/vision").join(fixture)).expect("fixture image").to_rgb8();
         let lines = engine.read(&img).expect("pipeline runs");
-        let got = lines.join("\n");
+        let got = lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n");
         if case["ok"] == serde_json::Value::Bool(true) {
             let want = case["text"].as_str().expect("text");
             assert_eq!(got, want, "{fixture}: the words differ from the engine in use");
-            eprintln!("ok  {fixture}: {got:?}");
+            eprintln!("ok  {fixture}: {got:?} ({} line(s), first confidence {:.3})", lines.len(), lines.first().map(|l| l.confidence).unwrap_or(0.0));
         } else {
             assert_eq!(got, "", "{fixture}: a text-free image must answer no words (the engine in use errored here: {})", case["error"]);
             eprintln!("ok  {fixture}: no text, as the component will say");

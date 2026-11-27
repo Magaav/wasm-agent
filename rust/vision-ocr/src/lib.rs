@@ -15,6 +15,18 @@ const UNCLIP: f32 = 1.6;
 const REC_H: usize = 48;
 const REC_MAX_W: usize = 320;
 
+/// One line of the image: the words, where it sits in the IMAGE's pixels, and how sure the reader is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    pub text: String,
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+    /// The mean per-character confidence over the line, 0.0 to 1.0.
+    pub confidence: f32,
+}
+
 pub struct Engine { det: Model, rec: Model, dict: Vec<String> }
 
 #[derive(Clone, Copy, Debug)]
@@ -40,7 +52,7 @@ impl Engine {
         Engine { det, rec, dict }
     }
 
-    pub fn read(&self, img: &image::RgbImage) -> Result<Vec<String>, String> {
+    pub fn read(&self, img: &image::RgbImage) -> Result<Vec<Line>, String> {
         let (w, h) = (img.width() as usize, img.height() as usize);
         // ---- det preprocessing: min side to 736, both dims to a multiple of 32
         let scale = DET_SIDE as f32 / w.min(h) as f32;
@@ -92,7 +104,7 @@ impl Engine {
         }
         // unclip and map back to the original image
         let (sx, sy) = (w as f32 / mw as f32, h as f32 / mh as f32);
-        let mut lines: Vec<(i32, i32, String)> = Vec::new();
+        let mut lines: Vec<Line> = Vec::new();
         for b in boxes {
             let bw = (b.x1 - b.x0 + 1) as f32;
             let bh = (b.y1 - b.y0 + 1) as f32;
@@ -105,14 +117,16 @@ impl Engine {
             let y1 = (((b.y1 as f32 + d) * sy) as u32).min(img.height());
             if x1 <= x0 + 1 || y1 <= y0 + 1 { continue; }
             let crop = image::imageops::crop_imm(img, x0, y0, x1 - x0, y1 - y0).to_image();
-            let text = self.recognize(&crop)?;
-            if !text.is_empty() { lines.push((y0 as i32, x0 as i32, text)); }
+            let (text, confidence) = self.recognize(&crop)?;
+            if !text.is_empty() {
+                lines.push(Line { text, x0, y0, x1, y1, confidence });
+            }
         }
-        lines.sort();
-        Ok(lines.into_iter().map(|(_, _, t)| t).collect())
+        lines.sort_by_key(|line| (line.y0, line.x0));
+        Ok(lines)
     }
 
-    fn recognize(&self, crop: &image::RgbImage) -> Result<String, String> {
+    fn recognize(&self, crop: &image::RgbImage) -> Result<(String, f32), String> {
         let (w, h) = (crop.width() as usize, crop.height() as usize);
         let rw = ((REC_H as f32 * w as f32 / h as f32) as usize).clamp(16, REC_MAX_W);
         let resized = image::imageops::resize(crop, rw as u32, REC_H as u32, image::imageops::FilterType::Triangle);
@@ -146,8 +160,8 @@ impl Engine {
             last = best_i;
         }
         let mean = if scores.is_empty() { 0.0 } else { scores.iter().sum::<f32>() / scores.len() as f32 };
-        if mean < 0.5 { return Ok(String::new()); }
-        Ok(text.trim().to_string())
+        if mean < 0.5 { return Ok((String::new(), 0.0)); }
+        Ok((text.trim().to_string(), (mean * 1000.0).round() / 1000.0))
     }
 }
 
