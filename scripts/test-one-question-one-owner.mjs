@@ -52,10 +52,17 @@ function walk(dir, out = []) {
 }
 const seen = new Map();
 for (const f of ROOTS.flatMap((r) => walk(r))) {
-  if (f === 'lua/core/codemode_pending.lua') continue; // the owner
+  // The owners are not their own duplicates: the wait budget's module, and the crate that owns how long a
+  // component call may wait (rust/wa-component-wait, law 17).
+  if (f === 'lua/core/codemode_pending.lua' || f.startsWith('rust/wa-component-wait/')) continue;
   let body;
   try { body = fs.readFileSync(f, 'utf8'); } catch { continue; }
-  for (const m of body.matchAll(NAME)) if (!seen.has(m[0])) seen.set(m[0], f);
+  for (const m of body.matchAll(NAME)) {
+    // A call site that NAMES the owner (wa_component_wait::DEFAULT_WAIT_MS) is the owner being called, not a
+    // second answer to its question.
+    if (body.slice(Math.max(0, m.index - 20), m.index).includes('wa_component_wait::')) continue;
+    if (!seen.has(m[0])) seen.set(m[0], f);
+  }
 }
 for (const [name, file] of seen) {
   if (!section.includes(name)) fail.push(`a second answer to a question that already has an owner: ${name} (${file}) is not in the table`);

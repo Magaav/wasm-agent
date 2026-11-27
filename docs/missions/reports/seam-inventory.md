@@ -64,7 +64,7 @@ this table - which is how the list below got to twenty names instead of the four
 
 | question | its ONE owner | duplicates found today | where each is being merged |
 | --- | --- | --- | --- |
-| How long may this wait? | `lua/core/codemode_pending.lua` - `M.DEFAULT_WAIT_S = 60`, `M.MAX_WAIT_S = 300`, then a pending handle | `WAIT_MS` (whatsapp index 2 000, mail index 2 000), `DOWNLOAD_WAIT_MS` (10 000), `DEFAULT_TIMEOUT_MS` in FIVE files (`hooks_host.rs:38`, `mesh_host.rs:37`, `selfloop_host.rs:41`, `stt_host.rs:39` at 2 000; `codemode_seam.rs:46` at 120 000 - five answers, 60x apart), their own env knobs (`WA_HOOKS_COMPONENT_TIMEOUT_MS`, `WA_MEMORY_COMPONENT_TIMEOUT_MS`, `WA_MESH_COMPONENT_TIMEOUT_MS`, `WA_SELFLOOP_COMPONENT_TIMEOUT_MS`, `WA_CODEMODE_COMPONENT_TIMEOUT_MS` - a second knob per host), `WA_GRAPH_PARSE_TIMEOUT_MS`, `MAX_WAIT_MS` (stt-remote, 15 000), and `MAX_TIMEOUT_MS` (`rust/components/hooks/src/logic.rs:28`, 60 000 - the hooks COMPONENT clamping what its caller may ask for, the same 60 s the shared default names) | `whatsapp-read-waits-on-a-future`, `email-read-waits-on-a-future`, `component-hosts-share-the-wait`, `stt-question-returns-a-future` (queued; one brief owns the merge, one owner remains) |
+| How long may this wait? (a component call) | `rust/wa-component-wait` - `DEFAULT_WAIT_MS = 60_000`, `MAX_WAIT_MS = 300_000`, one knob `WA_COMPONENT_WAIT_MS`, and `expiries()` counting every window that expires | JOINED 27/11: `DEFAULT_TIMEOUT_MS = 2_000` in `hooks_host.rs`, `mesh_host.rs`, `selfloop_host.rs`, `memory_host.rs` and `stt_host.rs`, a `DEFAULT_TIMEOUT_MS = 120_000` in `wa-capabilities/src/codemode_seam.rs`, five per-host knobs, and the hooks component's `MAX_TIMEOUT_MS = 60_000` - six answers, two orders of magnitude apart; STILL QUEUED, their own briefs: `WAIT_MS` (whatsapp index 2 000, mail index 2 000) and `DOWNLOAD_WAIT_MS` (10 000) | done in this task (`change/component-hosts-share-the-wait`) for the six component answers. The five per-host knobs `WA_HOOKS_COMPONENT_TIMEOUT_MS`, `WA_MEMORY_COMPONENT_TIMEOUT_MS`, `WA_MESH_COMPONENT_TIMEOUT_MS`, `WA_SELFLOOP_COMPONENT_TIMEOUT_MS`, `WA_CODEMODE_COMPONENT_TIMEOUT_MS` and the one knob this task briefly introduced and then removed (`WA_COMPONENT_WAIT_MS`) name nothing that reads them: the window is a constant a caller passes in, and `rust/wa-kernel-runtime/tests/component_wait_shared.rs` sets every one of those names and proves none of them moves a value |
 | How does a component get asked a question? | `wit/queue` (a job) and a WIT world for anything that returns a `future` | every `host.*` capability that enqueues a `wa_queue` job and then waits in the host for the answer | `whatsapp-read-waits-on-a-future`, `email-read-waits-on-a-future`, `stt-question-returns-a-future`, `terminal-and-operations-need-a-world` (queued) |
 | How does a build get installed? | the installer - `scripts/deploy.sh` with `scripts/lib/install-record.sh` as the one writer of `installed.txt` and the one ancestry verdict | `/update` (`lua/core/update.lua`, its own stop-file, waiting-request and watcher facts), `wa update` on the CLI, `scripts/upgrade.sh` (its own bounds) | `update-is-one-line.md` (queued) |
 | How is a turn drawn? | `lua/core/cli_view.lua` | `lua/core/chat.lua` draws the same turn again when it replays a resumed session | `the-turn-is-drawn-once.md` (queued by this task) |
@@ -74,6 +74,18 @@ this table - which is how the list below got to twenty names instead of the four
 
 ### KEEP: each with the question it actually answers
 
+* The memory host's MEASURED per-operation table (`rust/wa-kernel-runtime/src/memory_host.rs`, 1 500 ms for
+  `recall`, 5 000 ms for `search_messages`, a floor for the rest): how long one MEMORY OPERATION may take, ten
+  times its measured p99. That is a measurement of work, not the window a host gives a component call, so it stays
+  with its numbers - and an operation it has never measured now takes the owner's wait instead of a private 2 000.
+* `WA_GRAPH_PARSE_TIMEOUT_MS` (`rust/wa-graph/src/extract.rs:126`, default 30 000, 1-120 000): how long ONE syntax
+  parse inside the graph component may take (`docs/GRAPH.md`). A parse is a bounded unit of work in the guest, not
+  the window this node gives a component call, and a fix to one is not a fix to the other - so it is kept, with
+  this reason, and it is not a duplicate of the wait above.
+* `MAX_WAIT_MS` (`rust/wa-stt-remote/src/protocol.rs:418`, 15 000): the most a REMOTE peer may be asked to wait, as
+  the protocol declares it - the peer's contract, not this node's window.
+* `MAX_TIMEOUT_MS` (`rust/components/hooks/src/logic.rs`) is no longer a number of its own: it is
+  `wa_component_wait::DEFAULT_WAIT_MS` read from the owner.
 * `STATUSLINE_TIMEOUT_MS` (`rust/components/hooks/src/logic.rs:36`, 5 000): how long a statusline or hook SHELL command may
   run - a subprocess on this machine, not a component answer.
 * `LAUNCH_WAIT_MS`, `PROBE_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS` (`rust/wa-window/src/cdp.rs`): how long may a THIRD PARTY's
@@ -85,6 +97,8 @@ this table - which is how the list below got to twenty names instead of the four
 * `WA_WATCHDOG_WAIT_MS` (`rust/wa-sentinel/src/watchdog.rs`): how long may a rollback of a PID we do not own take; it is
   the same knob `upgrade.sh` reads, and the install owns it (`install-record.sh`/`upgrade.sh`), not the wait budget.
 * `RELEASE_TIMEOUT_MS` (`scripts/landing-queue.mjs`): how long a `gh` child may take to publish a release - a foreign CLI.
+* `ESC_CHILD_WAIT_MS` (`scripts/test-esc-stops-pty.mjs`, 30 000): how long a TEST row waits for a child PTY to be
+  up before it asserts the key stopped it - a harness bound, not a window the node gives a call.
 * `FULL_WAIT_MS` (`scripts/test-codemode-wait-bound.lua`), `SHARED_WAIT_MS` (`scripts/test-seam-inventory.mjs`), 
   `WA_EXPERIMENT_AWAIT_MS` (`scripts/experiment-tool-choice.lua`): test and experiment harnesses; they assert ABOUT the
   budget and must not read it as a value, or the test would move with the bug.

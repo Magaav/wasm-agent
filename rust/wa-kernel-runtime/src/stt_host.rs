@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Config as WasmConfig, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::components::{component_dir, load_in, Installed};
@@ -36,7 +36,6 @@ use crate::components::{component_dir, load_in, Installed};
 pub const COMPONENT: &str = "stt";
 /// How long one seam call may take. The layer is a decode, a hash and a signature check over a
 /// kilobyte of envelope: a guest that has not answered by then is wedged.
-const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 /// The component's own memory cap, from `limits.memory_mb` in its manifest when present.
 const DEFAULT_MEMORY_MB: u64 = 32;
 const TICK: Duration = Duration::from_millis(10);
@@ -64,7 +63,7 @@ pub struct Config {
 impl Config {
     /// The installed set and the default deadline: what the node uses.
     pub fn installed() -> Config {
-        Config { components_dir: component_dir(), timeout_ms: DEFAULT_TIMEOUT_MS }
+        Config { components_dir: component_dir(), timeout_ms: wa_component_wait::DEFAULT_WAIT_MS }
     }
 
     pub fn with_components(mut self, dir: impl Into<std::path::PathBuf>) -> Config {
