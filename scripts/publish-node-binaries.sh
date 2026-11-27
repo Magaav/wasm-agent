@@ -419,14 +419,15 @@ asset_list() {
   for triple in $MANIFEST_TRIPLES; do
     # THE MEMBER LIST IS ONE PLACE (law 17). A member added here is published, verified, staged and installed by
     # every loop that reads WA_BUNDLE_MEMBERS, instead of a new hand-written pair in each of them.
-    members=""; for m in wa-sentinel wa-term wa-operations-supervisor; do members="$members wa-$m-$triple-$SHORT"; done
+    # the ONE list (scripts/lib/node-binaries.sh): full names, so nothing is prefixed twice
+    members=""; for m in $WA_BUNDLE_MEMBERS; do members="$members $m-$triple-$SHORT"; done
     printf 'wa-%s-%s%s\n' "$triple" "$SHORT" "$members"
   done
 }
 
 if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
   say "would build $COMMIT for: $MANIFEST_TRIPLES"
-  say "with: cargo zigbuild --release --offline --locked -p wa-host -p wa-term --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
+  say "with: cargo zigbuild --release --offline --locked -p wa-host -p wa-term -p wa-operations-supervisor --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
   say "zig: ${ZIG_BIN:-none found (a build would refuse with zig_missing; pass WA_ZIG or install pip ziglang)}"
   [ -n "$ZIG_BIN" ] && say "cargo zigbuild uses: CARGO_ZIGBUILD_ZIG_COMMAND=$CARGO_ZIGBUILD_ZIG_COMMAND"
   say "cargo target dir: $TARGET_DIR (one directory for wa-host and wa-sentinel; --target-dir overrides)"
@@ -643,7 +644,7 @@ else
   for zig_target in $ZIG_TARGETS; do
     triple="${zig_target%%.2.*}"
     started=$(date +%s)
-    ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked -p wa-host -p wa-term --target "$zig_target" ) > "$OUT/build-wa-$triple.log" 2>&1 \
+    ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked -p wa-host -p wa-term -p wa-operations-supervisor --target "$zig_target" ) > "$OUT/build-wa-$triple.log" 2>&1 \
       || { tail -20 "$OUT/build-wa-$triple.log" >&2; fail "build_failed: wa for $zig_target (log $OUT/build-wa-$triple.log)" 8; }
     ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --target "$zig_target" ) > "$OUT/build-sentinel-$triple.log" 2>&1 \
       || { tail -20 "$OUT/build-sentinel-$triple.log" >&2; fail "build_failed: wa-sentinel for $zig_target (log $OUT/build-sentinel-$triple.log)" 8; }

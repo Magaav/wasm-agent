@@ -462,6 +462,9 @@ wa_node_tag_base() {
 #   4. the public API, `https://api.github.com/repos/<repo>/releases` - anonymous, rate-limited, enough
 #      for the handful of releases a digest search looks at.
 # Anything that is not `node-<twelve hex>` is not this channel's release and is dropped here, once.
+# THE ONE LIST OF WHAT A BUNDLE CARRIES, full names, no prefix arithmetic anywhere else.
+WA_BUNDLE_MEMBERS="wa-sentinel wa-term wa-operations-supervisor"
+
 wa_node_release_list() {
   # A STUB CHANNEL IS A CHANNEL (25/11): when WA_NODE_BINARIES_URL names a local directory or a file:// URL, the
   # tags are that directory's releases.txt, one tag per line. Without this the covering-release search could only be
@@ -522,8 +525,13 @@ wa_node_asset_names() {
   short="$(wa_node_short_sha "$commit")" || return 2
   # ONE MEMBER LIST (law 17): every asset the bundle carries comes from here, so adding the supervisor did not
   # add a fourth hand-written pair to each loop.
-  printf 'node-%s.manifest\nwa-%s-%s\nwa-sentinel-%s-%s\nwa-term-%s-%s\nwa-operations-supervisor-%s-%s\n' \
-    "$short" "$triple" "$short" "$triple" "$short" "$triple" "$short" "$triple" "$short""
+  # THE BUNDLE'S MEMBERS, IN ONE PLACE (law 17). Every loop that names an asset - the publish list, the download
+  # list, the staging copy - reads WA_BUNDLE_MEMBERS, so a member cannot be spelled one way here and another way
+  # there. (A first attempt put bare suffixes in the list and prefixed them again in the loop, which produced
+  # `wa-wa-sentinel-...` - every publish would have shipped wrong names.)
+  local member names=""
+  for member in $WA_BUNDLE_MEMBERS; do names="$names $member-$triple-$short"; done
+  printf 'node-%s.manifest%s\n' "$short" "$names""
 }
 
 # <repo> <tag> <asset> <dest> [base]

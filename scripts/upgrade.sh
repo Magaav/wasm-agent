@@ -1156,6 +1156,16 @@ if [ "$TARGET_DIR" != "$INSTALL_DIR" ]; then
   { cp -f "$NEW_TERM" "$TARGET_DIR/$TERM_NAME.new" && mv -f "$TARGET_DIR/$TERM_NAME.new" "$TARGET_DIR/$TERM_NAME"; } \
     || { rm -f "$TARGET_DIR/$TERM_NAME.new"; say "cannot stage $TERM_NAME in $TARGET_DIR"; exit 1; }
   chmod 0755 "$TARGET_DIR/$TERM_NAME" 2>/dev/null || true
+  # THE SUPERVISOR IS SEALED WITH IT (P0, 27/11): `wa` runs it for every bash/operations call, so a sealed tree without
+  # it installs a node that answers nothing. Same place, same chmod, same reason as wa-term above.
+  SUPERVISOR_NAME="wa-operations-supervisor"; case "$EXE" in *.exe) SUPERVISOR_NAME="wa-operations-supervisor.exe" ;; esac
+  [ -f "$TARGET_DIR/$SUPERVISOR_NAME" ] || { say "refused(operations_supervisor_missing): $TARGET_DIR has no $SUPERVISOR_NAME, so a node sealed from it would answer no bash/operations call; nothing was installed"; exit 1; }
+  chmod 0755 "$TARGET_DIR/$SUPERVISOR_NAME" 2>/dev/null || true
+  # THE SUPERVISOR IS SEALED WITH IT (P0, 27/11): `wa` runs it for every bash/operations call, so a sealed tree without
+  # it installs a node that answers nothing. Same place, same chmod, same reason as wa-term above.
+  SUPERVISOR_NAME="wa-operations-supervisor"; case "$EXE" in *.exe) SUPERVISOR_NAME="wa-operations-supervisor.exe" ;; esac
+  [ -f "$TARGET_DIR/$SUPERVISOR_NAME" ] || { say "refused(operations_supervisor_missing): $TARGET_DIR has no $SUPERVISOR_NAME, so a node sealed from it would answer no bash/operations call; nothing was installed"; exit 1; }
+  chmod 0755 "$TARGET_DIR/$SUPERVISOR_NAME" 2>/dev/null || true
   { cp -f "$0" "$TARGET_DIR/scripts/upgrade.sh.new.$$" \
       && mv -f "$TARGET_DIR/scripts/upgrade.sh.new.$$" "$TARGET_DIR/scripts/upgrade.sh"; } 2>/dev/null || true
   # THE RECORD is written by the SAME writer as the live path (record_installed), which targets TARGET_DIR: with
