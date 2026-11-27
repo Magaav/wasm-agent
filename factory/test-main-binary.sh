@@ -50,6 +50,7 @@ cat > "$B/cargo" <<'EOS'
 # Record the niceness the build was given (field 19 of /proc/self/stat) and whether the lock was held.
 ni=$(awk '{print $19}' /proc/self/stat)
 printf '%s\n' "$*" > "$CARGO_TARGET_DIR.args"
+printf '%s\n' "${WA_CODEMODE_BUILD_ASSETS:-none}" > "$CARGO_TARGET_DIR.assets"
 printf '%s\n' "$ni" > "$CARGO_TARGET_DIR.nice"
 [ -f "$CARGO_TARGET_DIR/.build.lock" ] && echo held > "$CARGO_TARGET_DIR.locked"
 mkdir -p "$CARGO_TARGET_DIR/release"; printf '#!/bin/bash\necho built\n' > "$CARGO_TARGET_DIR/release/wa"; chmod +x "$CARGO_TARGET_DIR/release/wa"
@@ -66,6 +67,14 @@ checks=$((checks + 1)); [ -s "$TARGET.nice" ] || fail "the build recorded no nic
 checks=$((checks + 1)); { [ "$(cat "$TARGET.nice" 2>/dev/null || echo 0)" -gt 0 ]; } || fail "the build must be niced (niceness $(cat "$TARGET.nice" 2>/dev/null))"
 checks=$((checks + 1)); [ -f "$TARGET.locked" ] || fail "the build must hold a lock, so two runs cannot build into one dir"
 like "$(cat "$TARGET.args" 2>/dev/null)" "-p wa-host" "and it builds the crate that HOLDS the wa binary"
+# THE ASSETS: wa-capabilities/build.rs refuses to build without them (exit 101), so the build must carry them.
+# The repo owns the path; the fixture plays the repo and names a directory that exists.
+mkdir -p "$ROOT/scripts/lib" "$WORK/assets"
+printf 'wa_codemode_assets_dir() { printf %%s "%s/assets"; }
+' "$WORK" > "$ROOT/scripts/lib/build-requirements.sh"
+rm -f "$TARGET/release/wa"
+PATH="$B:/usr/bin:/bin" HOME="$WORK/plainhome" bash -c '. "$1"; wa_main_binary "$2" "$3" "$4" "$5"' _ "$HERE/lib/main-binary.sh" "$SHA" "$STAGE" "$TARGET" "$ROOT" >/dev/null 2>&1
+ok "$(cat "$TARGET.assets" 2>/dev/null)" "$WORK/assets" "the build is given the repo's code-mode assets"
 checks=$((checks + 1)); case "$(cat "$TARGET.args" 2>/dev/null)" in *"-p wa "*) fail "the build asked for -p wa, which no package answers";; esac
 
 # --- 2b. THE LOOP'S OWN PATH: systemd gives the loop no toolchain, so the lib must find cargo itself.
