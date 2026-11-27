@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "why": "WHICH PATHS A LANDING MAY NOT TAKE BY ITSELF. Data on purpose (Fable 27/11): a review rule in code is a rule that only a code change can correct, and the paths that install a node, hold a key or move the host's tool boundary are exactly the ones that must be reviewed by a person who can see them change. A match means the queue stops the request at `needs_review` and waits for an approval that names THIS sha and THIS policy: a new sha voids it.",
+  "review": [
+    {"glob": "scripts/deploy.sh", "why": "installs the node"},
+    {"glob": "scripts/lib/deploy-*.sh", "why": "installs the node"},
+    {"glob": "scripts/lib/install*.sh", "why": "installs the node"},
+    {"glob": "scripts/install*.sh", "why": "installs the node"},
+    {"glob": "deploy/**", "why": "installs the node"},
+    {"glob": "scripts/upgrade.sh", "why": "moves a running node"},
+    {"glob": "scripts/lib/versions.sh", "why": "moves a running node"},
+    {"glob": "policies/**", "why": "this file is data; changing the policy is a review"},
+    {"glob": "**/*.key", "why": "a key"},
+    {"glob": "vault/**", "why": "the keystore"},
+    {"glob": "rust/wa-keystore/**", "why": "the keystore"},
+    {"glob": "rust/wa-tls/**", "why": "the trust anchors"},
+    {"glob": "rust/wa-capabilities/src/host.rs", "why": "the host's tool boundary"}
+  ],
+  "never": [
+    {"glob": ".git/**", "why": "history is not a landing"},
+    {"glob": "_orch/**", "why": "the orchestrator's own state is not a branch"}
+  ]
+}
