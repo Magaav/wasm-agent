@@ -698,45 +698,35 @@ end
 -- Rolling usage limits from the provider (`rolling` = 5h, `weekly` = 7d,
 -- `monthly` = 30d), each `{status, percent, resetsAt}`. Cached briefly.
 -- `provider_id` asks about one provider rather than the active one (`/status` lists them all).
--- The limits the provider publishes, read by the HOST on its own thread and never on this one.
---
--- It used to be a blocking `host.http` GET here, which is fine between runs and impossible mid-run:
--- the interpreter is inside the turn, so a `/status` opened mid-run had nothing to draw and told the
--- reader to come back between runs. The door (`host.limits_start` / `limits_poll`) answers at once
--- and does the GET on a thread of the host's own; this function only starts a read when one is due
--- and answers whatever the door has.
---
--- Returns the usage object (the three windows), a named failure, its AGE in seconds, and the door's
--- state ("ready", "loading", "failed", "none") - so a caller can draw a spinner, draw bars with
--- their age, or draw one line saying why, without ever waiting.
 function M.limits(provider_id)
   local provider = M.active()
   if provider_id and provider_id ~= provider.id then
     provider = nil
     for _, item in ipairs(M.providers()) do if item.id == provider_id then provider = item end end
-    if not provider then return {}, "unknown provider", nil, "failed" end
+    if not provider then return {}, "unknown provider" end
   end
   local configured = provider.api_key ~= ""
-  if not configured then return {}, "provider not configured", nil, "failed" end
-  if not (host and host.limits_start and host.limits_poll) then return {}, "this host has no limits door", nil, "failed" end
-  local id = provider.id
-  local held = {}
-  local ok, text = pcall(host.limits_poll, id)
-  if ok and type(text) == "string" then held = json.decode(text) or {} end
-  -- Due: nothing at all, a failed read to retry, or a reading past the window the panel refreshes at.
-  local age = tonumber(held.age_s)
-  local due = held.state == "none" or held.state == "failed" or (held.state == "ready" and (age or 0) >= 30)
-  if due and held.state ~= "loading" then
-    -- The read starts now and answers later; THIS call still draws what the door already had -
-    -- a failure stays a failure line while its retry is in flight, and old bars stay on screen
-    -- with their age. Only a door that has nothing at all is reported as loading.
-    -- The provider, and nothing else: the host resolves the URL itself (Fable, 26/11).
-    pcall(host.limits_start, id)
-  end
-  local failure = held.error and redact.text(tostring(held.error)) or nil
-  local state = held.state
-  if state == nil or state == "none" then state = "loading" end
-  return type(held.usage) == "table" and held.usage or {}, failure, tonumber(held.age_s), state
+  if not configured then return {}, "provider not configured" end
+  local now = (host and host.now and host.now()) or 0
+  local cache_key = provider.id .. "\n" .. provider.base_url
+  M._limits_by = M._limits_by or {}
+  local cached = M._limits_by[cache_key]
+  if cached and (now - cached.at) < 30 then return cached.limits, cached.error end
+  local limits = {}
+  local ok, err = pcall(function()
+    local url = provider.base_url:gsub("/+$", "") .. "/usage"
+    local headers = headers_for(provider)
+    local response = json.decode(host.http("GET", url, json.encode(headers), ""))
+    if response and tonumber(response.status) == 200 then
+      local ok, payload = pcall(json.decode, response.body)
+      if ok and type(payload) == "table" and type(payload.usage) == "table" then
+        limits = payload.usage
+      end
+    end
+  end)
+  local failure = (not ok) and redact.text(tostring(err)) or nil
+  M._limits_by[cache_key] = { at = now, limits = limits, error = failure }
+  return limits, failure
 end
 
 -- Prompt-cache routing. Providers cache the *prefix* of a request (system +

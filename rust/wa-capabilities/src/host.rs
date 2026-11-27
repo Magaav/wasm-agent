@@ -2239,57 +2239,6 @@ fn retry_after_ms(headers: &ureq::http::HeaderMap) -> Option<u64> {
 }
 
     /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
-/// The agent for a limits read: the same transport a provider call uses, with the read bounded by the
-/// door's own eight seconds rather than the model call's budget.
-pub(crate) fn limits_agent(url: &str) -> Result<ureq::Agent, String> {
-    let read = crate::limits::READ_TIMEOUT_SECONDS;
-    let (connect, _, _) = http_timeouts();
-    let mut builder = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        // NO redirects: a limits read carries the provider key, and a redirect is exactly how that key
-        // would leave for another origin. ureq's default drops the Authorization header on a redirect
-        // (`redirect_auth_headers = Never`), but following none is the rule that needs no trust.
-        .max_redirects(0)
-        .timeout_connect(Some(std::time::Duration::from_secs(connect.min(read))))
-        .timeout_recv_response(Some(std::time::Duration::from_secs(read)))
-        .timeout_recv_body(Some(std::time::Duration::from_secs(read)));
-    if wa_tls::is_tls(url) {
-        builder = builder.tls_config(wa_tls::tls_config().map_err(|error| error.to_string())?);
-    }
-    Ok(builder.build().into())
-}
-
-/// host.limits_start(provider, url) -> the door's answer at once ({"state": "loading", ...}).
-/// The read happens on a thread of the host program's own; a turn never waits for it.
-pub extern "C-unwind" fn limits_start(l: *mut LuaState) -> c_int {
-    let provider = arg_string(l, 1).unwrap_or_default();
-    // A URL from the caller is refused, by name, and NOT repeated in the answer: the host resolves
-    // the provider's base URL itself, so no caller can aim the provider key at another host.
-    let supplied = arg_string(l, 2).unwrap_or_default();
-    if !supplied.trim().is_empty() {
-        push_json(l, &json!({"state": "failed",
-            "error": "limits_url_refused: this host resolves the provider's URL itself; a caller-given URL is refused"}));
-        return 1;
-    }
-    push_json(l, &crate::limits::start(&provider));
-    1
-}
-
-/// host.limits_poll(provider) -> {"state": "loading"|"ready"|"failed"|"none", usage?, age_s?, error?}.
-pub extern "C-unwind" fn limits_poll(l: *mut LuaState) -> c_int {
-    let provider = arg_string(l, 1).unwrap_or_default();
-    push_json(l, &crate::limits::poll(&provider));
-    1
-}
-
-/// host.limits_forget(provider) -> nil. Drop this process's slot; the next start reads afresh.
-pub extern "C-unwind" fn limits_forget(l: *mut LuaState) -> c_int {
-    let provider = arg_string(l, 1).unwrap_or_default();
-    crate::limits::forget(&provider);
-    1
-}
-
-
 /// host.http(method, url, headers_json, body) -> {status, body} | {error}
 pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
@@ -4203,12 +4152,6 @@ struct ConsoleInput {
     /// ticker). It lives in that call's **block** in the transcript, never on the
     /// session-status-content row (Victor, 2026-11-10); kept so an unchanged phrase is not redrawn.
     tool_progress: String,
-    /// A panel whose limits rows the CONSOLE fills itself: the provider, and the spec those rows
-    /// belong in. Mid-run the interpreter is inside the turn, so only this thread can repaint the
-    /// rows when the read lands (crate::limits::row_texts). Cleared when the panel closes.
-    panel_limits: Option<(String, String, Value)>,
-    /// The limits rows the open panel is SHOWING, so a repaint happens only when they change.
-    panel_lines: Vec<Value>,
     /// The `/status` panel as Lua last described it (`host.status_snapshot`), shown by this thread when
     /// `/status` is submitted during a run - Lua is blocked in the model call then and cannot open it.
     status_snapshot: Option<Value>,
@@ -4804,15 +4747,6 @@ fn console_reader() {
                 let _ = refresh_editor_size();
                 expire_notice();
                 repaint_if_due();
-                // A /status panel open over a run draws its limits rows itself: the interpreter is
-                // inside the turn, so this thread is the only one that can repaint them.
-                limit_tick();
-            }
-            // While a panel waits on the door, the read is BOUNDED: the tick above only runs between
-            // keystrokes otherwise, and a `/status` panel that turned from loading to bars because the
-            // reader happened to press a key is not the panel this feature promised.
-            while limits_waiting() && !byte_ready(150) {
-                limit_tick();
             }
             let mut chunk = [0u8; 512];
             let read = read_chunk(&mut handle, &mut chunk);
@@ -4918,21 +4852,9 @@ fn console_reader() {
                                 let running = state.editor.as_ref().is_some_and(|e| e.status);
                                 if running && text.trim() == "/status" {
                                     let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
-                                    if let (Some(snapshot), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
-                                        let spec = crate::limits::expand_rows(&snapshot, epoch_seconds() as u64);
+                                    if let (Some(spec), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
                                         state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
                                         state.host_panel = true;
-                                        // A spec that names a provider's limits keeps its rows live: the
-                                        // reader's tick repaints them when the read lands, mid-run and
-                                        // without the reader closing anything.
-                                        state.panel_limits = crate::limits::marker_of(&snapshot);
-                                        state.panel_lines = spec_lines(&spec);
-                                        if let Some((provider, _url, _)) = state.panel_limits.clone() {
-                                            // The panel opens the read now, off the turn, at once. The
-                                            // URL is the host's to resolve; the snapshot names only the
-                                            // provider.
-                                            let _ = crate::limits::start(&provider);
-                                        }
                                         continue;
                                     }
                                 }
@@ -4945,19 +4867,9 @@ fn console_reader() {
                                     if let wa_cli_views::Route::Local(spec) = route {
                                         let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
                                         if let Some((width, rows)) = dims {
-                                            // The same live-rows contract as the mid-run snapshot: a
-                                            // published /status carries the marker, and the console
-                                            // fills it from the door on every draw.
-                                            // A published view is drawn AS IT IS: its lines can carry a
-                                            // model's or a tool's text, so a limits marker inside one
-                                            // is not the host's to obey (Fable, 26/11). Only the /status
-                                            // snapshot - written by this host from Lua's own status
-                                            // lines - can name a provider.
-                                            let drawn = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
-                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&drawn, width, rows));
+                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
                                             state.host_panel = true;
                                             state.balloon = true;
-
                                             continue;
                                         }
                                     }
@@ -4969,8 +4881,6 @@ fn console_reader() {
                                     state.balloon = false;
                                     state.host_panel = false;
                                     state.panel = None;
-                                    state.panel_limits = None;
-                                    state.panel_lines.clear();
                                 }
                                 // A queued Enter never ends anything; a send-now line raises the run's
                                 // interrupt exactly while a run is in flight (a Ctrl+Enter at an idle
@@ -5525,51 +5435,6 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
-}
-
-/// The lines a spec draws, as the panel is showing them: what a repaint compares against.
-fn spec_lines(spec: &Value) -> Vec<Value> {
-    spec.get("lines").and_then(Value::as_array).cloned().unwrap_or_default()
-}
-
-/// Repaint the open panel's limits rows from the door, in place. Called from the reader thread's tick,
-/// which is the only thing running while the interpreter is inside a turn; nothing is drawn when the
-/// rows did not change, so an idle panel costs one `row_texts` call per tick and no frame.
-fn refresh_panel_limits(state: &mut ConsoleInput) {
-    let Some((provider, _url, spec)) = state.panel_limits.clone() else { return };
-    if let Some(path) = std::env::var_os("WA_LIMITS_DEBUG").filter(|path| !path.is_empty()) {
-        use std::io::Write as _;
-        if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(log, "[limits] tick provider={provider} poll={}", crate::limits::poll(&provider));
-        }
-    }
-    if state.panel.is_none() { state.panel_limits = None; state.panel_lines.clear(); return }
-    let fresh = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
-    // What the panel is SHOWING is the yardstick, not the spec: the spec keeps its marker (it is the
-    // template this repaint reads), so comparing with it would repaint once and then never again
-    // once the drawn rows were stored over it.
-    if fresh.get("lines") == Some(&Value::Array(state.panel_lines.clone())) { return }
-    let Some((width, rows)) = state.editor.as_ref().map(|editor| (editor.width, editor.row + 1)) else { return };
-    state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&fresh, width, rows));
-    state.panel_lines = spec_lines(&fresh);
-    let frame = layout_frame(state);
-    let _ = wa_term::terminal_editor::write(&frame);
-}
-
-/// Whether an open panel is waiting on the limits door (so the reader's read is bounded).
-fn limits_waiting() -> bool {
-    let (lock, _) = console_input();
-    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    state.panel_limits.is_some()
-}
-
-/// The tick's entry point: the console lock is taken only while a panel waits on the door.
-fn limit_tick() {
-    let (lock, _) = console_input();
-    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let live = state.panel_limits.is_some();
-    if state.panel_limits.is_none() { return }
-    refresh_panel_limits(&mut state);
 }
 
 /// `host.status_snapshot(spec_json)`: the panel `/status` shows if it is submitted while a run is in
