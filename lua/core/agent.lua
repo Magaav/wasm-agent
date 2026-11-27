@@ -69,6 +69,16 @@ local ARGUMENT_EXAMPLES = {
   tool_call = '{"name":"read","arguments":{"path":"README.md"}}',
   remote = '{"node":"<name>","capability":"bash","command":"ls -la"}',
 }
+-- The names a tool accepts without its schema declaring them (the runtime's own fields and the synonyms
+-- its handlers map): one list, lua/core/tool_arguments.lua INTERNAL. Passed to the contract layer, which
+-- refuses a name the schema never declares.
+local accepted_extra
+local function extra_names()
+  if accepted_extra ~= nil then return accepted_extra or nil end
+  local ok, module = pcall(dofile, 'lua/core/tool_arguments.lua')
+  accepted_extra = (ok and type(module) == 'table' and type(module.INTERNAL) == 'table') and module.INTERNAL or false
+  return accepted_extra or nil
+end
 local function schema_of(tool_list, name)
   for _, item in ipairs(tool_list or {}) do
     local fn = item["function"] or {}
@@ -84,14 +94,14 @@ local function parse_tool_arguments(name, text, tool_list, role)
       local catalog = tool_list
       local parameters = schema_of(catalog, name)
       if not parameters then catalog = tools.all(role); parameters = schema_of(catalog, name) end
-      local valid = parameters and json_contract.validate(parameters, completed)
+      local valid = parameters and json_contract.validate(parameters, completed, extra_names())
       local decoded = valid and json.decode(completed)
       if valid and name == "tool_call" then
         -- The wrapper's schema says little; the target's schema is what makes the repair safe.
         local target = type(decoded.name) == "string" and (schema_of(catalog, decoded.name) or schema_of(tools.all(role), decoded.name))
         local inner = json_contract.at(valid, { "arguments" })
         valid = target and inner and inner.kind == "object"
-          and json_contract.validate(target, json_contract.raw(completed, inner)) and valid or nil
+          and json_contract.validate(target, json_contract.raw(completed, inner), extra_names()) and valid or nil
       end
       if valid and type(decoded) == "table" then
         return decoded, nil, completed, "appended " .. closers .. " to close the arguments JSON"

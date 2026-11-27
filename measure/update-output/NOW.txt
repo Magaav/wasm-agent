@@ -1,0 +1,49 @@
+# NOW (this branch): the same fixtures, the same 7001-line deploy.out. Format as BEFORE.txt.
+
+build            7 printed (0 alarming) first byte 0.287s last 5.929s exit 0
+  checking for updates  0:00
+  building 0/456 preflight (from source, on this machine)  0:00
+  building 12/456 compiling provisioning (from source, on this machine)  0:02
+  building 48/456 compiling wa-host (from source, on this machine)  0:03
+  building 456/456 proving (from source, on this machine)  0:04
+  updated to 8f755686 in 0:05
+  log: <config>/update-log/1795638792998741451-2019904-1.log
+
+published        4 printed (0 alarming) first byte 0.220s last 2.795s exit 0
+  checking for updates  0:00
+  installing the published binary (no build)  0:00
+  updated to d085fd88 in 0:02
+  log: <config>/update-log/1795638804885836592-2021250-1.log
+
+fail             7 printed (2 alarming: the word "not updated" and the path) first byte 0.237s last 6.002s exit 1
+  checking for updates  0:00
+  building 0/456 preflight (from source, on this machine)  0:00
+  building 12/456 compiling provisioning (from source, on this machine)  0:03
+  building 48/456 compiling wa-host (from source, on this machine)  0:04
+  building 456/456 proving (from source, on this machine)  0:05
+  not updated: compiling: no built binary at <build>/release/wa. Nothing was changed.
+  log: <config>/update-log/<request>.log
+
+problems         7 printed, first byte 0.266s last 6.046s exit 1
+  checking for updates  0:00
+  building ... (four phases)
+  installed ff82cbf4, with 1 problem: the sentinel could not be restarted after the swap
+  log: <config>/update-log/<request>.log
+
+current (tree already at the installed commit)   2 printed, first byte 0.295s last 0.362s exit 0
+  checking for updates  0:00
+  already up to date (81c8c6cc)
+  One request (`git ls-remote` to the fixture's local origin), no git fetch, no sentinel call, no backup.
+
+release-current  2 printed, first byte 0.340s last 0.495s exit 0
+  checking for updates  0:00
+  already up to date (4e664383)
+
+release-queued   3 printed, first byte 0.243s last 0.456s exit 0
+  checking for updates  0:00
+  not updated: the install is queued as wa-release-update-... and had not reported when this command ended. Nothing was changed.
+  log: <config>/release-update.log
+
+ON A TERMINAL (pty) the same runs are TWO lines after the run: the moving line is rewritten in place with
+ + erase-to-end-of-line (9 carriage returns and 7 escape bytes for the compile case) and the last line
+replaces it. On a pipe: no carriage return and no escape byte at all.

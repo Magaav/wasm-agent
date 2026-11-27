@@ -16,6 +16,15 @@ function M.run()
     local queried, raw = pcall(host.whatsapp_contacts, '{}')
     local contacts = queried and (type(raw) == 'string' and json.decode(raw) or raw) or nil
     local list = type(contacts) == 'table' and (contacts.chats or contacts.contacts or {}) or {}
+    -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers
+    -- whatsapp_component_absent (with the state and the owner) BEFORE any index is touched; reading that as an
+    -- empty index turns a stopped component into an account with no data - the one thing a canary must not do.
+    if type(contacts) == 'table' and contacts.error then
+      return false, tostring(contacts.error),
+      'the query was REFUSED, not answered: ' .. tostring(contacts.error)
+        .. (contacts.state and (' (state ' .. tostring(contacts.state) .. ')') or '')
+        .. (contacts.owner and ('; the account is served by ' .. tostring(contacts.owner)) or '')
+    end
     -- RULING (c), 25/11: no chat indexed on a node that DOES serve the account is no_data, not a break.
     if #list == 0 then return 'not_proven', 'no_data', 'no_data: no chat in the index' end
     local chat = list[1].chat or list[1].jid or list[1].name

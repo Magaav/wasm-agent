@@ -243,7 +243,11 @@ check(files.edit({path=path,old_text='original',new_text='new'}).error=='file_ch
 host.read_file=read
 local grep=tools.dispatch(memory,'grep',{path=path,pattern='aa',ignore_case=false,limit=1},'master')
 check(grep.count==1 and grep.complete,'supported search semantics')
-check(tools.dispatch(memory,'grep',{pattern='x',regex=true},'master').error=='unsupported_search_option','unsupported matching cannot silently succeed')
+-- An option `grep` does not support is REFUSED BY NAME and never silently ignored. Since the one argument
+-- rule (25/11) the contract refuses the NAME before the handler is reached - the same fact, one step
+-- earlier, and it says `effect: none` so the refusal is also a statement that nothing ran.
+local unsupported=tools.dispatch(memory,'grep',{pattern='x',regex=true},'master')
+check(unsupported.error=='unknown_argument:regex' and unsupported.effect=='none','unsupported matching cannot silently succeed: '..json.encode(unsupported):sub(1,200))
 local called=0
 local diagnosis=dofile('lua/core/diagnose.lua')
 local steps={{tool='read',args={path=path},expect={contains='missing'}},{tool='read',args={path=path}}}

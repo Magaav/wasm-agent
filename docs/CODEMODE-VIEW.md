@@ -53,7 +53,7 @@ value belonged; and nothing said which tools ran, whether they worked, or how lo
 | which block is open, the fold, the pin, the in-place rewrite | `rust/wa-term/src/transcript.rs` (`code_block`, `fold_code`, `pin_toggle`, `rewrite`) |
 | the view: when to fold, what to write, the live events | `lua/core/cli_view.lua` (`codemode_start`, `codemode_sync`, `codemode_settle`) |
 | the live events themselves | `lua/core/codemode.lua` (`codemode_call` per nested call, through `ctx.emit`) |
-| the host functions | `rust/wa-capabilities/src/host.rs` (`transcript_block(topic, code)`, `transcript_fold`, `transcript_rewrite`), registered in `capabilities.rs` |
+| the host functions | `rust/wa-capabilities/src/host.rs` (`transcript_block(topic, code)`, `transcript_fold`, `transcript_rewrite`), its rows in `capability_rows/console.rs` |
 
 ## The model boundary is untouched
 

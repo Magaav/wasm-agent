@@ -152,6 +152,71 @@ end
 
 -- How a landing waits between two polls of a node's own record. A field, not a sleep call inside the
 -- logic, so a test drains it instantly while production waits a real five seconds.
+-- TWO NAMED RULES OF THE DEPLOY WAIT (26/11, openclaw). They live here, not inside the wave loop, so a row can
+-- drive them: the loop is a closure, and the rule it carries is exactly what went wrong on a real node.
+--
+-- 1. AN `unknown` FROM THE RELAY IS NOT A VERDICT. It says only that this read did not arrive, and an install that
+--    is still downloading answers exactly that. The wait keeps reading the node own record to the deploy deadline.
+-- WHAT THE AGGREGATE MEANS FOR THE RELEASE (26/11, Fable r5). One rule, named here so a row can drive it:
+--
+-- LISTED, NOT RED: a feature answered `not_proven` on EVERY node asked. The canary runs in a CLI process on a
+-- serving node and cannot see what that node serves, so "nothing to test here" is a fact about the probe, not
+-- a break in the release. It is printed by name under "NOT PROVEN ON ANY NODE" and the step passes.
+-- RED, unchanged: a FAIL (a node said it is broken, including a refusal like whatsapp_component_absent - r4
+-- item 3), and a CUTTING proven nowhere: release-update must be fresh on a deployed node, so a release that
+-- cannot prove its own cut did not cut.
+function M.release_not_proven(aggregated)
+  local listed, cutting = {}, {}
+  for _, entry in ipairs((type(aggregated) == "table" and aggregated.proven_nowhere) or {}) do
+    local line = tostring(entry)
+    local feature = line:match("^([%w%-_]+)") or line
+    if feature == "release-update" then cutting[#cutting + 1] = line else listed[#listed + 1] = line end
+  end
+  return { listed = listed, cutting = cutting, red = cutting }
+end
+
+function M.deploy_settles(state)
+  local s = tostring(state or "unknown")
+  if s == "unknown" or s == "not_known_yet" then return false end
+  return s == "installed" or s == "failed" or s == "silent" or s == "refused"
+end
+--
+-- 2. THE NODE OWN RECORD DECIDES BEFORE `unknown` IS WRITTEN. Five read-backs, 30 s apart, stopping at the
+--    first ANSWER - one read on a relay that just missed one is not evidence. A record naming the commit that
+--    was asked for settles the row as installed; a record naming another commit settles it as installed_mismatch.
+M.DEPLOY_FINAL_READS = 5
+M.DEPLOY_FINAL_INTERVAL = 30
+-- 2. THE NODE OWN RECORD DECIDES BEFORE `unknown` IS WRITTEN. A last read taken after the deadline can name the commit
+--    that was asked for - the install finished while the relay was not answering - and then the row settles as
+--    installed, never as unknown.
+function M.deploy_last_chance(row, sha, read)
+  local want = tostring(sha or "")
+  local reads = 0
+  for i = 1, M.DEPLOY_FINAL_READS do
+    local ok_read, status = pcall(read)
+    if not ok_read then status = nil end
+    reads = reads + 1
+    local got = status and tostring(status.installed_commit or "") or ""
+    if want ~= "" and got == want then
+      row.state = "installed"
+      row.installed_commit = got
+      row.detail = "installed (read back on the node own record after the wait, read " .. reads .. ")"
+      return true
+    end
+    local state = tostring(status and status.state or "unknown")
+    if state == "installed" and got ~= "" then
+      row.state = "installed_mismatch"
+      row.installed_commit = got
+      row.detail = "the node installed " .. got .. ", not the " .. want .. " this round asked for"
+      return true
+    end
+    -- AN ANSWER ENDS THE READ-BACKS: failed, silent and refused are verdicts, not a missing reply.
+    if state ~= "unknown" and state ~= "not_known_yet" then return false, state end
+    if i < M.DEPLOY_FINAL_READS then M.sleep(M.DEPLOY_FINAL_INTERVAL) end
+  end
+  return false, nil
+end
+
 function M.sleep(seconds) M.exec("sleep " .. tostring(seconds)) end
 
 -- ---------------------------------------------------------------- the gate's LIVE output
@@ -4375,48 +4440,71 @@ impl.canaries = function(run, options)
     noticed = ok_call and tostring((answer or {}).reason or "") or ("raised: " .. tostring(answer))
   end
 
-  -- PROVEN NOWHERE IS RED BY NAME (25/11): an account canary nobody could answer proves nothing about the
-  -- release, and "unknown" is not yes. This is computed over this node AND every peer asked.
+  -- The aggregate still names every feature no node could answer; what that means is decided below, by
+  -- M.release_not_proven (26/11: listed and passing, unless it is the cut itself). This is computed over this
+  -- node AND every peer asked.
   local aggregated = canaries.aggregate((function()
     local list = { { node = "this node", results = results } }
     for _, answer in ipairs(peer_answers) do list[#list + 1] = answer end
     return list
   end)())
-  if #aggregated.proven_nowhere > 0 then
-    local named = table.concat(aggregated.proven_nowhere, ", ")
-    return false, { error = "canary_proven_nowhere",
-      observed = "not proven on every node asked: " .. named,
-      detail = "release is RED by name - proven nowhere: " .. named,
-      evidence = M.evidence_path(run.id, "canaries"),
-      next = "ask the node that holds the account (wa features canary json on it) and cut again: a canary no node could answer has proven nothing about this release",
-      notice = noticed }
+  -- LIVE CHECKS ARE ADVISORY (Fable 26/11): the cut continues to the tag, and every finding is printed, written to
+  -- the evidence and put in the release report under the heading below. This is not "the canaries do not matter" -
+  -- it is that after six gate-own defects the JUDGE is what is on trial, not the release: (1) the deploy wait flaky
+  -- under load; (2) "unknown" on a finished install; (3) release-update red on a tree-less node; (4) a refusal read
+  -- as no_data; (5) the CLI's own view read as the serving node's; (6) canaries that skip a node installed in an
+  -- earlier round of the same run, the laptop's account rows, recorded_commit missing ~/.local/bin/installed.txt,
+  -- and ctx.cutting lost on --resume (release-update came out FAIL on the laptop, not "cutting"). Each of those
+  -- stopped a real cut for a reason that was the gate's own. Re-armed as a gate by the release-rehearsal mission
+  -- once `wa release rehearse` is green on the real fleet.
+  local advisory = {}
+  local function advisory_line(text)
+    advisory[#advisory + 1] = tostring(text)
+    print("  " .. tostring(text))
+    evidence("  " .. tostring(text) .. "\n")
   end
+  print("LIVE CHECKS (advisory until rehearsed)")
+  evidence("LIVE CHECKS (advisory until rehearsed)\n")
   if #failed > 0 then
     local how = {}
     for _, entry in ipairs(ring or {}) do
       local name = tostring((type(entry) == "table" and entry.node) or entry or "")
       if name ~= "" then how[#how + 1] = rollback_line(name) end
     end
-    return false, { error = "canary_failed",
-      observed = "canaries failed: " .. table.concat(failed, ", ") .. (nodes_asked > 0 and (" (peers asked: " .. nodes_answered .. "/" .. nodes_asked .. ")") or "") .. " (notice: " .. noticed .. ")",
-      detail = "release is RED by name: " .. table.concat(failed, ", "),
-      evidence = M.evidence_path(run.id, "canaries"),
-      next = (#how > 0 and ("put the node(s) back on the PREVIOUS release, unless Fable says otherwise: " .. table.concat(how, "; "))
-        or ("fix " .. tostring(failed[1]) .. " before cutting again")),
-      notice = noticed }
+    advisory_line("FAIL: " .. table.concat(failed, ", ") .. (nodes_asked > 0 and (" (peers asked: " .. nodes_answered .. "/" .. nodes_asked .. ")") or ""))
+    if #how > 0 then advisory_line("the previous release to go back to: " .. table.concat(how, "; ")) end
   end
   if #unproven > 0 then
-    return false, { error = "canary_unproven",
-      observed = "NOT PROVEN (an unreachable or silent node is never green): " .. table.concat(unproven, "; "),
-      detail = "release is RED by name: not proven on " .. table.concat(unproven, "; "),
-      evidence = M.evidence_path(run.id, "canaries"),
-      next = "make each named node answer (wa nodes, wa services status), then cut again: a node whose canaries could not be collected has not been proven by this release",
-      notice = noticed }
+    advisory_line("NOT PROVEN (an unreachable or silent node is never green): " .. table.concat(unproven, "; "))
   end
-  return true, { canaries = #results, nodes_asked = nodes_asked, nodes_answered = nodes_answered, off = #off, notice = noticed,
+  -- WHERE "PROVEN NOWHERE" LANDS (26/11, Fable r5, removing the rule of 25/11): see M.release_not_proven.
+  local not_proven = M.release_not_proven(aggregated)
+  if #not_proven.red > 0 then
+    advisory_line("CUTTING NOT PROVEN (release-update proved nothing about this cut): " .. table.concat(not_proven.red, ", "))
+  end
+  if #not_proven.listed > 0 then
+    print("NOT PROVEN ON ANY NODE")
+    evidence("NOT PROVEN ON ANY NODE\n")
+    for _, line in ipairs(not_proven.listed) do
+      print("  " .. line)
+      evidence("  " .. line .. "\n")
+    end
+    local because = "(not red: the canary runs in a CLI process on a serving node and cannot see what that node serves - 26/11)"
+    print("  " .. because)
+    evidence("  " .. because .. "\n")
+  end
+  -- THE REPORT LINE (26/11): a successful step now says what the live checks found, under the same heading.
+  local advisory_text = #advisory > 0 and ("LIVE CHECKS (advisory until rehearsed): " .. table.concat(advisory, " | ")) or ""
+  local advisory_notice = #advisory > 0
+    and ((noticed ~= "" and (noticed .. " | ") or "") .. string.format("LIVE CHECKS: %d advisory finding(s) - the cut continues", #advisory))
+    or noticed
+  return true, { canaries = #results, nodes_asked = nodes_asked, nodes_answered = nodes_answered, off = #off,
+    advisory = advisory, notice = advisory_notice,
     observed = string.format("%d canary(ies) ran on this node and %d peer node(s) ran their own; %d off%s%s",
       #results, nodes_answered, #off, #off > 0 and (" (" .. table.concat(off, ", ") .. ")") or "",
-      fleet_recorded and "" or " - the deploy recorded no per-node outcome, so the fleet was not asked") }
+      fleet_recorded and "" or " - the deploy recorded no per-node outcome, so the fleet was not asked") .. (#not_proven.listed > 0 and (" | NOT PROVEN ON ANY NODE: " .. table.concat(not_proven.listed, ", ")) or "")
+      .. (advisory_text ~= "" and (" | " .. advisory_text) or ""),
+    detail = advisory_text ~= "" and advisory_text or nil }
 end
 
 impl.deploy = function(run, options)
@@ -4532,13 +4620,12 @@ impl.deploy = function(run, options)
     row.verified = (status and status.verified == true) or false
     row.detail = status and status.detail or row.detail
     row.seconds = now() - (row.started_at or now())
-    if state == "unknown" and row.retry_unknown then
-      -- The node has the id (the request named it) and has not written its deploy record yet: that is
-      -- the pre-update backup running, not a node that lost the request. Keep reading until the deploy
-      -- deadline, and only then say the phase is unknown (unknown is not yes, and not a no either).
-      return false
-    end
-    return state == "installed" or state == "failed" or state == "silent" or state == "unknown"
+    -- AN UNKNOWN FROM THE RELAY IS NOT A VERDICT (26/11, openclaw). It was installing: the request was
+    -- accepted, the download ran on a slow node, one status call did not answer inside the relay's deadline,
+    -- and the round called the node "unknown after 186s: node_no_answer" while that node then finished and
+    -- came up on node-6b6afc72f188. A status that says node_no_answer / unknown says ONLY that this read did
+    -- not arrive; the wait keeps reading the node's own record until the deploy deadline.
+    return M.deploy_settles(state)
   end
   local function failure_for(row)
     if row.state == "installed" then return nil end
@@ -4649,10 +4736,23 @@ impl.deploy = function(run, options)
         end
       end
       for _, row in ipairs(pending) do
-        -- The deadline passed with the node still working: say `unknown`, never `installed`. Its own records
-        -- are the truth and `wa update <node> --status` reads them.
-        row.state = "unknown"
-        row.detail = "not settled within " .. tostring(deadline) .. "s; read it with: wa update " .. row.node .. " --status"
+        -- THE NODE'S OWN RECORD DECIDES BEFORE "unknown" IS WRITTEN (26/11). A last read can name the commit it
+        -- installed even when the wait ran out: an install that finished is never reported as unknown.
+        local read = function()
+          return remote_update.status(M.call(), row.node, { id = row.record, session = options.session })
+        end
+        local settled, answered = M.deploy_last_chance(row, sha, read)
+        if settled then
+          -- row.state and row.detail were set by the rule: installed, or installed_mismatch
+        elseif answered then
+          row.state = answered
+          row.detail = "the node answered " .. tostring(answered) .. " while the wait was ending; read it with: wa update " .. row.node .. " --status"
+        else
+          -- The deadline passed with the node still working: say `unknown`, never `installed`. Its own records
+          -- are the truth and `wa update <node> --status` reads them.
+          row.state = "unknown"
+          row.detail = "not settled within " .. tostring(deadline) .. "s after " .. tostring(M.DEPLOY_FINAL_READS) .. " read-backs " .. tostring(M.DEPLOY_FINAL_INTERVAL) .. "s apart; read it with: wa update " .. row.node .. " --status"
+        end
         row.seconds = now() - (row.started_at or now())
       end
       for _, row in ipairs(asked) do

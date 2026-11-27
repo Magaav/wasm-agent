@@ -65,8 +65,10 @@ local absent=graph({action='symbol_source',path='absent.lua',name='absent',line=
 check(one.source=='function gamma() return 2 end' and two.source=='function beta() return gamma() end','both exact definitions')
 check(absent.error=='symbol_path_not_found','a selector that is not there is its own refusal, not a failed batch')
 check(one.graph_snapshot and one.graph_snapshot.committed_revision>=one.graph_snapshot.required_revision and two.graph_snapshot,'every call admits its own pinned snapshot')
-check(graph({action='symbol_source_many',requests={{path='a.lua',name='gamma',line=1}}}).error=='unknown_graph_action:symbol_source_many','the retired batch action is not an action')
-check(call('symbol_source_many',{requests={{path='a.lua',name='gamma',line=1}}}).error==
+-- No `requests`: it is not an argument of this tool at all (since 25/11 an undeclared name is refused by
+-- name), and the retired ACTION is what this line is about.
+check(graph({action='symbol_source_many'}).error=='unknown_graph_action:symbol_source_many','the retired batch action is not an action')
+check(call('symbol_source_many',{}).error==
   'retired: batch in code mode - Promise.all(items.map(x => tools.graph(x)))','the retired batch name answers the one sentence')
 local stale=graph({action='symbol_source',path='a.lua',name='gamma',line=1,source_version=source.source_version})
 check(stale.error=='symbol_source_changed' and stale.required_revision and stale.committed_revision and not stale.source,'stale source identity refuses with revision evidence')

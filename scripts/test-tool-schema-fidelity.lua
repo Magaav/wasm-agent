@@ -228,16 +228,32 @@ end
 local schema = { type = 'object', additionalProperties = false, properties = {
   q = { type = 'string' }, since = { type = 'number' }, before = { type = 'number' }, limit = { type = 'integer' } } }
 local _, refusal = contract.validate(schema, '{"query":"laura"}')
-check(has(refusal, 'schema_extra:arguments.query'), 'the refusal names the argument that does not exist: ' .. tostring(refusal))
-check(has(refusal, 'accepted:'), 'the refusal names the arguments that do: ' .. tostring(refusal))
+check(has(refusal, 'unknown_argument:query'), 'the refusal names the argument that does not exist: ' .. tostring(refusal))
+-- 25/11: the refusal also names the argument that was MEANT. Where the name sent is close to one the schema
+-- declares, the suggestion is there; here `query` is one letter from `q`... it is not, and the schema's own
+-- `q` is still what the sentence offers below - a suggestion is only made when it is close (see the contract's
+-- nearest()).
+local refusal_rendered = dofile('lua/core/refusal.lua').build(refusal, {}, { tool = 'search', parameters = schema })
+check(has(refusal_rendered.fix, 'q') and has(refusal_rendered.fix, 'limit')
+  and has(refusal_rendered.fix, 'since') and has(refusal_rendered.fix, 'before'),
+  'the refusal names every argument that does: ' .. tostring(refusal_rendered.fix))
 for _, accepted in ipairs({ 'before', 'limit', 'q', 'since' }) do
-  check(has(refusal, accepted), 'the refusal lists ' .. accepted .. ': ' .. tostring(refusal))
+  check(has(refusal_rendered.fix, accepted), 'the refusal lists ' .. accepted .. ': ' .. tostring(refusal_rendered.fix))
 end
--- A tool that takes no arguments says that instead of listing nothing.
+-- A name close to a declared one is answered WITH the name meant, which is the whole point of the sentence.
+local _, one_letter = contract.validate(schema, '{"q":"laura","limt":3}')
+check(has(one_letter, 'unknown_argument:limt') and has(one_letter, 'did you mean limit?'),
+  'a name one letter from a declared one carries the name meant: ' .. tostring(one_letter))
+-- A tool that takes no arguments refuses every name, and names it.
 local _, empty_refusal = contract.validate({ type = 'object', additionalProperties = false, properties = {} }, '{"q":"x"}')
-check(has(empty_refusal, 'this object takes no arguments'), 'a no-argument tool says so: ' .. tostring(empty_refusal))
--- An argument the schema does not police is still accepted (the guard is a guard, not a rubber stamp).
-local valid = contract.validate({ type = 'object', properties = { q = { type = 'string' } } }, '{"anything":1}')
+check(has(empty_refusal, 'unknown_argument:q'), 'a no-argument tool names the name it was sent: ' .. tostring(empty_refusal))
+-- THE DEFAULT IS CLOSED (25/11, the one rule): a schema that declares arguments and says nothing about
+-- additionalProperties refuses a name outside them, because the handler would have dropped it in silence.
+local _, closed = contract.validate({ type = 'object', properties = { q = { type = 'string' } } }, '{"anything":1}')
+check(closed ~= nil and has(closed, 'unknown_argument:anything'),
+  'a schema that declares arguments is closed unless it says otherwise: ' .. tostring(closed))
+-- An explicitly open schema still accepts what it does not name (the guard is a guard, not a rubber stamp).
+local valid = contract.validate({ type = 'object', additionalProperties = true, properties = { q = { type = 'string' } } }, '{"anything":1}')
 check(valid ~= nil, 'an open schema accepts what it does not name')
 
 host.plugins = real_plugins

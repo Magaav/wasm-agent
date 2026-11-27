@@ -373,6 +373,11 @@ fi
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime -- components::tests services::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests drain::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-governance -- node_policy::tests node_telemetry::tests store::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities -- capabilities::tests
+# A capability's registration is DATA (mission capability-registration-is-data): every row lives in a
+# file under src/capability_rows/, one file per area, and capabilities.rs declares none - so adding or
+# moving a capability never edits the file every other capability edits. Both rows read the sources on
+# disk. The first fails on the code before that change, by name: 152 rows were still in capabilities.rs.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities --test capability_registration --test capability_row_discovery
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
@@ -531,6 +536,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$D
 # pass/fail/off, account canaries answer it only when the node has no account of that kind, and a canary proven
 # on no node asked is red.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db "$DB.canary-not-proven" | grep "canary not proven ok"
+
+# THE CUT CANARIES STEP IS ADVISORY UNTIL THE REHEARSAL IS GREEN (Fable 26/11, r6): the step runs, names every finding
+# - a FAIL, an unreachable node, a cutting canary proven nowhere, the rollback line - under the heading
+# LIVE CHECKS (advisory until rehearsed), and the cut continues to the tag. The row drives land.impl.canaries with
+# fixture canaries; the wrapper owns the scratch root the test-home guard needs and runs the tree under test.
+gate_run bash scripts/test-release-canaries-advisory.sh
 # A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
 # install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
 # the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.
@@ -1104,6 +1115,12 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # `--check` answers for the installed commit and the one behind it from the local release list. It refuses a
 # home inside the operator's store (scripts/lib/scratch-home.sh) and touches no node but its own.
 WA_BIN="$BIN" gate_run bash scripts/test-update-follow.sh | grep 'update follow ok'
+# THE WAIT BETWEEN SNAPSHOTS IS AN EVENT, NOT A 1 s POLL (mission update-is-one-line, step 9): a phase the
+# deploy already wrote must not wait for a tick, and a command that finished in 200 ms must not pay a sleep.
+# The row proves `inotifywait` fires on a real file write, that the wait is bounded so it cannot hang the
+# command, and that the follower uses it (and that a caller handing a sleep seam still gets its sleep).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-wait.lua" "$BIN" --db "$DB.update-wait" | grep "update wait ok"
+
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 # No test may run the installer with the operator's real data dir: one run pauses every session here.

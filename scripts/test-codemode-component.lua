@@ -59,9 +59,13 @@ local ctx = { session_id = session, user_id = 'master' }
 
 -- The catalogue: two callable tools, one the fence refuses, one the node itself blocks. `execution` is
 -- the node's pre-flight summary, so these records are the ones a real run would have.
+-- `path` is here because the scripts below ask `read` for it: since 25/11 an argument a tool's schema does
+-- not declare is refused by name, and a fixture whose schema is narrower than the calls it makes would
+-- measure the fixture instead of the seam.
 local function schema(name, description)
   return { type = 'function', ['function'] = { name = name, description = description,
-    parameters = { type = 'object', properties = { text = { type = 'string' }, limit = { type = 'integer' } } } } }
+    parameters = { type = 'object', properties = { text = { type = 'string' }, limit = { type = 'integer' },
+      path = { type = 'string' } } } } }
 end
 local catalog = {
   schema('sessions', 'List sessions'),

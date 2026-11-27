@@ -1,0 +1,58 @@
+# BEFORE (base 70eb209d): what a person saw. Fixture deploy.out: 7001 lines, 411 alarming.
+# Format: case | printed lines | alarming lines printed | time to FIRST line | time to last | exit
+#         + the lines, verbatim
+
+build            9 printed (1 alarming) first byte 1.524s last 6.835s exit 0
+  no published binary is named for 779179c here: the installer looks for one built from the same inputs, and builds from source only if there is none (minutes)
+  queued: the sentinel will deploy 779179c through the gate once this node is idle. This is not done yet.
+  next: the sentinel performs it when this node is idle. The record lands in <config>/sentinel/done/ or failed/, and installed.txt records the commit it installed.
+  following: Ctrl-C stops following; the install continues (wa update --follow re-attaches)
+  no published binary for 779179c on x86_64-unknown-linux-gnu: building from source, minutes
+  building 12/456 compiling provisioning (from source, on this machine) . 3s
+  building 48/456 compiling wa-host (from source, on this machine) . 4s
+  building 456/456 proving (from source, on this machine) . 5s
+  installed 779179c29377 . 6s
+
+published        6 printed (1 alarming) first byte 1.550s last 3.735s exit 0
+  install: published binary for 9809881 on x86_64-unknown-linux-gnu - download, no build
+  queued: the sentinel will deploy 9809881 through the gate once this node is idle. This is not done yet.
+  next: the sentinel performs it when this node is idle. The record lands in <config>/sentinel/done/ or failed/, and installed.txt records the commit it installed.
+  following: Ctrl-C stops following; the install continues (wa update --follow re-attaches)
+  installing the published binary (no build) . 0s
+  installed 9809881c9396 . 2s
+
+fail            18 printed (4 alarming) first byte 1.428s last 6.951s exit 1
+  (the four lines above, then the phases)
+  failed: compiling: no built binary at <build>/release/wa . 5s
+    Compiling crate-6995 v0.1.0        <- the installer's own last eight lines
+    Compiling crate-6996 v0.1.0
+    Compiling crate-6997 v0.1.0
+    Compiling crate-6998 v0.1.0
+    Compiling crate-6999 v0.1.0
+    Compiling crate-7000 v0.1.0
+    deploy: no published binary for this commit; building this tree (disk floor ok)
+    deploy: refused(no_built_binary): nothing is built at this install path, and this deploy was told not to build
+  next: this node still runs 917dfff0a26a; the installer's own output is <config>/sentinel/deploy.out
+
+problems        18 printed (3 alarming) first byte 1.210s last 6.867s exit 1
+  ... installed ac84902c9f95, with 1 problem(s): the sentinel could not be restarted after the swap . 5s
+  8 lines of the build log
+  next: this node still runs ac84902c9f95; ...   <- says "still runs" about a commit it just installed
+
+current (tree already at the installed commit)   6 printed, first byte 0.623s, last 2.688s, exit 0
+  it QUEUED A FULL DEPLOY (build + the whole test suite + the swap) after a git fetch and a sentinel preflight.
+
+release-current   first byte 0.633s, then 5 lines, exit 1
+  no published binary is named for this commit here: the installer looks for one built from the same inputs, and builds from source only if there is none (minutes)
+  this node already runs the newest published bundle (node-...); nothing to do.
+  following: Ctrl-C stops following; the install continues (wa update --follow re-attaches)
+  no phase reported yet: waiting for the sentinel to observe this request . 0s
+  stopped following after 1800s: the sentinel has not started this request (...); wa update --follow picks it up again   <- a failure it invented
+
+release-queued   first byte 0.366s, then 6 lines, exit 1
+  ... queued: installing node-... in the transient unit wa-release-update-...
+  ... no phase reported yet ... stopped following after 1800s ...   <- same invented failure
+
+WHAT RAN BEFORE THE FIRST LINE (build case, 1.5 s on a fixture with no network):
+  9-10 git calls, one of them `git fetch --quiet origin`; one sentinel `preflight`; the pre-update backup
+  (a sqlite copy of every store); then the sentinel `request deploy`.
