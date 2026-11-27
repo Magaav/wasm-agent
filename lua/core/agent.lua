@@ -2970,7 +2970,10 @@ function M:run_body(text, images)
   -- (lua/core/codemode_pending.lua, stop_work); the code-mode layer keeps it on this run's tool
   -- context (lua/core/codemode.lua, cancel_error), which is rebuilt every round - so it is taken
   -- here, at run scope, where the cancellation check below can still reach it.
-  local stop_notice
+  -- The sentence a stop produced, read from the RUN as well as from the round: a stop that ends a round before the
+  -- batch is folded in never reaches the place that copies dispatch_ctx.stop_notice (measured 28/11: the record
+  -- said `stopped 1: bash; record <id>` while the reader saw nothing), so both are consulted.
+  local stop_notice = self.stop_notice
   while true do
     round = round + 1
     -- The deploy pause (lua/core/deploy_pause.lua). This is the step boundary: between decisions,
@@ -4178,7 +4181,10 @@ function M:run_body(text, images)
             local pending_calls = dofile('lua/core/codemode_pending.lua')
             local _, said = pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil,
               dispatch_ctx and dispatch_ctx.stop_notice or nil)
-            if said ~= nil and type(dispatch_ctx) == 'table' then dispatch_ctx.stop_notice = said end
+            if said ~= nil then
+              if type(dispatch_ctx) == 'table' then dispatch_ctx.stop_notice = said end
+              self.stop_notice = said
+            end
           end)
         end
       end
