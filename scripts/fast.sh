@@ -1404,6 +1404,9 @@ check wit-lint-selftest bash scripts/test-wit-lint.sh
 # so these two are what the landing gate runs. Proved by running them with the same argv fast.sh uses.
 check wit-async node scripts/lint-wit-async.mjs
 check wit-async-selftest bash scripts/test-wit-async-lint.sh
+# ONE MODEL CALL IS ONE 'run' EVENT (27/11): the row counts the ledger for a single run call and refuses a second
+# nested row. It caught a real duplicate (two starts, same arguments_hash) that the structural reading had argued away.
+check run-logged-once env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-run-logged-once.lua" "$bin" --db "$work/run-logged-once.db"
 # SIGNED RELEASES ON THE FAST PATH (27/11): scripts/test-release-sign.lua shipped from 5185436b and was wired into no
 # runner, so nothing judged it and it rotted - by the time this line existed the fixture signed a set the publisher
 # then rewrote (release_signature_invalid ... signature_stale). It is wired here, and green, so the next drift is a
