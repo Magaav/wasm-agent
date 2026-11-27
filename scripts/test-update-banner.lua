@@ -562,7 +562,11 @@ eq(tick_calls, 2, "a distinct cache path is a distinct window")
 -- while it runs. The windows are the twin of the Rust renderer's constants, so the tests read that
 -- file rather than restating them: a drift here would be a build that hides the notice for a
 -- different length of time depending on which renderer drew it.
-local rust = host.read_file("rust/wa-term/src/build_status.rs") or ""
+-- The constants LEFT `wa-term` in the last slice of wa-term-own-program: the row is ONE renderer in
+-- `wa-tool-progress` now, and `wa_term::build_status` is the re-export. The reader follows the code, so
+-- it asks the file that owns them - and falls back to the old one, where they lived.
+local rust = host.read_file("rust/wa-tool-progress/src/build.rs") or ""
+if rust == "" then rust = host.read_file("rust/wa-term/src/build_status.rs") or "" end
 local cli_view = dofile("lua/core/cli_view.lua")
 local function rust_const(name)
   return tonumber((rust:match("const " .. name .. ": f64 = ([%d%.]+)")))

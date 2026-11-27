@@ -2171,7 +2171,7 @@ dependencies = [
  "wa-queue",
  "wa-rendezvous",
  "wa-sqlite",
- "wa-term",
+ "wa-term-proto",
  "wa-tls",
  "wa-tool-progress",
  "wa-vault",
@@ -2537,7 +2537,16 @@ dependencies = [
  "libc",
  "serde_json",
  "wa-host-support",
+ "wa-term-proto",
  "wa-tool-progress",
+]
+
+[[package]]
+name = "wa-term-proto"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "serde_json",
 ]
 
 [[package]]

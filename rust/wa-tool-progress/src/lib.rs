@@ -34,6 +34,9 @@ use serde_json::{json, Value};
 
 /// The bar's width, and its glyphs: the same shape `wa-term`'s build loader draws, so the two
 /// loaders on the same row cannot look like two different features.
+pub mod build;
+pub mod render;
+
 pub const BAR: usize = 14;
 const BAR_LEFT: &str = "\u{2595}";
 const BAR_RIGHT: &str = "\u{258f}";
@@ -894,5 +897,25 @@ mod tests {
         // What the aggregate must never be: a tool name, a session id, a line of output.
         let line = elsewhere(2);
         assert!(!line.contains("bash") && !line.contains('\u{27f3}'));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The store: what a running call publishes for its own session's reader, and what removes it.
+// MOVED OUT OF `wa-term`: the node publishes these facts (its own ticker) and the renderer reads them,
+// so the file is this crate's business and neither side needs the drawing crate for it.
+pub fn publish(owner: &str, facts: &Value) -> std::io::Result<()> {
+    let Some(path) = progress_path(owner) else {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "tool_progress_owner_required"));
+    };
+    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(facts)?)?;
+    std::fs::rename(&temporary, &path)
+}
+
+pub fn finish(owner: &str) {
+    if let Some(path) = progress_path(owner) {
+        let _ = std::fs::remove_file(path);
     }
 }
