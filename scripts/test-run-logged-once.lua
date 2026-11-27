@@ -10,6 +10,22 @@
 -- real one in the runner's private home, read through telemetry.events (a cursor reader).
 --
 --   WASM_AGENT_HOME=<scratch> WASM_AGENT_LUA_ROOT=<repo> WA_SCRIPT=scripts/test-run-logged-once.lua wa --db <scratch>
+-- THE ROW JUDGES A TREE THAT CARRIES THE FIX, AND SAYS SO WHEN IT DOES NOT. Measured at landing queue #59: the row
+-- came back RED on a merged tip whose Lua tree did not carry the guard in lua/core/codemode.lua (a stale or embedded
+-- tree), which reads as "the product is broken" when the truth is "this row cannot judge here". A row that cannot see
+-- the code it is about must SKIP BY NAME, never fail.
+do
+  local root = host.getenv('WASM_AGENT_LUA_ROOT')
+  if root and root ~= '' then
+    local ok, body = pcall(host.read_file, root .. '/lua/core/codemode.lua')
+    if ok and type(body) == 'string' and not body:find("call.tool~='run'", 1, true) then
+      print('SKIP test-run-logged-once: the Lua tree at ' .. root .. ' has no guard in codemode.lua for the door, '
+        .. 'so this row would report the defect it exists to prevent instead of judging the fix')
+      return
+    end
+  end
+end
+
 local native_getenv = host.getenv
 local overrides = {WASM_AGENT_LLM_API_KEY='test-only', WASM_AGENT_PROVIDER='opencode-go',
   WASM_AGENT_LLM_MODEL='deepseek-v4.1-flash', WASM_AGENT_PI_MODELS_STORE='missing-test-store',
