@@ -1054,15 +1054,20 @@ impl Transcript {
         // A frame that keeps the rows it had paints ONCE: the second pass is only for the frame in
         // which the pinned row appears or goes, and that is a change of state, not a per-frame cost.
         if pin.is_some() != expected {
-            reserved = usize::from(pin.is_some());
+            // THE BALLOON'S ROWS STAY RESERVED HERE. This pass exists for the frame in which the pin
+            // appears or goes, and it used to recompute the reservation from the pin alone - which
+            // dropped the balloon's rows for that frame, drew the chat over them and left
+            // `self.reserved` (what a press is measured against) one balloon short.
+            reserved = balloon_rows + usize::from(pin.is_some());
             shown = self.paint(width, height.saturating_sub(reserved).max(1), reserved);
         }
         let mut top: Vec<String> = Vec::new();
         if let Some(row) = pin { top.push(row); }
         top.truncate(height.saturating_sub(1).min(top.len()));
-        let reserved = top.len();
+        // The chat begins BELOW the balloon and the pin, so that is what a press is measured against.
+        let reserved = top.len() + balloon_rows;
         self.reserved = reserved;
-        self.pin_shown = reserved >= 1;
+        self.pin_shown = !top.is_empty();
         // The way back: the reader is not following the newest output, so a pill says so on the
         // region's last row and answers a press and the key. It never reaches the row below it.
         self.pill_row = None;
@@ -1932,6 +1937,7 @@ mod notice_balloon_tests {
         assert!(t.notice_balloon(40, later).is_empty(), "the rows come back on their own");
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -3139,7 +3145,7 @@ mod tests {
     // messages". The status row is his to keep: a message never takes it.
 
     /// A session with two turns: a request, the answer under it, and the same again.
-    fn two_turns() -> Transcript {
+    pub(crate) fn two_turns() -> Transcript {
         let mut t = plain(Transcript::default());
         // A little chat above the first turn, so that turn can scroll off the top as well.
         t.block(false); for n in 0..4 { t.write(&format!("welcome {n}\n")); }
@@ -3156,7 +3162,7 @@ mod tests {
     /// Two frames. The pinned request is decided from the LAST DRAWN frame (`Transcript::view_at`,
     /// which is what keeps it from flipping with the height of the row it reserves), so a test that
     /// wants the settled picture draws once to establish where the view is and once to read it.
-    fn settled(t: &mut Transcript, width: usize, height: usize) -> Vec<String> {
+    pub(crate) fn settled(t: &mut Transcript, width: usize, height: usize) -> Vec<String> {
         let _ = t.view(width, height);
         t.view(width, height)
     }
@@ -3307,7 +3313,7 @@ mod tests {
 
         // Two seconds later: the message is gone and the frame is the one from before it, byte for byte.
         let later = now + std::time::Duration::from_millis(NOTICE_MS + 50);
-        let after = t.view_at(40, 8, later);
+        let after = t.view_at(40, 10, later);
         assert_eq!(after, before, "the frame after it is the frame before it: {after:?}");
         assert!(t.expire_notice(later), "the caller is told to take it away");
         assert_eq!(t.notice_text(later), None, "and it is gone from the state");
@@ -3349,22 +3355,35 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_a_copy_icon_lands_on_the_same_row_during_the_notice() {
+    fn a_press_on_a_copy_icon_is_unchanged_while_the_notice_balloon_shows() {
         let mut t = Transcript::default();
         fenced(&mut t);
-        let before = t.view(60, 14);
-        let row = before.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).expect("the icon's row") + 1;
-        assert_eq!(t.copy_at(row, 1).as_deref(), Some("print('hi')\nreturn 1"), "the icon copies before");
+        // ENOUGH BELOW THE FENCE THAT ITS ICON STAYS ON SCREEN while the balloon takes its rows at the
+        // top: this row asks WHAT a press lands on, not what happens when the chat is clipped.
+        t.block(false);
+        for n in 0..6 { t.write(&format!("below {n}\n")); }
+        let before = t.view(60, 20);
+        let icon = |rows: &[String]| rows.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).expect("the icon's row");
+        let row = icon(&before);
+        assert_eq!(t.copy_at(row + 1, 1).as_deref(), Some("print('hi')\nreturn 1"), "the icon copies before");
+
         let now = std::time::Instant::now();
         assert!(t.notice("Copied 18 characters", now, false));
-        let during = t.view_at(60, 14, now);
+        let during = t.view_at(60, 20, now);
         assert!(during[2].contains("Copied 18 characters"), "{during:?}");
-        // THE ICON'S ROW MOVED DOWN WITH THE CHAT - by the balloon's four rows - and THAT is the row a
-        // press lands on now. The question is the same as before: does a press copy what the row shows.
-        assert_eq!(during[row - 1 + 4], before[row - 1],
-            "the icon's row is byte-identical, four rows lower: {during:?}");
-        assert_eq!(t.copy_at(row + 4, 1).as_deref(), Some("print('hi')\nreturn 1"),
-            "a press on its new row copies the same text: {during:?}");
+        // WHERE THE ICON IS, read from the frame rather than computed from an offset: the balloon
+        // changes the chat's region, and a following view loses its top rows rather than moving
+        // everything by a constant. What must hold is the reader's experience: the row that SHOWS the
+        // icon, pressed, copies that icon's text.
+        let moved = icon(&during);
+        // A FOLLOWING VIEW IS ANCHORED AT THE BOTTOM: the balloon takes its rows from the blank space
+        // above the chat, not from the reader's place in it, so the icon is exactly where it was and a
+        // press on that row still copies it. (A frozen view is the other case: there the balloon pushes
+        // the chat down, which the test above pins.)
+        assert_eq!(moved, row, "the icon does not move for the balloon: {during:?}");
+        assert_eq!(t.copy_at(moved + 1, 1).as_deref(), Some("print('hi')\nreturn 1"),
+            "a press on that row copies it, during the balloon as before: {during:?}");
+        assert_eq!(during[moved], before[row], "and it is the same icon: {during:?}");
     }
 
     #[test]
