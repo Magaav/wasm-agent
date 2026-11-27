@@ -256,6 +256,7 @@ fn a_download_reads_the_last_attempts_chunks_and_checks_the_hash() {
         sha256: sha256_hex(payload),
         bytes: payload.len() as u64,
         chunks: 1,
+        path: None,
     };
     // A failed first attempt, then the real one: progress is append-only, so both are stored.
     queue.progress(wa_queue::JobId(1), &seam::download_header(1)).unwrap();
@@ -287,6 +288,7 @@ fn a_download_filename_cannot_escape_the_directory() {
         sha256: String::new(),
         bytes: 10,
         chunks: 1,
+        path: None,
     };
     let name = file_name(&manifest);
     assert!(!name.contains('/') && !name.contains('\\'), "{name}");
@@ -757,4 +759,51 @@ fn the_answer_names_the_job_that_answered_it() {
     let refused = ask_in(&queue, seam::Op::Read, &serde_json::json!({"__job": next}), 1, BUILD);
     assert_eq!(refused["job"].as_u64(), Some(next), "a refusal names its job too: {refused}");
     assert_eq!(refused["error"], "whatsapp_read_chat_not_found", "{refused}");
+/// A file the COMPONENT wrote is checked by the host: inside this node's directory, the size it
+/// claims, and the digest the message carries. Nothing is taken on the component's word.
+#[test]
+fn a_file_the_component_wrote_is_verified_before_it_is_answered() {
+    let dir = wa_host_support::paths::component_dir().join(DOWNLOAD_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    let payload = b"a video, not a chunk stream".repeat(64);
+    let digest = super::sha256_hex(&payload);
+    let leaf = format!("verify-{}.bin", std::process::id());
+    std::fs::write(dir.join(&leaf), &payload).unwrap();
+    let manifest = seam::Download {
+        chat: "5511999999999@lid".into(),
+        id: "3EB0ABCDEF".into(),
+        kind: "video".into(),
+        mime: "video/mp4".into(),
+        filename: "clip.mp4".into(),
+        sha256: digest.clone(),
+        bytes: payload.len() as u64,
+        chunks: 0,
+        path: Some(format!("/downloads/{leaf}")),
+    };
+    let answer = verify_stored(&manifest).expect("a real file in the node's own directory");
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(answer["bytes"], payload.len() as u64, "{answer}");
+    assert_eq!(answer["sha256"], digest, "the digest the host computed, not the one the component claimed: {answer}");
+    let path = answer["path"].as_str().unwrap();
+    assert!(path.contains(DOWNLOAD_DIR), "the answer names the host's path: {path}");
+    assert!(path.ends_with(&leaf), "{path}");
+
+    // A size the manifest gets wrong is refused, with the words the chunk path uses.
+    let mut lying = manifest.clone();
+    lying.bytes = 3;
+    let (code, detail) = verify_stored(&lying).expect_err("a wrong size cannot pass");
+    assert_eq!(code, "hash_mismatch", "{detail}");
+    // A digest that does not match is refused the same way.
+    let mut forged = manifest.clone();
+    forged.sha256 = "00".repeat(32);
+    assert_eq!(verify_stored(&forged).unwrap_err().0, "hash_mismatch");
+    // A path that climbs out of the directory is refused by name, before anything is read.
+    let mut escaping = manifest.clone();
+    escaping.path = Some("/downloads/../../../../etc/passwd".into());
+    assert_eq!(verify_stored(&escaping).unwrap_err().0, "path_refused");
+    // And a file that is not there at all.
+    let mut absent = manifest.clone();
+    absent.path = Some("/downloads/nothing-here.bin".into());
+    assert_eq!(verify_stored(&absent).unwrap_err().0, "path_refused");
+    let _ = std::fs::remove_file(dir.join(&leaf));
 }

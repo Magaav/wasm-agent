@@ -650,6 +650,16 @@ fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str)
         Some(manifest) => manifest,
         None => return seam::refusal(seam::Op::Download, "answer_unreadable", "the download manifest is not readable"),
     };
+    // THE COMPONENT MAY HAVE WRITTEN THE FILE ITSELF (`manifest.path`, the directory the node granted it).
+    // A component's word is checked, not trusted: the path must be inside the directory THIS node owns,
+    // and the size and digest are recomputed here. Only a manifest without a path - a node that granted
+    // nothing - falls back to the chunks.
+    if manifest.path.is_some() {
+        return match verify_stored(&manifest) {
+            Ok(answer) => answer,
+            Err((code, detail)) => seam::refusal(seam::Op::Download, &code, &detail),
+        };
+    }
     match collect_in(q, id, &manifest) {
         Ok(bytes) => match store(&manifest, &bytes) {
             Ok(path) => json!({
@@ -669,6 +679,51 @@ fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str)
         },
         Err((code, detail)) => seam::refusal(seam::Op::Download, code, detail),
     }
+}
+
+/// The answer for a file the COMPONENT wrote, verified against this node's own directory.
+///
+/// The component answers with the path it wrote (`/downloads/<name>` in its own world); what the tool
+/// answers with is the host's path, after the host has checked three things itself: the file is inside the
+/// directory this node owns (`DOWNLOAD_DIR`), its size is the size the manifest claims, and its sha256 is
+/// the digest the message carries (`hash_mismatch` when either differs, the same words the chunk path
+/// uses). Nothing about the file is taken on the component's word.
+fn verify_stored(manifest: &seam::Download) -> Result<Value, (String, String)> {
+    let guest = manifest.path.as_deref().unwrap_or_default();
+    let dir = wa_host_support::paths::component_dir().join(DOWNLOAD_DIR);
+    let leaf = std::path::Path::new(guest).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if leaf.is_empty() || leaf.starts_with('.') {
+        return Err(("path_refused".to_string(), "the component named no usable file".to_string()));
+    }
+    let path = dir.join(leaf);
+    // A symlink or a `..` in the middle would escape the directory the node owns; `canonicalize` answers
+    // the real place, and it must still be the file in OUR directory.
+    let real = path.canonicalize().map_err(|error| ("path_refused".to_string(), format!("the file is not readable where the component said: {error}")))?;
+    let owned = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    if !real.starts_with(&owned) {
+        return Err(("path_refused".to_string(), "the file is outside this node's download directory".to_string()));
+    }
+    let bytes = std::fs::read(&real).map_err(|error| ("path_refused".to_string(), format!("the file is not readable: {error}")))?;
+    if bytes.len() as u64 != manifest.bytes {
+        return Err(("hash_mismatch".to_string(), format!("the file is {} bytes; the manifest says {}", bytes.len(), manifest.bytes)));
+    }
+    let digest = sha256_hex(&bytes);
+    if !manifest.sha256.is_empty() && !manifest.sha256.eq_ignore_ascii_case(&digest) {
+        return Err(("hash_mismatch".to_string(), "the file does not hash to the message's own digest".to_string()));
+    }
+    Ok(json!({
+        "ok": true,
+        "op": "download",
+        "chat": manifest.chat,
+        "id": manifest.id,
+        "kind": manifest.kind,
+        "mime": manifest.mime,
+        "filename": manifest.filename,
+        "bytes": bytes.len() as u64,
+        "sha256": digest,
+        "path": real.to_string_lossy(),
+        "note": "the bytes are in this node's component directory, in a bounded download folder, and this tool checked the file against the message's own size and digest",
+    }))
 }
 
 /// Collect the chunks of the **last** download attempt of this job.
