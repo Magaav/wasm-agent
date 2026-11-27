@@ -176,6 +176,17 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   already uses work, and it is why `KILL_ON_JOB_CLOSE` is what makes the trade safe:
   the tree still cannot outlive the node. If a future change removes the job object,
   this becomes a leak and must be revisited.
+* A run **cancel** - Esc, `/stop`, a steering cancel, a turn's deadline - ends the command
+  the run is WAITING ON, and ends its whole process group. The operation's own cancel is
+  dispatched, the supervisor sends SIGTERM to the group and SIGKILLs whatever is left after
+  `STOP_GRACE_MS` (250 ms, rust/wa-operation/src/process.rs), and the operation's record says
+  which signal it took: `stop: {signal, grace_ms, needed_kill, survivors}`. A `sleep 300` a
+  person stopped is gone, not just its prompt, and the run's own line says so:
+  `stopped: sleep 300, after 2.1 s (nothing survived the 250 ms grace)`.
+  What a run cancel does NOT end is work the caller started detached: a call left with
+  `wait_s: 0`, anything the `operation` tool started, and an adopted tree (above). Those keep
+  running and the answer names them instead (`still running: sleep 300, after 2.1 s (op …)`),
+  because the person asked for that work to outlive the turn.
 * On Windows, once the launcher has exited and every remaining job member is
   the MSVC `VCTIP.EXE` telemetry helper under Visual Studio's `VC/Tools/MSVC`
   installation path (plus its system console host), terminate the owned job and settle the build. Compiler
