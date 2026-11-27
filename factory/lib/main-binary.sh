@@ -27,6 +27,11 @@ wa_main_binary_release() { # <sha> <root> <stage>
   . "$lib" || { echo "wa_main_binary: could not source $lib" >&2; return 1; }
   command -v wa_node_binary_source_resolve >/dev/null 2>&1 || {
     echo "wa_main_binary: $lib defines no wa_node_binary_source_resolve" >&2; return 1; }
+  # The deploy bounds its digest scan at 20 s because a deploy has a build waiting behind it. THIS caller's
+  # fallback is a ten-minute build, so a slow scan is the cheaper answer: measured 27/11 - the first scan in a
+  # fresh stage stopped at 23 releases inside its 20 s bound and reported "no release", and the same scan a
+  # minute later, with the list warm, found the one covering the tip (fdeda1b8).
+  export WA_NODE_RELEASE_DIGEST_SECONDS=${WA_NODE_RELEASE_DIGEST_SECONDS:-60}
   triple=$(wa_node_target_triple 2>/dev/null) || triple=""
   [ -n "$triple" ] || { echo "wa_main_binary: no prebuilt target triple on this machine" >&2; return 1; }
   mkdir -p "$stage" 2>/dev/null || true
