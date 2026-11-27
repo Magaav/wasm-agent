@@ -595,9 +595,17 @@ while :; do
   if [ "$HEAD_NOW" != "$MAIN_NOW" ] && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "HEAD" ]; then
     fail "refused(source_pin_stale): $SOURCE_ROOT is a detached worktree at ${HEAD_NOW:0:12} and origin/main is ${MAIN_NOW:0:12}; a landing never fast-forwards a detached tree, so this wait could only time out after ${WA_TREE_WAIT}s. Unset WA_DEPLOY_ROOT (a deploy exports it for the processes it starts and a watcher started by one inherits it), or point it at the canonical checkout. Nothing was built."
   fi
-  [ "$HEAD_NOW" = "$MAIN_NOW" ] && [ "$DIRT_NOW" = "0" ] && break
+  # IS THIS TREE ON MAIN, OR IS IT THE TIP? (P0, 27/11: a peer's update waited the full 600 s and refused
+  # `canonical_busy` while the factory landed every ~10 minutes - with HEAD == origin/main as the test, a tree whose
+  # deploy fetches can never install, because origin/main never stops moving.) Ancestry answers the question the
+  # deploy actually needs: a tree on a main commit that has since moved forward IS main. A clean tree is still
+  # required, and a commit that is NOT an ancestor still waits and then refuses by name.
+  if [ "$DIRT_NOW" = "0" ] && [ -n "$HEAD_NOW" ] && [ -n "$MAIN_NOW" ]     && git merge-base --is-ancestor "$HEAD_NOW" "$MAIN_NOW" 2>/dev/null; then
+    [ "$HEAD_NOW" = "$MAIN_NOW" ] || note "the tree is on ${HEAD_NOW:0:12}, which is on origin/main (${MAIN_NOW:0:12}) but not its tip: deploying the tree as it is, which is a main commit"
+    break
+  fi
   if [ "$TREE_WAITED" -ge "$WA_TREE_WAIT" ]; then
-    fail "refused(canonical_busy): $SOURCE_ROOT is not exactly origin/main after waiting ${WA_TREE_WAIT}s (HEAD ${HEAD_NOW:0:12}, origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s)); a landing is in progress or the tree owns edits nobody has committed. Nothing was built. The queue's status names its holder."
+    fail "refused(canonical_busy): $SOURCE_ROOT is not on origin/main after waiting ${WA_TREE_WAIT}s (HEAD ${HEAD_NOW:0:12} is not an ancestor of origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s)); a landing that never stops is not a reason to wait, so this is refusal after the bound, not a rule about the tip"
   fi
   [ "$TREE_WAITED" = "0" ] && note "waiting for the canonical tree to be exactly origin/main: HEAD ${HEAD_NOW:0:12}, origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s) - a landing is in progress"
   sleep 5
@@ -1716,8 +1724,14 @@ if ! WA_COMPONENTS_DIR="$COMPONENT_STAGE" WASM_AGENT_HOME="$COMPONENT_PROOF_HOME
   env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY -u WA_GRAPH_ROOT -u WA_GRAPH_DB \
   "$NEW" --db "$COMPONENT_PROOF_HOME/proof.db" >"$COMPONENT_PROOF_HOME/proof.log" 2>&1; then
   tail -5 "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null | sed 's/^/  component: /' >&2
+  # WHICH COMPONENT, WHICH CALL (P0, 27/11: work's update refused with the sentence below and nothing else, so the
+  # operator could not tell memory from graph, or a call from a dormant refusal). The proof prints a step before each
+  # check; the last one it reached is the answer, and when it printed none the refusal says that too instead of
+  # guessing.
+  PROOF_STEP="$(grep 'component proof step:' "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null | tail -1 | sed 's/^component proof step: //')"
   rm -rf "$COMPONENT_PROOF_HOME"
-  fail "refused(component_proof_failed): the candidate binary did not answer a call through the staged component (or a dormant feature did not refuse by name); nothing installed"
+  [ -n "$PROOF_STEP" ] || PROOF_STEP="the proof printed no step, so it failed before the first check"
+  fail "refused(component_proof_failed): $PROOF_STEP - the staged components were:$COMPONENT_SET; nothing installed"
 fi
 COMPONENT_PROOF="$(grep -c 'component proof ok' "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null)"
 rm -rf "$COMPONENT_PROOF_HOME"
