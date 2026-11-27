@@ -1595,6 +1595,9 @@ gate_run bash scripts/test-scratch-env.sh
 # verifies, a truncated/flipped/tampered one is refused by name, an interface mismatch names BOTH digests, and a
 # tarball path that escapes is refused. Milliseconds; no install, no pointer, no network.
 gate_run bash scripts/test-lua-part.sh
+# A lua part is accepted only under the SAME trusted-key check as a node build (27/11): unsigned or signed by a key
+# this node does not carry is refused by name before anything is unpacked.
+gate_run bash scripts/test-lua-part-signature.sh
 # THE HOST DECLARES ITS LUA INTERFACE (wa --interface) and names the tree in force with its digest
 # (wa --build-info lua_tree/lua_tree_digest). A binary older than the verbs SKIPS by name.
 WA_BIN="$BIN" gate_run bash scripts/test-lua-interface.sh

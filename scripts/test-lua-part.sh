@@ -21,6 +21,10 @@ fail() { echo "FAIL test-lua-part: $*" >&2; exit 1; }
 
 BASE="${TMPDIR:-/tmp}"
 case "$BASE" in */.wasm-agent|*/.wasm-agent/*) BASE=/tmp ;; esac
+ROOT="$PWD"
+# The verifier is passed explicitly (no WA_BIN fallback in the library).
+BIN="${WA_BIN:-$(command -v wa || true)}"
+[ -n "$BIN" ] && [ -x "$BIN" ] || { echo "FAIL test-lua-part: no wa binary (set WA_BIN)" >&2; exit 2; }
 W="$(mktemp -d "$BASE/wa-luapart-XXXXXX")" || { echo "FAIL test-lua-part: no scratch" >&2; exit 2; }
 trap 'rm -rf "$W"' EXIT
 
@@ -56,6 +60,11 @@ lock_line() { # <lock> <part file> <interface>
 }
 
 T1="$W/tree1"; build_tree "$T1" "$HOST_INT"; P1="$W/lua-core-1.tar.gz"; part_from "$T1" "$P1"
+# A PART IS ACCEPTED ONLY UNDER THE SAME TRUSTED-KEY CHECK AS A NODE BUILD (27/11): this row's parts are signed here
+# with the repository TEST key, because an unsigned part is now refused by name - scripts/test-lua-part-signature.sh
+# is the row that pins that refusal.
+export WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt"
+python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$W" --key A >/dev/null 2>&1 || fail "could not sign the fixture parts"
 LOCK="$W/components.lock"; lock_line "$LOCK" "$P1" "$HOST_INT"
 
 # R1: the good part
@@ -116,13 +125,13 @@ ok
 tree="$W/member/lua-core"; mkdir -p "$tree"; printf 'the old tree
 ' > "$tree/old.lua"
 lock_line "$LOCK" "$P1" "$HOST_INT"
-wa_lua_part_fill "$P1" "$LOCK" "$tree" "$HOST_INT" > "$W/fill.log" 2>&1 \
+wa_lua_part_fill "$P1" "$LOCK" "$tree" "$HOST_INT" "$BIN" > "$W/fill.log" 2>&1 \
   || { sed -n 1,4p "$W/fill.log" >&2; fail "R2: a good part must fill the member"; }
 [ -f "$tree/lua/core/init.lua" ] || fail "R2: the part did not land in the member"
 [ ! -f "$tree/old.lua" ] || fail "R2: the tree it replaced is still there"
 ok
 mkdir -p "$W/member2/lua-core"; printf 'keep me\n' > "$W/member2/lua-core/keep.lua"
-wa_lua_part_fill "$P1" "$LOCK" "$W/member2/lua-core" "$OTHER_INT" 2> "$W/fill2.log" \
+wa_lua_part_fill "$P1" "$LOCK" "$W/member2/lua-core" "$OTHER_INT" "$BIN" 2> "$W/fill2.log" \
   && fail "R2: a part whose interface differs must not fill the member"
 grep -q 'lua_part_interface_mismatch' "$W/fill2.log" || { sed -n 1,3p "$W/fill2.log" >&2; fail "R2: the refusal is not named"; }
 [ -f "$W/member2/lua-core/keep.lua" ] || fail "R2: a refused part replaced the tree it must not touch"
