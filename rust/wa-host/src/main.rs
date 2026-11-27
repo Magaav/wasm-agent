@@ -780,11 +780,10 @@ fn main() {
         });
         if let Err(error) = wa_capabilities::serve_static::serve(root, port, rendezvous) {
             eprintln!("serve-static: {error}");
-    // THE OPERATIONS SUPERVISOR (slice 1 of ready-operations-own-program.md): this binary in a second
-    // mode, owning the process groups the node's tools start. Its own process, its own lifetime and its
-<>>>>>>> 5ca2149 (operations: the node stops carrying the runner (slice 2 complete - the commit that pays))
-
->>>>>>> 38bfda24 (operations-supervisor: the runner's first verbs cross a process boundary (ready-operations-own-program.md, slice 1))
+            std::process::exit(1);
+        }
+        return;
+    }
     if command == "serve" {
         if let Err(error) = lua.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
             eprintln!("lua error: {error}");
