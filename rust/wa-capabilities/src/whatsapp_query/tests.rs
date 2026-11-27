@@ -807,3 +807,37 @@ fn a_file_the_component_wrote_is_verified_before_it_is_answered() {
     assert_eq!(verify_stored(&absent).unwrap_err().0, "path_refused");
     let _ = std::fs::remove_file(dir.join(&leaf));
 }
+
+/// The sizes Victor hit live: a 4.3 MB video (refused before) and a 40 MB one (never possible through a
+/// queue that caps a job at 1 MiB of progress). Both are files the component wrote; the host reads them,
+/// counts them and hashes them, and neither is anywhere near a transport bound.
+#[test]
+fn a_media_file_of_any_size_the_node_will_keep_is_answered_with_its_path() {
+    let dir = wa_host_support::paths::component_dir().join(DOWNLOAD_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (label, size) in [("4mb", 4 * 1024 * 1024usize), ("40mb", 40 * 1024 * 1024usize)] {
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let leaf = format!("size-{label}-{}.mp4", std::process::id());
+        std::fs::write(dir.join(&leaf), &payload).unwrap();
+        let manifest = seam::Download {
+            chat: "5511999999999@lid".into(),
+            id: "3EB0ABCDEF".into(),
+            kind: "video".into(),
+            mime: "video/mp4".into(),
+            filename: "clip.mp4".into(),
+            sha256: super::sha256_hex(&payload),
+            bytes: payload.len() as u64,
+            chunks: 0,
+            path: Some(format!("/downloads/{leaf}")),
+        };
+        let answer = verify_stored(&manifest).unwrap_or_else(|(code, detail)| panic!("{label}: {code}: {detail}"));
+        assert_eq!(answer["bytes"], payload.len() as u64, "{label}: {answer}");
+        assert_eq!(answer["path"].as_str().unwrap().ends_with(&leaf), true, "{label}");
+        assert!(size as u64 > seam::MAX_DOWNLOAD_BYTES, "{label} is past the old transport bound, which is the point");
+        assert!(size as u64 <= seam::MAX_STORED_BYTES, "{label} is inside what the node keeps");
+        let _ = std::fs::remove_file(dir.join(&leaf));
+    }
+    // And the bound that DOES remain is the disk: a request may not ask for more than the node keeps.
+    let asked = super::request_of(seam::Op::Download, &serde_json::json!({"chat": "1@lid", "id": "X", "max_bytes": seam::MAX_STORED_BYTES * 2})).unwrap();
+    assert_eq!(asked.max_bytes, seam::MAX_STORED_BYTES, "the validator clamps to what the node keeps");
+}

@@ -2264,13 +2264,7 @@ async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Resu
     // the bound: the bytes ride the job's progress stream, which `wa:queue` caps at 1 MiB.
     let stored = store_at_downloads(&bytes, &id, &media.filename, &media.mime);
     if stored.is_none() && bytes.len() as u64 > seam::MAX_DOWNLOAD_BYTES {
-        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the decrypted media is larger than this node will hand back through the job's progress stream, and it granted no directory to write it in");
-        answer["size"] = serde_json::Value::from(bytes.len());
-        answer["max_bytes"] = serde_json::Value::from(seam::MAX_DOWNLOAD_BYTES);
-        // A refusal that names no way forward is what made a model invent one (shell on another node,
-        // ffmpeg, a store read by hand). This is the exact next call.
-        answer["next"] = serde_json::Value::from("enable the component with a definition that grants it a directory (`wa services enable wa-whatsapp`, the manifest's `capabilities.dirs`), and this same call returns the file's path");
-        return Ok(answer);
+        return Ok(seam::download_too_large_answer(bytes.len() as u64));
     }
     let chunks = match stored {
         Some(_) => 0,
