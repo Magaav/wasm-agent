@@ -26,6 +26,9 @@ pub mod links;
 pub mod opening;
 pub mod scroll;
 pub mod selection;
+// The transcript capability on the far side of the wire (`src/bin/wa-term.rs`): the program's whole
+// state and its call table, so a display-only change is built into `wa-term` and nothing else.
+pub mod session;
 pub mod terminal_editor;
 pub mod tool_progress;
 pub mod transcript;
