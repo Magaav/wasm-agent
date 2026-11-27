@@ -331,4 +331,4 @@ wa-whatsapp b92137035ff30b79e654047e450b335283fd22e2c9f5922796c65a7ccfcf44b6 895
 # are not inside this artifact. Feature `vision` (wa-features) decides; the kernel reader in
 # rust/wa-kernel-runtime/src/vision_host.rs stays the fallback until the flip after round 2. Built by
 # cargo build --release --target wasm32-wasip2 in rust/components/vision.
-vision ccb5c45265fd30fbc135e2052f080563a50c9de9d85a816bccffd38a6609348a 3669932
+vision 5577e2ca25ab72c52c7317628b3e9218ce0ce869a1c1b13d0c6f63f08233ce56 3642503

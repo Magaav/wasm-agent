@@ -1,0 +1,9 @@
+{
+  "name": "vision",
+  "kind": "tool",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "Images become words (wa:vision): the det+rec pipeline on rten, with the three model files HOST-SUPPLIED through the world's `assets` import - no model bytes are inside this artifact. Refuses with the vocabulary the node already prints (no-text-detected, image-unreadable, model-hash-mismatch, engine-failed).",
+  "capabilities": {},
+  "limits": {"memory_mb": 512}
+}
