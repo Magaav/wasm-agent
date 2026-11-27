@@ -196,7 +196,9 @@ host = {
   getenv = function(name)
     if name == "WA_BACKUP_ATTEMPTS" then return "3" end
     if name == "WA_BACKUP_BACKOFF_MS" then return "250" end
-    if name == "WA_BACKUP_BUSY_TIMEOUT_MS" then return "15000" end
+    -- The busy timeout is sqlite_busy's patience now (ARCHITECTURE.md laws 17-18): the snapshot takes the
+    -- number from the owner, and this stub answers the owner's knob.
+    if name == "WASM_AGENT_SQLITE_RETRY_MS" then return "15000" end
     return os.getenv(name)
   end,
   write_file = function(path, text) return true end,

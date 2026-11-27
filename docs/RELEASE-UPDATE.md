@@ -241,8 +241,11 @@ call, so the read cannot meet a page mid-commit.
   aside, and logs one line with the reason. `scripts/reclaim-disk.mjs` still reclaims a directory an
   older binary filled, keeping its newest copy, and `wa clean` prints the bytes it freed per category.
 
-Knobs, all optional: `WA_BACKUP_BUSY_TIMEOUT_MS` (15000), `WA_BACKUP_ATTEMPTS` (3),
-`WA_BACKUP_BACKOFF_MS` (250). `rust/wa-snapshot` is the same rule as a library, using SQLite's online
+Knobs, all optional: `WA_BACKUP_ATTEMPTS` (3), `WA_BACKUP_BACKOFF_MS` (250). The busy timeout is not a
+backup knob any more: `lua/core/sqlite_busy.lua` owns "how patient are we with a busy database"
+(`WASM_AGENT_SQLITE_RETRY_MS`), and `WA_BACKUP_BUSY_TIMEOUT_MS` was its second answer (ARCHITECTURE.md laws 17-19).
+
+`rust/wa-snapshot` is the same rule as a library, using SQLite's online
 backup API step by step, for the host path once a store is copied outside the Lua interpreter; its
 fifty-snapshot writer test (`cargo test -p wa-snapshot`) is where real concurrency is exercised, since
 one Lua interpreter has one SQLite connection and cannot lock a store against itself.
