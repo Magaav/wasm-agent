@@ -235,6 +235,10 @@ gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # installer refuses a non-rooted scratch (`absolute existing install/home required`) and the whole gate
 # dies on a proof directory it created itself - measured 2026-10-26, gate lane #238 and #239.
 SERVICE_PROOF="$(git rev-parse --absolute-git-dir)/service-gate-$(date +%s)-$$"
+# A CONTAINER'S WATCHER START RETRIES AND SAYS SO (Fable 26/11, work): deploy/wa-start-watcher.sh - bounded backoff, a line
+# per try, and one give-up line in sentinel.log when it runs out. The entrypoint the image ships calls it instead of a bare
+# `wa-sentinel start`.
+gate_run bash scripts/test-sentinel-start-retry.sh
 gate_run node scripts/test-sentinel-service.cjs "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" "$(cygpath -w "$SERVICE_PROOF/cli")"
 gate_run powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/scripts/test-sentinel-service-installer.ps1")" -Scratch "$(cygpath -w "$SERVICE_PROOF/installer")"
 INTAKE_PROOF="$(git rev-parse --absolute-git-dir)/intake-gate-$(date +%s)-$$"
