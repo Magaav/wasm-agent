@@ -1,55 +1,85 @@
-// Compile the vendored ffmpeg sources for the component's target, into one static archive the cdylib links.
+// Compile the vendored ffmpeg for the component's target: one archive per library, each compiled with its
+// OWN directory first on the include path, then linked in dependency order.
 //
-// The tree under `vendor/ffmpeg` is exactly what `scripts/vendor-ffmpeg-source.sh` copied from a configured
-// build: every .c the build compiled, the generated registry files, the headers, and that build's `config.h`.
-// `config.h` is the configuration - the demuxers, decoders and filters this component has, and the fact that
-// asm and threads are off - so nothing here re-derives it.
+// WHY PER LIBRARY AND NOT ONE ARCHIVE. ffmpeg's sources include headers BARE (`#include "internal.h"`,
+// `#include "adts_header.h"`), and several libraries have a header with the same name doing different
+// things: libavcodec/internal.h defines `AVCodecInternal`, libavutil/internal.h does not. With one global
+// include order, libavcodec/opus/parse.c found libavutil's and failed with "incomplete definition of type
+// struct AVCodecInternal" - a message that names the file and not the cause. ffmpeg's own build passes each
+// library's directory first for that library's files; this does the same.
+//
+// The sources themselves are exactly the list the vendored tree carries (`compiled.txt`, written by
+// scripts/vendor-ffmpeg-source.sh): some .c beside them are INCLUDED textually and compiling one of those on
+// its own produces a page of nonsense errors.
 use std::path::{Path, PathBuf};
 
-fn c_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            c_files(&path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("c") {
-            out.push(path);
-        }
-    }
-}
+/// Dependency order: avformat on top, avutil at the bottom.
+const LIBRARIES: [&str; 5] = ["libavutil", "libswresample", "libswscale", "libavcodec", "libavformat"];
 
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("vendor/ffmpeg");
-    // The vendored tree says which sources are COMPILED (`compiled.txt`, written by
-    // scripts/vendor-ffmpeg-source.sh): some of the .c beside them are INCLUDED textually and compiling one
-    // of those on its own produces a page of nonsense errors, which is how this was learned.
-    let mut sources = Vec::new();
     let list = root.join("compiled.txt");
-    if list.is_file() {
-        for line in std::fs::read_to_string(&list).unwrap_or_default().lines() {
-            let line = line.trim();
-            if !line.is_empty() { sources.push(root.join(line)); }
-        }
-    }
-    if sources.is_empty() {
-        for library in ["libavutil", "libswresample", "libswscale", "libavcodec", "libavformat"] {
-            c_files(&root.join(library), &mut sources);
-        }
-    }
-    if sources.is_empty() {
-        panic!("no vendored ffmpeg sources under {}: run scripts/vendor-ffmpeg-source.sh", root.display());
-    }
+    let text = std::fs::read_to_string(&list).unwrap_or_else(|error| {
+        panic!("no vendor list at {}: run scripts/vendor-ffmpeg-source.sh ({error})", list.display())
+    });
+    let mut sources: Vec<PathBuf> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| root.join(line))
+        .collect();
     sources.sort();
-    let mut build = cc::Build::new();
-    build.include(&root).define("HAVE_AV_CONFIG_H", None).define("_GNU_SOURCE", None);
-    // ffmpeg's sources are warning-clean for its own flags, not for clang's full set, and a component build
-    // that fails on a warning is a build nobody can regenerate.
-    build.warnings(false);
-    build.flag_if_supported("-w");
-    for source in &sources {
-        build.file(source);
-        println!("cargo:rerun-if-changed={}", source.display());
+    if sources.is_empty() {
+        panic!("the vendored list is empty: run scripts/vendor-ffmpeg-source.sh");
     }
-    build.compile("ffmpeg_vendored");
-    println!("cargo:rerun-if-changed={}", root.join("config.h").display());
+    for library in LIBRARIES {
+        let files: Vec<&PathBuf> = sources.iter().filter(|path| path.starts_with(root.join(library))).collect();
+        if files.is_empty() {
+            continue;
+        }
+        let mut build = cc::Build::new();
+        build.include(root.join(library));
+        build.include(&root);
+        for other in LIBRARIES {
+            if other != library {
+                build.include(root.join(other));
+            }
+        }
+        build.define("HAVE_AV_CONFIG_H", None).define("_GNU_SOURCE", None);
+        build.warnings(false);
+        build.flag_if_supported("-w");
+        for file in &files {
+            build.file(file);
+            println!("cargo:rerun-if-changed={}", file.display());
+        }
+        build.compile(&format!("ffmpeg_{library}"));
+    }
+    println!("cargo:rustc-link-lib=static=ffmpeg_libavformat");
+    println!("cargo:rustc-link-lib=static=ffmpeg_libavcodec");
+    println!("cargo:rustc-link-lib=static=ffmpeg_libswscale");
+    println!("cargo:rustc-link-lib=static=ffmpeg_libswresample");
+    println!("cargo:rustc-link-lib=static=ffmpeg_libavutil");
+
+    // Bindings from the vendored headers. `LIBCLANG_PATH` is the wasi-sdk's own libclang when the environment
+    // does not name another: the compiler that builds the C is the one that reads its declarations.
+    if std::env::var_os("LIBCLANG_PATH").is_none() {
+        let candidate = PathBuf::from("/home/victor/wasm-agent/toolchain/wasi-sdk-34/lib");
+        if candidate.is_dir() {
+            std::env::set_var("LIBCLANG_PATH", candidate);
+        }
+    }
+    let bindings = bindgen::Builder::default()
+        .header(root.join("libavformat/avformat.h").display().to_string())
+        .header(root.join("libavcodec/avcodec.h").display().to_string())
+        .clang_arg(format!("-I{}", root.display()))
+        .clang_arg(format!("-I{}", root.join("libavcodec").display()))
+        .allowlist_function("av_.*")
+        .allowlist_type("AV.*")
+        .allowlist_var("AV.*")
+        .layout_tests(false)
+        .generate()
+        .expect("bindgen could not read the vendored ffmpeg headers");
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("out dir")).join("bindings.rs");
+    bindings.write_to_file(&out).expect("writing bindings");
+    println!("cargo:rerun-if-changed={}", list.display());
 }

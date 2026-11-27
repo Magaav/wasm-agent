@@ -101,7 +101,10 @@ def main() -> int:
             if "/" in name:
                 candidates = [(src_root / name, dest_root / name)]
             else:
+                # Same directory first, then the SAME RELATIVE DIRECTORY IN THE SOURCE TREE (a compiled file
+                # under libavcodec/aac/ includes a template that lives only there), then the library roots.
                 candidates = [(current.parent / name, current.parent / name)]
+                candidates += [(src_root / rel_dir / name, dest_root / rel_dir / name)]
                 candidates += [
                     (src_root / library / name, dest_root / library / name) for library in LIBRARIES
                 ]

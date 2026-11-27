@@ -1,7 +1,6 @@
 static const FFCodec * const codec_list[] = {
     &ff_mjpeg_encoder,
     &ff_pcm_s16le_encoder,
-    &ff_libx264_encoder,
     &ff_h264_decoder,
     &ff_vp8_decoder,
     &ff_vp9_decoder,
