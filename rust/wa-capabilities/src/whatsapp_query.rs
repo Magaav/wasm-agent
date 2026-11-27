@@ -228,6 +228,14 @@ fn component_build() -> String {
 /// The same, against a queue the caller owns: what the tests drive without touching the node's own
 /// component directory. `build` is the answering component's identity (see [`component_build`]).
 fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: &str) -> Value {
+    // A call that names `__job` CONTINUES a job it was already told about: the pending handle's `op`
+    // carries the id, and `lua/core/codemode_pending.lua`'s query executor starts with `__wait_ms: 0`,
+    // keeps the id, and asks about it with the call's remaining budget. There is no request to validate -
+    // the id is the whole question - and the answer is the settled answer the first call would have given.
+    // Both internal fields ride in the raw argument text and never in a tool's schema.
+    if let Some(job) = args.get("__job").and_then(Value::as_u64) {
+        return settle(q, op, job, wait_ms);
+    }
     let verified = match request_of(op, args) {
         Ok(verified) => verified,
         Err(refusal) => return seam::refusal(op, refusal.code, refusal.detail),
