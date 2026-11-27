@@ -211,8 +211,25 @@ run_update() { # <args...> -> output in $W/out.txt, exit code in $CODE
   # WASM_AGENT_DATA is pinned as well as WASM_AGENT_HOME: `paths.data()` prefers it when a caller's
   # environment exports it, and a row that inherited it would read and write a REAL store while every
   # other path in it was a fixture (the class of accident the orchestrator's 24/11 note names).
+  # THE FIRST BYTE IS A MEASUREMENT, NOT AN IMPRESSION (bug 4, Victor 27/11: "we need instantaneous"). The command
+  # runs in the background and this polls the file it writes, so FIRST_BYTE_MS is the time from spawn to the first
+  # byte a person would see - the same thing `WA_FIRST_BYTE` measures by hand on a node.
+  local t0 t1 pid
+  # THE FILE MUST BE EMPTY FIRST: the previous case left its output there, and the poll below then read the old
+  # bytes and reported "first byte: 1 ms" - a measurement of nothing (caught by reading the number, not the ok).
+  : > "$W/out.txt"
+  t0=$(date +%s%N)
   WASM_AGENT_DATA="$SANDBOX" WASM_AGENT_HOME="$HOMEDIR" WA_INSTALL_DIR="$INST" WASM_AGENT_LUA_ROOT="$ROOT" \
-    "$BIN" --db "$W/node.db" update "$@" > "$W/out.txt" 2>&1
+    "$BIN" --db "$W/node.db" update "$@" > "$W/out.txt" 2>&1 &
+  pid=$!
+  while :; do
+    [ -s "$W/out.txt" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.005
+  done
+  t1=$(date +%s%N)
+  FIRST_BYTE_MS=$(( (t1 - t0) / 1000000 ))
+  wait "$pid" 2>/dev/null
   CODE=$?
 }
 reset_fixture() { rm -f "$SANDBOX/build-status.json" "$INST/deploy-result.json" "$SENTINEL/deploy.out"; }
@@ -365,6 +382,19 @@ printf '%s' "$LAST_PROGRESS" | grep -q 'installing the published binary (no buil
 grep -q '/456' "$W/out.txt" || fail 'a compiling install must show its n/m progress'
 grep -q 'compiling' "$W/out.txt" || fail 'a compiling install must name the phase that is really running'
 echo '  ok: a published declaration followed by a real compile prints the build, never "(no build)"'
+
+# ---- 3c. THE FIRST BYTE IS QUICK, AND THE LINE IS THE START (bug 4) -------------------------------
+# Measured by hand on this node, 27/11: 204 ms from the installed binary, 180 ms with the screen opened before the
+# update modules load, 585 ms with a full real home. The row asserts a generous ceiling so a real regression (a
+# network call before the line, which was 1.2-1.6 s on the old path) reds it, and prints the number either way.
+export FIXTURE_OUTCOME=ok FIXTURE_LEAD=1 FIXTURE_DECLARE=build
+reset_fixture
+run_update
+printf '  first byte: %s ms
+' "$FIRST_BYTE_MS"
+[ "$FIRST_BYTE_MS" -lt 1000 ] || fail "the first byte came at ${FIRST_BYTE_MS} ms; something runs before the line"
+head -1 "$W/out.txt" | grep -q 'checking for updates' || fail 'the first line must be the start line'
+echo '  ok: the first byte arrived in the first second and it was the start line'
 
 # ---- 4. a deploy that FAILS: one line with the reason, and the installer's own words in the log -----
 export FIXTURE_OUTCOME=fail FIXTURE_DECLARE=build
