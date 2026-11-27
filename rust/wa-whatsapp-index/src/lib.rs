@@ -87,6 +87,14 @@ pub const MAX_ATTEMPTS: u32 = 2;
 /// says `download_too_large` with the size instead of pretending.
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024;
 
+/// Largest media this node will KEEP, which is a different question from what it can hand back through a
+/// queue. The component writes the decrypted file into the directory the node grants it
+/// (`/downloads`, `rust/wa-kernel-runtime/src/services.rs`) and answers with the path, so a 4.3 MB video
+/// or a 40 MB one is a download and not `download_too_large`. The number matches the host's own
+/// retention bound (`DOWNLOAD_KEEP_BYTES`, 64 MB): media bigger than what the directory will keep could
+/// not survive the prune that runs before the write.
+pub const MAX_STORED_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Largest answer the component will settle with. `wa:queue`'s own cap is 64 KiB; the margin is the
 /// job record around the result.
 pub const MAX_RESULT_BYTES: usize = 56 * 1024;
@@ -509,7 +517,7 @@ impl Request {
                 if chat.is_none() || id.is_none() {
                     return Err(Refusal::new("chat_and_id_required", "one message: pass chat and id"));
                 }
-                let bytes = self.max_bytes.unwrap_or(MAX_DOWNLOAD_BYTES).clamp(1, MAX_DOWNLOAD_BYTES);
+                let bytes = self.max_bytes.unwrap_or(MAX_STORED_BYTES).clamp(1, MAX_STORED_BYTES);
                 (1, bytes)
             }
             Op::Backfill => {
@@ -818,8 +826,34 @@ pub struct Download {
     pub filename: String,
     pub sha256: String,
     pub bytes: u64,
-    /// How many progress chunks the job carries, in order, starting at sequence 0.
+    /// How many progress chunks the job carries, in order, starting at sequence 0. ZERO when the
+    /// component wrote the file itself (`path`): no bytes ride the queue, so there are no chunks.
     pub chunks: u32,
+    /// Where the decrypted file IS, when the node granted the component a directory to write in (the
+    /// `/downloads` preopen, `rust/wa-kernel-runtime/src/services.rs`). Its absence is not an error: a
+    /// node that granted nothing gets the chunks, bounded by [`MAX_DOWNLOAD_BYTES`]. A 4.3 MB video is
+    /// only possible through this field - the progress stream is capped at 1 MiB by `wa:queue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// The refusal a download answers when the media does not fit the road it would have to travel.
+///
+/// It names the cap, the size, and THE EXACT NEXT CALL, because a refusal that names no way forward is
+/// what made a model invent one live on 27/11 (shell on another node, ffmpeg, a store read by hand)
+/// after a 4.3 MB video came back `download_too_large`.
+pub fn download_too_large_answer(size: u64) -> serde_json::Value {
+    let mut answer = refusal(
+        Op::Download,
+        "download_too_large",
+        "the decrypted media is larger than this node will hand back through the job's progress stream, and it granted no directory to write it in",
+    );
+    answer["size"] = serde_json::Value::from(size);
+    answer["max_bytes"] = serde_json::Value::from(MAX_DOWNLOAD_BYTES);
+    answer["next"] = serde_json::Value::from(
+        "run `wa services enable wa-whatsapp` on the node that holds the account: the definition gives the component a directory (`capabilities.dirs`), and this same call then answers with the file's path instead of its bytes",
+    );
+    answer
 }
 
 impl Download {
@@ -1156,7 +1190,7 @@ mod tests {
                 ..request(op)
             };
             let verified = both.validate().unwrap();
-            assert_eq!(verified.max_bytes, MAX_DOWNLOAD_BYTES, "{op}");
+            assert_eq!(verified.max_bytes, MAX_STORED_BYTES, "{op}");
         }
         assert_eq!(request("").validate().unwrap_err().code, "bad_op");
         assert_eq!(request("delete).drop table").validate().unwrap_err().code, "bad_op");
@@ -1270,13 +1304,19 @@ mod tests {
         assert_eq!(huge_read.validate().unwrap().limit, READ_MAX);
         let zero = Request { q: Some("a".into()), limit: Some(0), ..request("search") };
         assert_eq!(zero.validate().unwrap().limit, SEARCH_DEFAULT);
+        // The download bound MOVED on 27/11 and this assertion still holds it exactly: a download is no
+        // longer one kv record (that was `MAX_DOWNLOAD_BYTES`, 512 KiB, the queue's progress stream), it is
+        // a file the component writes into a directory the node granted it, so the bound is what the node
+        // KEEPS. The transport bound is still asserted - by the refusal that fires when no directory was
+        // granted (`the_too_large_refusal_names_the_next_call`).
         let download = Request {
             chat: Some("5511999999999@lid".into()),
             id: Some("3EB0ABCDEF".into()),
-            max_bytes: Some(64 * 1024 * 1024),
+            max_bytes: Some(200 * 1024 * 1024),
             ..request("download")
         };
-        assert_eq!(download.validate().unwrap().max_bytes, MAX_DOWNLOAD_BYTES, "a video is not one kv record");
+        assert_eq!(download.validate().unwrap().max_bytes, MAX_STORED_BYTES, "a video is a file, and the node keeps 64 MB of them");
+        assert!(MAX_STORED_BYTES > MAX_DOWNLOAD_BYTES, "the file bound is looser than the transport bound, or this change would be pointless");
     }
 
     #[test]
@@ -1356,9 +1396,24 @@ mod tests {
             sha256: "ab".repeat(32),
             bytes: 1024,
             chunks: 1,
+            path: None,
         };
         assert_eq!(Download::decode(&manifest.encode()).unwrap(), manifest);
         assert!(Download::decode(b"\x00").is_none());
+    }
+
+    /// A refusal that names no way forward sends a model looking for one. This one names the cap, the size,
+    /// and the exact next call - the difference between a dead end and a dead end with a door.
+    #[test]
+    fn the_too_large_refusal_names_the_next_call() {
+        let answer = download_too_large_answer(4_300_000);
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["error"], "whatsapp_download_download_too_large", "{answer}");
+        assert_eq!(answer["size"], 4_300_000, "{answer}");
+        assert_eq!(answer["max_bytes"], MAX_DOWNLOAD_BYTES, "{answer}");
+        let next = answer["next"].as_str().unwrap_or_default();
+        assert!(next.contains("wa services enable wa-whatsapp"), "the exact command: {next}");
+        assert!(next.contains("path"), "and what the same call answers afterwards: {next}");
     }
 
     #[test]
