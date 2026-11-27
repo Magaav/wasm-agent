@@ -20,7 +20,10 @@ use std::time::Duration;
 
 /// The switch. A node may name a supervisor it started itself (`--rendezvous <file>`); unset means this node
 /// spawns one on first use.
-pub const SWITCH: &str = "WASM_AGENT_OPERATIONS_SUPERVISOR";
+/// The supervisor writes this file under the node home and the node reads it: a FILE, never an environment
+/// variable (Fable: no env override in product code, ever). `wa-operations-supervisor` defaults its
+/// `--rendezvous` to the same path, so the two sides meet without an operator flag.
+pub const RENDEZVOUS: &str = "operations-supervisor.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A `foreground` call runs to its own budget (up to 24 h for a build), so the reader must outlast it: the
 /// verb's bound is enforced in the supervisor, and a client timeout here would report a running command as
@@ -43,18 +46,15 @@ fn home() -> PathBuf {
 
 /// The rendezvous this node uses: the one it was told about, else the one its own supervisor writes.
 fn rendezvous_path() -> PathBuf {
-    let named = environ(SWITCH);
-    let named = named.trim();
-    if !named.is_empty() && named != "0" && named != "off" && named != "in-process" {
-        return PathBuf::from(named);
-    }
-    home().join(".wasm-agent/operations-supervisor.json")
+    // The file the program writes; absent means the node keeps the work in process (the caller finds out by
+    // the same path it always did - it cannot connect). No environment variable decides this.
+    home().join(".wasm-agent").join(RENDEZVOUS)
 }
 
 fn explicitly_off() -> bool {
-    let named = environ(SWITCH);
-    let named = named.trim();
-    named == "0" || named == "off" || named == "in-process"
+    // Nothing in the environment can ask for in-process any more: the file's presence is the only signal, and
+    // a caller that cannot reach the program behaves as it always did.
+    false
 }
 
 fn read_rendezvous(path: &std::path::Path) -> Result<Target, String> {
@@ -98,7 +98,7 @@ fn target() -> Result<Target, String> {
     }
     if explicitly_off() {
         return Err(format!(
-            "operations_supervisor_off: {SWITCH} is off, and the runner is not in this binary any more ({})",
+            "operations_supervisor_off: the supervisor is disabled and the runner is not in this binary any more ({})",
             path.display()
         ));
     }
@@ -110,8 +110,8 @@ fn target() -> Result<Target, String> {
     // that outlived it), and a fixed default would make the new one fail to bind and exit silently.
     command.arg("--port").arg("0");
     command.arg("--rendezvous").arg(&path);
-    // The child must not inherit the switch, or it would think it is a client of itself.
-    command.env(SWITCH, "");
+    // Nothing to scrub any more: there is no environment variable, so the child cannot think it is a client
+    // of itself. Its rendezvous is the `--rendezvous` argument above, which is the same file both sides read.
     command.stdin(std::process::Stdio::null());
     let log = std::fs::OpenOptions::new().create(true).append(true).open(home().join(".wasm-agent/operations-supervisor.log"));
     match log {

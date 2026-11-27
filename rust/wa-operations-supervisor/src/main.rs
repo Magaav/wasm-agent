@@ -28,7 +28,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("usage: wa-operations-supervisor [--port 8791] [--rendezvous <file>]\n  own this node's supervised operations (blocks until stopped)\n  the node reaches it through WASM_AGENT_OPERATIONS_SUPERVISOR=<the rendezvous file>");
+        println!("usage: wa-operations-supervisor [--port 8791] [--rendezvous <file>]\n  own this node's supervised operations (blocks until stopped)\n  the node reaches it through <home>/.wasm-agent/operations-supervisor.json, which this program writes (no environment variable decides it)");
         return;
     }
     let port = flag(&args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8791);
