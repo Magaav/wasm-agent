@@ -887,6 +887,30 @@ function M.run(argv)
     seen_seq = ok and tonumber(bounds and bounds.last_seq) or seen_seq
   end
   mark_seen()
+  -- The facts of a turn this process is NOT running (a node wake): the CLI attaches by cursor and draws
+  -- them as they happen (mission turn-survives-a-provider-stall, item 3 / C2), instead of waiting for the
+  -- turn to end and replaying it as history. The cursor starts at the NEWEST fact so a fresh CLI does not
+  -- redraw a session's past; `catch_up` below keeps drawing the rows this does not cover (the answer).
+  local turn_tail = dofile("lua/core/turn_tail.lua")
+  local tail_state = nil
+  local function attach()
+    if not (view.editor and view.stdout) then return end
+    if not tail_state then
+      local telemetry = dofile("lua/core/telemetry.lua")
+      local newest = telemetry.events(agent.session_id, 0, 1)
+      local cursor = 0
+      if newest and newest.available then
+        local batch = telemetry.events(agent.session_id, 0, 1000)
+        for _, row in ipairs((batch and batch.events) or {}) do cursor = math.max(cursor, tonumber(row.seq) or 0) end
+      end
+      tail_state = { cursor = cursor }
+    end
+    local hold = host.transcript_hold
+    if hold then pcall(hold, true) end
+    pcall(turn_tail.poll, view, agent.session_id, tail_state)
+    if hold then pcall(hold, false) end
+  end
+
   local function catch_up()
     if not (view.editor and view.stdout) then return end
     local ok, bounds = pcall(memory.session_message_bounds, agent.session_id)
@@ -959,6 +983,7 @@ function M.run(argv)
     while true do
       record_interrupt()
       restart_if_due()
+      attach()
       catch_up()
       idle_refresh()
       sweep_handles_if_due()
