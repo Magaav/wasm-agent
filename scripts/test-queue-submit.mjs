@@ -41,16 +41,18 @@ const run = (args, options = {}) => {
 // ---- 1. submit answers with an id and a position ------------------------------------------------------
 const first = run(['submit', 'change/q-one', sha, 'mission-one', '--repo', repo]);
 eq(first.code, 0, `submit exits 0 (${first.out.trim()})`);
-const firstLine = first.out.trim().split('\n')[0];
+// The answer can carry a needs_review line before the id (this branch changes the policy file), so the row
+// reads the id line where it is, not only as the first line.
+const firstLine = (first.out.match(/^\d+\s+position=\d+$/m) || [''])[0];
 ok(/^1\s+position=0$/.test(firstLine), `the first submit is id 1 at position 0 (got ${JSON.stringify(firstLine)})`);
 const repeat = run(['submit', 'change/q-one', sha, 'mission-one', '--repo', repo]);
-ok(/^1 \(already queued\) position=0$/.test(repeat.out.trim()), `a repeat submit is the same id (got ${JSON.stringify(repeat.out.trim())})`);
+ok(/^1 \(already queued\) position=0$/m.test(repeat.out), `a repeat submit is the same id (got ${JSON.stringify(repeat.out.trim())})`);
 
 const second = run(['submit', 'change/q-two', sha, 'mission-two', '--repo', repo]);
-ok(/^2\s+position=1$/.test(second.out.trim().split('\n')[0]), `the second submitter is behind the first (got ${JSON.stringify(second.out.trim())})`);
+ok(/^2\s+position=1$/m.test(second.out), `the second submitter is behind the first (got ${JSON.stringify(second.out.trim())})`);
 
 const priority = run(['submit', 'change/q-revert', sha, 'mission-health', '--priority', '--repo', repo]);
-ok(/^3\s+position=0$/.test(priority.out.trim().split('\n')[0]), `a priority request jumps the FIFO (got ${JSON.stringify(priority.out.trim())})`);
+ok(/^3\s+position=0$/m.test(priority.out), `a priority request jumps the FIFO (got ${JSON.stringify(priority.out.trim())})`);
 
 const status = run(['status', '--json']);
 const open = JSON.parse(status.out);
@@ -63,7 +65,7 @@ const capped = run(['submit', 'change/q-three', sha, 'mission-three', '--wait', 
 const waited = Date.now() - started;
 eq(capped.code, 4, 'a wait that runs out exits 4');
 ok(waited >= 900 && waited <= 8000, `and it waited about its cap, not forever (${waited} ms)`);
-ok(/ran out: request \d+ is (queued|unknown)/.test(capped.out), `and it names the state it last saw (${JSON.stringify(capped.out.trim())})`);
+ok(/ran out: request \d+ is (queued|needs_review|unknown)/.test(capped.out), `and it names the state it last saw (${JSON.stringify(capped.out.trim())})`);
 
 // ---- 3. the verdict reaches the request that waited ----------------------------------------------------
 const db = openJournal(dbFile);
@@ -73,7 +75,7 @@ db.close();
 const answered = run(['submit', 'change/q-three', sha, 'mission-three', '--wait', '5', '--repo', repo]);
 eq(answered.code, 0, 'a submit whose verdict is already in answers at once');
 ok(/rejected \(own_rows_red\)/.test(answered.out), `and names the verdict and the cause (${JSON.stringify(answered.out.trim())})`);
-ok(/^\d+ \(already queued\)/.test(answered.out.trim()), 'without creating a second request');
+ok(/^\d+ \(already queued\)/m.test(answered.out), 'without creating a second request');
 
 // ---- 4. a verdict closes the request, and the queue moves ----------------------------------------------
 const afterOne = run(['show', '1', '--json']);
