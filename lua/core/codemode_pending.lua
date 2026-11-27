@@ -45,6 +45,10 @@
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
+-- ONE instance, so the pause budget below can be moved in a fixture and every reader sees it: dofile
+-- re-evaluates a file, which would give each caller its own numbers and make the shared budget
+-- untestable. The idiom is lua/core/refusal.lua's (package.loaded, published once).
+if package.loaded['codemode_pending'] then return package.loaded['codemode_pending'] end
 local M = {}
 
 -- The wait a call gets when it names none, and the ceiling on any wait. There is no third bound from
@@ -52,7 +56,13 @@ local M = {}
 -- script time" for a wait to outlive (the loop sets neither remaining_ms nor remaining). A caller
 -- that passes one still gets the old clamp (M.effective_ms); the only other stop is the CPU guard.
 M.DEFAULT_WAIT_S = 60
+-- THE ONE PAUSE BUDGET (Victor 27/11). “how long may this script pause” is ONE number, owned here: a
+-- single pause (the 5 s of one sleep(ms), and so of every timer built on it) and the total a script may
+-- pause across all of its pauses (the wait ceiling). sleep(ms), setTimeout/setInterval and wait(op) all
+-- read THESE two fields - a change to either reaches all three with no other edit, and a script can never
+-- be talked into a longer pause than a call's own wait by mixing them.
 M.MAX_WAIT_S = 300
+M.PAUSE_MS_MAX = 5000
 -- Reserved for the answer itself, the delivery into the guest and the script's return: a wait that
 -- spent the script's last millisecond would answer a handle nobody could read.
 M.MARGIN_MS = 2000
@@ -1587,4 +1597,5 @@ M.CANCEL_HELP = {
   code = "const started = await tools.bash({command:'sleep 300', wait_s:0});\nconst stopped = await cancel(started.op);\nreturn {op: started.op, cancelled: stopped.cancelled};",
 }
 
+package.loaded['codemode_pending']=M
 return M
