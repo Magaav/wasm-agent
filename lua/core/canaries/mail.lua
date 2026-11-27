@@ -27,7 +27,7 @@ function M.run()
   -- answers inside a 2 s constant of its own, so a call that names no wait gets a HANDLE at once - and a
   -- handle is not an empty mailbox. The number is read from the file that owns it, never copied.
   local wait_s = dofile("lua/core/codemode_pending.lua").DEFAULT_WAIT_S
-  local ok, raw = pcall(host.email_search, json.encode({ mailbox = "INBOX", limit = 1, wait_s = wait_s }))
+  local ok, raw = pcall(host.email_search, json.encode({ mailbox = "INBOX", limit = 1, __wait_ms = wait_s * 1000 }))
   if not ok then return false, 'index_unreadable', tostring(raw) end
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return false, 'index_unreadable', 'the search answered nothing' end

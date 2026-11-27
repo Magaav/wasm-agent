@@ -49,7 +49,7 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
         // once with its id (the handle), and a later call names that id to read its outcome. The shared
         // bound - 60 s, 300 s at most - lives in `lua/core/codemode_pending.lua`, one number for every
         // tool that can outlive its wait (Victor, 27/11: a slow answer is not a failure).
-        Ok(args) => match args.get("job").and_then(Value::as_u64) {
+        Ok(args) => match args.get("__job").and_then(Value::as_u64) {
             Some(id) => settle(&queue(), id, wait_ms(&args)),
             None => ask(op, &args, wait_ms(&args)),
         },
@@ -91,12 +91,12 @@ fn from_epoch(value: i64) -> i64 {
     }
 }
 
-/// The wait this call asked for: `wait_ms`, or `wait_s` in seconds, or none at all - which means
-/// "queue it and tell me the id at once", because the caller is holding a handle and will ask again.
+/// The wait this call asked for, under the SAME internal name the WhatsApp query uses: `__wait_ms` rides
+/// in the raw argument text and never in a tool's schema, so a closed schema stays closed. Absent means
+/// zero - queue it and answer the id at once - because the caller then holds a handle and will ask again;
+/// the shared bound (60 s, 300 s at most) is `lua/core/codemode_pending.lua`'s, not this crate's.
 fn wait_ms(args: &Value) -> u64 {
-    if let Some(ms) = args.get("wait_ms").and_then(Value::as_u64) { return ms; }
-    if let Some(s) = args.get("wait_s").and_then(Value::as_u64) { return s.saturating_mul(1000); }
-    0
+    args.get("__wait_ms").and_then(Value::as_u64).unwrap_or(0)
 }
 
 fn ask(op: seam::Op, args: &Value, wait_ms: u64) -> Value {

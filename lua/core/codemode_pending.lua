@@ -679,14 +679,17 @@ end
 function M.queue_job_family(tool, opts)
   opts = opts or {}
   return {
-      kind = "queue_job",
+      -- The kind is the caller's, so a family that already has a name keeps it (`whatsapp_query`): the shape
+      -- is shared, the label is not something this factory should decide for it.
+      kind = opts.kind or "queue_job",
       start = function(dispatch, opts, params, raw)
-        local copy = {}
-        for key, value in pairs(type(params) == "table" and params or {}) do copy[key] = value end
-        -- Queue and answer at once: the wait is this layer's, the same one every other call gets.
-        copy.wait_ms = 0
-        copy.job = nil
-        local ok, answer = pcall(dispatch, tool, copy, json.encode(copy))
+        -- Queue and answer at once: the wait is this layer's, the same one every other call gets. The
+        -- two internal fields ride in the RAW argument text and never in `params` - an unknown name in a
+        -- tool's arguments is refused by name (`tool_arguments.lua`), so a closed schema stays closed.
+        local wire = {}
+        for key, value in pairs(type(params) == "table" and params or {}) do wire[key] = value end
+        wire.__wait_ms = 0
+        local ok, answer = pcall(dispatch, tool, params or {}, json.encode(wire))
         if not ok then return { result = { error = tostring(answer), effect = "unknown", replay_allowed = false } } end
         if type(answer) ~= "table" then return { result = answer } end
         local id = tonumber(answer.id)
@@ -700,8 +703,8 @@ function M.queue_job_family(tool, opts)
       poll = function(dispatch, opts, record, ms)
         -- The crate's own bounded read: `{job: <id>, wait_ms: <slice>}` answers the job's state, and one
         -- short slice at a time keeps the wait interruptible by a stop.
-        local asked = { job = record.id, wait_ms = math.max(0, math.floor(tonumber(ms) or 0)) }
-        local ok, answer = pcall(dispatch, record.tool, asked, json.encode(asked))
+        local asked = { __job = record.id, __wait_ms = math.max(0, math.floor(tonumber(ms) or 0)) }
+        local ok, answer = pcall(dispatch, record.tool, {}, json.encode(asked))
         if not ok then return nil, tostring(answer) end
         if type(answer) ~= "table" then return nil, "email_answer_malformed" end
         local running = answer.state == "running"
@@ -716,8 +719,8 @@ function M.queue_job_family(tool, opts)
           why = "a query already queued is a read: it answers, and stopping the caller does not stop the index" }
       end,
       progress = function(dispatch, opts, record, state)
-        return { state = tostring(type(state) == "table" and state.state or "running"), kind = "queue_job",
-          job = record.id, tool = record.tool }
+        return { state = tostring(type(state) == "table" and state.state or "running"),
+          kind = opts.kind or "queue_job", job = record.id, tool = record.tool }
       end,
   }
 end

@@ -16,6 +16,8 @@ local function ok(condition, label)
   if not condition then failed = failed + 1; print('FAIL ' .. label) end
 end
 
+local json = dofile('lua/vendor/json.lua')
+
 local function read(path)
   local file = io.open(path, 'r')
   if not file then return nil end
@@ -33,8 +35,9 @@ local query = read('rust/wa-capabilities/src/email_query.rs')
 assert(query, 'rust/wa-capabilities/src/email_query.rs is not readable')
 ok(query:find('WAIT_MS', 1, true) == nil, 'and the host side says no WAIT_MS either')
 ok(query:find('fn wait_ms', 1, true) ~= nil, 'the wait comes from the caller (`fn wait_ms`)')
-ok(query:find('args.get("job")', 1, true) ~= nil, 'and a call may name a job id to read its outcome')
-ok(query:find('saturating_mul(1000)', 1, true) ~= nil, 'wait_s is seconds, converted in one place')
+ok(query:find('args.get("__job")', 1, true) ~= nil, 'and a call may name a job id to read its outcome, under the SAME internal name the WhatsApp query uses')
+ok(query:find('__wait_ms', 1, true) ~= nil, 'the wait rides the same internal name too')
+
 
 -- ---- 2. one shared number, read from its owner ------------------------------------------
 local pending_text = read('lua/core/codemode_pending.lua')
@@ -54,11 +57,15 @@ for _, tool in ipairs({ 'email_search', 'email_read', 'email_media' }) do
 end
 
 -- ---- 4. a running query becomes a handle; an answered one stays an answer ---------------
+-- The dispatcher sees BOTH texts, because the difference between them is the point: the internal fields
+-- ride in the RAW one (`__wait_ms`, `__job`) so that a tool's closed schema is never handed a name it does
+-- not declare - the defect the WhatsApp change measured, and a defect this branch had until it aligned.
 local asked = {}
-local dispatch = function(name, params)
-  asked[#asked + 1] = { name = name, params = params }
-  if params.job then
-    return { ok = true, id = params.job, state = 'done', hits = { { subject = 'a synthetic hit' } } }
+local dispatch = function(name, params, raw)
+  local wire = raw and json.decode(raw) or {}
+  asked[#asked + 1] = { name = name, params = params, wire = wire }
+  if wire.__job then
+    return { ok = true, id = wire.__job, state = 'done', hits = { { subject = 'a synthetic hit' } } }
   end
   return { ok = true, id = 7, state = 'running' }
 end
@@ -68,8 +75,11 @@ local started = exec.start(dispatch, {}, { q = 'anything' }, '{}')
 ok(started.op == 'email-7', 'a query still running answers a handle named after its job: ' .. tostring(started.op))
 ok(started.id == 7 and started.tool == 'email_search', 'carrying the job id and the tool')
 ok(started.result == nil, 'and NOT an answer')
-ok(asked[1] and asked[1].params.wait_ms == 0, 'the start queues and does not wait (wait_ms=0)')
-ok(asked[1] and asked[1].params.job == nil, 'and it asks for a new query, not an old job')
+ok(asked[1] and asked[1].wire.__wait_ms == 0, 'the start queues and does not wait (__wait_ms=0)')
+ok(asked[1] and asked[1].wire.__job == nil, 'and it asks for a new query, not an old job')
+ok(asked[1] and asked[1].params.__wait_ms == nil and asked[1].params.__job == nil,
+  'the internal fields NEVER enter the tool arguments (a closed schema would refuse them)')
+ok(asked[1] and asked[1].params.q == 'anything', 'and what the caller asked for is passed through untouched')
 
 local answered = exec.start(function() return { ok = true, id = 9, state = 'done', hits = {} } end, {}, {}, '{}')
 ok(answered.result ~= nil and answered.op == nil, 'a query the connector answered is the answer, not a handle')
@@ -78,21 +88,23 @@ ok(answered.result ~= nil and answered.op == nil, 'a query the connector answere
 asked = {}
 local slice = {}
 local poll = function(dispatch, opts, record, ms)
-  local state, reason = exec.poll(function(name, params)
-    slice[#slice + 1] = { name = name, params = params }
-    if params.wait_ms and params.wait_ms > 0 then return { ok = true, id = params.job, state = 'done' } end
-    return { ok = true, id = params.job, state = 'running' }
+  local state, reason = exec.poll(function(name, params, raw)
+    local wire = json.decode(raw)
+    slice[#slice + 1] = { name = name, params = params, wire = wire }
+    if wire.__wait_ms and wire.__wait_ms > 0 then return { ok = true, id = wire.__job, state = 'done' } end
+    return { ok = true, id = wire.__job, state = 'running' }
   end, {}, { id = 7, tool = 'email_search' }, ms)
   return state, reason
 end
 local state, reason = poll(nil, nil, nil, 0)
 ok(state and state.settled == false, 'a job still running polls as pending')
 ok(reason == 'still_running', 'with the reason said (it is ' .. tostring(reason) .. ')')
-ok(slice[1] and slice[1].params.job == 7, 'the poll names the job') 
-ok(slice[1] and slice[1].params.wait_ms == 0, 'and spends only the slice it was given')
+ok(slice[1] and slice[1].wire.__job == 7, 'the poll names the job on the wire')
+ok(slice[1] and slice[1].wire.__wait_ms == 0, 'and spends only the slice it was given')
+ok(slice[1] and next(slice[1].params) == nil, 'with no arguments at all: the id is the whole question')
 state, reason = poll(nil, nil, nil, 800)
 ok(state and state.settled == true and reason == nil, 'a job that answered settles, with no reason')
-ok(slice[2] and slice[2].params.wait_ms == 800, 'the slice is the caller wait, passed through')
+ok(slice[2] and slice[2].wire.__wait_ms == 800, 'the slice is the caller wait, passed through')
 
 -- ---- 6. a cancel says what it is, and does not pretend ----------------------------------
 local cancelled = exec.cancel(dispatch, {}, { op = 'email-7', tool = 'email_search' })
@@ -104,13 +116,12 @@ ok(type(cancelled.why) == 'string' and #cancelled.why > 0, 'with a reason a read
 -- The canary asked `email_search` with no wait before this change, so under it a busy index would have
 -- answered a handle and the canary would have said "no message in the index" - a false empty, which is
 -- the exact defect the canary was fixed for on 26/11.
-local json = dofile('lua/vendor/json.lua')
 local canary = dofile('lua/core/canaries/mail.lua')
 local native_search = host.email_search
 local seen_wait = nil
 host.email_search = function(asked)
   local args = json.decode(asked)
-  seen_wait = args.wait_s
+  seen_wait = args.__wait_ms
   return json.encode({ ok = true, id = 31, state = 'running' })
 end
 local proven, reason, detail = canary.run()
@@ -119,7 +130,8 @@ ok(proven == 'not_proven', 'a handle is not proof of an index (the canary answer
 ok(reason == 'pending', 'it is reported as pending (got ' .. tostring(reason) .. ')')
 ok(reason ~= 'no_data', 'and never as an empty mailbox')
 ok(detail and tostring(detail):find('shared wait', 1, true) ~= nil, 'the detail names the wait it spent')
-ok(seen_wait == pending.DEFAULT_WAIT_S, 'the canary spends the SHARED wait, read from its owner (' .. tostring(seen_wait) .. ')')
+ok(seen_wait == pending.DEFAULT_WAIT_S * 1000, 'the canary spends the SHARED wait, read from its owner (' ..
+  tostring(seen_wait) .. ' ms)')
 host.email_search = function() return json.encode({ ok = true, hits = { { subject = 'one' } } }) end
 proven, reason = canary.run()
 ok(proven == true and reason == 'index', 'an answered index still proves the index (got ' .. tostring(proven) .. '/' .. tostring(reason) .. ')')
