@@ -72,6 +72,11 @@ if (existsSync(listPath)) {
 const SYNC = /^\s*([a-z][a-z0-9-]*)\s*:\s*func\b/;
 const ASYNC = /^\s*([a-z][a-z0-9-]*)\s*:\s*async\s+func\b/;
 const REASON = /^\s*\/\/\s*sync-export\s*:\s*\S/;
+// ASYNC ABI, WRITTEN DOWN (27/11, evidence: wit/stt landed with `admit`/`reply-ok` as `async func ... -> admitted`).
+// `async func` IS the async ABI - the caller awaits it - so a plain result is not a defect, and demanding a
+// future<> around it would refuse correct code that shipped. What must not happen is an unusual shape arriving
+// without a reason, so an async export that names neither a future nor a stream may carry the marker instead.
+const ASYNC_REASON = /^\s*\/\/\s*async-abi\s*:\s*\S/;
 
 const problems = [];
 let files = 0, syncTotal = 0, asyncTotal = 0;
@@ -80,7 +85,7 @@ for (const path of walk(witDir)) {
   const rel = relative(root, path);
   const lines = readFileSync(path, 'utf8').split('\n');
   const recorded = grandfather.get(rel);
-  let sync = 0, async = 0, hasStream = false;
+  let sync = 0, async = 0, hasStream = false, asyncExplainedCount = 0;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (/stream\s*</.test(line)) hasStream = true;
@@ -94,7 +99,9 @@ for (const path of walk(witDir)) {
       // ONLY FOR A FILE THAT IS NOT GRANDFATHERED: the rule is about NEW or MOVED interfaces. The tree's own async
       // exports (63 of them, in the grandfathered files) use the async ABI - `async func(...) -> result<T, E>` -
       // which the caller awaits; a new interface must ALSO say what it streams and what it hands back as a handle.
-      if (recorded === undefined && !/future\s*</.test(sig) && !/stream\s*</.test(sig)) {
+      const asyncReason = [lines[i - 1] || '', lines[i - 2] || '', lines[i - 3] || '', lines[i - 4] || '', lines[i - 5] || ''].some((l) => ASYNC_REASON.test(l));
+      if (asyncReason) asyncExplainedCount += 1;
+      if (recorded === undefined && !asyncReason && !/future\s*</.test(sig) && !/stream\s*</.test(sig)) {
         problems.push({ code: 'wit_async_without_result', file: rel, line: i + 1,
           detail: line.trim(), why: 'an async export must carry a future<result> or a stream<progress> - otherwise nothing is awaited' });
       }
@@ -118,7 +125,8 @@ for (const path of walk(witDir)) {
       detail: `${sync} sync export(s), the list records ${recorded}`,
       why: 'a grandfathered interface may not ADD a sync export: a moved interface is async, or it carries the reason line' });
   }
-  if (recorded === undefined && async > 0 && !hasStream) {
+  const asyncExplained = async > 0 && asyncExplainedCount === async;
+  if (recorded === undefined && async > 0 && !hasStream && !asyncExplained) {
     problems.push({ code: 'wit_async_without_backpressure', file: rel, line: 0,
       detail: `${async} async export(s), no stream<`,
       why: 'streams are what carry backpressure: an async interface without one has not declared it' });

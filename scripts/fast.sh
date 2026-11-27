@@ -1402,8 +1402,13 @@ check wit-lint-selftest bash scripts/test-wit-lint.sh
 # file. Existing worlds are grandfathered by an explicit list (wit/async-grandfather.txt), never by a pattern.
 # The land path needs no separate hook: scripts/landing-queue.mjs defaults to `bash scripts/fast.sh` (its line 227),
 # so these two are what the landing gate runs. Proved by running them with the same argv fast.sh uses.
-check wit-async bash scripts/lint-wit-async.mjs
+check wit-async node scripts/lint-wit-async.mjs
 check wit-async-selftest bash scripts/test-wit-async-lint.sh
+# SIGNED RELEASES ON THE FAST PATH (27/11): scripts/test-release-sign.lua shipped from 5185436b and was wired into no
+# runner, so nothing judged it and it rotted - by the time this line existed the fixture signed a set the publisher
+# then rewrote (release_signature_invalid ... signature_stale). It is wired here, and green, so the next drift is a
+# red row instead of a surprise at a release.
+check release-sign env WASM_AGENT_LUA_ROOT="$PWD" WA_FAST_BIN="$bin" WA_SCRIPT="$PWD/scripts/test-release-sign.lua" "$bin" --db "$work/release-sign.db"
 # The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
 # manifest not at all), a win line and the flag for the modules without one, a ledger's seconds, a
 # co-change pair over 70% and a decision inside the 30-day / 100-commit cooldown - plus the exit code
