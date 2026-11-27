@@ -265,6 +265,10 @@ gate_run node scripts/test-gate-check.mjs
 # and no line saying why. Cheap: it never builds, and it keeps the fragile idiom from being copied.
 gate_run node scripts/test-main-module-entry.mjs
 gate_run node scripts/test-landing-queue.mjs
+# THE INVENTORY STAYS AN INVENTORY (Fable 27/11): every private wait below the shared 60 s and every crate that crosses a
+# queue or a socket must be named in docs/missions/reports/seam-inventory.md, and the inventory must carry at least one
+# KEEP with its reason. It derives the facts from the tree, so a new private wait cannot appear unlisted.
+gate_run node scripts/test-seam-inventory.mjs
 gate_run node scripts/test-deploy-pin-prune.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
 gate_run node scripts/test-full-gate-proof.mjs
