@@ -654,7 +654,16 @@ local function settle_call(s,call)
       parameters=current['function'].parameters,input=stripped,site='the code-mode script loop'}),false
     else
      local params=json.decode(stripped or '{}')
-     local span=telemetry.start(ctx,'tool',{name=call.tool,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
+     -- ONE MODEL CALL IS ONE EVENT (27/11, run-is-the-only-declared-door item 3). MEASURED with
+     -- scripts/test-run-logged-once.lua on 07d2b7c5: a model that calls `run` produced TWO kind='tool' phase='start'
+     -- rows both named run and carrying the SAME arguments_hash - the model's own span (agent.lua:4069) and this
+     -- nested one, because the door is re-entered through this loop to execute what it was given. The nested span is
+     -- for a call made INSIDE a script; the door itself is not inside anything, so it gets no second span and no
+     -- duplicate row for the stats to count.
+     local span=nil
+     if call.tool~='run' then
+       span=telemetry.start(ctx,'tool',{name=call.tool,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
+     end
      live(ctx,{type='codemode_call',id=call.id,name=call.tool,arguments=params,state='running'})
      local live_started=tonumber(host.now()) or 0
      local called,result=pcall(pending_calls.invoke,s.dispatch,s.popts,call.tool,params,stripped,wait_s);admitted=true
@@ -739,7 +748,9 @@ local function settle_call(s,call)
        read_only = command ~= "" and dofile("lua/core/orchestration_mode.lua").read_only_command(command) or nil
      end
      s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value),read_only=read_only}
-     telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
+     if span then
+       telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
+     end
     end
    end
   end

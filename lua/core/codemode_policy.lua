@@ -10,7 +10,14 @@ function M.setting()
  -- works inside code mode" (measured 2026-10-27). Unset now means native; an operator who wants
  -- the worktree fence back asks for it by name.
  if value=='' then return 'native' end
- if value~='native' and value~='off' and value~='default' then error('invalid_codemode_setting:'..value) end
+ if value=='default' then
+  -- THE CODEMODE TOOL IS GONE (27/11, run-is-the-only-declared-door): `default` existed only to enable the worktree-fenced
+  -- codemode TOOL, and `run(code)` is the door now. Accepting it would silently select a mode that changes nothing the
+  -- model is offered, so it is refused BY NAME instead - an operator who set it learns what to set instead.
+  error('codemode_tool_removed: WASM_AGENT_CODEMODE=default only ever enabled the codemode tool, which no longer exists; '
+    ..'run(code) is the one door, and this variable now selects the engine only (native or off)')
+ end
+ if value~='native' and value~='off' then error('invalid_codemode_setting:'..value) end
  return value
 end
 function M.eligible(memory,role,ctx,mode)
