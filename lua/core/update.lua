@@ -822,10 +822,29 @@ local function publishability(tree, commit)
   return { state = fields.components, tag = fields.tag, buildable = fields.buildable, note = note }
 end
 
+-- THE CHANNEL IS DECIDED PER UPDATE FROM WHAT IS PUBLISHED (decision, 27/11; law 17: one owner).
+--
+-- It used to be decided by the install RECORD - `M.release_install(record)`, i.e. `record.via == "linux-bootstrap"` - so
+-- a node installed any other way could never take a published bundle, whatever was on the shelf. The bundle channel in
+-- this file is the owner now: if a published release exists for this commit and target, the update DOWNLOADS it (the
+-- updater verifies signature and sha256); `scripts/deploy.sh` is the source-build path, taken only when nothing is
+-- published. A node with no installed updater cannot download at all, so it is never sent down this path by accident.
+local function published_bundle(facts, record)
+  if type(M.installed_updater) ~= "function" then return nil end
+  if not M.installed_updater(facts.install) then return nil end
+  local probe = M.run_release({ check = true }, facts, record)
+  if type(probe) ~= "table" then return nil end
+  local state = tostring(probe.state or "")
+  if state == "behind" or state == "installable" or state == "available" then return probe end
+  return nil
+end
+
 function M.check(options)
   options = options or {}
   local facts = M.facts(options)
   local record = installed_record(facts.install)
+  -- The same owner for the question `--check` asks: report the bundle whenever one is published for this commit.
+  if published_bundle(facts, record) then return M.run_release({ check = true }, facts, record) end
   if not facts.tree and M.release_install(record) then
     return M.run_release({ check = true }, facts, record)
   end
@@ -953,9 +972,12 @@ function M.run(options)
   end
   -- Asked before the tree is synchronized: a request no watcher can perform is refused without moving
   -- the runtime worktree for it, and without writing anything.
-  if not facts.tree then
+  -- Law 17: what is PUBLISHED decides, for every node - not how it was installed. A tree node with a bundle on the
+  -- shelf downloads it; deploy.sh is the source-build path below.
+  do
     local record = installed_record(facts.install)
-    if M.release_install(record) then return M.run_release(options, facts, record) end
+    if published_bundle(facts, record) then return M.run_release(options, facts, record) end
+    if not facts.tree and M.release_install(record) then return M.run_release(options, facts, record) end
   end
   local blocked = M.preconditions(facts)
   if blocked then return decorate(blocked, facts) end
