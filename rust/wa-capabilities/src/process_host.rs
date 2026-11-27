@@ -195,6 +195,7 @@ impl StreamProducer<Host> for EmptyStream {
 
 #[cfg(test)]
 mod rows {
+
     use super::*;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
@@ -207,7 +208,6 @@ mod rows {
     fn waker() -> Waker {
         Waker::from(Arc::new(Noop))
     }
-
     /// ROW: `wait` returns the exit once the operation settled - the whole point of handing the guest one future.
     #[test]
     fn wait_returns_the_exit_it_was_given() {
@@ -228,6 +228,49 @@ mod rows {
         match settled {
             Poll::Ready(Ok(Some(Exit::Code(code)))) => assert_eq!(code, 7),
             other => panic!("the exit must be delivered once: {other:?}"),
+        }
+    }
+
+
+    /// ROW: a component that imports an interface the host has NOT granted is refused at instantiation. The
+    /// refusal lives in the LINKER, which is why this row could not exist before a host did.
+    ///
+    /// The component is built in the test from WAT: `wat` is a dev-dependency and does produce COMPONENT bytes
+    /// (verified against `Component::from_binary` before this row was written), so the fixture is test-local and no
+    /// product component is added.
+    ///
+    /// Honest scope: no repo guest imports `wa:process/child` yet, so the import named here is of the same kind but
+    /// not the world itself; the rule covers the world the moment a guest names it.
+    #[test]
+    fn a_component_is_refused_without_its_grant() {
+        let engine = wasmtime::Engine::default();
+        let source = r#"
+            (component
+              (import "wa:process/child" (instance
+                (export "spawn" (func (result u32)))
+              ))
+            )
+        "#;
+        let bytes = wat::parse_str(source).unwrap_or_else(|error| panic!("WAT parse: {error:?}"));
+        let component = wasmtime::component::Component::from_binary(&engine, &bytes)
+            .unwrap_or_else(|error| panic!("the fixture must be a component: {error:?}"));
+
+        let imported = component.component_type().imports(&engine).count();
+        assert!(imported > 0, "the fixture must import something for this row to mean anything");
+
+        // A linker that grants NOTHING: the only difference from the real host is the grant itself.
+        let mut linker = wasmtime::component::Linker::<Host>::new(&engine);
+        let mut store = wasmtime::Store::new(&engine, Host::new());
+
+        match linker.instantiate(&mut store, &component) {
+            Err(error) => {
+                let message = error.to_string().to_lowercase();
+                assert!(
+                    message.contains("import") || message.contains("unknown"),
+                    "the refusal must name the ungranted import, got: {message}"
+                );
+            }
+            Ok(_) => panic!("a component with {imported} imports must not instantiate against an empty grant"),
         }
     }
 
