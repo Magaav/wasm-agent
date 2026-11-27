@@ -73,7 +73,7 @@ wa_main_binary_build() { # <sha> <root> <target>
   fi
   local cap=${WA_MAIN_BUILD_CAP_SECONDS:-900} nice_level=${WA_MAIN_BUILD_NICE:-10} rc=0
   CARGO_TARGET_DIR="$target" nice -n "$nice_level" timeout "$cap" \
-    "$cargo_bin" build --release --offline -p wa --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
+    "$cargo_bin" build --release --offline -p wa-host --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
   if [ "$rc" = 0 ] && [ -x "$built" ]; then printf '%s\n' "$built"; return 0; fi
   echo "wa_main_binary: the build of ${sha:0:12} in $target failed (rc $rc, cap ${cap}s)" >&2
   return 1

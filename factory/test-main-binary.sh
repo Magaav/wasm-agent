@@ -49,6 +49,7 @@ cat > "$B/cargo" <<'EOS'
 #!/bin/bash
 # Record the niceness the build was given (field 19 of /proc/self/stat) and whether the lock was held.
 ni=$(awk '{print $19}' /proc/self/stat)
+printf '%s\n' "$*" > "$CARGO_TARGET_DIR.args"
 printf '%s\n' "$ni" > "$CARGO_TARGET_DIR.nice"
 [ -f "$CARGO_TARGET_DIR/.build.lock" ] && echo held > "$CARGO_TARGET_DIR.locked"
 mkdir -p "$CARGO_TARGET_DIR/release"; printf '#!/bin/bash\necho built\n' > "$CARGO_TARGET_DIR/release/wa"; chmod +x "$CARGO_TARGET_DIR/release/wa"
@@ -64,6 +65,8 @@ like "$OUT" "$TARGET/release/wa" "and hands back the build in its OWN target dir
 checks=$((checks + 1)); [ -s "$TARGET.nice" ] || fail "the build recorded no niceness"
 checks=$((checks + 1)); { [ "$(cat "$TARGET.nice" 2>/dev/null || echo 0)" -gt 0 ]; } || fail "the build must be niced (niceness $(cat "$TARGET.nice" 2>/dev/null))"
 checks=$((checks + 1)); [ -f "$TARGET.locked" ] || fail "the build must hold a lock, so two runs cannot build into one dir"
+like "$(cat "$TARGET.args" 2>/dev/null)" "-p wa-host" "and it builds the crate that HOLDS the wa binary"
+checks=$((checks + 1)); case "$(cat "$TARGET.args" 2>/dev/null)" in *"-p wa "*) fail "the build asked for -p wa, which no package answers";; esac
 
 # --- 2b. THE LOOP'S OWN PATH: systemd gives the loop no toolchain, so the lib must find cargo itself.
 mkdir -p "$WORK/fakehome/wasm-agent/toolchain/cargo/bin"
