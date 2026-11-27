@@ -624,7 +624,30 @@ do
         return { result = result }
       end
       local id = tostring(params.id or "")
-      if id == "" then return { result = { error = "id_required" } } end
+      if id == "" then
+        -- AN AWAIT WITH NO ID, IN A SCRIPT THAT STARTED EXACTLY ONE THING (28/11). A model that starts an
+        -- operation and then awaits it wrote the id once and forgot it once, and the refusal cost the whole
+        -- turn (`operation needs an id`, measured in the detached scenario). The store already knows which
+        -- calls this script started, so the unambiguous case is answered instead of refused: one open
+        -- operation started in this scope, and nothing else. Two candidates stay a refusal - guessing between
+        -- someone else's work is exactly the ambiguity the id exists for.
+        local scope = type(opts) == "table" and opts.scope or nil
+        local only = nil
+        local index = M.open(scope)
+        for _, record in pairs(index.ops or {}) do
+          if type(record) == "table" and record.state == "running"
+              and (record.tool == "operation" or record.kind == "operation") then
+            if only ~= nil then only = false break end
+            only = record
+          end
+        end
+        if type(only) == "table" and type(only.op) == "string" then
+          id = only.op
+          params.id = id
+        else
+          return { result = { error = "id_required" } }
+        end
+      end
       -- `wait_for=settled` and the adoption rules are the operation tool's; the wait here only
       -- decides how long this call watches before it hands back a handle.
       return { op = id, attach = true }
