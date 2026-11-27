@@ -50,7 +50,20 @@ wa_main_binary_release() { # <sha> <root> <stage>
 wa_main_binary_build() { # <sha> <root> <target>
   local sha=$1 root=$2 target=$3 built=""
   built=$target/release/wa
-  command -v cargo >/dev/null 2>&1 || { echo "wa_main_binary: no cargo to build ${sha:0:12}" >&2; return 1; }
+  # CARGO IS NOT ON THE LOOP'S PATH. The health loop runs under systemd, whose PATH is the unit's, and this
+  # node's toolchain lives in ~/wasm-agent/toolchain/cargo/bin - measured 27/11: with main's own lib and the
+  # real tip the answer was "no cargo to build <sha>", so the build step could never run and every tip stayed
+  # NOT GRADED even after the release resolver was fixed. Ask the same places the rest of the node does, and
+  # put the toolchain's bin FIRST so its rustc is found too.
+  local cargo_bin=""
+  for cargo_bin in "${WA_MAIN_CARGO:-}" "$HOME/wasm-agent/toolchain/cargo/bin/cargo" "$HOME/.cargo/bin/cargo"                   "$HOME/.local/share/mise/shims/cargo"; do
+    [ -n "$cargo_bin" ] && [ -x "$cargo_bin" ] && break
+  done
+  if [ -z "$cargo_bin" ] || [ ! -x "$cargo_bin" ]; then
+    cargo_bin=$(command -v cargo 2>/dev/null) || cargo_bin=""
+  fi
+  [ -n "$cargo_bin" ] || { echo "wa_main_binary: no cargo to build ${sha:0:12} (looked in the toolchain, ~/.cargo, mise and PATH)" >&2; return 1; }
+  local cargo_dir; cargo_dir=$(cd "$(dirname "$cargo_bin")" && pwd); PATH="$cargo_dir:$PATH"
   mkdir -p "$target" 2>/dev/null || { echo "wa_main_binary: cannot create $target" >&2; return 1; }
   # ONE AT A TIME: two health runs must not build into the same target dir, and the loop has better things to do
   # than queue - the next tick picks it up.
@@ -60,7 +73,7 @@ wa_main_binary_build() { # <sha> <root> <target>
   fi
   local cap=${WA_MAIN_BUILD_CAP_SECONDS:-900} nice_level=${WA_MAIN_BUILD_NICE:-10} rc=0
   CARGO_TARGET_DIR="$target" nice -n "$nice_level" timeout "$cap" \
-    cargo build --release --offline -p wa --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
+    "$cargo_bin" build --release --offline -p wa --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
   if [ "$rc" = 0 ] && [ -x "$built" ]; then printf '%s\n' "$built"; return 0; fi
   echo "wa_main_binary: the build of ${sha:0:12} in $target failed (rc $rc, cap ${cap}s)" >&2
   return 1

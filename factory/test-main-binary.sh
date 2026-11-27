@@ -56,12 +56,30 @@ exit 0
 EOS
 chmod +x "$B/cargo"
 rm -f "$WORK/cargo.called"
-OUT=$(PATH="$B:$PATH" bash -c '. "$1"; wa_main_binary "$2" "$3" "$4" "$5"' _ "$HERE/lib/main-binary.sh" "$SHA" "$STAGE" "$TARGET" "$ROOT" 2>&1); rc=$?
+# HOME with no toolchain and no ~/.cargo: the lib must fall back to PATH, where the stub lives.
+mkdir -p "$WORK/plainhome"
+OUT=$(HOME="$WORK/plainhome" PATH="$B:/usr/bin:/bin" bash -c '. "$1"; wa_main_binary "$2" "$3" "$4" "$5"' _ "$HERE/lib/main-binary.sh" "$SHA" "$STAGE" "$TARGET" "$ROOT" 2>&1); rc=$?
 ok "$rc" "0" "with no release it builds one instead of refusing"
 like "$OUT" "$TARGET/release/wa" "and hands back the build in its OWN target dir"
 checks=$((checks + 1)); [ -s "$TARGET.nice" ] || fail "the build recorded no niceness"
 checks=$((checks + 1)); { [ "$(cat "$TARGET.nice" 2>/dev/null || echo 0)" -gt 0 ]; } || fail "the build must be niced (niceness $(cat "$TARGET.nice" 2>/dev/null))"
 checks=$((checks + 1)); [ -f "$TARGET.locked" ] || fail "the build must hold a lock, so two runs cannot build into one dir"
+
+# --- 2b. THE LOOP'S OWN PATH: systemd gives the loop no toolchain, so the lib must find cargo itself.
+mkdir -p "$WORK/fakehome/wasm-agent/toolchain/cargo/bin"
+cat > "$WORK/fakehome/wasm-agent/toolchain/cargo/bin/cargo" <<'EOS'
+#!/bin/bash
+# Found WITHOUT being on PATH: this is the case that made every tip NOT GRADED (27/11 18:23-18:40).
+printf 'found-by-the-lib\n' > "$CARGO_TARGET_DIR.found"
+[ "$1" = build ] || exit 9
+mkdir -p "$CARGO_TARGET_DIR/release"; printf '#!/bin/bash\necho built\n' > "$CARGO_TARGET_DIR/release/wa"; chmod +x "$CARGO_TARGET_DIR/release/wa"
+EOS
+chmod +x "$WORK/fakehome/wasm-agent/toolchain/cargo/bin/cargo"
+rm -f "$TARGET/release/wa" "$TARGET.found" "$WORK/fakehome/.cargo" -r
+OUT=$(HOME="$WORK/fakehome" PATH="/usr/bin:/bin" bash -c '. "$1"; wa_main_binary "$2" "$3" "$4" "$5"' _ "$HERE/lib/main-binary.sh" "$SHA" "$STAGE" "$TARGET" "$ROOT" 2>&1); rc=$?
+ok "$rc" "0" "with cargo OFF PATH the lib finds the toolchain's own cargo"
+like "$OUT" "$TARGET/release/wa" "and builds with it"
+checks=$((checks + 1)); [ -f "$TARGET.found" ] || fail "the toolchain cargo was never run"
 
 # --- 3. THE REFUSAL: no resolver, no cargo -> a named refusal, and never the install.
 rm -f "$ROOT/scripts/lib/node-binaries.sh" "$TARGET/release/wa"
