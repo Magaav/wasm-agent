@@ -269,6 +269,9 @@ gate_run node scripts/test-landing-queue.mjs
 # queue or a socket must be named in docs/missions/reports/seam-inventory.md, and the inventory must carry at least one
 # KEEP with its reason. It derives the facts from the tree, so a new private wait cannot appear unlisted.
 gate_run node scripts/test-seam-inventory.mjs
+# ONE QUESTION, ONE OWNER (ARCHITECTURE.md law 17, Victor 27/11): a second answer to a question the seam inventory already
+# gives an owner fails by name. It derives the waits from the tree, so a new private timeout cannot be added quietly.
+gate_run node scripts/test-one-question-one-owner.mjs
 gate_run node scripts/test-deploy-pin-prune.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
 gate_run node scripts/test-full-gate-proof.mjs

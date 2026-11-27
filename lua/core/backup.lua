@@ -19,8 +19,8 @@
 -- The source `quick_check` below is what tells them apart: it is asked before every retry, and a
 -- verdict that is not contention (or contention that repeats on a second, independent read) is
 -- damage. A copy is never reported without passing `integrity_check`, so a torn copy cannot pass as a
--- recovery source either. Knobs: `WA_BACKUP_ATTEMPTS`, `WA_BACKUP_BACKOFF_MS`,
--- `WA_BACKUP_BUSY_TIMEOUT_MS`.
+-- recovery source either. Knobs: `WA_BACKUP_ATTEMPTS`, `WA_BACKUP_BACKOFF_MS`; the busy timeout is
+-- `sqlite_busy`'s patience (`WASM_AGENT_SQLITE_RETRY_MS`), not a second number here.
 --
 -- The graph store is read under its OWNER's lock (13/11). The retry above treats a symptom: the graph
 -- component writes its store from inside WASI, where SQLite has no POSIX locks and the journal mode
@@ -36,28 +36,35 @@
 -- tree, so it is never worth blocking a deploy. The ledger and every other store keep the rule above.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
+-- ONE OWNER for "what do we do when the database is locked" (ARCHITECTURE.md laws 17-19): sqlite_busy
+-- decides whether an answer is contention and how long we are willing to wait for the lock. This module
+-- keeps its own snapshot policy (how many copies, how far apart) and asks the owner for both of those
+-- facts instead of spelling a second answer.
+local sqlite_busy = dofile("lua/core/sqlite_busy.lua")
+local sql_answer = dofile("lua/core/sql_answer.lua")
 local M = {}
 
 -- A store that a live writer holds needs SQLite to wait, not to answer "busy" on the first try.
-local BUSY_TIMEOUT_MS = tonumber(host.getenv("WA_BACKUP_BUSY_TIMEOUT_MS") or "") or 15000
 local ATTEMPTS = tonumber(host.getenv("WA_BACKUP_ATTEMPTS") or "") or 3
 local BACKOFF_MS = tonumber(host.getenv("WA_BACKUP_BACKOFF_MS") or "") or 250
 local SOURCE_ALIAS = "wa_backup_source"
 local CHECK_ALIAS = "wa_backup_check"
 
 
+-- The owner runs the statement (lua/core/sql_answer.lua); a backup raises, because half a snapshot is worse than a
+-- named failure.
+local function run(method, statement, params)
+  local value, why = sql_answer.run(method, statement, params)
+  if not value then error(tostring(why), 0) end
+  return value
+end
+
 local function sql(statement, params)
-  local raw = host.sql_exec(statement, json.encode(params or {}))
-  local result = type(raw) == "string" and json.decode(raw) or raw
-  if type(result) == "table" and result.error then error(tostring(result.error), 0) end
-  return result
+  return run("sql_exec", statement, params)
 end
 
 local function query(statement, params)
-  local raw = host.sql_query(statement, json.encode(params or {}))
-  local rows = type(raw) == "string" and json.decode(raw) or raw
-  if type(rows) == "table" and rows.error then error(tostring(rows.error), 0) end
-  return rows or {}
+  return run("sql_query", statement, params) or {}
 end
 
 local function list(dir)
@@ -117,11 +124,6 @@ end
 
 -- The two ways a store answers "I cannot be read right now". They are classified, never guessed from
 -- the caller: contention is retried, damage is refused.
-local function busy(answer)
-  local text = tostring(answer):lower()
-  return text:find("busy", 1, true) ~= nil or text:find("locked", 1, true) ~= nil
-end
-
 -- `database disk image is malformed` is what a read of a store another writer holds looked like on
 -- 07/11, and it is also what a damaged b-tree says. It is retried, because the source `quick_check`
 -- is the authority on which of the two it is; it is never trusted as a verdict on its own.
@@ -132,7 +134,7 @@ local function torn(answer)
 end
 
 local function retryable(answer)
-  return busy(answer) or torn(answer)
+  return sqlite_busy.is_busy(answer) or torn(answer)
 end
 
 -- The first row of an `integrity_check`/`quick_check`: "ok", or the first problem SQLite names.
@@ -170,12 +172,12 @@ end
 local function damaged(path, is_main)
   local kind, value = source_read(path, is_main)
   if kind == "verdict" and value == "ok" then return nil end
-  if kind == "error" and busy(value) then return nil end
+  if kind == "error" and sqlite_busy.is_busy(value) then return nil end
   host.sleep(BACKOFF_MS)
   local again_kind, again = source_read(path, is_main)
   if again_kind == "verdict" and again == "ok" then return nil end
   if torn(value) or torn(again) then return torn(value) and value or again end
-  if again_kind == "error" and busy(again) then
+  if again_kind == "error" and sqlite_busy.is_busy(again) then
     -- The second read could not run at all; the first one's answer stands, and a busy answer is not
     -- evidence of damage.
     if kind == "verdict" then return value ~= "ok" and value or nil end
@@ -257,7 +259,7 @@ local function with_busy_timeout(work)
   if ok and type(rows) == "table" and type(rows[1]) == "table" then
     previous = tonumber(rows[1].timeout or rows[1].busy_timeout or rows[1][1]) or 0
   end
-  sql("PRAGMA busy_timeout = " .. BUSY_TIMEOUT_MS)
+  sql("PRAGMA busy_timeout = " .. tostring(sqlite_busy.patience_ms()))
   local returned = table.pack(pcall(work))
   pcall(sql, "PRAGMA busy_timeout = " .. tostring(previous))
   if not returned[1] then error(returned[2], 0) end
@@ -284,7 +286,7 @@ local function graph_snapshot(source, copy)
   if type(host.graph_snapshot) ~= "function" then
     return nil, "this host has no graph_snapshot capability, so a graph store cannot be copied safely; rebuilt from source"
   end
-  local ok, raw = pcall(host.graph_snapshot, json.encode({ db = source, copy = copy, wait_ms = BUSY_TIMEOUT_MS }))
+  local ok, raw = pcall(host.graph_snapshot, json.encode({ db = source, copy = copy, wait_ms = sqlite_busy.patience_ms() }))
   if not ok then return nil, tostring(raw) end
   local answer = type(raw) == "string" and json.decode(raw) or raw
   if type(answer) ~= "table" then return nil, "graph_snapshot answered " .. tostring(raw) end

@@ -316,6 +316,21 @@ brief that will (the table at the end of this section says which).
   nothing; a quiet tree while workers always run) is refused by the landing's self-check.
 - **Law 16. An incident is answered with a guard that costs nothing per landing, plus a revert.** A new wait on the
   landing path needs Fable's word and its measured cost.
+- **Law 17. One question, one owner.** Each question (how long may this wait, how is a turn drawn, how does a build get
+  installed) has one named owner, and everything else calls it. A second answer is a bug even when both agree today,
+  because they drift.
+- **Law 18. If one fits another's path, they are duplicates and are joined.** The test: a bug fix in one would need the
+  same fix in the other. Different names, files or languages don't make them two.
+- **Law 19. A duplicate is fixed where it is found.** The task that spots it joins it into the owner, as a subtask,
+  right away. The callers' tests are green before and after.
+
+As this tree answered them on 27/11 (the live list, with an owner and where each merge is happening, is the second
+table of `docs/missions/reports/seam-inventory.md`, and `scripts/test-one-question-one-owner.mjs` refuses a second
+answer that is not named there): how long may this wait - owner `lua/core/codemode_pending.lua`, the second answers
+in `rust/wa-whatsapp-index`, `rust/wa-email-index`, the four `DEFAULT_TIMEOUT_MS` copies and a per-host env knob for
+each; the code-mode script pause's own totals (`lua/core/codemode.lua:281`), kept with its reason beside the same
+budget; how a turn is drawn - `lua/core/cli_view.lua` draws it and `lua/core/chat.lua` draws it again on replay; how
+a build is installed - `/update`, `wa update` and the installer each decide a precondition of one install.
 
 ### What enforces each law
 
@@ -337,6 +352,9 @@ or the brief that will.
 | law 8. installer acts on its target only; installer rows only via the runner | `test-installer-data-isolation.sh`, `test-install-isolation.mjs` |
 | law 9. release rehearsed against the fleet; a blind canary is not a gate | NOT ENFORCED YET - `release-rehearsal` (the canary rows test canary STATES; no rehearsal exists) |
 | law 10. new tool born as a component; registration is data | NOT ENFORCED YET - `capability-registration-is-data` |
+| law 17. one question, one owner | `test-one-question-one-owner.mjs` (derives the private waits from the tree and refuses one the table does not name) |
+| law 18. duplicates are joined, not tolerated | the joins that landed: `d580fdf1` (`test-backup-live.lua`, `test-backup-restore.lua`, `test-remote-update.lua`), `8801b311` (`test-agent-control.lua`, `test-ledger-transactions.lua`) |
+| law 19. a duplicate is fixed where it is found | `docs/FACTORY.md` rule 0, applied in `docs/missions/reports/one-owner-trial.md` |
 | law 11. "same program" includes the embedded Lua | `check-embedded-lua-closure.mjs`, `check-embedded-runtime.lua` |
 | law 12. async WIT for new or moved interfaces | `scripts/lint-wit-async.mjs` + `scripts/test-wit-async-lint.sh` (879891bf, on `change/async-born-interfaces`, NOT landed) |
 | law 13. a new gate runs advisory until a rehearsal is green | NOT ENFORCED YET - `release-rehearsal` |

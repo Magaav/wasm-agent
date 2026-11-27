@@ -55,6 +55,13 @@ end
 -- The text a retry decision is made on. Both spellings are matched because the same condition
 -- arrives as SQLite's own sentence (from a host that does not name it) and as ours (from one that
 -- does, `rust/wa-sqlite`), and a caller must not care which binary it is running on.
+-- How long this layer is willing to wait for one lock. The ONE answer to "how patient are we with a
+-- busy database": retry() spends it, and a caller that sets its own connection's busy_timeout (backup)
+-- takes the number from here instead of naming a second one.
+function M.patience_ms()
+  return retry_budget_ms()
+end
+
 function M.is_busy(reason)
   local text = tostring(reason or ""):lower()
   return text:find("database is locked", 1, true) ~= nil
