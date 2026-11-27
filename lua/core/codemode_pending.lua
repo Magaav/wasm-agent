@@ -1708,6 +1708,11 @@ end
 -- managed executor reads, never a value invented here.
 
 function M.native_open(scope, tool, params, detached)
+  -- THE DIRECTORY FIRST. M.save writes one file per scope and a write into a directory that does not exist
+  -- fails silently (measured 27/11: the row's homes had no codemode-pending/ at all, so every native stop wrote
+  -- nothing and the store answered `null`). The empty prefix is how lua/core/approve.lua creates its own dir -
+  -- one call, no new host function.
+  pcall(host.write_file, M.dir() .. '/.keep', '')
   local index = M.open(scope)
   local n = 0
   for _ in pairs(index.ops) do n = n + 1 end
@@ -1737,7 +1742,18 @@ function M.native_settle(handle, dispatch, outcome)
   record.detached = outcome.detached == true or record.detached == true
   if stopped then
     -- WHAT THE NODE SAW, not what we hoped: snapshot() is the operations layer's own answer for this op.
-    local observed = (id ~= nil and dispatch ~= nil) and snapshot(dispatch, tostring(id)) or nil
+    -- THE SUPERVISOR FINISHES THE KILL AFTER THE ANSWER (the runner says so in its own words:
+    -- cleanup="supervised"), so the signal and the survivors are not in the answer the tool got. Asking once
+    -- caught them `nil`; the managed path WAITS for them inside its own bounded grace (STOP_CONFIRM_MS) and
+    -- that is what this does too - bounded, because the reader's prompt must come back at once, and never
+    -- invented: what the record says is what the operations layer reported.
+    local observed, deadline = nil, now_seconds() + (M.STOP_CONFIRM_MS / 1000)
+    repeat
+      observed = (id ~= nil and dispatch ~= nil) and snapshot(dispatch, tostring(id)) or nil
+      if type(observed) == "table" and type(observed.stop) == "table" then break end
+      if type(observed) == "table" and tostring(observed.state or "") == "cancelled" and observed.settled == true then break end
+      if host.sleep then host.sleep(10) end
+    until now_seconds() >= deadline
     local facts = type(observed) == "table" and type(observed.stop) == "table" and observed.stop or nil
     local survivors = facts and facts.survivors or outcome.survivors
     local signal = facts and facts.signal or outcome.signal
