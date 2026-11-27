@@ -40,6 +40,7 @@ pub mod features;
 pub mod graph;
 pub mod host;
 pub mod http_transport;
+pub mod limits;
 pub mod operations;
 pub mod plugins;
 pub mod quickjs;

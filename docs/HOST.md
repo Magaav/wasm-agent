@@ -872,6 +872,9 @@ input_image          device
 input_start          device
 input_stop           device
 input_take           device
+limits_forget        read-only
+limits_poll          read-only
+limits_start         network
 opening_header       device
 opening_start         device
 invoke               runs a process
