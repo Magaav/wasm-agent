@@ -943,6 +943,10 @@ if command -v node >/dev/null 2>&1; then
   # both facts are cheap shelf rows on a temp file - no node, no tree, no push.
   check queue-journal node scripts/test-queue-journal.mjs
   check queue-submit node scripts/test-queue-submit.mjs
+  # THE QUEUE TWO DECISIONS ABOUT A PERSON (hunk 2): what the path policy stops, and that an approval is
+  # for exactly (branch, sha, policy-hash) - a new sha voids it, and only the review lane may write one.
+  check queue-policy node scripts/test-queue-policy.mjs
+  check queue-approval node scripts/test-queue-approval.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...

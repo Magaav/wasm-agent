@@ -8,6 +8,8 @@
 //   node scripts/queue.mjs status [--json]
 //   node scripts/queue.mjs show <id> [--json]
 //   node scripts/queue.mjs events [--since <id>] [--json]
+//   node scripts/queue.mjs approve <branch> <sha> [--repo <dir>]   (the review lane's token decides)
+//   node scripts/queue.mjs review [--json]                         (what waits on a person, and since when)
 //   node scripts/queue.mjs table
 //   node scripts/queue.mjs migrate --from <v0-journal.db> [--json]
 //
@@ -19,7 +21,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {openJournal, submit, position, openRequests, show, events, migrateV0} from './lib/queue/journal.mjs';
+import {openJournal, submit, position, openRequests, show, events, migrateV0, transition, lastState,
+        recordApproval, approvalFor, awaitingReview} from './lib/queue/journal.mjs';
+import {loadPolicy, policyHash, evaluate, policyPath} from './lib/queue/policy.mjs';
+import {reviewLane} from './lib/queue/lane.mjs';
 
 function defaultDb() {
   const home = process.env.WASM_AGENT_HOME || path.join(os.homedir(), '.wasm-agent');
@@ -56,6 +61,17 @@ function branchFacts(repo, branch, sha) {
   } catch {
     return {files: [], crates: [], compiled: 0};
   }
+}
+
+/// The policy answer for a request's diff, and whether an approval already covers exactly this triple.
+function policyFor(repoDir, files, branch, sha) {
+  const file = policyPath(repoDir);
+  if (!fs.existsSync(file)) return {present: false, needsReview: false, refuses: false, review: [], refused: [], hash: null};
+  const policy = loadPolicy(file);
+  const verdict = evaluate(policy, files);
+  const hash = policyHash(file);
+  const approved = approvalFor(db, {branch, sha, policyHash: hash});
+  return {...verdict, present: true, hash, approved};
 }
 
 function fmtRequest(db, row) {
@@ -95,6 +111,15 @@ try {
     const facts = branchFacts(repo, branch, sha);
     const kind = facts.compiled ? 'compiled' : 'plain';
     const out = submit(db, {branch, sha, mission, kind, prio: argv.flags.priority ? 1 : 0, note: argv.flags.note ?? null, ...facts});
+    // THE POLICY IS DATA, APPLIED AT THE DOOR: a request whose diff touches a reviewed path stops at
+    // needs_review before anything runs, unless an approval already names this exact (branch, sha, hash).
+    const policy = policyFor(repo, facts.files, branch, sha);
+    if (policy.refuses) die(5, `refused by policy: ${policy.refused.map((r) => r.file).join(', ')} is never a landing`);
+    if (policy.needsReview && !policy.approved && lastState(db, out.id) !== 'needs_review') {
+      const paths = policy.review.map((r) => `${r.file} (${r.why})`).join(', ');
+      transition(db, out.id, 'needs_review', 'policy_refused', paths);
+      if (!argv.flags.json) process.stdout.write(`needs_review: ${paths}\nwaiting on review since ${new Date().toISOString().replace(/\.\d+Z$/, 'Z')} — approve with the review lane's token\n`);
+    }
     if (argv.flags.wait) {
       const verdict = waitFor(db, out.id, Number(argv.flags.wait));
       if (argv.flags.json) say(JSON.stringify({...out, verdict, verdictPayload: verdict.payload ? JSON.parse(verdict.payload) : null}));
@@ -129,6 +154,34 @@ try {
     const rows = events(db, Number(argv.flags.since || 0));
     if (argv.flags.json) say(JSON.stringify(rows));
     else for (const e of rows) say(`${e.id}  req ${e.req}  ${e.at}  ${e.state}${e.cause ? `  ${e.cause}` : ''}`);
+    process.exit(0);
+  }
+
+  if (cmd === 'approve') {
+    const [, branch, want] = argv._;
+    if (!branch || !want) die(2, 'usage: queue.mjs approve <branch> <sha> [--repo <dir>]');
+    const lane = reviewLane();
+    if (!lane.ok) die(6, `approve refused: ${lane.why}`);
+    let sha = want;
+    try { sha = execFileSync('git', ['-C', repo, 'rev-parse', `${want}^{commit}`], {encoding: 'utf8'}).trim(); } catch { /* full sha */ }
+    const row = db.prepare('SELECT * FROM requests WHERE branch = ? AND sha = ?').get(branch, sha);
+    if (!row) die(3, `no request for ${branch}@${sha.slice(0, 12)}`);
+    const facts = {files: row.files ? row.files.split(' ') : []};
+    const policy = policyFor(repo, facts.files, branch, sha);
+    if (!policy.present) die(3, `no ${policyPath(repo)} in this tree, so there is nothing to approve against`);
+    if (!policy.needsReview) die(3, `${branch}@${sha.slice(0, 12)} touches no reviewed path under this policy - nothing to approve`);
+    const approved = recordApproval(db, {branch, sha, policyHash: policy.hash, by: lane.by});
+    if (lastState(db, row.id) === 'needs_review') transition(db, row.id, 'queued', `approved by ${lane.by}`, policy.hash);
+    if (argv.flags.json) say(JSON.stringify({...approved, policyHash: policy.hash, by: lane.by}));
+    else say(`${approved.created ? 'approved' : 'already approved'} ${branch}@${sha.slice(0, 12)} policy=${policy.hash.slice(0, 12)} by ${lane.by}`);
+    process.exit(0);
+  }
+
+  if (cmd === 'review') {
+    const rows = awaitingReview(db);
+    if (argv.flags.json) say(JSON.stringify(rows));
+    else if (!rows.length) say('nothing waiting on review');
+    else for (const row of rows) say(`${String(row.id).padStart(4)}  ${row.branch}@${row.sha.slice(0, 12)}  ${row.mission || '-'}  waiting on review since ${row.submitted_at}`);
     process.exit(0);
   }
 

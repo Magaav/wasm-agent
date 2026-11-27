@@ -236,3 +236,41 @@ export function migrateV0(db, v0File) {
     v0.close();
   }
 }
+
+// AN APPROVAL IS A ROW FOR EXACTLY (branch, sha, policy_hash), and the unique key is what makes a new sha
+// void it: there is no code path that has to remember to delete one. The verb that writes it is the queue's
+// `approve`, and the token that authorises it is checked there, not here - this module records the person,
+// it does not decide who they are.
+export function recordApproval(db, {branch, sha, policyHash, by, at = nowIso()}) {
+  return immediate(db, () => {
+    const existing = db.prepare('SELECT id FROM approvals WHERE branch = ? AND sha = ? AND policy_hash = ?')
+      .get(branch, sha, policyHash);
+    if (existing) return {id: existing.id, created: false};
+    db.prepare('INSERT INTO approvals(branch, sha, policy_hash, by, at) VALUES(?, ?, ?, ?, ?)')
+      .run(branch, sha, policyHash, by, at);
+    return {id: db.prepare('SELECT last_insert_rowid() AS id').get().id, created: true};
+  });
+}
+
+export function approvalFor(db, {branch, sha, policyHash}) {
+  return db.prepare('SELECT branch, sha, policy_hash, by, at FROM approvals WHERE branch = ? AND sha = ? AND policy_hash = ?')
+    .get(branch, sha, policyHash) ?? null;
+}
+
+// The runner must not pick a request that is waiting on a person. `needs_review` is a STATE, so the test is
+// the last transition, not a flag somebody has to clear.
+export function awaitingReview(db) {
+  return db.prepare(`SELECT r.* FROM requests r
+                      WHERE NOT EXISTS (SELECT 1 FROM verdicts v WHERE v.req = r.id)
+                        AND (SELECT t.state FROM transitions t WHERE t.req = r.id ORDER BY t.id DESC LIMIT 1) = 'needs_review'
+                      ORDER BY r.prio DESC, r.id`).all();
+}
+
+export function nextRunnable(db) {
+  const open = openRequests(db);
+  for (const row of open) {
+    if (lastState(db, row.id) === 'needs_review') continue;
+    return row;
+  }
+  return null;
+}
