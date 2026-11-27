@@ -36,6 +36,8 @@ use wa::process::types::{Error as Fault, Exit, Spec as Request};
 /// One child, as the guest holds it: where its result will land, and nothing else.
 pub struct Job {
     outcome: Arc<Mutex<Option<Exit>>>,
+    /// The supervisor's operation id, filled once `foreground` answers; the output reader needs it.
+    operation: Arc<Mutex<Option<String>>>,
 }
 
 impl HasData for Job {
@@ -87,6 +89,8 @@ impl wa::process::child::HostProcessWithStore<Host> for Host {
         async move {
             let outcome: Arc<Mutex<Option<Exit>>> = Arc::new(Mutex::new(None));
             let settled = outcome.clone();
+            let operation: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let recorded = operation.clone();
 
             let mut line = request.program.clone();
             for argument in &request.arguments {
@@ -110,7 +114,7 @@ impl wa::process::child::HostProcessWithStore<Host> for Host {
                 }
             });
 
-            match access.with(|mut access| access.data_mut().table.push(Job { outcome })) {
+            match access.with(|mut access| access.data_mut().table.push(Job { outcome, operation })) {
                 Ok(job) => Ok(job),
                 Err(error) => Err(Fault::Failed(error.to_string())),
             }
@@ -141,12 +145,22 @@ impl wa::process::child::HostProcessWithStore<Host> for Host {
         }
     }
 
-    fn stdout(mut access: Access<'_, Host, Host>, _self: Resource<Job>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
-        StreamReader::new(access.as_context_mut(), EmptyStream)
+    fn stdout(mut access: Access<'_, Host, Host>, self_: Resource<Job>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
+        let operation = match access.data_mut().table.get(&self_) {
+            Ok(job) => job.operation.clone(),
+            Err(_) => return Err(wasmtime::Error::msg("process handle gone")),
+        };
+        let source = OutputStream::new(Box::new(RecordOutput { operation, served: false }));
+        StreamReader::new(access.as_context_mut(), source)
     }
 
-    fn stderr(mut access: Access<'_, Host, Host>, _self: Resource<Job>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
-        StreamReader::new(access.as_context_mut(), EmptyStream)
+    fn stderr(mut access: Access<'_, Host, Host>, self_: Resource<Job>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
+        let operation = match access.data_mut().table.get(&self_) {
+            Ok(job) => job.operation.clone(),
+            Err(_) => return Err(wasmtime::Error::msg("process handle gone")),
+        };
+        let source = OutputStream::new(Box::new(RecordOutput { operation, served: false }));
+        StreamReader::new(access.as_context_mut(), source)
     }
 }
 
@@ -189,22 +203,75 @@ impl FutureProducer<Host> for ExitFuture {
     }
 }
 
-/// The output streams, declared and ended at once: the bytes live in the operation record.
-pub struct EmptyStream;
+/// Where a child's output comes from. This is the SEAM: the host wires the supervisor's operation record in
+/// (`RecordOutput`), and a test wires a fake in, so the stream path is a unit test rather than a live node.
+pub trait OutputSource: Send {
+    /// The next chunk, or `None` when the output has ended.
+    fn next_chunk(&mut self) -> Option<Vec<u8>>;
+}
 
-impl StreamProducer<Host> for EmptyStream {
+/// The output of one child, streamed into the guest.
+pub struct OutputStream {
+    source: Box<dyn OutputSource>,
+}
+
+impl OutputStream {
+    pub fn new(source: Box<dyn OutputSource>) -> OutputStream {
+        OutputStream { source }
+    }
+}
+
+impl StreamProducer<Host> for OutputStream {
     type Item = Vec<u8>;
     type Buffer = Option<Vec<u8>>;
 
     fn poll_produce<'a>(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         _store: StoreContextMut<'a, Host>,
-        _destination: Destination<'a, Self::Item, Self::Buffer>,
+        mut destination: Destination<'a, Self::Item, Self::Buffer>,
         _finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
-        Poll::Ready(Ok(StreamResult::Dropped))
+        match self.source.next_chunk() {
+            Some(chunk) => {
+                destination.set_buffer(Some(chunk));
+                // `Completed` after `set_buffer` is what delivers the buffered item (`futures_and_streams.rs:686`).
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+            None => Poll::Ready(Ok(StreamResult::Dropped)),
+        }
     }
+}
+
+/// The supervisor-backed reader: the operation's recorded output, served once and then ended. Kept deliberately
+/// small - reading a live record in slices needs the supervisor and belongs to the node, not to this seam.
+pub struct RecordOutput {
+    operation: Arc<Mutex<Option<String>>>,
+    served: bool,
+}
+
+impl OutputSource for RecordOutput {
+    fn next_chunk(&mut self) -> Option<Vec<u8>> {
+        if self.served {
+            return None;
+        }
+        self.served = true;
+        let id = self.operation.lock().ok()?.clone()?;
+        let answer = crate::operations::call("read", &serde_json::json!({"id": id})).ok()?;
+        answer
+            .get("output")
+            .and_then(|value| value.as_str())
+            .map(|text| text.as_bytes().to_vec())
+    }
+}
+
+/// Every chunk this source yields, in order - the shape a test can assert without a wasmtime store.
+fn collect(mut source: Box<dyn OutputSource>) -> Vec<u8> {
+    let mut all = Vec::new();
+    while let Some(chunk) = source.next_chunk() {
+        all.extend_from_slice(&chunk);
+    }
+    all
 }
 
 #[cfg(test)]
@@ -362,6 +429,34 @@ mod rows {
 
         let instance = block_on(linker.instantiate_async(&mut store, &component));
         instance.unwrap_or_else(|error| panic!("a GRANTED component must instantiate: {error:?}"));
+    }
+
+
+    /// ROW: the stream seam. A fake source yields three chunks and ends; `collect` - the exact loop the producer
+    /// runs - returns them in order and then stops. No supervisor, no process, no wasmtime store: the seam is what
+    /// makes the output path testable at all.
+    #[test]
+    fn output_chunks_are_streamed_in_order() {
+        struct Fake {
+            chunks: Vec<Vec<u8>>,
+        }
+
+        impl OutputSource for Fake {
+            fn next_chunk(&mut self) -> Option<Vec<u8>> {
+                if self.chunks.is_empty() {
+                    None
+                } else {
+                    Some(self.chunks.remove(0))
+                }
+            }
+        }
+
+        let source = Fake { chunks: vec![b"one ".to_vec(), b"two ".to_vec(), b"three".to_vec()] };
+        assert_eq!(collect(Box::new(source)), b"one two three".to_vec());
+
+        // An empty child yields nothing and ends cleanly rather than stalling.
+        let empty = Fake { chunks: Vec::new() };
+        assert!(collect(Box::new(empty)).is_empty());
     }
 
     /// ROW: an argument with a space or a quote reaches the program as ONE argument - asserted by running a real
