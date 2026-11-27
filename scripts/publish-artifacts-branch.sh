@@ -103,7 +103,13 @@ for triple in $TRIPLES; do
   pin="$(wa_node_manifest_pin "$MANIFEST" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
   set -- $pin
   [ "$#" = 4 ] || fail "manifest_incomplete: row for $triple is '$pin'" 2
-  for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4"; do
+  # THE PROGRAM SHIPS WITH THE NODE (wa-term-own-program): a set whose manifest pins the node and not
+  # `wa-term` would install a node that starts and cannot draw a prompt, so a set without it is refused here.
+  if ! term_pin="$(wa_node_manifest_program "$MANIFEST" "$triple")"; then
+    fail "manifest_incomplete: the row for $triple does not pin wa-term; this set is refused rather than shipped" 2
+  fi
+  set -- "$1" "$2" "$3" "$4" "${term_pin% *}" "${term_pin#* }"
+  for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4" "wa-term-$triple-$SHORT:$5:$6"; do
     name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
     file="$OUT/$name"
     [ -f "$file" ] || fail "binary_missing: $file" 2

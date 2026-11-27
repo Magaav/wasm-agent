@@ -273,14 +273,16 @@ local function global_params(raw)
   return json.decode(text)
 end
 
--- How long a script may pause is ONE surface, and it is owned by lua/core/codemode_pending.lua: the
--- per-pause ceiling (PAUSE_MS_MAX) and the budget a script may pause in total (MAX_WAIT_S). sleep(ms),
--- every timer built on it, and wait(op) all read those two fields, so a change there reaches all three
--- and there is no second limit to drift out of step (Victor 27/11). A pause is not work: it is not
--- charged to the script's computing budget (the host sleeps, rust/wa-capabilities/src/host.rs).
-local function pause_limits()
-  return tonumber(pending_calls.PAUSE_MS_MAX) or 5000, (tonumber(pending_calls.MAX_WAIT_S) or 0) * 1000
-end
+-- The longest a script may pause in one sleep(ms). A pause is not work, so it is not charged to the
+-- script's computing budget; the cap is what keeps one script from holding the node's thread (a pause
+-- really does sleep the host - rust/wa-capabilities/src/host.rs host.sleep). A longer wait belongs to a
+-- call's own wait_s, where a managed operation runs while the script waits (22/11).
+local SLEEP_MS_MAX = 5000
+-- ...and a script's pause in TOTAL is bounded too: one CALL may sleep 5 s, one SCRIPT may sleep 30 s.
+-- Without this cap the per-call bound said nothing - 100 calls of 5 s held the node's thread for eight
+-- minutes (22/11 review, MUST). The count lives on this script's own handle table, so a new script
+-- starts at zero and neither loop can be talked into a longer one.
+local SLEEP_TOTAL_MS = 30000
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
@@ -322,8 +324,7 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     if not asked or asked ~= asked or asked < 0 then
       return { error = 'codemode_sleep_requires_milliseconds' }, false
     end
-    local pause_max, budget_ms = pause_limits()
-    if asked > pause_max then
+    if asked > SLEEP_MS_MAX then
       return { error = 'codemode_sleep_too_long' }, false
     end
     -- The pause of THIS SCRIPT, not of this call (MUST, 22/11 review): a cap per call says nothing
@@ -331,7 +332,7 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     -- count stands and what to use instead - a pause spaces retries, it never waits for work.
     local spent = tonumber(popts and popts.slept_ms) or 0
     local slept = math.floor(asked)
-    if spent + slept > budget_ms then
+    if spent + slept > SLEEP_TOTAL_MS then
       return { error = 'codemode_sleep_total_too_long', paused_ms = spent, asked_ms = slept }, false
     end
     if type(host.sleep) == 'function' then pcall(host.sleep, slept) end
@@ -1333,7 +1334,7 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local session_key=type(ctx.session_id)=='string' and ctx.session_id~='' and ctx.session_id
    or ('no-session:'..tostring(host.uuid and host.uuid() or '')..':'..tostring(host.now and host.now() or 0))
  local scope=host.sha256(json.encode({session=session_key,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
- args={code=harness.decorate(args.code,session_vars(memory,scope),select(1,pause_limits()),select(2,pause_limits())),timeout_ms=args.timeout_ms}
+ args={code=harness.decorate(args.code,session_vars(memory,scope)),timeout_ms=args.timeout_ms}
  -- One handle table for this script, on either loop: a call that outlives its wait answers
  -- {state:"pending", op} and wait(op)/cancel(op) answer it. A wait is bounded by its own wait_s and by
  -- the sandbox's CPU guard, never by a wall clock (18/11: a script is not killed for waiting).

@@ -247,8 +247,8 @@ var results=Object.freeze({
  last:function(count,options){ return track('results.last('+preview(count)+')',rawResults({ op:'last', n:count, tool:options&&options.tool })); },
  diff:function(before,after){ return track('results.diff('+preview(before)+', '+preview(after)+')',rawResults({ op:'diff', a:before, b:after })); }
 });
-var TIMER_CAP=(typeof TIMER_PAUSE_MS==='number'&&TIMER_PAUSE_MS>0)?TIMER_PAUSE_MS:5000;
-var TIMER_CEILING=(typeof TIMER_BUDGET_MS==='number')?TIMER_BUDGET_MS:300000;
+var TIMER_CAP=5000;
+var TIMER_CEILING=300000;
 /* Timers are the one pause this sandbox has: setTimeout was its largest missing global (91 failures in 7 days, 27 of 36 recoverable scripts writing "await new Promise(r => setTimeout(r, ms))"), so every timer is a due time on a clock the script pause advances - the host sleep is the only place JS yields here - and a timer that would outlive the script is never kept implicitly: persistence is declared with tools.wake, not implied. */
 var timers={ next:1, entries:[], spent:0, wake:null, stopped:false, notes:[], firing:false };
 var timerSignal=function(){ var wake=timers.wake; timers.wake=null; if(wake){ wake(); } };
@@ -376,14 +376,9 @@ end
 
 -- The script the node sends: the harness on line 1, the model's code from line 2. `vars` is the
 -- session's variable index, `{ {name=, bytes=} ... }` (lua/core/codemode.lua `session_vars`).
--- The pause budget the timers obey, handed in by the caller (lua/core/codemode.lua reads it from
--- lua/core/codemode_pending.lua, which owns it): one number for sleep, timers and wait, so a change
--- there reaches all three with no edit here.
-function M.decorate(code, vars, pause_ms, budget_ms)
+function M.decorate(code, vars)
   if type(code) ~= "string" then return code end
-  local limits = string.format("var TIMER_PAUSE_MS=%d;var TIMER_BUDGET_MS=%d;",
-    math.max(1, math.floor(tonumber(pause_ms) or 5000)), math.max(0, math.floor(tonumber(budget_ms) or 300000)))
-  return limits .. OPEN .. index_json(vars) .. BODY .. "\n" .. code .. M.epilogue
+  return OPEN .. index_json(vars) .. BODY .. "\n" .. code .. M.epilogue
 end
 
 return M

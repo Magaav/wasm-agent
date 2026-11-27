@@ -160,6 +160,19 @@ if [ -z "$NEW" ]; then
   done
 fi
 [ -n "$NEW" ] && [ -x "$NEW" ] || { say "no new binary to install (build one, or pass a path)"; exit 2; }
+
+# WA-TERM SHIPS WITH WA (wa-term-own-program). `wa` opens its terminal by running `wa-term` from beside
+# itself, so installing one without the other installs a node that cannot draw a prompt - which is exactly
+# how the first landing of this work was reverted. The pair is resolved and required HERE, before anything
+# is staged or swapped: both, or nothing is installed.
+NEW_TERM="${WA_UPGRADE_TERM:-}"
+if [ -z "$NEW_TERM" ]; then
+  case "$NEW" in
+    *.exe) NEW_TERM="$(dirname "$NEW")/wa-term.exe" ;;
+    *) NEW_TERM="$(dirname "$NEW")/wa-term" ;;
+  esac
+fi
+[ -f "$NEW_TERM" ] || { say "refused(term_program_missing): $NEW_TERM is not beside $NEW. The program that draws the terminal ships with the node and is installed with it - both, or neither - so nothing was installed. Build it (cargo build --release -p wa-term) beside the node binary, or name it with WA_UPGRADE_TERM."; exit 2; }
 [ -x "$INSTALLED" ] || { say "nothing installed at $INSTALLED - this upgrades a running node, it does not create one"; exit 2; }
 
 # SIGNED BEFORE ANY SWAP. These bytes are about to replace the running node, so they must be the bytes a
@@ -1127,11 +1140,32 @@ if [ "$TARGET_DIR" != "$INSTALL_DIR" ]; then
   { cp -f "$NEW" "$TARGET_DIR/$EXE.new" && mv -f "$TARGET_DIR/$EXE.new" "$TARGET_DIR/$EXE"; } \
     || { rm -f "$TARGET_DIR/$EXE.new"; say "cannot stage the program in $TARGET_DIR"; exit 1; }
   chmod 0755 "$TARGET_DIR/$EXE" 2>/dev/null || true
+  # BOTH OR NEITHER: the terminal program lands in the same guarded step. A staging tree with a node and
+  # no `wa-term` would be sealed, pointed at and restarted into term_program_missing.
+  TERM_NAME="wa-term"; case "$EXE" in *.exe) TERM_NAME="wa-term.exe" ;; esac
+  { cp -f "$NEW_TERM" "$TARGET_DIR/$TERM_NAME.new" && mv -f "$TARGET_DIR/$TERM_NAME.new" "$TARGET_DIR/$TERM_NAME"; } \
+    || { rm -f "$TARGET_DIR/$TERM_NAME.new"; say "cannot stage $TERM_NAME in $TARGET_DIR"; exit 1; }
+  chmod 0755 "$TARGET_DIR/$TERM_NAME" 2>/dev/null || true
   { cp -f "$0" "$TARGET_DIR/scripts/upgrade.sh.new.$$" \
       && mv -f "$TARGET_DIR/scripts/upgrade.sh.new.$$" "$TARGET_DIR/scripts/upgrade.sh"; } 2>/dev/null || true
   # THE RECORD is written by the SAME writer as the live path (record_installed), which targets TARGET_DIR: with
   # staging it lands as a real file in the tree that will be sealed, and it is never written over a link (fix 6).
-  record_installed || { say "cannot stage the install record in $TARGET_DIR"; exit 1; }
+  # THE RECORD HAS ONE WRITER - deploy.sh's record_installed, exported by the deploy that starts this script.
+  # Invoked directly (a row, an operator, anything that is not the deploy) no writer is in the environment,
+  # and this line used to die with "record_installed: command not found" AFTER the program was staged: a
+  # staging tree with binaries and no record, reported as a missing command rather than a missing record.
+  if declare -F record_installed >/dev/null 2>&1; then
+    record_installed || { say "cannot stage the install record in $TARGET_DIR"; exit 1; }
+  else
+    record_commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+    { printf 'commit=%s
+' "$record_commit"
+      printf 'via=upgrade.sh
+at=%s
+' "$(date -u +%FT%TZ)"
+    } > "$TARGET_DIR/installed.txt" || { say "cannot stage the install record in $TARGET_DIR"; exit 1; }
+    say "staged a minimal install record (no record_installed in this environment: not started by the deploy)"
+  fi
   say "staged in $TARGET_DIR (program, upgrade.sh, record); the deploy seals it and moves the pointer before the restart"
   exit 0
 fi

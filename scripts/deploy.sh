@@ -1180,7 +1180,9 @@ BINARY_LINES
       NEW_SENTINEL="$BINARY_STAGE/wa-sentinel"
       # Presence, not the exec bit: a filesystem where `chmod` is a no-op (this checkout's /c mount) would
       # refuse a good binary, and the prove gate below executes it anyway - a file that cannot run fails there.
-      [ -f "$NEW" ] && [ -f "$NEW_SENTINEL" ] || fail "refused(prebuilt_binary_incomplete): the staged binary is missing $NEW or $NEW_SENTINEL; nothing installed"
+      NEW_TERM="$BINARY_STAGE/wa-term"
+      [ -f "$NEW_TERM" ] || NEW_TERM="$BINARY_STAGE/wa-term.exe"
+      [ -f "$NEW" ] && [ -f "$NEW_SENTINEL" ] && [ -f "$NEW_TERM" ] || fail "refused(prebuilt_binary_incomplete): the staged set is missing $NEW, $NEW_SENTINEL or $NEW_TERM. The program that draws the terminal ships WITH the node - both, or neither - so nothing was installed."
       SENTINEL_NAME="wa-sentinel"
       if [ -n "${WA_DEPLOY_BINARY_SOURCE:-}" ]; then
         BINARY_PROVENANCE="prebuilt-source"
@@ -1529,6 +1531,15 @@ case "$NEW_SENTINEL_LOWER" in
   *.exe) SENTINEL_NAME="wa-sentinel.exe" ;;
   *)     SENTINEL_NAME="wa-sentinel" ;;
 esac
+
+# AND THE PROGRAM THAT DRAWS THE TERMINAL (wa-term-own-program). `wa` runs `wa-term` from beside itself,
+# so a deploy that installs one and not the other leaves a node that starts and cannot open a prompt -
+# the refusal below is that bug, caught before anything is staged, sealed or swapped. (The FIRST landing
+# of this work was reverted for exactly this: the installed `wa` had no `wa-term` beside it.)
+NEW_TERM="$DEPLOY_BUILD_TARGET/release/wa-term.exe"
+[ -f "$NEW_TERM" ] || NEW_TERM="$DEPLOY_BUILD_TARGET/release/wa-term"
+[ -x "$NEW_TERM" ] || fail "refused(term_program_missing): no built program at $NEW_TERM. The workspace builds it (cargo build --release --manifest-path rust/Cargo.toml produces wa-term beside wa) and the node cannot draw a prompt without it; nothing was built into the install and nothing was installed."
+WA_UPGRADE_TERM="$NEW_TERM"; export WA_UPGRADE_TERM
 fi
 
 # 5. Prove it answers before it goes near the running node. A build that cannot start must not replace one
@@ -2370,6 +2381,10 @@ record_installed() {
     ''|unknown) fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
   esac
 }
+# EXPORTED: upgrade.sh runs as a CHILD process (bash "$UPGRADE") and its staging path calls this writer,
+# so "the same writer as the live path" is only true when the child inherits it. Without this the staging path
+# staged the program and then died on "record_installed: command not found".
+export -f record_installed
 
 # Record what is installed HERE, not only at the end. Every fact this record names - the exact commit, the
 # binary hash, the sentinel hash, the install directory - is already true at this point, and the steps that

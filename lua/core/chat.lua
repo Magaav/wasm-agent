@@ -1474,27 +1474,7 @@ function M.run(argv)
         status("updating", "queued \194\183 waiting for this node to be idle")
       elseif report.ok == false then status("failed", tostring(report.error or report.status or "refused"):sub(1, 60))
       end
-      -- THE SAME LAST LINE `wa update` PRINTS (Victor, 27/11: the TUI went quiet after "checking for updates" and
-      -- the update's own outcome never reached the session that asked for it). The verdict sentence is built by
-      -- update_screen - the module the shell path uses - so the two surfaces cannot drift into saying different
-      -- things about the same deploy, and a FAILED update is said out loud rather than left in a status file.
-      local screen = dofile("lua/core/update_screen.lua")
-      local seconds = math.max(0, math.floor((host.now and host.now() or os.time()) - started))
-      local failed = report.ok ~= true
-      local verdict
-      if failed then
-        verdict = screen.not_updated(tostring(report.message or report.error or "the update did not happen"))
-      else
-        verdict = screen.updated(report.version, tostring(report.commit or report.installed_commit or ""), seconds)
-      end
-      status(failed and "failed" or "installed", verdict)
-      ui.say(redact.text(verdict))
-      if failed then
-        -- A FAILED UPDATE BELONGS IN THE THREAD, not only in build-status.json: the person asked here, and this
-        -- is the surface they are reading.
-        local detail = tostring(report.message or "")
-        if detail ~= "" and not verdict:find(detail, 1, true) then ui.say(redact.text("  " .. detail)) end
-      end
+      ui.say(redact.text(report.message or json.encode(report)))
       if report.release and report.release.state == "behind" then
         ui.say(redact.text("release: " .. report.release.message))
       end
