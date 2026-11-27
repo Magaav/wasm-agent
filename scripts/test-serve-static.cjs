@@ -27,7 +27,7 @@ const repo = path.resolve(__dirname, '..');
 const wa = path.resolve(process.argv[2] || path.join(repo, 'rust', 'target', 'release', 'wa'));
 const ui = path.join(repo, 'ui');
 // A real temp directory, never the node's own state root.
-const tempBase = fs.existsSync('/tmp') ? '/tmp' : os.tmpdir();
+const tempBase = os.tmpdir();
 const root = fs.mkdtempSync(path.join(tempBase, 'wa-serve-static-'));
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
