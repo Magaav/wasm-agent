@@ -1283,6 +1283,14 @@ BINARY_LINES
         fail "refused(no_prebuilt_binary): nothing is published for $(git rev-parse --short HEAD) on $(wa_node_target_triple 2>/dev/null || echo 'this host') and this deploy was asked for a published binary only (WA_DEPLOY_PREBUILT_ONLY=1); nothing was built and nothing installed. Publish it (bash scripts/publish-node-binaries.sh --ensure --publish on the building host) or run the deploy without that variable"
       fi
       if command -v wa_node_disk_floor_ok >/dev/null 2>&1 && wa_node_disk_floor_ok "$ROOT"; then
+      # THE SHELF NOTE (Victor on work, 27/11). "no published binary for this commit" is true and useless alone: it
+      # does not say whether the shelf holds anything, or how stale it is - and the operator had to infer "the factory
+      # is behind" from a screenshot afterwards. The sentence is built by wa_node_shelf_note so it can be proven
+      # without a build (scripts/test-node-shelf-note.sh), and it never invents a distance it cannot measure.
+      PUBLISHED_REPO="${WA_NODE_BINARIES_REPO:-$(git remote get-url origin 2>/dev/null | sed -n 's|.*[:/]\([^/]\{1,\}/[^/]\{1,\}\)$|\1|p')}"
+      PUBLISHED_REPO="${PUBLISHED_REPO%.git}"
+      PUBLISHED_NEWEST="$(wa_node_release_list "$PUBLISHED_REPO" 1 2>/dev/null | head -1)"
+      echo "deploy: $(wa_node_shelf_note "$PUBLISHED_NEWEST" "$(git rev-parse HEAD)")"
         echo "deploy: no published binary for this commit; building this tree (disk floor ok)"
       else
         fail "refused(no_prebuilt_binary_and_disk_floor): no published binary for $(git rev-parse --short HEAD) on $(wa_node_target_triple 2>/dev/null || echo 'this host'), and this machine is below the disk floor a build needs - so neither path can install this commit. Publish it (bash scripts/publish-node-binaries.sh on a machine with cargo, then the printed gh command), pass WA_DEPLOY_BINARY_SOURCE=<dir>, or free space (scripts/reclaim-disk.sh). Nothing installed."
