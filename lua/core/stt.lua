@@ -21,7 +21,8 @@
 --   WASM_AGENT_STT_LEASE_MS     default 60000, the lease every worker takes and extends
 --   WASM_AGENT_STT_HEARTBEAT_MS default 15000, how often a streaming worker extends it
 --   WASM_AGENT_STT_GRACE_MS     default 3000, how long the local worker holds back for a remote
---   WASM_AGENT_STT_FRESH_MS     default 300000, the freshness window (`WA_WHATSAPP_FRESH_SECONDS`)
+--   WASM_AGENT_STT_FRESH_MS     unset by default: the freshness window is owned by the node
+--                               (wa_stt_remote::producer::DEFAULT_FRESH_MS); setting it overrides that
 --   WASM_AGENT_STT_LATENCY_TTL_MS default 600000, how long a decode measurement is evidence
 --
 -- The environment keeps winning on purpose: it is the operator's emergency and test override, and a
@@ -257,7 +258,10 @@ local function request_of()
     lease_ms = env_number('WASM_AGENT_STT_LEASE_MS', 60000),
     heartbeat_every_ms = env_number('WASM_AGENT_STT_HEARTBEAT_MS', 15000),
     fallback_after_ms = env_number('WASM_AGENT_STT_GRACE_MS', 3000),
-    fresh_ms = env_number('WASM_AGENT_STT_FRESH_MS', 300000),
+    -- One owner for the freshness window: wa_stt_remote::producer::DEFAULT_FRESH_MS, which the node
+    -- applies when this is absent (ARCHITECTURE.md law 17). A default here would be a second answer
+    -- to the same question, and the two would drift; the env var overrides it when an operator asks.
+    fresh_ms = env_number('WASM_AGENT_STT_FRESH_MS', nil),
     sample_ttl_ms = env_number('WASM_AGENT_STT_LATENCY_TTL_MS', 600000),
     wait_ms = 0,
   }
@@ -411,7 +415,7 @@ function M.view()
     lease_ms = env_number('WASM_AGENT_STT_LEASE_MS', 60000),
     heartbeat_every_ms = env_number('WASM_AGENT_STT_HEARTBEAT_MS', 15000),
     grace_ms = env_number('WASM_AGENT_STT_GRACE_MS', 3000),
-    fresh_ms = env_number('WASM_AGENT_STT_FRESH_MS', 300000),
+    fresh_ms = env_number('WASM_AGENT_STT_FRESH_MS', nil),
   }
   answer.configured = state.configured
   -- A different process (`wa stt status`, a one-shot script) has its own, unconfigured speech runtime:
@@ -469,6 +473,47 @@ function M.submit(request)
   if not ok then return { error = 'stt_submit_failed' } end
   local decoded = pcall(json.decode, raw)
   return decoded and json.decode(raw) or { error = 'stt_answer_unreadable' }
+end
+
+-- The handle a submit answers, and the ONE call that settles it. A submit enqueues (a queue job, as it
+-- should) and answers its job id; `wait_for(id, wait_s)` returns as soon as the job leaves the queue or
+-- the wait runs out, so a caller never writes a poll loop of its own (Victor's test: "the answer arrives,
+-- or says pending and then arrives, with no poll loop in the caller"). The state it returns is the node's
+-- own word for the job, never a guess: `queued`, `running`, `done`, `failed`, `stale` or `empty`.
+local SETTLED = { done = true, failed = true, stale = true, empty = true }
+function M.wait_for(id, wait_s)
+  local job = tonumber(id) or 0
+  if job <= 0 then return { error = 'stt_no_job' } end
+  local budget = math.max(0, math.floor(tonumber(wait_s) or 60)) * 1000
+  local waited = 0
+  local step = 250
+  while true do
+    local row = M.job(job)
+    local state = row and ((row.ok and row.ok.state) or row.state)
+    if state and SETTLED[state] then
+      row.settled = true
+      return row
+    end
+    if waited >= budget then
+      row = row or {}
+      row.settled = false
+      row.paused_ms = waited
+      return row
+    end
+    if type(host.sleep) == 'function' then host.sleep(step) end
+    waited = waited + step
+  end
+end
+
+-- A submit that answers the settled row: the same two calls in the order every caller writes them.
+function M.submit_and_wait(request, wait_s)
+  local submitted = M.submit(request)
+  if not submitted or submitted.error then return submitted end
+  local id = submitted.ok and submitted.ok.job or submitted.job
+  if not id then return submitted end
+  local settled = M.wait_for(id, wait_s)
+  settled.submitted = submitted
+  return settled
 end
 
 -- The tick the node's housekeeping loop calls, guarded: a failing relay round must not take the
