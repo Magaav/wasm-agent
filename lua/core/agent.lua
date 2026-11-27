@@ -2954,6 +2954,12 @@ function M:run_body(text, images)
   -- ledger AFTER the stripped message it is about (18/11 round 2, finding 4), and the removed markup
   -- rides with that row as the evidence (finding 3).
   local fake_notice, fabricated_step
+  -- WHAT A STOP STOPPED, carried from the round that was stopped to the one that ends the run (week 1,
+  -- "Esc stops what it started"). A stopped call answers one sentence on its own record
+  -- (lua/core/codemode_pending.lua, stop_work); the code-mode layer keeps it on this run's tool
+  -- context (lua/core/codemode.lua, cancel_error), which is rebuilt every round - so it is taken
+  -- here, at run scope, where the cancellation check below can still reach it.
+  local stop_notice
   while true do
     round = round + 1
     -- The deploy pause (lua/core/deploy_pause.lua). This is the step boundary: between decisions,
@@ -2985,7 +2991,12 @@ function M:run_body(text, images)
     end
     -- Unified cancellation: a foreground run's scoped cancel and a supervised
     -- child's cancel both answer here, so the loop checks one name.
-    if foreground_cancelled() then error("run_cancelled") end
+    -- The sentence a stop produced travels WITH the code word, never instead of it: every matcher in this
+    -- tree looks for `run_cancelled` (run_failure.lua, provider.lua, selfloop.lua), and the reader's line
+    -- adds what came after it (lua/core/cli_view.lua).
+    if foreground_cancelled() then
+      error(stop_notice and ("run_cancelled: " .. tostring(stop_notice)) or "run_cancelled")
+    end
     local child_state = child_status()
     if child_state and child_state.cancelled then error("subagent_cancelled") end
     while self:maybe_compact(messages) do
@@ -4172,6 +4183,11 @@ function M:run_body(text, images)
           redact.text(tostring(audit_why or "unknown")):sub(1, 120) .. ") - the node keeps it and retries") })
       end
       output = redacted_output
+      -- See `stop_notice` above: the round after a stop is the one that ends the run, so the note the
+      -- stopped call left on this round's tool context has to outlive this round.
+      if type(dispatch_ctx) == "table" and type(dispatch_ctx.stop_notice) == "string" then
+        stop_notice = dispatch_ctx.stop_notice
+      end
       if type(output)=="table" and output.error=="graph_patch_review_required" then
         remember_audit_leads(output.audit)
       elseif function_.name=="graph" and args.action=="audit_assess"

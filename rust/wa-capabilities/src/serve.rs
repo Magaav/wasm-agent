@@ -572,6 +572,15 @@ pub fn run_cancel_requested() -> bool {
     })
 }
 
+/// Whether THIS thread is running a call relayed from a peer (install_relay_context put a cancel flag on
+/// it). It is the one fact that separates a wait the run's own interpreter is making - which must wake
+/// the moment the run is cancelled, so a stop is instant - from a wait a RELAYED caller is making, whose
+/// interruption is the relay's own business and whose operation must not be disturbed by the node's
+/// cancel (scripts/test-remote-pending.lua and the adoption test in wa-capabilities both pin that).
+pub fn current_call_is_relayed() -> bool {
+    CURRENT_RUN_CANCEL.with(|cell| cell.borrow().is_some())
+}
+
 /// Install (or clear) the current-run cancel flag for this node-thread thread.
 fn set_current_run_cancel(flag: Option<Arc<AtomicBool>>) {
     CURRENT_RUN_CANCEL.with(|cell| {

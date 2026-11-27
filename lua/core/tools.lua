@@ -2401,7 +2401,33 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       watched = bash_changes.before(cwd,
         ctx.read_only_command and ctx.read_only_command(args.command) or nil)
     end
+    -- ESC STOPS WHAT THE TURN STARTED, WHATEVER DOOR STARTED IT (decision (a), 27/11). The reader's own `bash`
+    -- is the same command, in the same process group, as a script's - but only the script's was registered in
+    -- the pending store, so its stop wrote no record and the line "stopped: <command>" had nowhere to come
+    -- from. The call is opened in the SAME index here, and settled with the stop facts the operations layer
+    -- reports for it (never a value invented in Lua). A script's nested bash is already inside that index, so
+    -- it is not opened twice.
+    local pending_native = dofile('lua/core/codemode_pending.lua')
+    local native_handle = nil
+    if not ctx.codemode_nested then
+      native_handle = pending_native.native_open('native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
+    end
+    local started_at = host.now()
     local result = run(args.command, timeout, cwd, provenance, stdin)
+    if native_handle then
+      local cancelled = type(result) == 'table'
+        and (result.cancelled == true or result.stopped == true or result.stop ~= nil
+          or tostring(result.error or ''):find('cancel', 1, true) ~= nil)
+      local note = pending_native.native_settle(native_handle,
+        function(n, a) return M.dispatch(memory, n, a, role, ctx) end,
+        { operation_id = type(result) == 'table' and result.operation_id or nil,
+          cancelled = cancelled,
+          stop = type(result) == 'table' and result.stop or nil,
+          signal = type(result) == 'table' and result.signal or nil,
+          survivors = type(result) == 'table' and result.survivors or nil,
+          after_s = host.now() - started_at })
+      if note ~= nil then ctx.stop_notice = note end
+    end
     -- The phase breakdown is AGGREGATE EVIDENCE, not context: it leaves the answer a caller receives
     -- (lua/core/bash_result.lua) and the agent records it on this call's tool span from here
     -- (lua/core/agent.lua, tool_output.execution_timing), so the numbers are neither lost nor spent on
