@@ -47,7 +47,9 @@ check(type(refused) == 'table' and refused.field == 'time_seconds',
   'it names the field that was sent: ' .. tostring(type(refused) == 'table' and refused.field))
 check(type(refused) == 'table' and refused.nearest == 'timeout_seconds',
   'and the field the caller probably meant: ' .. tostring(type(refused) == 'table' and refused.nearest))
-local message = type(refused) == 'table' and tostring(refused.message or refused.note or '') or ''
+-- ONE SENTENCE, IN ONE PLACE (post-landing read of q#92): the refusal used to repeat it in `message`, `fix`
+-- and `note`. It lives in `fix`, the field a caller reads for what to do next.
+local message = type(refused) == 'table' and tostring(refused.fix or '') or ''
 check(message:find('unknown field time_seconds', 1, true) ~= nil,
   'the message says which field is unknown: ' .. message:sub(1, 240))
 check(message:find('accepted fields are ', 1, true) ~= nil,
@@ -56,7 +58,35 @@ check(message:find('nearest: timeout_seconds', 1, true) ~= nil,
   'and the nearest accepted name: ' .. message:sub(1, 240))
 check(type(refused) == 'table' and type(refused.carried) == 'table' and #refused.carried > 0,
   'the accepted fields travel as a list too: ' .. json.encode(type(refused) == 'table' and refused.carried or {}):sub(1, 240))
+check(type(refused) == 'table' and refused.message == nil and refused.note == nil,
+  'and says it ONCE, in fix, not again in message or note: ' .. json.encode(refused or {}):sub(1, 300))
 check(#seen == 0, 'and nothing was started for a refused call (dispatches: ' .. #seen .. ')')
+
+-- 1b. THE SAME ANSWER WITHOUT THE CALLER'S CWD. This is the post-landing defect q#92 had: the module was
+-- found with `pcall(dofile, 'lua/core/json_contract.lua')`, a path relative to the process's working
+-- directory, so on a node whose cwd is not the lua root the pcall swallowed the miss and `nearest` vanished.
+-- A row in this tree cannot reproduce that cwd, so the row takes the cwd away instead: relative `dofile` is
+-- made to fail for this one call, exactly as it does on such a node, and the name must still come back.
+do
+  local real_dofile = dofile
+  local refused_relative = 0
+  dofile = function(path, ...)
+    -- Only the contract module: other lazy loads in this process are not the subject here, and refusing
+    -- them would fail the call for an unrelated reason.
+    if path == 'lua/core/json_contract.lua' then
+      refused_relative = refused_relative + 1
+      error('a node whose cwd is not the lua root cannot read ' .. path, 0)
+    end
+    return real_dofile(path, ...)
+  end
+  local without_cwd = wa_peer_dispatch('bash', { command = 'printf ok', time_seconds = 5, budget_ms = 5000 }, caller, author)
+  dofile = real_dofile
+  check(type(without_cwd) == 'table' and without_cwd.error == 'peer_bash_field_not_adoptable',
+    'the refusal is the same without a cwd-relative dofile: ' .. json.encode(without_cwd or {}):sub(1, 240))
+  check(type(without_cwd) == 'table' and without_cwd.nearest == 'timeout_seconds',
+    'and it STILL names the nearest field (' .. refused_relative .. ' relative loads refused): '
+      .. tostring(type(without_cwd) == 'table' and without_cwd.nearest))
+end
 
 -- 2. THE FIELD IT SUGGESTED IS ACCEPTED: the suggestion is not a second refusal.
 seen = {}

@@ -6,6 +6,10 @@ function wa_binding_tick() return dofile('lua/vendor/json.lua').encode(binding.t
 -- lanes run on different threads.
 function wa_binding_serve(raw) return dofile('lua/vendor/json.lua').encode(binding.serve(raw)) end
 local json = dofile("lua/vendor/json.lua")
+-- THE ONE WAY A LUA MODULE IS LOADED (law 18). `reload.require` reads WASM_AGENT_LUA_ROOT first and
+-- falls back to the binary, which is what the rest of lua/core uses; this file uses it too instead of
+-- keeping a second answer of its own.
+local reload = dofile("lua/core/reload.lua")
 local memory = dofile("lua/core/memory.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local provider = dofile("lua/core/provider.lua")
@@ -1387,16 +1391,20 @@ local function adopt_bash(args, caller, author, request)
         local list = {}
         for name in pairs(properties) do list[#list + 1] = tostring(name) end
         table.sort(list)
-        local ok_contract, contract = pcall(dofile, 'lua/core/json_contract.lua')
-        local nearest = ok_contract and type(contract) == 'table' and contract.nearest_name
+        -- FOUND THROUGH THE SHARED LOADER ONLY (law 18/19, post-landing read of cf870be7): this file used to
+        -- `pcall(dofile, 'lua/core/json_contract.lua')`, a path relative to the process's cwd, and a node whose
+        -- cwd is not the lua root lost `nearest` to the swallowed pcall. The answer is not a private loader
+        -- here - a second answer to "how is a module loaded" - but the loader the rest of lua/core uses.
+        local contract = reload.require('lua/core/json_contract.lua')
+        local nearest = type(contract) == 'table' and type(contract.nearest_name) == 'function'
           and contract.nearest_name(tostring(key), properties) or nil
-        local message = 'unknown field ' .. tostring(key) .. '; accepted fields are ' .. table.concat(list, ', ')
-          .. (nearest and ('; nearest: ' .. tostring(nearest)) or '')
+        -- ONE SENTENCE, IN ONE PLACE (post-landing read of q#92): the refusal used to say the same thing in
+        -- `message`, `fix` and `note`, three times the bytes for one fact. The sentence lives in `fix`, which
+        -- is the field a caller (and this tree's own refusal table) reads for what to do next.
+        local sentence = 'unknown field ' .. tostring(key) .. '; accepted fields are '
+          .. table.concat(list, ', ') .. (nearest and ('; nearest: ' .. tostring(nearest)) or '')
         return { error = 'peer_bash_field_not_adoptable', field = tostring(key), nearest = nearest,
-          message = message, effect = 'none', carried = list, fix = message,
-          note = "this node's adoption path (budget_ms) carries the operation start's own fields, and `"
-            .. tostring(key) .. '` is not one of them, so the call is refused rather than run without it: '
-            .. message .. ". Send the field this node knows, or send the same call without budget_ms." }
+          effect = 'none', carried = list, fix = sentence }
       end
     end
   end
