@@ -519,15 +519,11 @@ async function scenario(entry) {
       ledger, home, requestsSeen: state.requests.map(entry => entry.path),
       coldMs: warm.coldMs, warmCache: warm.cache, warmWhy: warm.why};
   }
-  // THE CHILD THE KEY INTERRUPTS EXISTS WHEN IT EXISTS, NOT 250 ms AFTER THE REQUEST (mission flaky-twice).
-  // This leg used to sleep a fixed settle and then look for the `sleep 30` child; under load the settle
-  // sometimes elapsed before the node had spawned it, and the leg reported "no shell was running at the key"
-  // - a red against the CODE for a fact about this machine (flaky.tsv: 01:53Z main-health, 06:14Z load 3.46).
-  // Waiting for the child is progress; the settle stays, because a caller that asked for one wants it, but it
-  // now runs after the fact it was standing in for.
-  await waitFor(() => descendants(panePid).some(process_ => process_.comm === 'sleep'),
-    'the child the key interrupts to be running', Number(process.env.ESC_CHILD_WAIT_MS || 30000));
-  await sleep(Number(process.env.ESC_SETTLE_MS || entry.opts.settleMs || 250));
+  // THE SETTLE STAYS, AND NOTHING ELSE IS ADDED HERE: this row's own `ready()` for the leg that HAS a
+  // child (`bash`) already waits for it to be running, not merely announced (see its comment, 'THE SHELL
+  // MUST BE RUNNING'). A wait added here in the flaky-twice pass was wrong twice over - redundant on that
+  // leg and fatal on the four that never start a child (measured: the `headers` leg timed out waiting for
+  // a `sleep` it never spawns). Reverted to the settle alone.
   // THE SHELL THE KEY INTERRUPTS, BY PID, TAKEN NOW: the pane's own tree, never a search by name. Following
   // the pids is what makes the measurement survive the session's own death (measured 25/11: the CLI is gone
   // before the shell is, and a tree walk from a dead pane sees no shell at all and calls it gone).
