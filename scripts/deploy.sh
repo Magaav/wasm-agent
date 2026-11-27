@@ -678,13 +678,20 @@ done
 MAIN_REFS="${MAIN_REFS# }"
 DEPLOY_MAIN_REF=origin/main
 for MAIN_REF in $MAIN_REFS; do
-  [ "$(git rev-parse "$MAIN_REF")" = "$(git rev-parse HEAD)" ] && { DEPLOY_MAIN_REF="$MAIN_REF"; break; }
+  # THE FOURTH ANSWER, JOINED (work retry 4): this picked the main ref only when HEAD EQUALLED it, so a tree that was
+  # on main but behind its tip selected no ref at all and the checks below read an empty one. Ancestry is the rule.
+  git merge-base --is-ancestor HEAD "$MAIN_REF" 2>/dev/null && { DEPLOY_MAIN_REF="$MAIN_REF"; break; }
 done
 export WA_DEPLOY_MAIN_REF="$DEPLOY_MAIN_REF"
 if [ -n "$MAIN_REFS" ]; then
   for MAIN_REF in $MAIN_REFS; do
     BEHIND="$(git rev-list --count "HEAD..$MAIN_REF" 2>/dev/null || echo 0)"
-    [ "$BEHIND" = "0" ] || fail "this tree is $BEHIND commit(s) behind $MAIN_REF; merge main first (a node that cannot see main cannot see its own fixes)"
+  # THE THIRD ANSWER TO "IS THIS TREE MAIN", JOINED TO THE ONE OWNER (work retry 4, 27/11: the deploy said "the tree
+  # is on 27b99c8ee9ec, which is on origin/main ... deploying the tree as it is" and then refused two lines later with
+  # "this tree is 23 commit(s) behind origin/main; merge main first"). Step 0b decides that question by ancestry, and a
+  # remote update deliberately fast-forwards the tree to a NAMED commit that may sit behind a moving tip. So being
+  # behind is a fact to say, never a refusal: only a commit that is not on main at all is refused, at 0b.
+  [ "$BEHIND" = "0" ] || note "the tree is $BEHIND commit(s) behind $MAIN_REF; deploying it as it is (it is a main commit, which is the rule at 0b)"
   done
   # ... and a tree AHEAD of main is the other half of the same failure. An unmerged `change/`
   # branch deploys fine, and then main lags the live binary, so the next main-side deploy is
