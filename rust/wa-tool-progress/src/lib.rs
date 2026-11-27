@@ -462,11 +462,21 @@ fn parse_line(raw: &str) -> Option<Detail> {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Row { pub text: String, pub stalled: bool }
 
+/// A limit as a person says it: `5:00`, `12:30`. Never `5m00s` - a limit is a clock, not a duration.
+fn clock(seconds: f64) -> String {
+    let total = if seconds.is_finite() { seconds.max(0.0).round() as u64 } else { 0 };
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
 impl Row {
     /// The row's text before clipping: `⟳ <tool> · <elapsed>` then the detail, or the stall hint.
-    pub fn text(tool: &str, elapsed_seconds: f64, detail: Option<&Detail>, silent_seconds: f64) -> String {
+    pub fn text(tool: &str, elapsed_seconds: f64, detail: Option<&Detail>, silent_seconds: f64, limit_seconds: Option<f64>, held: bool) -> String {
         let tool = if tool.trim().is_empty() { "tool" } else { tool.trim() };
         let mut text = format!("\u{27f3} {tool} \u{b7} {}", elapsed(elapsed_seconds));
+        // THE JOB LIMIT, in the row and nowhere else, and NO parenthetical when it has none.
+        if let Some(limit) = limit_seconds {
+            if limit > 0.0 { text.push_str(&format!(" (limit {})", clock(limit))); }
+        }
         if silent_seconds >= STALL_SECONDS {
             text.push_str(" \u{b7} ");
             text.push_str(&stall(silent_seconds));
@@ -490,6 +500,9 @@ impl Row {
             }
             None => {}
         }
+        // A cancelled RUN cancels the foreground operation too, so this is what the key does; only an
+        // ADOPTED operation start survives a cancel.
+        if held { text.push_str(" \u{b7} Esc stops it"); }
         text
     }
 }
@@ -504,11 +517,23 @@ pub struct Tracker {
     started_at: f64,
     last_output_at: f64,
     lines: Vec<String>,
+    /// The job limit, when it has one (its record timeout_ms), for the row parenthetical.
+    limit_seconds: Option<f64>,
+    /// Whether this call WAITS on a job, which is when Esc stops it is the truth about the key.
+    held: bool,
 }
 
 impl Tracker {
     pub fn new(tool: &str, now: f64) -> Self {
-        Self { tool: tool.to_string(), started_at: now, last_output_at: now, lines: Vec::new() }
+        Self { tool: tool.to_string(), started_at: now, last_output_at: now, lines: Vec::new(),
+               limit_seconds: None, held: false }
+    }
+
+    /// This call is a WAIT: it carries the job limit when it has one, and says that Esc stops the job.
+    pub fn waiting(mut self, limit_seconds: Option<f64>) -> Self {
+        self.limit_seconds = limit_seconds;
+        self.held = true;
+        self
     }
 
     pub fn tool(&self) -> &str { &self.tool }
@@ -543,7 +568,8 @@ impl Tracker {
         let elapsed_seconds = now - self.started_at;
         if elapsed_seconds < MIN_SECONDS { return None; }
         let detail = self.detail();
-        let text = redact(&Row::text(&self.tool, elapsed_seconds, detail.as_ref(), self.silent_for(now)), secrets);
+        let text = redact(&Row::text(&self.tool, elapsed_seconds, detail.as_ref(), self.silent_for(now),
+                        self.limit_seconds, self.held), secrets);
         Some(Row { text, stalled: self.silent_for(now) >= STALL_SECONDS })
     }
 
@@ -561,6 +587,8 @@ impl Tracker {
             "at": now,
             "last_output_at": self.last_output_at,
             "detail": detail.map(|detail| detail.to_json()),
+            "limit_seconds": self.limit_seconds,
+            "held": self.held,
         })
     }
 }
@@ -579,7 +607,9 @@ pub fn row_from_facts(facts: &Value, now: f64, secrets: &[String]) -> Option<Row
     let last_output_at = facts.get("last_output_at").and_then(Value::as_f64).unwrap_or(started_at);
     let silent = (now - last_output_at).max(0.0);
     let detail = facts.get("detail").and_then(Detail::from_json);
-    let text = redact(&Row::text(tool, elapsed_seconds, detail.as_ref(), silent), secrets);
+    let limit = facts.get("limit_seconds").and_then(Value::as_f64);
+    let held = facts.get("held").and_then(Value::as_bool).unwrap_or(false);
+    let text = redact(&Row::text(tool, elapsed_seconds, detail.as_ref(), silent, limit, held), secrets);
     Some(Row { text, stalled: silent >= STALL_SECONDS })
 }
 
@@ -590,6 +620,28 @@ mod tests {
     fn no_secrets() -> Vec<String> { Vec::new() }
 
     // ---- the clock and the bar ---------------------------------------------------------------
+    /// THE EXTENDED ROW (Fable 28/11): the job own limit in the row, and what the key does.
+    #[test]
+    fn a_held_row_says_the_limit_and_what_esc_does() {
+        let text = Row::text("bash", 190.0, None, 0.0, Some(300.0), true);
+        assert_eq!(text, "\u{27f3} bash \u{b7} 3m10s (limit 5:00) \u{b7} Esc stops it");
+    }
+
+    /// NO PARENTHETICAL WITHOUT A LIMIT: a made-up one would be worse than none.
+    #[test]
+    fn a_held_row_without_a_limit_has_no_parenthetical() {
+        let text = Row::text("bash", 62.0, None, 0.0, None, true);
+        assert_eq!(text, "\u{27f3} bash \u{b7} 1m02s \u{b7} Esc stops it");
+    }
+
+    /// A REMOTE JOB SAYS WHERE: the tool label carries the target capability, so the row reads
+    /// `remote work . bash` and a reader knows the work is on another machine.
+    #[test]
+    fn a_remote_row_names_the_machine_class_and_the_capability() {
+        let text = Row::text("remote work \u{b7} bash", 62.0, None, 0.0, None, true);
+        assert!(text.starts_with("\u{27f3} remote work \u{b7} bash \u{b7} 1m02s"), "{text}");
+    }
+
     #[test]
     fn a_clock_reads_like_the_build_loaders() {
         assert_eq!(elapsed(45.0), "45s");
@@ -650,7 +702,7 @@ mod tests {
         assert_eq!(Detail::from_lines(&lines), Some(Detail::Text("test result: ok. 41 passed; 0 failed".into())),
             "no dialect claims it, so the last line is the answer");
         assert_eq!(Detail::from_lines(&[]), None, "no output at all: no detail");
-        let row = Row::text("bash", 12.0, None, 0.0);
+        let row = Row::text("bash", 12.0, None, 0.0, None, false);
         assert_eq!(row, "\u{27f3} bash \u{b7} 12s", "no detail: the tool and the clock only");
     }
 
