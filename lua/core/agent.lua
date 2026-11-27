@@ -4159,6 +4159,22 @@ function M:run_body(text, images)
         dispatched = true
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
+      -- AND WHEN THE STOP ARRIVES AS AN ANSWER, not as a raised run_cancelled (measured 28/11: for the bash and
+      -- detached scenarios the stop ends the tool call with a result carrying error=run_cancelled, and that path
+      -- reaches neither the tool's own settle nor run_body's cancel branch, so their records stayed running). The
+      -- same closer runs here, where a live interpreter still exists.
+      -- `handled` is the pcall's success, NOT 'the call ran': a stopped command comes back as a NORMAL table
+      -- (measured 28/11: handled=true, type=table, error=run_cancelled), so gating on `not handled` skipped
+      -- exactly the case this is for. The result is inspected on its own.
+      if dispatched and type(output) == 'table' then
+        if tostring(output.error or ''):find('cancel', 1, true) ~= nil then
+          pcall(function()
+            local pending_calls = dofile('lua/core/codemode_pending.lua')
+            pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil,
+              dispatch_ctx and dispatch_ctx.stop_notice or nil)
+          end)
+        end
+      end
       host.beat()
       if dispatched then
         -- A real tool call is the model doing what the notice asked it to do, so the imitation streak
