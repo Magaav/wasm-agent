@@ -1097,7 +1097,25 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     end
     return started.result
   end
-  local record = { op = started.op, tool = name, kind = executor.kind or "operation", scope = scope,
+  -- THE WORDS A PERSON RECOGNISES (Fable 27/11): the first 40 characters of the command, or the tool's own
+  -- name for a job that is not a shell. The operation's own record never carries its command text (only
+  -- `waiting_for: command|descendants`), so the call that starts it is the only place this can be captured -
+  -- and it is captured here, once, rather than reconstructed by a reader.
+  local what = tostring((type(params) == "table" and params.command) or name or "")
+  what = what:gsub("%s+", " "):gsub("^%s+", "")
+  -- 40 BYTES, because the row's own bound is bytes and the ellipsis is three of them: clipping to 39
+  -- characters and appending the ellipsis made 42 bytes, which is what row 7 caught.
+  if #what > 40 then what = what:sub(1, 37) .. "…" end
+  -- A REMOTE JOB SAYS WHERE (Fable 28/11): the row reads `remote <node> . <capability>`, so a reader knows which machine runs the work
+  -- on another machine. Every other call keeps the tool name it already had.
+  local label = name
+  if name == "remote" and type(params) == "table" then
+    local capability = tostring(params.capability or "")
+    local node = tostring(params.node or params.peer or "")
+    local prefix = node ~= "" and ("remote " .. node) or "remote"
+    if capability ~= "" then label = prefix .. " · " .. capability end
+  end
+  local record = { op = started.op, tool = label, what = what, kind = executor.kind or "operation", scope = scope,
     started_at = started_at, state = "running", reported = false, id = started.id,
     -- The shell command's before-snapshot, kept with the handle it belongs to and read once, when
     -- that handle settles (watch_settle). It is this call's own evidence: a map of path -> porcelain
@@ -1464,6 +1482,256 @@ function M.withdraw_wake(op)
   return called and done == true
 end
 
+-- ---------------------------------------------------------------------------- holding the answer
+--
+-- A script that ends with live work used to hand the model a handle, and the wait then cost a model round
+-- trip each time (measured 26/11 over seven days: 8,772 `operation` calls inside 942 runs over two minutes,
+-- 45 % of those runs making six or more, one making 172). The handle still exists for a script that WANTS to
+-- keep working in parallel - blocking is never forced - but when the script has simply ended, there is nothing
+-- for the model to decide: the harness holds the one answer itself, on the same call the model already made,
+-- until an event. One call, one result, no new field on the result: prompt delta 0.
+--
+-- The four events, and why each is what it is (numbers in ready-waiting-costs-no-turns.md):
+--   * settled - reliable for 100 % of jobs, so this is where the saving comes from;
+--   * silence past the job's own norm - only for a job that HAS written output: 29 % of long jobs never
+--     write a byte, and their own norm is silence, so a global silence rule would fire on correct silent
+--     work (a `make -s` is the measured case);
+--   * near its own limit - the only early event a never-speaking job can offer;
+--   * the user - a stop/steer cancels the hold at once and the model gets the facts it has now.
+-- A hold never outlives the operation's own timeout, and never exceeds the ceiling below; a run is never
+-- killed for waiting (the approved rule stands), so the ceiling is a bound on THIS answer, not on the work.
+M.ANSWER_HOLD_MS = 900000   -- 15 min ceiling on holding one answer
+M.HOLD_SILENCE_MS = 30000   -- a job that has spoken and then says nothing for this long is reported, not held
+M.HOLD_DEADLINE_MS = 30000  -- "near its own limit": within this much of the operation's own timeout
+
+-- THE LIMITS ARE FIELDS, NOT ENVIRONMENT (Fable's standing rule: no env override in product code, ever).
+-- A row that has to prove a 15-minute rule in seconds sets M.HOLD_SILENCE_MS on this module - the one
+-- instance the node uses, registered in `package.loaded` below - instead of changing the environment
+-- under a running process. Production never touches them.
+
+-- A MESSAGE WAITING IS AN EVENT (Fable 27/11). Until this, only a stop/steer ended a hold: a user message
+-- queued mid-turn sat in `steering_inbox` until the turn was over, so a held answer could delay the
+-- operator's own words by up to the hold ceiling. The probe is the session's queued row, read once per
+-- slice; a store this process cannot read answers "nothing waiting", which is the pre-existing behaviour.
+local function message_waiting(opts)
+  local sid = tostring((opts and (opts.session or (opts.ctx and opts.ctx.session_id))) or "")
+  if sid == "" then return false end
+  local ok, steering = pcall(dofile, "lua/core/steering.lua")
+  if not ok or type(steering) ~= "table" or type(steering.queued) ~= "function" then return false end
+  local called, queued = pcall(steering.queued, sid)
+  return called and queued == true
+end
+
+-- Hold this scope's answer until an event. Returns nil when there was nothing live to hold, else the reason
+-- the hold ended and how long it held - for the ledger, never for the model.
+-- WHAT A WAKE CARRIES BESIDE THE HANDLE (Fable 27/11): a job that has been quiet for minutes must not be
+-- reported as a bare op id. The facts are bounded on purpose - 20 lines and 2 KB - because they ride in the
+-- tool RESULT of a call the model already made, never in the prompt: the byte delta is stated in the build's
+-- table and is 0 for the prompt itself.
+M.HOLD_TAIL_BYTES = 2048
+M.HOLD_TAIL_LINES = 20
+
+local function hold_tail(dispatch, record, state)
+  -- A tail cannot be read without knowing where the output ends, and a RUNNING operation's status does not
+  -- carry a byte count (measured 27/11: the row lists elapsed/remaining/last_output_elapsed_ms and no
+  -- stdout_bytes; the read answer is what names it, `available_bytes`). So: one bounded read, and a second
+  -- only when the output is longer than the window - both on the wake path alone, never in the wait loop.
+  local function read(offset)
+    local ok, page = pcall(dispatch, "operation", { action = "read", id = record.op, stream = "stdout",
+      offset = offset, limit = M.HOLD_TAIL_BYTES })
+    if not ok or type(page) ~= "table" then return nil end
+    return page
+  end
+  local page = read(math.max(0, (tonumber(state and state.stdout_bytes) or 0) - M.HOLD_TAIL_BYTES))
+  if not page then return nil end
+  local available = tonumber(page.available_bytes)
+  if available and available > M.HOLD_TAIL_BYTES then
+    page = read(available - M.HOLD_TAIL_BYTES) or page
+  end
+  local text = page.content or page.stdout
+  if type(text) ~= "string" or text == "" then return nil end
+  -- The last N lines within the byte ceiling, so a file of one enormous line cannot push the answer past
+  -- the bound either.
+  local lines = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+  while #lines > 0 and #lines[#lines] == 0 do lines[#lines] = nil end
+  local from = math.max(1, #lines - M.HOLD_TAIL_LINES + 1)
+  local kept = {}
+  local bytes = 0
+  for index = from, #lines do
+    local line = lines[index]
+    if bytes + #line + 1 > M.HOLD_TAIL_BYTES then break end
+    kept[#kept + 1] = line
+    bytes = bytes + #line + 1
+  end
+  if #kept == 0 then return nil end
+  return table.concat(kept, "\n")
+end
+
+-- The same facts the design asks for at every wake: what it is doing, how long, against which limit, how
+-- long since it last spoke, and the last lines. Only for the wakes that need them - a settle answers with
+-- the work's own result, and a cancelled hold answers with the user's own action.
+local function hold_facts(dispatch, records)
+  local facts = {}
+  for _, item in ipairs(records) do
+    local state = item.state or {}
+    -- How long since it last spoke: the operation reports `output_idle_ms` when it has one, and always the
+    -- pair the difference comes from (the same two fields the silence rule itself reads).
+    local silent = tonumber(state.output_idle_ms)
+    if silent == nil then
+      local elapsed = tonumber(state.elapsed_ms)
+      local last = tonumber(state.last_output_elapsed_ms)
+      if elapsed and last then silent = math.max(0, elapsed - last) end
+    end
+    facts[#facts + 1] = {
+      op = item.record.op,
+      state = tostring(state.state or "running"),
+      elapsed_ms = tonumber(state.elapsed_ms),
+      -- ITS OWN LIMIT, which is the number the model needs to judge `near its timeout` against: the
+      -- operation's timeout when it reports one, else what is left of it.
+      limit_ms = tonumber(state.timeout_ms) or tonumber(state.remaining_ms),
+      silent_ms = silent,
+      tail = hold_tail(dispatch, item.record, state),
+    }
+  end
+  return facts
+end
+
+-- WHAT THE INSTALL'S OWN LINE NAMES (Fable 27/11). The sentinel announces a held install with the reason it
+-- is held, and until now the reason could only be "a turn is running": the node never said WHICH work. A hold
+-- is the one case where that is knowable and worth saying - the job is the turn's work, waking the model
+-- would not free the node any sooner, and the operator deserves to see what the wait is for. So the hold
+-- publishes one small record per live job while it waits and removes it after; wa-sentinel reads the directory
+-- and its line becomes "waiting for <job> of session X, up to m:ss". Nothing here is model-facing.
+-- One flat file per held job in the node's own data directory (no new directory: `host.write_file` is the only
+-- create this layer has, and a directory nobody removes on a crash is a worse neighbour than a file).
+M.HOLD_PREFIX = "codemode-hold-"
+
+local function hold_path(op)
+  return paths.data() .. "/" .. M.HOLD_PREFIX .. tostring(op) .. ".json"
+end
+
+local function hold_publish(records, opts)
+  local ok, err = pcall(function()
+    local session = tostring((opts and opts.session) or "")
+    for _, item in ipairs(records) do
+      local state = item.state or {}
+      local record = {
+        op = item.record.op,
+        session = session,
+        tool = tostring(item.record.tool or ""),
+        what = tostring(item.record.what or ""),
+        started_at = os.time(),
+        elapsed_ms = tonumber(state.elapsed_ms),
+        limit_ms = tonumber(state.timeout_ms) or tonumber(state.remaining_ms),
+      }
+      pcall(host.write_file, hold_path(item.record.op), json.encode(record))
+    end
+  end)
+  return ok
+end
+
+local function hold_withdraw(records)
+  for _, item in ipairs(records) do
+    pcall(os.remove, hold_path(item.record.op))
+  end
+end
+
+function M.hold_before_answer(dispatch, opts, scope)
+  local index = M.open(scope)
+  if index.count == 0 then return nil end
+  local started = host.now()
+  local limit_ms = M.ANSWER_HOLD_MS
+  local silence_ms = M.HOLD_SILENCE_MS
+  local deadline_ms = M.HOLD_DEADLINE_MS
+  local woke = nil
+  local last_state = {}
+  local published = nil
+  while true do
+    local live, silent, near_limit = 0, false, false
+    local first_live = nil
+    for _, record in pairs(index.ops) do
+      if record.state == "running" or record.state == "unknown" then
+        local executor = executor_of(record)
+        if executor then
+          local state = executor_poll(executor, dispatch, opts, record, 0)
+          if type(state) == "table" and state.settled == true then
+            settle(executor, dispatch, opts, scope, index, record, state)
+          else
+            live = live + 1
+            first_live = first_live or { executor = executor, record = record }
+            if type(state) == "table" then
+              last_state[record.op] = state
+              -- Where the silence clock comes from, in order: the field the operation reports when it has
+              -- one, else the two it always reports (23/11 state record: elapsed_ms and
+              -- last_output_elapsed_ms are in every answer, output_idle_ms only in some). A job that has
+              -- never written a byte is NOT silent - its own norm is silence (29 % of long jobs) - so the
+              -- rule needs the `wrote` half and not only the clock.
+              local idle = tonumber(state.output_idle_ms)
+              if idle == nil then
+                local elapsed = tonumber(state.elapsed_ms)
+                local last = tonumber(state.last_output_elapsed_ms)
+                if elapsed and last then idle = math.max(0, elapsed - last) end
+              end
+              local wrote = (tonumber(state.output_bytes) or 0) > 0
+                or (tonumber(state.last_output_elapsed_ms) or 0) > 0
+              if wrote and idle ~= nil and idle >= silence_ms then silent = true end
+              local remaining = tonumber(state.remaining_ms)
+              if remaining ~= nil and remaining <= deadline_ms then near_limit = true end
+            end
+          end
+        end
+      end
+    end
+    if live == 0 then break end
+    if not published then
+      local snapshot = {}
+      for _, record in pairs(index.ops) do
+        if record.state == "running" or record.state == "unknown" then
+          snapshot[#snapshot + 1] = { record = record, state = last_state[record.op] }
+        end
+      end
+      if #snapshot > 0 then
+        published = snapshot
+        hold_publish(snapshot, opts)
+      end
+    end
+    if silent then woke = "silent" break end
+    if near_limit then woke = "deadline" break end
+    -- The operator's own words end the wait before a stop does: a queued message is a person asking for the
+    -- turn to end, and a hold that ignores it is the harness talking over them.
+    if message_waiting(opts) then woke = "user" break end
+    if cancelled() then woke = "cancelled" break end
+    local spent_ms = math.floor((host.now() - started) * 1000)
+    if spent_ms >= limit_ms then woke = "hold_limit" break end
+    -- One real slice of waiting, so this loop is not a spin: the same 1 s slice `operation_poll` uses, and
+    -- only the FIRST live record is polled per turn of the loop, because the next turn re-reads them all.
+    if first_live then
+      local slice = math.max(1, math.min(M.SLICE_MS, limit_ms - spent_ms))
+      local state = executor_poll(first_live.executor, dispatch, opts, first_live.record, slice)
+      if type(state) == "table" and state.settled == true then
+        settle(first_live.executor, dispatch, opts, scope, index, first_live.record, state)
+      end
+    end
+  end
+  local held_ms = math.floor((host.now() - started) * 1000)
+  if published then hold_withdraw(published) end
+  M.save(scope, index)
+  -- The refresh, for the two wakes that report a job still running. A settle needs none (announce carries the
+  -- work's own result) and a user cancel needs none (the person who cancelled knows what they did).
+  local facts = nil
+  if woke == "silent" or woke == "deadline" or woke == "hold_limit" then
+    local live_records = {}
+    for _, record in pairs(index.ops) do
+      if record.state == "running" or record.state == "unknown" then
+        live_records[#live_records + 1] = { record = record, state = last_state[record.op] }
+      end
+    end
+    if #live_records > 0 then facts = hold_facts(dispatch, live_records) end
+  end
+  return { woke = woke, held_ms = held_ms, facts = facts }
+end
+
 function M.announce(scope)
   local index = M.open(scope)
   if index.count == 0 then return nil end
@@ -1586,5 +1854,7 @@ M.CANCEL_HELP = {
   description = "Stop one pending call, or up to 20, by its op handle. Answers {op, cancelled:true, state:\"cancelled\"} when the work was stopped, {op, cancelled:false, error:\"finished\"} when it had finished first, and {op, cancelled:false, error:\"not_cancellable\", why:…} when the effect cannot be stopped - a sent message stays sent, a landed deploy stays landed. A cancelled call is never re-run.",
   code = "const started = await tools.bash({command:'sleep 300', wait_s:0});\nconst stopped = await cancel(started.op);\nreturn {op: started.op, cancelled: stopped.cancelled};",
 }
+
+package.loaded['codemode_pending'] = package.loaded['codemode_pending'] or M
 
 return M

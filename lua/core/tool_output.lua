@@ -185,9 +185,9 @@ function M.is_script(name) return SCRIPT_NAMES[name] == true end
 -- note, `pending: <what> <the key's own JSON>`, so M.parse_view reads the value back exactly as the key held
 -- it. Measured note sizes: pending_backgrounded median 56 B (max 161), pending_settled median 171 B
 -- (p90 335, max 3,601) - so a note set over NOTE_BYTES keeps the JSON form rather than dropping a field.
-local PENDING_NOTES = { 'pending_settled', 'pending_backgrounded' }
-local NOTE_LABEL = { pending_settled = 'settled', pending_backgrounded = 'backgrounded' }
-local NOTE_WORD = { settled = 'pending_settled', backgrounded = 'pending_backgrounded' }
+local PENDING_NOTES = { 'pending_settled', 'pending_backgrounded', 'pending_held' }
+local NOTE_LABEL = { pending_settled = 'settled', pending_backgrounded = 'backgrounded', pending_held = 'waiting' }
+local NOTE_WORD = { settled = 'pending_settled', backgrounded = 'pending_backgrounded', waiting = 'pending_held' }
 local NOTE_BYTES = 4096
 -- The header lines for a result's notes, or nil when one does not fit (the caller keeps the JSON form).
 local function pending_lines(source)

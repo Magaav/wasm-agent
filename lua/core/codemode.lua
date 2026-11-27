@@ -99,7 +99,9 @@ local session_results=dofile('lua/core/codemode_results.lua')
 -- after its wait answers {state:"pending", op}, and `wait(op)`/`cancel(op)` resume or stop it. Built
 -- on the managed operations the node already supervises - this file only names which tool call an
 -- operation is (`lua/core/codemode_pending.lua`).
-local pending_calls=dofile('lua/core/codemode_pending.lua')
+-- One instance for the node (the module registers itself in package.loaded): a row that proves a
+-- rule in seconds sets its fields, and the same table is what the node runs.
+local pending_calls=package.loaded['codemode_pending'] or dofile('lua/core/codemode_pending.lua')
 -- What a command's answer keeps for the caller, in one allow-list (lua/core/bash_result.lua).
 local bash_result=dofile('lua/core/bash_result.lua')
 -- What a connector answers, learned from its settled answers for the connector index (keys only).
@@ -1380,6 +1382,17 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
     end
   end
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
+  -- HOLD THE ANSWER, NOT THE RUN (27/11). A script that ended with live work used to hand the model a
+  -- handle, and every further wait was a model round trip (measured: 8,772 `operation` calls inside 942
+  -- runs over two minutes in seven days, one run making 172). Nothing the model could decide is left at
+  -- this point - the script is over - so the harness waits here, on the same call, until an event: the
+  -- work settled, it went silent past its own norm, it is near its own limit, or the user cancelled.
+  -- `announce` below then reports exactly what `invoke` already reports for work that settled during the
+  -- script, so this adds NO field to the answer: prompt bytes stay as they were.
+  local hold=pending_calls.hold_before_answer(dispatch,popts,scope)
+  -- A wake that reports a job still running carries what a model needs to decide (state, elapsed, its
+  -- own limit, time since it last spoke, the last lines): a note on the same result, never a prompt line.
+  if type(hold)=='table' and type(hold.facts)=='table' and #hold.facts>0 then result.pending_held=hold.facts end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
   -- Every handle this script stops waiting for is work nobody is waiting for any more: its CPU
