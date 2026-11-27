@@ -482,11 +482,18 @@ mod tests {
         assert_eq!(answer["message_id"], "3EB0TEST");
         // A job of another queue in the same namespace is not an outbox id.
         let other = queue
-            .enqueue(EnqueueRequest::new("wa.stt", b"x".to_vec()).fresh_for(60_000))
+            .enqueue(EnqueueRequest::new("wa.stt", b"x".to_vec()).fresh_for(OTHER_QUEUE_FRESH_MS))
             .unwrap();
         let job = queue.job(other.id).unwrap().unwrap();
         assert_ne!(job.queue, outbox::QUEUE);
     }
+
+    /// A freshness for the harness only: this test puts a job on ANOTHER queue to prove it is not an
+    /// outbox id, and the value is irrelevant to that. It is deliberately NOT the speech policy -
+    /// how long an stt job stays fresh has one owner,
+    /// `wa_stt_remote::producer::DEFAULT_FRESH_MS` (ARCHITECTURE.md law 17), and a fixture that named
+    /// it here would be a second answer wearing a constant.
+    const OTHER_QUEUE_FRESH_MS: i64 = 60_000;
 
     #[test]
     fn cancel_stops_a_queued_send_and_refuses_one_already_taken() {
