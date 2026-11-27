@@ -128,6 +128,31 @@ wa_ancestry_verdict "$CIN" "$BUILT" "$SCRIPTS_ONLY"
 same 'a scripts-only landing on the reused binary -> 0 (installs)' "$?" "0"
 same 'and it is restamped with the scripts-only commit' "$WA_ANCESTRY_REUSED" "$SCRIPTS_ONLY"
 
+# THE LIVE SHAPE (26/11 05:29Z), which the earlier rows MISSED: the RUNNING binary answers that it CONTAINS the
+# candidate stamp. That answer is correct, and it used to short-circuit the verdict to 1 BEFORE the reuse question
+# was asked - so the landed rule never ran, and a deploy of 76906a27 (which contains the running 702e4342, and
+# whose compiled inputs equal the stamp 7490fc56) was refused. The fixture reproduces the whole shape: a compiled
+# change, then its revert (compiled inputs back to the stamp), and a running binary that says it contains the stamp.
+LIVE="$WORK/live"
+mkdir -p "$LIVE"
+git -C "$LIVE" init -q 2>/dev/null
+git -C "$LIVE" config user.email test@example.com; git -C "$LIVE" config user.name test
+mkdir -p "$LIVE/rust/wa-host/src"
+printf 'fn a() {}\n' > "$LIVE/rust/wa-host/src/a.rs"; git -C "$LIVE" add -A; git -C "$LIVE" commit -qm 'the compiled source the reused build was made from'
+L_STAMP="$(git -C "$LIVE" rev-parse HEAD)"
+printf 'fn a() { one(); }\n' > "$LIVE/rust/wa-host/src/a.rs"; git -C "$LIVE" add -A; git -C "$LIVE" commit -qm 'the commit the node is running'
+L_RUNNING="$(git -C "$LIVE" rev-parse HEAD)"
+git -C "$LIVE" revert --no-edit HEAD >/dev/null 2>&1
+L_INSTALLING="$(git -C "$LIVE" rev-parse HEAD)"
+same 'the live fixture: the commit being installed has the stamp compiled inputs' "$(wa_compiled_inputs_digest "$LIVE" "$L_INSTALLING")" "$(wa_compiled_inputs_digest "$LIVE" "$L_STAMP")"
+RUNBIN="$LIVE/fake-running-wa"
+printf '#!/bin/sh\ncase "$1" in --contains) exit 0 ;; esac\nexit 2\n' > "$RUNBIN"
+chmod +x "$RUNBIN"
+wa_ancestry_verdict "$LIVE" "$L_STAMP" "$L_RUNNING" "$RUNBIN" "$RUNBIN"
+same 'the live shape: running contains the stamp, and it still installs' "$?" "0"
+same 'and the verdict names the commit being installed, not the stamp' "$WA_ANCESTRY_REUSED" "$L_INSTALLING"
+shows 'the reason says it is a reused build' "$WA_ANCESTRY_WHY" 'reused build'
+
 # A TRULY OLDER COMMIT: the commit being installed does not contain what is running, whatever the digests say.
 wa_ancestry_verdict "$CIN" "$BUILT" "$RUNNING" 2>/dev/null >/dev/null
 wa_ancestry_verdict "$CIN" "$BUILT" "$RUNNING" >/dev/null 2>&1
