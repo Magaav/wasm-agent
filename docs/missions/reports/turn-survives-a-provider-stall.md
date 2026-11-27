@@ -226,6 +226,35 @@ implementation is the one already recorded: the prefix on the model-call span an
 
 None. This commit adds no product string and changes none; the only new text is this file.
 
+## 11. Item 5 closed, and two answers this branch uses (mission continues on branch
+## change/turn-survives-a-provider-stall)
+
+**Item 5, re-measured on this tree in a CLEAN environment** (the report's §2 computed it; this is my own run):
+
+| estimated context tokens | deadline |
+|---|---|
+| 1 000 | 90 s |
+| 32 000 | 90 s |
+| 100 000 | 107 s |
+| 400 000 | 182 s |
+| 872 000 | 300 s (ceiling) |
+| 1 200 000 | 300 s (ceiling) |
+
+and with no argument and no override: **90 s**. `WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS` is **nil** in a clean
+agent environment while the agent's ambient environment has it at 300. So the 300 s Victor saw is the node's
+flat override, not the size of the request: the size hypothesis cannot be settled from that sentence, and
+the operator's read-only query in §2 is what distinguishes the two.
+
+**Two answers this branch relies on, both already in this report:**
+
+* §4.2 - a turn that continues must NOT write the failure row (`run_failure.lua:185-206`, which
+  `memory.session_state` and `evidence.failure()` read); the pause is a SPAN plus one thin view line. The stall
+  pause (item 1, commit `dbb0d011`) does exactly that: the loop's own `status` line and one `provider_retry`
+  span, no assistant failure row - asserted by `scripts/test-stall-pauses-the-turn.lua`.
+* §4.3 - what the person should read for a turn that ran elsewhere: one prompt row, one run box, one status
+  row that never resets, and one thin marker where it paused. That is the specification for the next write
+  (item 3's replay half).
+
 ## 10. Every claim, and the check behind it
 
 | claim | checked by |
