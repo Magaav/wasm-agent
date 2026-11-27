@@ -4140,6 +4140,11 @@ function M:run_body(text, images)
         -- The name the model called, so the dispatcher can tell the model's own call from the inner calls
         -- a facade (tool_call) makes with this same ctx (lua/core/tools.lua, one pathway).
         dispatch_ctx.tool_call_name=function_.name
+        -- THE NATIVE DOOR (decision (a), 27/11): this is the model's own tool call from this loop, as opposed to
+        -- an inner call a facade makes with the same ctx. It is the flag that puts the call in the pending
+        -- registry, because codemode_nested is TRUE even here (measured: the native bash arrived nested=true, so
+        -- a gate on that flag opened no record at all and the store stayed null).
+        dispatch_ctx.native_tool_call = true
         dispatched = true
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)

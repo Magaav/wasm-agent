@@ -93,6 +93,9 @@ local REMOTE_OWN = { node = true, capability = true, args = true }
 -- one of them would ignore it (mission tool-args-honest-and-same-on-peers, mixed-fleet follow-up). Only
 -- what this node learned to send in that mission is named; a capability absent from this table sends
 -- everything, exactly as before.
+-- ONE LOAD, NOT ONE PER CALL: dofile re-executes the file, and asking it inside the bash branch (a 2 000-line
+-- module) is a cost paid on every command - including the one a stop is interrupting.
+local pending_native = dofile('lua/core/codemode_pending.lua')
 local PEER_FIELD_SUPPORT = { bash = { 'stdin' }, operation = { 'stdin' }, grep = { 'context' } }
 local REMOTE_EXAMPLE = '{"node":"<name>","capability":"bash","command":"ls -la"}'
 
@@ -2327,6 +2330,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     return result
   elseif name == "bash" then
+    pcall(host.write_file, "/tmp/esc-bash.log", "bash branch: nested=" .. tostring(ctx and ctx.codemode_nested) .. " native=" .. tostring(ctx and ctx.native_tool_call) .. " keys=" .. tostring(ctx and ctx.tool_call_name) .. "\n")
     if not args.command or args.command == "" then return { error = "command_required" } end
     local timeout = args.timeout_seconds
     if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
@@ -2407,10 +2411,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- from. The call is opened in the SAME index here, and settled with the stop facts the operations layer
     -- reports for it (never a value invented in Lua). A script's nested bash is already inside that index, so
     -- it is not opened twice.
-    local pending_native = dofile('lua/core/codemode_pending.lua')
     local native_handle = nil
-    if not ctx.codemode_nested then
-      native_handle = pending_native.native_open('native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
+    if ctx.native_tool_call == true then
+      -- A failure here must never cost the command: the record is best effort, the work is not.
+      local ok_open, opened = pcall(pending_native.native_open, 'native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
+      native_handle = ok_open and opened or nil
+
     end
     local started_at = host.now()
     local result = run(args.command, timeout, cwd, provenance, stdin)
