@@ -255,6 +255,22 @@ the operator's read-only query in §2 is what distinguishes the two.
   row that never resets, and one thin marker where it paused. That is the specification for the next write
   (item 3's replay half).
 
+## 12. The pty harness is RED on main (measured both ways), and what that means for acceptance item 2
+
+The brief's acceptance item 2 is "a wake-started turn captured at 80 columns looks like a typed turn", and
+the harness the report names for it is `scripts/test-run-live-pty.mjs`. Measured on this node:
+
+| tree whose Lua it runs and whose binary it uses | result |
+|---|---|
+| this branch (`change/turn-survives-a-provider-stall`) + the tool-progress binary | **2 ok, 6 failed** |
+| a worktree WITHOUT this branch's changes, same binary, same script | **2 ok, 6 failed** |
+
+The same six fail either way, so they are **pre-existing on main** and are not this branch's. They are named
+here, not fixed: a pty harness that is red before the change cannot serve as the green row the acceptance
+asks for, and repairing it is its own item. What IS proved for item 2 on this branch is the rendering
+itself, in the capture-based row C1 added to `scripts/test-cli-view.lua`: the same rows drawn as history
+say Commentary, drawn as a turn do not, and the answer reaches the reader at the width the view is given.
+
 ## 10. Every claim, and the check behind it
 
 | claim | checked by |
