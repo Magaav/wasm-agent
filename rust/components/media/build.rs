@@ -11,7 +11,7 @@
 // The sources themselves are exactly the list the vendored tree carries (`compiled.txt`, written by
 // scripts/vendor-ffmpeg-source.sh): some .c beside them are INCLUDED textually and compiling one of those on
 // its own produces a page of nonsense errors.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Dependency order: avformat on top, avutil at the bottom.
 const LIBRARIES: [&str; 5] = ["libavutil", "libswresample", "libswscale", "libavcodec", "libavformat"];
@@ -38,11 +38,17 @@ fn main() {
             continue;
         }
         let mut build = cc::Build::new();
-        build.include(root.join(library));
+        // -iquote, NOT -I, for the library directories: -I is used for angle-bracket includes too, and
+        // libavutil contains a `time.h` of ffmpeg's own. With -I on that directory, `#include <time.h>` in
+        // libavutil/dict.c resolved to ffmpeg's header instead of wasi-libc's, so `struct tm` was incomplete,
+        // `gmtime_r` and `strftime` were undeclared, and the build failed three files from the real cause.
+        // Measured, not guessed: the same file compiles with `-I.` (ffmpeg's own build) and fails with
+        // `-I libavutil` - the difference is exactly this flag. -iquote reaches quoted includes only.
         build.include(&root);
+        build.flag(format!("-iquote{}", root.join(library).display()));
         for other in LIBRARIES {
             if other != library {
-                build.include(root.join(other));
+                build.flag(format!("-iquote{}", root.join(other).display()));
             }
         }
         // wasi-libc hides `struct tm` and `gmtime_r` behind the POSIX/XOPEN feature macros: without them
@@ -73,11 +79,37 @@ fn main() {
             std::env::set_var("LIBCLANG_PATH", candidate);
         }
     }
+    // bindgen's clang has no idea what this crate is being built for: without the target and the sysroot it
+    // answers `stdio.h file not found` for a header that compiles perfectly two lines above. The sysroot comes
+    // from the C compiler in `CC` (wasi-sdk/bin/clang -> wasi-sdk/share/wasi-sysroot), so the same compiler
+    // builds the C and reads its declarations.
+    let mut clang_args = vec!["--target=wasm32-wasip2".to_string()];
+    // libclang also needs ITS OWN builtin headers (stddef.h lives there, not in the sysroot), and it does not
+    // find them on its own when the target and sysroot are handed to it explicitly.
+    if let Some(builtin) = std::env::var_os("CC")
+        .map(PathBuf::from)
+        .and_then(|cc| cc.parent().and_then(|bin| bin.parent()).map(|sdk| sdk.join("lib/clang")))
+        .filter(|path| path.is_dir())
+    {
+        if let Ok(entries) = std::fs::read_dir(&builtin) {
+            if let Some(include) = entries.flatten().map(|e| e.path().join("include")).find(|p| p.is_dir()) {
+                clang_args.push(format!("-isystem", ) + &include.display().to_string());
+            }
+        }
+    }
+    if let Some(sysroot) = std::env::var_os("CC")
+        .map(PathBuf::from)
+        .and_then(|cc| cc.parent().and_then(|bin| bin.parent()).map(|sdk| sdk.join("share/wasi-sysroot")))
+        .filter(|path| path.is_dir())
+    {
+        clang_args.push(format!("--sysroot={}", sysroot.display()));
+    }
     let bindings = bindgen::Builder::default()
         .header(root.join("libavformat/avformat.h").display().to_string())
         .header(root.join("libavcodec/avcodec.h").display().to_string())
         .clang_arg(format!("-I{}", root.display()))
         .clang_arg(format!("-I{}", root.join("libavcodec").display()))
+        .clang_args(&clang_args)
         .allowlist_function("av_.*")
         .allowlist_type("AV.*")
         .allowlist_var("AV.*")

@@ -21,7 +21,7 @@ interface types {
 
 interface probe {
     use types.{error, file};
-    record stream {
+    record media-stream {
         kind: string,
         codec: string,
         width: u32,
@@ -32,7 +32,7 @@ interface probe {
     record description {
         duration-ms: u64,
         size-bytes: u64,
-        streams: list<stream>,
+        streams: list<media-stream>,
         format: string,
         has-audio: bool,
         elapsed-ms: u64,

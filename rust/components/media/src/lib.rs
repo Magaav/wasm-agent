@@ -24,8 +24,8 @@ use std::time::Instant;
 
 struct Component;
 
-fn failure(code: &str, detail: String) -> exports::wa::media::types::Failure {
-    exports::wa::media::types::Failure { code: code.to_string(), detail }
+fn failure(code: &str, detail: String) -> wa::media::types::Failure {
+    wa::media::types::Failure { code: code.to_string(), detail }
 }
 
 fn error_code(code: &str) -> i32 {
@@ -35,13 +35,13 @@ fn error_code(code: &str) -> i32 {
 
 impl exports::wa::media::probe::Guest for Component {
     fn describe(
-        source: exports::wa::media::types::File,
-    ) -> Result<exports::wa::media::probe::Description, exports::wa::media::types::Error> {
+        source: wa::media::types::File,
+    ) -> Result<exports::wa::media::probe::Description, wa::media::types::Error> {
         let started = Instant::now();
         let path = match CString::new(source.path.clone()) {
             Ok(path) => path,
             Err(_) => {
-                return Err(exports::wa::media::types::Error::Failure(failure(
+                return Err(wa::media::types::Error::Failure(failure(
                     "bad_path",
                     "the file path has a NUL in it".to_string(),
                 )))
@@ -56,7 +56,7 @@ impl exports::wa::media::probe::Guest for Component {
                 std::ptr::null_mut(),
             );
             if opened < 0 || context.is_null() {
-                return Err(exports::wa::media::types::Error::Failure(failure(
+                return Err(wa::media::types::Error::Failure(failure(
                     "unreadable",
                     format!("the container could not be opened (averror {})", error_code(opened)),
                 )));
@@ -64,7 +64,7 @@ impl exports::wa::media::probe::Guest for Component {
             let info = ffi::avformat_find_stream_info(context, std::ptr::null_mut());
             if info < 0 {
                 ffi::avformat_close_input(&mut context);
-                return Err(exports::wa::media::types::Error::Failure(failure(
+                return Err(wa::media::types::Error::Failure(failure(
                     "unreadable",
                     format!("the streams could not be read (averror {})", error_code(info)),
                 )));
@@ -137,8 +137,8 @@ impl exports::wa::media::probe::Guest for Component {
 impl exports::wa::media::frames::Guest for Component {
     fn take(
         _request: exports::wa::media::frames::Request,
-    ) -> Result<Vec<exports::wa::media::frames::Still>, exports::wa::media::types::Error> {
-        Err(exports::wa::media::types::Error::Again(
+    ) -> Result<Vec<exports::wa::media::frames::Still>, wa::media::types::Error> {
+        Err(wa::media::types::Error::Again(
             "frames is not implemented in this slice: the stills are PPM until the JPEG encoder question is answered (docs/missions/reports/media-is-a-component.md)".to_string(),
         ))
     }
@@ -147,11 +147,11 @@ impl exports::wa::media::frames::Guest for Component {
 impl exports::wa::media::audio::Guest for Component {
     fn extract(
         _request: exports::wa::media::audio::Request,
-    ) -> Result<exports::wa::media::audio::Track, exports::wa::media::types::Error> {
-        Err(exports::wa::media::types::Error::Again(
+    ) -> Result<exports::wa::media::audio::Track, wa::media::types::Error> {
+        Err(wa::media::types::Error::Again(
             "audio is not implemented in this slice; its measurement is in the report and it is the next operation to wire".to_string(),
         ))
     }
 }
 
-export!(Component with: exports::wa::media::probe, exports::wa::media::frames, exports::wa::media::audio);
+export!(Component);

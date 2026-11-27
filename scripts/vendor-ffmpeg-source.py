@@ -118,18 +118,6 @@ def main() -> int:
                         queue.append(dest)
                     break
 
-    # The two files that call strftime get an include for the shim beside the component (wasi/strftime.c).
-    # This is the ONLY edit the vendored tree carries, it is re-applied every time the tree is regenerated,
-    # and it is visible in the copy itself.
-    for caller in ("libavutil/bprint.c", "libavutil/dict.c"):
-        path = dest_root / caller
-        if path.is_file():
-            text = path.read_text(encoding="utf-8")
-            if "time_compat.h" not in text:
-                marker = text.index("#include")
-                note = "/* wasi-libc has no strftime; the component's shim declares it */\n#include \"../../../wasi/time_compat.h\"\n"
-                path.write_text(text[:marker] + note + text[marker:], encoding="utf-8")
-
     for notice in ("LICENSE.md", "COPYING.LGPLv2.1", "COPYING.LGPLv3"):
         if (src_root / notice).is_file():
             copy(src_root / notice, dest_root / notice)

@@ -18,8 +18,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/* wasi-libc has no strftime; the component's shim declares it */
-#include "../../../wasi/time_compat.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
