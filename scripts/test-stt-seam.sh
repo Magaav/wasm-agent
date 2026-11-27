@@ -24,6 +24,27 @@ TARGET="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
 artifact="$TARGET/wasm32-wasip2/release/stt.wasm"
 status=0
 
+# 0. **The async rule as a row, not a reading** (Victor 26/11): every export in the interface is an
+#    \`async func\`, or a sync \`func\` with a "SYNC ON PURPOSE" reason line above it; and the world either
+#    declares an output/progress stream or writes why it has none. Static: no build, no toolkit.
+WIT="$ROOT/wit/stt/stt.wit"
+sync_exports=$(grep -cE '^[[:space:]]+[a-z][a-z0-9-]*:[[:space:]]+func\(' "$WIT" || true)
+async_exports=$(grep -cE '^[[:space:]]+[a-z][a-z0-9-]*:[[:space:]]+async func\(' "$WIT" || true)
+reasons=$(grep -c 'SYNC ON PURPOSE' "$WIT" || true)
+if [ "$async_exports" -lt 1 ]; then
+  echo "FAIL wit/stt has no async export: the async rule says a new interface is born async" >&2; status=1
+fi
+if [ "$sync_exports" -ne "$reasons" ]; then
+  echo "FAIL wit/stt has $sync_exports sync export(s) and $reasons \"SYNC ON PURPOSE\" reason line(s): a sync export needs its written reason" >&2
+  status=1
+fi
+if ! grep -qE 'stream<|no output stream' "$WIT"; then
+  echo "FAIL wit/stt neither declares an output/progress stream nor writes why it has none" >&2; status=1
+fi
+if [ "$status" -eq 0 ]; then
+  echo "  async rule: $async_exports async export(s); $sync_exports sync with its reason line; stream-or-reason declared"
+fi
+
 echo "== building rust/components/stt (wasm32-wasip2)"
 ( cd rust/components/stt && cargo build --release $offline --target wasm32-wasip2 --target-dir "$TARGET" ) || {
   echo "FAIL the stt component did not build" >&2; exit 1; }
