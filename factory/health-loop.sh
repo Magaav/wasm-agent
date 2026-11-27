@@ -14,6 +14,25 @@ set -uo pipefail
 M=$HOME/Work/missions; H=$M/HANDOVER.md; C=$HOME/wasm-agent/checkout
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib/main-binary.sh"
+
+# WHICH COPY OF THE FACTORY IS RUNNING (28/11). MEASURED: every tip printed "NOT GRADED" for hours after the fix had
+# LANDED, because this loop runs from a copy under _orch that is swapped by hand between landings (factory/MAP.md) and
+# a running shell loop sources its lib once, at start. The lib in use had no release-resolution bound, no sidecar build
+# and no step name - the fix was in the repo and nothing on the running node could have read it. A worker reading the
+# HANDOVER had no way to tell. So the loop now says which copies it is running, and how far behind the landed ones they
+# are, on every start and once per grading: a swap that was forgotten is a line, not an afternoon.
+wa_factory_selfcheck() {
+  local mine_lib=$HERE/lib/main-binary.sh landed_lib=$C/factory/lib/main-binary.sh note=""
+  if [ -r "$landed_lib" ] && [ -r "$mine_lib" ] && ! cmp -s "$mine_lib" "$landed_lib"; then
+    note="the running lib differs from the landed one ($(stat -c %y "$mine_lib" 2>/dev/null | cut -d. -f1) vs $(stat -c %y "$landed_lib" 2>/dev/null | cut -d. -f1)); swap _orch per factory/MAP.md and restart"
+  fi
+  printf '%s\n' "$note"
+}
+FACTORY_NOTE=$(wa_factory_selfcheck)
+if [ -n "$FACTORY_NOTE" ]; then
+  m="$(date -u +%H:%MZ) WATCHDOG: health runs a factory copy that is not the landed one - $FACTORY_NOTE"
+  echo "$m" >> $M/ATTENTION; echo "$m" >> $H
+fi
 G="env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C $C"
 GREEN=$(cat $M/_orch/health-green 2>/dev/null); KNOWN=" $(cat $M/_orch/health-known 2>/dev/null) "
 while true; do
@@ -39,6 +58,8 @@ while true; do
   wa_note_graded $M/_orch
   # WHICH STEP GAVE THE BINARY, on the line that records the grading, so "graded" is never mistaken for "built".
   echo "$(date -u +%H:%MZ) orch(health): grading ${N:0:8} with ${WA_MAIN_BINARY_STEP:-unknown} (${WA_BIN})" >> $H
+  # The lib that produced that binary, named: a grading line is evidence only if a reader can tell WHICH factory said it.
+  echo "$(date -u +%H:%MZ) orch(health): factory lib $(stat -c %y "$HERE/lib/main-binary.sh" 2>/dev/null | cut -d. -f1)${FACTORY_NOTE:+  [$FACTORY_NOTE]}" >> $H
   export WA_BIN
   bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1
   S=$(jq -r .sha $M/main-health.json); echo $S > $M/_orch/health-last
