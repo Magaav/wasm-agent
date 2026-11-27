@@ -17,7 +17,8 @@
 //!
 //! Why the node waits instead of answering "queued": a search is a local kv read in a component that
 //! is already running, and a model that has to poll for the answer to "what did they say" would spend a
-//! turn doing it. The wait is bounded ([`wa_whatsapp_index::WAIT_MS`]) and heartbeats the node
+//! turn doing it. The wait is the ONE shared one ([`crate::serve::tool_wait_ms`], 60 s by default
+//! with the 300 s ceiling `lua/core/codemode_pending.lua` enforces) and it heartbeats the node
 //! (`serve::beat`) while it waits, so a slow answer is an answer ("still running, here is the id") and
 //! never a frozen node. The dedupe key is the request itself, so a caller that asks again after a slow
 //! answer reads the *same* job instead of queueing a second scan.
@@ -42,7 +43,6 @@ const COMPONENT: &str = "wa-whatsapp";
 const POLL: Duration = Duration::from_millis(20);
 /// How long `whatsapp_download` waits for the decrypted bytes. Longer than a search (a CDN fetch plus a
 /// decrypt), still bounded: a slow one answers "still running" and the same call reads the same job.
-const DOWNLOAD_WAIT_MS: u64 = 10_000;
 /// The directory the decrypted media lands in, under the components directory.
 const DOWNLOAD_DIR: &str = "wa-whatsapp.downloads";
 /// How many files that directory keeps before the oldest go.
@@ -165,7 +165,8 @@ fn component_absent(op: seam::Op) -> Option<Value> {
 fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => component_absent(op).unwrap_or_else(|| ask(op, &args, seam::WAIT_MS)),
+        Ok(args) => component_absent(op)
+            .unwrap_or_else(|| ask(op, &args, crate::serve::tool_wait_ms(&args))),
         Err(_) => seam::refusal(op, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
@@ -345,7 +346,7 @@ fn refused(op: seam::Op, code: &str, detail: &str, asked_op: Option<&str>) -> Va
 // ---- download ----------------------------------------------------------------------------------
 
 fn ask_download(args: &Value) -> Value {
-    ask_download_in(&queue(), args, DOWNLOAD_WAIT_MS, &component_build())
+    ask_download_in(&queue(), args, crate::serve::tool_wait_ms(&args), &component_build())
 }
 
 fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {

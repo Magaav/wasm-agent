@@ -45,7 +45,7 @@ pub extern "C-unwind" fn media(l: *mut wa_host_support::lua::LuaState) -> std::o
 fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => ask(op, &args, seam::WAIT_MS),
+        Ok(args) => ask(op, &args, crate::serve::tool_wait_ms(&args)),
         Err(_) => json!({"ok": false, "error": "email_invalid_request", "detail": "the arguments are not a JSON object"}),
     };
     wa_host_support::json::push_json(l, &answer);

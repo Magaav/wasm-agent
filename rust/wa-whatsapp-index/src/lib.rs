@@ -72,7 +72,8 @@ pub const MAX_ATTEMPTS: u32 = 2;
 /// job id". Bounded because the caller is a Lua tool call on the node's own thread: a search is a
 /// local scan, and a node that blocks longer than this to answer "what did they say" is a node that
 /// stopped serving everything else.
-pub const WAIT_MS: u64 = 2_000;
+// No wait constant here: a tool answer obeys crate::serve::tool_wait_ms in wa-capabilities, and the
+// shared number lives in lua/core/codemode_pending.lua. See whatsapp-read-slow-is-not-an-error.
 
 /// Largest media one `whatsapp_download` may hand back. The bytes ride the job's progress stream,
 /// which `wa:queue` bounds at 1 MiB of chunks; 512 KiB of plaintext stays inside that with room for
@@ -697,7 +698,8 @@ pub fn refusal(op: Op, code: &str, detail: impl AsRef<str>) -> serde_json::Value
     })
 }
 
-/// The answer when the component has not settled inside [`WAIT_MS`]: the job id, so the caller can
+/// The answer when the component has not settled inside the wait the CALL named (see
+/// `wa_capabilities::serve::tool_wait_ms`): the job id, so the caller can
 /// ask again (the dedupe key makes that a read of the same job, not a second scan).
 pub fn slow(op: Op, id: u64, state: &str) -> serde_json::Value {
     serde_json::json!({

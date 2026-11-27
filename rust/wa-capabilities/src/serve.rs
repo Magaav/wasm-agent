@@ -408,6 +408,24 @@ pub(crate) fn test_set_run_cancel(flag: Option<Arc<AtomicBool>>) {
     set_current_run_cancel(flag);
 }
 
+/// The ONE wait a tool call obeys, in milliseconds.
+///
+/// `lua/core/codemode_pending.lua` owns the number (`DEFAULT_WAIT_S = 60`, ceiling 300 s) and hands the
+/// budget it computed to the call, because the budget is a property of the CALL and not of the process:
+/// a script that says `wait_s: 5` and one that says nothing run in the same host. A call that names none
+/// gets that same default. The fallback exists only so a caller outside a script is bounded at all, and
+/// it is the shared default rather than a crate's own smaller number - which is what the two
+/// `WAIT_MS = 2_000` index constants were, and why a slow read crossed the seam as a throw.
+///
+/// `scripts/test-waits-follow-the-shared-rule.lua` refuses any capability that keeps a private wait
+/// BELOW this one; this function is the only place a capability may read a wait from.
+pub fn tool_wait_ms(args: &serde_json::Value) -> u64 {
+    if let Some(ms) = args.get("__wait_ms").and_then(serde_json::Value::as_u64) {
+        return ms.max(1);
+    }
+    (env_usize("WASM_AGENT_WAIT_SECONDS", 60) as u64).saturating_mul(1000)
+}
+
 fn env_usize(name: &str, fallback: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
 }

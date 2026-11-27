@@ -86,8 +86,13 @@ for _, path in ipairs(judged) do
   end
 end
 
-ok(seen > 0, "the scan found the waits it judges (found " .. seen .. "); a scan that sees nothing proves nothing")
-ok(true, offenders .. " private wait(s) below the shared default, of " .. seen .. " judged")
+-- The scan must WORK on a fix that leaves nothing to complain about: a row that only fails while offenders
+-- exist would report "clean" for a broken pattern the moment the tree was fixed. So the pattern is
+-- exercised on a sample of its own, and the real scan is allowed to find zero.
+local sample = 'pub const WAIT_MS: u64 = 2_000;' .. "\n" .. 'pub const DOWNLOAD_WAIT_MS: u64 = 10_000;'
+ok(#private_waits(sample) == 2, "the scan reads a bare WAIT_MS and a prefixed one out of a sample")
+ok(#private_waits("// nothing here") == 0, "and finds nothing in a sample that holds no wait")
+ok(true, offenders .. " private wait(s) below the shared default, of " .. seen .. " judged (0 is the fixed tree)")
 
 if failed > 0 then
   print("waits-follow-the-shared-rule: " .. failed .. " failed of " .. checks .. " checks")
