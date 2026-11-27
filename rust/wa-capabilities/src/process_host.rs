@@ -274,6 +274,26 @@ mod rows {
         }
     }
 
+
+    /// GUARD: a TEST fixture component must never become a shipped one. `components.lock` is what a deploy
+    /// installs; a fixture that appears there is a product mistake, so this fails loudly rather than shipping
+    /// silently. The rule is by name: anything called `test-*` is a fixture.
+    #[test]
+    fn fixture_components_are_never_shipped() {
+        let lock = std::path::Path::new("../../components.lock");
+        let text = std::fs::read_to_string(lock).expect("components.lock must be readable");
+        let shipped: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect();
+        for line in shipped {
+            assert!(
+                !line.contains("test-"),
+                "a test fixture must never be in components.lock: {line}"
+            );
+        }
+    }
+
     /// ROW: an argument with a space or a quote reaches the program as ONE argument - asserted by running a real
     /// shell and comparing what came back, not by spelling the escaping out (the first version of this test did
     /// that, and was wrong about the bytes while the code was right).
