@@ -59,19 +59,33 @@ eq(enum,'schema_enum:arguments.a','a value outside the enum is refused')
 local ok_enum=contract.validate({type='object',properties={a={enum={'x','y'}}}}, '{"a":"y"}')
 check(ok_enum~=nil,'a value inside the enum passes')
 local _,extra=contract.validate({type='object',additionalProperties=false},'{"a":1}')
-eq(extra,'schema_extra:arguments.a (this object takes no arguments)','additionalProperties=false still refuses an extra key, and says it takes none')
--- The refusal that names the wrong argument also names the right ones (13/11: the model guessed `query`
--- for a tool whose parameter is `q`, then `name`, then found `q` - three calls for one question, on a
--- tool whose schema was offered with empty `properties` and so had nothing to read).
-local _, guessed = contract.validate({type='object',additionalProperties=false,properties={
-  q={type='string'}, ['from']={type='string'}, limit={type='integer'}}}, '{"query":"laura"}')
-eq(guessed,'schema_extra:arguments.query (accepted: from, limit, q)','the refusal names every argument the tool accepts')
+eq(extra,'unknown_argument:a','additionalProperties=false still refuses an extra key, by name (25/11: one code for the rule)')
+-- An object that declares no arguments has no close name to suggest, so the refusal makes no suggestion: a
+-- guess that is not close is worse than none.
+check(not extra:find('did you mean',1,true),'and suggests nothing when there is nothing near: '..tostring(extra))
+-- The refusal that names the wrong argument also names the right ones, through the ONE renderer
+-- (lua/core/refusal.lua) that turns the code into the sentence a model reads (13/11: the model guessed
+-- `query` for a tool whose parameter is `q`, then `name`, then found `q` - three calls for one question).
+local guessed_schema={type='object',additionalProperties=false,properties={
+  q={type='string'}, ['from']={type='string'}, limit={type='integer'}}}
+local _, guessed = contract.validate(guessed_schema, '{"query":"laura"}')
+-- `query` against a schema declaring `q`: the PREFIX rule answers with `q` (the brief's own example, the
+-- other way round from `q` -> `query`, which the next check pins).
+eq(guessed,'unknown_argument:query - did you mean q?','the refusal names the argument that does not exist, and the one meant')
+local _, brief = contract.validate({ type = 'object', properties = { query = { type = 'string' } } }, '{"q":"laura"}')
+eq(brief,'unknown_argument:q - did you mean query?','the approved example is real row output: q is a prefix of query')
+local rendered=dofile('lua/core/refusal.lua').build(guessed,{},{tool='probe',parameters=guessed_schema})
+check(rendered.fix:find('from',1,true) and rendered.fix:find('limit',1,true) and rendered.fix:find('q',1,true),
+  'and the sentence names every argument the tool accepts: '..tostring(rendered.fix))
 -- Bounded: a wide schema names the first twelve and says there are more, so the refusal stays a
 -- refusal and not a schema dump.
 local wide={type='object',additionalProperties=false,properties={}}
 for index=1,20 do wide.properties['arg'..index]={type='string'} end
 local _, many = contract.validate(wide,'{"nope":1}')
-check(many:find('^schema_extra:arguments%.nope %(accepted: arg1, arg10')~=nil, 'a wide schema is listed, sorted, from the start: '..tostring(many))
-check(many:find('%.%.%.%)$')~=nil, 'and says the list continues: '..tostring(many))
+eq(many,'unknown_argument:nope','a key far from every declared name is refused without a suggestion')
+local rendered_many=dofile('lua/core/refusal.lua').build(many,{},{tool='probe',parameters=wide})
+check(rendered_many.fix:find('arg1',1,true) and rendered_many.fix:find('arg10',1,true)~=nil,
+  'a wide schema is listed, sorted, from the start: '..tostring(rendered_many.fix))
+check(rendered_many.fix:find('...',1,true)~=nil,'and says the list continues: '..tostring(rendered_many.fix))
 
 print('test-json-contract: '..checks..' checks passed')

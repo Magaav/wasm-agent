@@ -221,6 +221,12 @@ local CODES={
   fix='rename one of the two arguments and send the call again{example_clause}.'},
  schema_unsupported={message='the schema of {tool} uses a JSON-Schema keyword this node does not implement, so it cannot know what the tool accepts and refused the call rather than guess ({origin}).',
   fix='this is a tool-definition problem, not a call problem: report the keyword named in the code; the tool cannot be called until its schema is one this node validates.'},
+ -- The one rule (lua/core/json_contract.lua, 25/11): an object schema is CLOSED unless it says
+ -- otherwise, so a name it does not declare is refused before anything runs. The suggestion is the
+ -- schema's own nearest name, carried by the code's own detail ("unknown_argument:q - did you mean
+ -- query?"), so no site restates it and the sentence cannot disagree with the code.
+ unknown_argument={message='{tool} does not take the argument `{input}` - its own schema never declares that name, so nothing was dispatched ({origin}).',
+  fix='drop `{input}`{did_you_mean}; {tool} takes {accepted}'},
  schema_extra={message='{tool} does not take the argument `{input}`; the call carried a name that is not in its schema ({origin}).',
   fix='drop `{input}`; {tool} takes {accepted}'},
  schema_required={message='{tool} needs `{input}` and the call did not carry it ({origin}).',
@@ -1013,6 +1019,9 @@ function M.build(code,fields,ctx)
   detail=detail and bounded(detail,M.MAX_MESSAGE) or '',input=input or '',
   field=field or '',rule=words(head),code=head,
   accepted=M.accepted(ctx.parameters) or 'the arguments its own schema lists',
+  -- Filled only for the one refusal that makes a suggestion; every other sentence renders it as nothing,
+  -- so a template can carry it without a second sentence for the common case.
+  did_you_mean='',
   expected='',received='',example=fields.example or ctx.example or '',
   -- `{example_clause}` is ", e.g. X" and `{example_sentence}` is " Then send: X."; both empty when the
   -- site recorded no example, so a sentence never ends in "e.g. ." or "Then send: .".
@@ -1023,6 +1032,14 @@ function M.build(code,fields,ctx)
  -- A code with no detail (`{error='unknown_tool'}`) still names a tool in the call itself, so the
  -- sentence says which one instead of quoting nothing.
  if vars.input=='' then vars.input=input or tostring(fields.tool or ctx.tool or '') end
+ -- `unknown_argument:q - did you mean query?`: the contract's own words carry the name sent and the name
+ -- it read as nearest, so the sentence repeats both without any site restating them.
+ if head=='unknown_argument' and type(detail)=='string' then
+  local sent,did=detail:match('^(.-) %- did you mean (.+)%?$')
+  if sent and did and sent~='' and did~='' then
+   vars.field=sent;vars.input=sent;vars.did_you_mean=', did you mean `'..did..'`?'
+  end
+ end
  -- A `schema_*` code records a PATH (`arguments.limit`); what a model has to change is its last name.
  if head:match('^schema_') and vars.field~='' then vars.input=vars.field end
  if path then

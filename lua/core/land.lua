@@ -4448,38 +4448,39 @@ impl.canaries = function(run, options)
     for _, answer in ipairs(peer_answers) do list[#list + 1] = answer end
     return list
   end)())
+  -- LIVE CHECKS ARE ADVISORY (Fable 26/11): the cut continues to the tag, and every finding is printed, written to
+  -- the evidence and put in the release report under the heading below. This is not "the canaries do not matter" -
+  -- it is that after six gate-own defects the JUDGE is what is on trial, not the release: (1) the deploy wait flaky
+  -- under load; (2) "unknown" on a finished install; (3) release-update red on a tree-less node; (4) a refusal read
+  -- as no_data; (5) the CLI's own view read as the serving node's; (6) canaries that skip a node installed in an
+  -- earlier round of the same run, the laptop's account rows, recorded_commit missing ~/.local/bin/installed.txt,
+  -- and ctx.cutting lost on --resume (release-update came out FAIL on the laptop, not "cutting"). Each of those
+  -- stopped a real cut for a reason that was the gate's own. Re-armed as a gate by the release-rehearsal mission
+  -- once `wa release rehearse` is green on the real fleet.
+  local advisory = {}
+  local function advisory_line(text)
+    advisory[#advisory + 1] = tostring(text)
+    print("  " .. tostring(text))
+    evidence("  " .. tostring(text) .. "\n")
+  end
+  print("LIVE CHECKS (advisory until rehearsed)")
+  evidence("LIVE CHECKS (advisory until rehearsed)\n")
   if #failed > 0 then
     local how = {}
     for _, entry in ipairs(ring or {}) do
       local name = tostring((type(entry) == "table" and entry.node) or entry or "")
       if name ~= "" then how[#how + 1] = rollback_line(name) end
     end
-    return false, { error = "canary_failed",
-      observed = "canaries failed: " .. table.concat(failed, ", ") .. (nodes_asked > 0 and (" (peers asked: " .. nodes_answered .. "/" .. nodes_asked .. ")") or "") .. " (notice: " .. noticed .. ")",
-      detail = "release is RED by name: " .. table.concat(failed, ", "),
-      evidence = M.evidence_path(run.id, "canaries"),
-      next = (#how > 0 and ("put the node(s) back on the PREVIOUS release, unless Fable says otherwise: " .. table.concat(how, "; "))
-        or ("fix " .. tostring(failed[1]) .. " before cutting again")),
-      notice = noticed }
+    advisory_line("FAIL: " .. table.concat(failed, ", ") .. (nodes_asked > 0 and (" (peers asked: " .. nodes_answered .. "/" .. nodes_asked .. ")") or ""))
+    if #how > 0 then advisory_line("the previous release to go back to: " .. table.concat(how, "; ")) end
   end
   if #unproven > 0 then
-    return false, { error = "canary_unproven",
-      observed = "NOT PROVEN (an unreachable or silent node is never green): " .. table.concat(unproven, "; "),
-      detail = "release is RED by name: not proven on " .. table.concat(unproven, "; "),
-      evidence = M.evidence_path(run.id, "canaries"),
-      next = "make each named node answer (wa nodes, wa services status), then cut again: a node whose canaries could not be collected has not been proven by this release",
-      notice = noticed }
+    advisory_line("NOT PROVEN (an unreachable or silent node is never green): " .. table.concat(unproven, "; "))
   end
   -- WHERE "PROVEN NOWHERE" LANDS (26/11, Fable r5, removing the rule of 25/11): see M.release_not_proven.
   local not_proven = M.release_not_proven(aggregated)
   if #not_proven.red > 0 then
-    local named = table.concat(not_proven.red, ", ")
-    return false, { error = "canary_cutting_nowhere",
-      observed = "cutting not proven on every node asked: " .. named,
-      detail = "release is RED by name - release-update proved nothing about this cut: " .. named,
-      evidence = M.evidence_path(run.id, "canaries"),
-      next = "read the node's own record (wa update <node> --status) and cut again: release-update must be fresh on a deployed node",
-      notice = noticed }
+    advisory_line("CUTTING NOT PROVEN (release-update proved nothing about this cut): " .. table.concat(not_proven.red, ", "))
   end
   if #not_proven.listed > 0 then
     print("NOT PROVEN ON ANY NODE")
@@ -4492,10 +4493,18 @@ impl.canaries = function(run, options)
     print("  " .. because)
     evidence("  " .. because .. "\n")
   end
-  return true, { canaries = #results, nodes_asked = nodes_asked, nodes_answered = nodes_answered, off = #off, notice = noticed,
+  -- THE REPORT LINE (26/11): a successful step now says what the live checks found, under the same heading.
+  local advisory_text = #advisory > 0 and ("LIVE CHECKS (advisory until rehearsed): " .. table.concat(advisory, " | ")) or ""
+  local advisory_notice = #advisory > 0
+    and ((noticed ~= "" and (noticed .. " | ") or "") .. string.format("LIVE CHECKS: %d advisory finding(s) - the cut continues", #advisory))
+    or noticed
+  return true, { canaries = #results, nodes_asked = nodes_asked, nodes_answered = nodes_answered, off = #off,
+    advisory = advisory, notice = advisory_notice,
     observed = string.format("%d canary(ies) ran on this node and %d peer node(s) ran their own; %d off%s%s",
       #results, nodes_answered, #off, #off > 0 and (" (" .. table.concat(off, ", ") .. ")") or "",
-      fleet_recorded and "" or " - the deploy recorded no per-node outcome, so the fleet was not asked") .. (#not_proven.listed > 0 and (" | NOT PROVEN ON ANY NODE: " .. table.concat(not_proven.listed, ", ")) or "") }
+      fleet_recorded and "" or " - the deploy recorded no per-node outcome, so the fleet was not asked") .. (#not_proven.listed > 0 and (" | NOT PROVEN ON ANY NODE: " .. table.concat(not_proven.listed, ", ")) or "")
+      .. (advisory_text ~= "" and (" | " .. advisory_text) or ""),
+    detail = advisory_text ~= "" and advisory_text or nil }
 end
 
 impl.deploy = function(run, options)
@@ -4700,6 +4709,9 @@ impl.deploy = function(run, options)
           print("land: deploy: " .. name .. " already installed in this run")
           record({ node = name, mode = entry.mode or "tree", commit = sha, state = "installed", seconds = 0,
             detail = "already installed at this commit in this run" })
+          -- AND THE CANARIES MUST ASK IT (26/11): deployed_nodes is what steps.deploy.nodes carries, and the
+          -- canary step asks exactly that list - a node settled in an earlier round was recorded and never asked.
+          deployed_nodes[#deployed_nodes + 1] = { node = name, mode = entry.mode or "tree", state = "installed" }
         elseif stopped then
           record({ node = name, mode = entry.mode or "tree", commit = sha, state = "not_attempted", seconds = 0,
             detail = "not deployed: the round stopped at " .. tostring(stopped.detail or "an earlier node") })

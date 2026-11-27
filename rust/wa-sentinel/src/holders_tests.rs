@@ -94,9 +94,9 @@ fn current_is_a_holder_once() {
 #[test]
 fn holder_lines_name_the_session_and_its_duration() {
     let holders = vec![
-        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false, completion: false },
-        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false, completion: false },
-        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false },
+        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false, completion: false, expired: false },
+        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false, completion: false, expired: false },
+        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false, expired: false },
     ];
     let lines = holders::holder_lines(&holders, |session| session.starts_with("8082b42e"));
     assert_eq!(lines.len(), 3, "one line per holder: {lines:?}");
@@ -109,9 +109,9 @@ fn holder_lines_name_the_session_and_its_duration() {
 /// for this request and over nothing else - not a working session, not a subagent, not a run with no session.
 #[test]
 fn the_bound_passes_over_paused_sessions_only() {
-    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
-    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
-    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false };
+    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false, expired: false };
+    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false, expired: false };
+    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false, expired: false };
 
     // Before the bound: held, whatever the holders are doing.
     let early = holders::bound_verdict(10, 180, &[paused_one.clone()], |_| true);
@@ -224,6 +224,35 @@ fn the_bound_never_passes_over_a_turn_that_has_not_started() {
     let holders::Verdict::Fail(why) = &refused else { panic!("a named queued turn is a failure, not a wait: {refused:?}") };
     assert!(why.contains("admitted and not started"), "the refusal names the queued turn: {refused:?}");
     assert!(why.contains("session 9b28c30d"), "with the session as `wa sessions` prints it: {refused:?}");
+}
+
+/// 12. A RUN THE NODE HAS ALREADY BOUNDED OUT IS NAMED AND DOES NOT HOLD (27/11). MEASURED: a turn admitted behind a
+/// busy node held an install for 25 minutes and nothing bounded the TURN, so the deploy could only die at its own
+/// bound. The node now publishes `wait_bound_ms` beside the entries, marks a run `expired`, and refuses it by name
+/// at the next free thread (`queue_wait_expired`) - so a sentinel that still held on it would fail an install on
+/// work that cannot start. This behaviour does not exist on main, which is the reason the row exists.
+#[test]
+fn an_expired_queued_run_is_named_and_does_not_hold_the_bound() {
+    let body = |expired_field: &str, waited: u64| -> serde_json::Value {
+        serde_json::from_str(&format!(r#"{{"busy":true,"queue":1,
+            "queue_sessions":{{"count":1,"named":1,"wait_bound_ms":120000,"entries":[
+              {{"run_id":1,"session":"9b28c30d-1111","node_thread":0,"kind":"run","waited_ms":{waited}{expired_field}}}]}},
+            "node_threads":[],"current":null,"subagents":{{"queued":0,"running":0,"active":0}}}}"#)).unwrap()
+    };
+    // the node says expired: named, and not a hold
+    let holders = holders::holders_from(&body(r#","expired":true"#, 130_000));
+    let named = holders.iter().find(|holder| holder.session.starts_with("9b28c30d")).expect("still named for the operator");
+    assert!(named.queued && named.expired, "named, and marked with the node's own expiry: {holders:?}");
+    assert_eq!(holders::bound_verdict(200, 180, &holders, |_| false), holders::Verdict::Proceed,
+        "an expired run must not fail a deploy that is past its bound");
+    // an older node that does not publish the flag: the bound beside the entries still decides
+    let holders = holders::holders_from(&body("", 130_000));
+    assert!(holders.iter().any(|holder| holder.expired), "130s against a 120s published bound is expired");
+    // inside its bound the same entry still holds, exactly as before
+    let holders = holders::holders_from(&body("", 45_000));
+    assert!(!holders.iter().any(|holder| holder.expired));
+    assert!(matches!(holders::bound_verdict(200, 180, &holders, |_| true), holders::Verdict::Fail(_)),
+        "a queued run inside its bound still fails the request by name");
 }
 
 /// 11. A request's NAME carries its queue time only when it is a stamp. MEASURED (23/11): this sentinel read

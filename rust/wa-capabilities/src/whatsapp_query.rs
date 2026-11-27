@@ -318,31 +318,34 @@ fn index_op(args: &Value) -> Option<&str> {
 /// not page anything). Either name is accepted for either op, so a caller that says `count` to a
 /// search or `limit` to a backfill is understood instead of silently getting the default.
 fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusal> {
-    request_of_text(op.as_str(), args)
-}
-
-/// [`request_of`] with the op as the word on the wire: the same request, the same checks.
-///
-/// The one piece of op knowledge left here is the count's name - `count` before `limit` for `backfill`,
-/// which pages nothing and asks the phone how many messages to reach for. It is kept verbatim, keyed by
-/// the word, so this is not a place the wire shape can drift.
-fn request_of_text(op: &str, args: &Value) -> Result<seam::Verified, seam::Refusal> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
-    let number = |key: &str| args.get(key).and_then(Value::as_i64);
-    let limit = if op == seam::Op::Backfill.as_str() {
-        args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64))
-    } else {
-        args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64))
+    // A time is passed through in the form the caller wrote it: the FORMS are the shared seam's
+    // (`seam::TIME_FORMS`, `seam::parse_time`), so the host neither repeats the rule nor lets a date
+    // string fall on the floor of an `as_i64` that answers `None`.
+    let time = |key: &str| -> Result<Option<i64>, seam::Refusal> {
+        let code = if key == "since" { "bad_since" } else { "bad_until" };
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(number)) => Ok(number.as_i64()),
+            Some(Value::String(text)) => {
+                seam::parse_time(text).map(Some).ok_or_else(|| seam::Refusal::new(code, seam::TIME_FORMS))
+            }
+            Some(_) => Err(seam::Refusal::new(code, seam::TIME_FORMS)),
+        }
+    };
+    let limit = match op {
+        seam::Op::Backfill => args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64)),
+        _ => args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64)),
     };
     let request = seam::Request {
-        op: op.to_string(),
+        op: op.as_str().to_string(),
         q: text("q"),
         chat: text("chat"),
         id: text("id"),
         kind: text("kind"),
         from: text("from"),
-        since: number("since"),
-        until: number("until"),
+        since: time("since")?,
+        until: time("until")?,
         before: text("before"),
         limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
         max_bytes: args.get("max_bytes").and_then(Value::as_u64),
@@ -477,7 +480,14 @@ fn ask_class_in(q: &wa_queue::Queue, args: &Value, door: &str, want: seam::Effec
 
 /// [`ask_in`] for an op named as data: validate, enqueue, wait - the same three steps, the same queue.
 fn ask_text_in(q: &wa_queue::Queue, op: &str, args: &Value, wait_ms: u64, build: &str) -> Value {
-    let verified = match request_of_text(op, args) {
+    // The word arrives as data and the request builder takes the typed op (main's `request_of`), so the
+    // door parses it once here: a word this seam does not carry is refused by name instead of being
+    // forwarded as if it were one.
+    let typed = match seam::Op::parse(op) {
+        Some(typed) => typed,
+        None => return seam::refusal_text(op, "bad_op", format!("`{op}` is not a whatsapp op")),
+    };
+    let verified = match request_of(typed, args) {
         Ok(verified) => verified,
         Err(refusal) => return seam::refusal_text(op, refusal.code, refusal.detail),
     };

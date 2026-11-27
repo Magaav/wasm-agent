@@ -95,6 +95,18 @@ host is not told about the host's Hyprland.
 Set it explicitly rather than leaning on `/.dockerenv`: podman's default and a plain chroot create
 no such file, and a node that believes it is on a desktop will try to change one.
 
+**Start the watcher through `deploy/wa-start-watcher.sh`, not with a bare `wa-sentinel start`.** MEASURED on work
+(26/11, 10:36Z and 18:05Z): the image's entrypoint ran `wa-sentinel autostart on` then `wa-sentinel start`, both starts
+failed, and their reason went to the container's stdout only - the last `sentinel started` line in `sentinel.log` was
+from the day before. An hour later `wa update` could only answer "no sentinel watcher ownership was verified", so the
+node had two symptoms and no cause. The script retries with a bounded backoff (1s, 2s, 4s, 8s, 16s - five tries),
+prints every try on stdout, and on giving up appends one `start_gave_up` line to `sentinel.log` with the reason. In an
+image, the entrypoint line becomes:
+
+```sh
+/usr/local/bin/wa-start-watcher.sh      # instead of: wa-sentinel start
+```
+
 ## GitHub access
 
 Each machine holds its **own** deploy key on the repo (Settings → Deploy keys,

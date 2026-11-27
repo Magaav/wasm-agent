@@ -120,6 +120,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
+        id: "stt",
+        component: "stt",
+        env: "WA_STT_COMPONENT",
+        native: "rust/wa-kernel-runtime/src/stt_node.rs",
+        summary: "the speech queue's wire layer (component): the envelope, the admission rule and the reply codecs",
+        default_enabled: DEFAULT_ENABLED,
+    },
+    FeatureSpec {
         id: "agent_core",
         component: "agent-core",
         env: "WA_AGENT_CORE_COMPONENT",

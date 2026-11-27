@@ -20,7 +20,14 @@ end
 local M = { mode = 'read' }
 function M.run()
   if type(host.email_search) ~= 'function' then return false, 'capability_missing', 'this binary has no email_search' end
-  local ok, raw = pcall(host.email_search, json.encode({ limit = 1 }))
+  -- A REAL QUESTION, NOT AN EMPTY ONE (26/11): email_search refuses {limit = 1} with email_empty_query - the
+  -- connector needs a question (rust/wa-capabilities/src/email_query.rs:9 lists q/from/subject/mailbox/...), so the
+  -- canary was refused before any mailbox was read. The cheapest real question is the newest inbox message.
+  -- THE SHARED WAIT, NOT A PRIVATE ONE (mission email-read-waits-on-a-future): the mail index no longer
+  -- answers inside a 2 s constant of its own, so a call that names no wait gets a HANDLE at once - and a
+  -- handle is not an empty mailbox. The number is read from the file that owns it, never copied.
+  local wait_s = dofile("lua/core/codemode_pending.lua").DEFAULT_WAIT_S
+  local ok, raw = pcall(host.email_search, json.encode({ mailbox = "INBOX", limit = 1, __wait_ms = wait_s * 1000 }))
   if not ok then return false, 'index_unreadable', tostring(raw) end
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return false, 'index_unreadable', 'the search answered nothing' end
@@ -30,6 +37,11 @@ function M.run()
     return false, tostring(answer.error), 'the search was REFUSED, not answered: ' .. tostring(answer.error)
       .. (answer.state and (' (state ' .. tostring(answer.state) .. ')') or '')
       .. (answer.owner and ('; the account is served by ' .. tostring(answer.owner)) or '')
+  end
+  -- A RUNNING QUERY IS NOT AN EMPTY MAILBOX EITHER: the answer says it has not settled yet, which is the
+  -- truth about the index, not a fact about the mail in it.
+  if answer.state == 'running' or (answer.id ~= nil and answer.messages == nil and answer.hits == nil) then
+    return 'not_proven', 'pending', 'the email index has not answered within the shared wait (' .. tostring(wait_s) .. ' s)'
   end
   local messages = answer.messages or answer.hits or {}
   -- RULING (c), 25/11: no chat indexed on a node that DOES serve the account is no_data, not a break.

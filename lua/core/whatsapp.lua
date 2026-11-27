@@ -71,7 +71,7 @@ M.TOOLS = {
     request = function(args) return { q = args.q, limit = args.limit } end,
     -- What a script reads from the answer (rust/components/wa-whatsapp/src/index.rs `contacts`,
     -- `candidate_json`); the connector index prints it after the arguments (lua/core/return_shapes.lua).
-    returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,truncated}',
+    returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,matched,truncated,next,limit_asked}',
   },
   {
     verb = 'search', capability = 'whatsapp_index', effect = 'read',
@@ -90,7 +90,7 @@ M.TOOLS = {
       return { q = args.q, chat = args.chat, kind = args.kind, ['from'] = args['from'], ['since'] = args['since'], ['until'] = args['until'], limit = args.limit, order = args.order }
     end,
     -- index.rs `search` + `hit_json` (a hit is `view::message` plus chat_name/score).
-    returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text}],count,matched,truncated}',
+    returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text,chat_newest_ts}],count,matched,truncated,limit_asked}',
   },
   {
     verb = 'read', capability = 'whatsapp_index', effect = 'read',
@@ -1563,6 +1563,21 @@ function M.call(name, args, ctx)
       answer.resolved_chat = { asked = args.chat, chat = lookup.chat, picked = lookup.picked }
     end
     return answer
+  end
+  -- A SEND to a chat that is a NAME is refused, and the refusal carries the candidates: the tool never
+  -- picks a recipient (a read may, a send may not), but a model told only "not an exact JID" guesses a
+  -- number - which is the mistake this answers (whatsapp-index-heals-itself P2.4). Nothing is queued, so
+  -- the one forbidden thing (a message to the wrong person) cannot happen here either.
+  if tool.verb == 'send' and type(args.chat) == 'string' and args.chat ~= '' and not args.chat:find('@', 1, true)
+      and not args.chat:match('^[%d%s%+%-%(%)]+$') then
+    local lookup = M.call('contacts', { q = args.chat, limit = 5 }, ctx)
+    local candidates = type(lookup) == 'table' and lookup.candidates or nil
+    local any = type(candidates) == 'table' and #candidates > 0
+    return { ok = false, error = any and 'whatsapp_send_chat_ambiguous' or 'whatsapp_send_chat_not_found',
+      status = any and 409 or 404, effect = 'none', asked = args.chat, candidates = candidates,
+      note = any
+        and 'a name is not a recipient: pick the chat you mean from candidates and send to its exact JID'
+        or 'no chat in the index carries that name: ask mcp_whatsapp_contacts({q}) for what it knows, or pass the exact JID' }
   end
   -- Two verbs are more than one capability call: a send queues and then waits for its outcome in the
   -- same step, and the hidden alias is that resume with no wait (operator decision, 11/11).

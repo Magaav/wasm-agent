@@ -19,6 +19,13 @@
 #   WA_PORT=8799 WA_INSTALL_DIR=/usr/local/bin scripts/upgrade.sh ./rust/target/release/wa
 set -uo pipefail
 
+# A VERDICT IS NOT INHERITED (Fable 26/11). WA_ANCESTRY_REUSED and WA_ANCESTRY_WHY are THIS process's answer about THIS
+# candidate, written by wa_ancestry_verdict below. An inherited value from a caller's environment would restamp the
+# record with a commit of the caller's choice on any path where the verdict never ran - a refusal that exits early, a
+# first install, a candidate that cannot report itself. They are cleared here, BEFORE anything is sourced, and never
+# exported, so no caller can hand this script an answer.
+unset WA_ANCESTRY_REUSED WA_ANCESTRY_WHY
+
 for required in dirname date mkdir sed tr wc uname; do
   command -v "$required" >/dev/null 2>&1 || { printf 'upgrade: shell_environment_missing:%s; no installation attempted\n' "$required" >&2; exit 127; }
 done
@@ -70,6 +77,13 @@ SERVICE_LIB="$ROOT/scripts/lib/service-target.sh"
 . "$SERVICE_LIB"
 HOME_DIR="$(wa_config_dir)"
 INSTALLED="$INSTALL_DIR/$EXE"
+# THE STAGING HALF (Fable 25/11, approved). With WA_VERSION_STAGING set, the install is WRITTEN INTO THAT
+# DIRECTORY and this script stops there: the deploy seals it with scripts/version-install.sh and moves the
+# pointer BEFORE the restart, so a restart always runs a complete version and a rollback is a pointer move.
+# With it UNSET, TARGET_DIR is INSTALL_DIR and every branch below behaves exactly as it did before - the only
+# difference in this file is the guarded block that follows, and this variable.
+TARGET_DIR="$INSTALL_DIR"
+[ -z "${WA_VERSION_STAGING:-}" ] || TARGET_DIR="$WA_VERSION_STAGING"
 # The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh): this script
 # places bytes it did not build, so the only honest source for "which commit is installed" is the binary
 # itself. A missing lib is a refusal, never a silent fallback to the caller's belief.
@@ -87,6 +101,10 @@ done
 [ -n "$WA_NODE_PINS_LIB" ] \
   || { say "refused(node_pins_lib_missing): scripts/lib/node-pins.sh is not beside this script, and it is what reads this node's own pin; nothing was installed"; exit 2; }
 . "$WA_NODE_PINS_LIB"
+# The version folders (slice b). Sourced HERE, at the top with the others, never from inside a function: the
+# rollback below needs to know whether the program it restores is a real file or a link into a sealed version.
+WA_VERSIONS_LIB="$ROOT/scripts/lib/versions.sh"; [ -f "$WA_VERSIONS_LIB" ] || WA_VERSIONS_LIB="$(dirname "$0")/lib/versions.sh"
+[ ! -f "$WA_VERSIONS_LIB" ] || . "$WA_VERSIONS_LIB"
 UI_DIR="${WA_UI_DIR:-$INSTALL_DIR/ui}"
 RUNTIME_ROOT="${WA_RUNTIME_WORKTREE:-$ROOT}"
 if [ -z "${WA_RUNTIME_WORKTREE:-}" ] && [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
@@ -166,6 +184,68 @@ if [ -n "$RELEASE_DIR" ]; then
 elif [ -n "${WA_UPGRADE_RELEASE_TAG:-}" ]; then
   say "refused: WA_UPGRADE_RELEASE_TAG=$WA_UPGRADE_RELEASE_TAG says these bytes came from release $WA_UPGRADE_RELEASE_TAG, and no signed sums were given (--release DIR, or WA_UPGRADE_RELEASE=DIR); nothing was staged"
   exit 3
+fi
+
+# ---- A COVER, ON A NODE THAT RUNS THE BINARY'S EMBEDDED LUA ----------------------------------------
+#
+# A release may be installed for a commit that is NOT its source commit. That is a COVER: another commit's
+# build, accepted because every COMPILED input is identical (wa_compiled_inputs_digest, scripts/deploy.sh's
+# fast path and the release digest search). It is sound for a node WITH a tree - deploy.sh stages THIS
+# commit's lua-core beside the binary and nothing ever reads the embedded copy - and it is UNSOUND for a node
+# with no tree, which runs the binary's EMBEDDED Lua, because the embedded Lua is not a compiled input.
+# MEASURED 25/11: node-3589b5ca9690 was published asserting 3589b5ca while carrying node-a1857d15887c's bytes;
+# a tree-less node installed it, ran a1857d15's Lua and recorded 3589b5ca.
+#
+# So: if these bytes are another commit's build and this install carries no Lua tree of its own, the two Lua
+# digests must be EQUAL and both named. A digest that differs, a release whose manifest has no lua_inputs row,
+# and a caller that names no digest are three different refusals, each by name, all before a byte is staged:
+# an install that cannot tell is refused, never passed.
+COVER_COMMIT=""
+COVER_LUA_VERIFIED=""
+COVER_LUA_INPUTS=""
+if [ -n "$RELEASE_DIR" ] && [ -n "${WA_UPGRADE_REQUESTED_COMMIT:-}" ]; then
+  cover_want="$(printf '%s' "$WA_UPGRADE_REQUESTED_COMMIT" | tr -d '[:space:]')"
+  cover_manifest="$(ls -1 "$RELEASE_DIR"/node-*.manifest 2>/dev/null | head -1)"
+  cover_source=""
+  [ -n "$cover_manifest" ] && cover_source="$(sed -n 's/^source_commit=//p' "$cover_manifest" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  if [ -n "$cover_source" ] && [ "$cover_source" != "$cover_want" ]; then
+    COVER_COMMIT="$cover_source"
+    # THE MANIFEST IS THE WITNESS HERE, so it is verified like one. It ships inside the release's
+    # SHA256SUMS - which wa_release_verify_candidate has just proved is signed by a trusted key - but
+    # nothing above compares the manifest's own bytes with the hash those sums declare for it, so a
+    # swapped manifest could claim a matching Lua tree for a signed binary that embeds another one.
+    cover_manifest_name="$(basename "$cover_manifest")"
+    cover_declared="$(grep -F "  $cover_manifest_name" "$RELEASE_DIR/SHA256SUMS" 2>/dev/null | head -1 | awk '{print $1}')"
+    cover_actual="$(sha256sum < "$cover_manifest" 2>/dev/null | awk '{print $1}')"
+    if [ -z "$cover_declared" ] || [ "$cover_declared" != "$cover_actual" ]; then
+      say "refused(release_cover_lua_manifest_unverified): $RELEASE_DIR/SHA256SUMS does not carry the hash of $cover_manifest_name (declared ${cover_declared:-nothing}, this file is ${cover_actual:-unreadable}), so the Lua tree it claims cannot be trusted - and on a node with no Lua tree of its own that claim is the whole decision; nothing was staged"
+      exit 3
+    fi
+    if [ ! -f "$INSTALL_DIR/lua-core/manifest.txt" ]; then
+      cover_have="$(sed -n 's/^lua_inputs=//p' "$cover_manifest" 2>/dev/null | head -1 | tr -d '[:space:]')"
+      cover_want_lua="$(printf '%s' "${WA_RELEASE_LUA_INPUTS:-}" | tr -d '[:space:]')"
+      case "$cover_want_lua" in
+        ''|*[!0-9a-f]*)
+          say "refused(release_cover_lua_unknown): $RELEASE_DIR is the build of $cover_source and this install has no Lua tree, so these bytes are run through their EMBEDDED Lua - and no Lua-tree digest for $cover_want was given, so whether the two are the same program cannot be told; nothing was staged. The caller that has the tree passes it (scripts/release-install.sh --lua-inputs, or WA_RELEASE_LUA_INPUTS)."
+          exit 3 ;;
+      esac
+      if [ "${#cover_want_lua}" != 64 ]; then
+        say "refused(release_cover_lua_unknown): WA_RELEASE_LUA_INPUTS=$cover_want_lua is not a sha256 of a Lua tree, so $cover_want's Lua cannot be compared with the Lua these bytes embed; nothing was staged"
+        exit 3
+      fi
+      case "$cover_have" in
+        ''|*[!0-9a-f]*)
+          say "refused(release_cover_lua_unrecorded): $cover_manifest names no lua_inputs row (source_commit=$cover_source), so the Lua these bytes embed cannot be compared with $cover_want's; nothing was staged"
+          exit 3 ;;
+      esac
+      if [ "$cover_have" != "$cover_want_lua" ]; then
+        say "refused(release_cover_lua_mismatch): these bytes embed Lua tree $cover_have and $cover_want has Lua tree $cover_want_lua, and this install has no Lua tree of its own to put beside them - installing it would run another program's Lua under $cover_want's name; nothing was staged"
+        exit 3
+      fi
+      COVER_LUA_VERIFIED=yes
+      COVER_LUA_INPUTS="$cover_have"
+    fi
+  fi
 fi
 
 # THE CANDIDATE AGAINST THIS HOST'S LIBC, before the prove gate and long before the swap. A binary that
@@ -373,11 +453,23 @@ record_install() {
     dirty="$(wa_build_field "$UPGRADE_INFO" dirty)"
     build=yes
   fi
+  # A REUSED BUILD IS RESTAMPED WITH THE COMMIT BEING INSTALLED (Fable 26/11). The guard accepted the candidate
+  # because its stamp names an older commit whose TREE is this tree's tree and this tree contains the running commit
+  # (scripts/lib/install-record.sh, WA_ANCESTRY_REUSED). The record then has to say what is installed: the commit
+  # being installed. The older stamp is NOT thrown away - it moves to source_commit_hint, where a reader can see the
+  # build was reused instead of rebuilt.
+  if [ -n "${WA_ANCESTRY_REUSED:-}" ] && [ "$commit" != "$WA_ANCESTRY_REUSED" ]; then
+    say "restamped: ${WA_ANCESTRY_WHY:-the candidate is a reused build}; the record names the commit being installed ${WA_ANCESTRY_REUSED:0:12}"
+    REUSED_BUILD_STAMP="$commit"
+    commit="$WA_ANCESTRY_REUSED"
+    REUSED_BUILD=1
+  fi
   [ "$commit" = unknown ] && commit=""
   [ -n "$commit" ] || { commit=unknown; say "the installed binary cannot report its own build (build_info=absent): the record says commit=unknown rather than guessing"; }
   # A sentinel upgrade knows the exact installed bytes, but cannot prove that a
   # separately built binary corresponds to the checkout's current HEAD.
   source_hint="${SOURCE_COMMIT:-unknown}"
+  [ -n "${REUSED_BUILD_STAMP:-}" ] && source_hint="${REUSED_BUILD_STAMP} (reused build; installed as ${commit})"
   # The record's OWN identity is reused when the bytes it names are the bytes this script is placing: its
   # `sha256=` field is that claim and it is checkable here. `-ef` covers the hard-link case (the installed
   # file IS the built file); the wider check covers a deploy's build, which is a DIFFERENT file with
@@ -430,6 +522,17 @@ record_install() {
     "$commit" "$branch" "$dirty" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$provenance" "$role" "$via" "$stamp" "$reason" > "$record"
   {
     printf 'tree=%s\nbuild_info=%s\n' "$tree" "$build"
+    # WHICH LUA THIS NODE RUNS, as a fact on disk and not only inside the binary. A tree-less install has no
+    # lua-core/manifest.txt to read, so the Lua it runs is the one the binary EMBEDS, and the release's own
+    # manifest names that tree (lua_inputs=). `lua_tree=` is the commit whose Lua is running - the same field
+    # a fast-path deploy writes - so `wa --version` names it (rust/wa-host/src/build_info.rs install_label)
+    # and a cover shows up as exactly what it is: the bytes are one commit's, the Lua another's.
+    if [ -n "$COVER_LUA_VERIFIED" ]; then
+      printf 'lua_inputs=%s\ncover_lua_verified=yes\n' "$COVER_LUA_INPUTS"
+    fi
+    if [ -n "$COVER_COMMIT" ]; then
+      printf 'binary_source_commit=%s\n' "$COVER_COMMIT"
+    fi
     if [ -n "${UPGRADE_ANCESTRY_OVERRIDE:-}" ]; then
       printf 'ancestry_override=%s\nancestry_override_by=%s\nancestry_override_at=%s\n' \
         "$(printf '%s' "$UPGRADE_ANCESTRY_OVERRIDE" | tr '\r\n' '  ')" "$(id -un 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -437,7 +540,17 @@ record_install() {
     if [ "${ANCESTRY:-0}" = 2 ]; then printf 'ancestry_unverified=yes\n'; fi
     true
   } >> "$record" \
-    && mv -f "$record" "$INSTALL_DIR/installed.txt"
+    && { if [ -L "${TARGET_DIR:-$INSTALL_DIR}/installed.txt" ]; then
+           # A node on a version folder holds the record as a LINK into current (slice (b), requirement 4). Writing
+           # over it would replace the link with a regular file and let the pointer and the record disagree again, so
+           # this refuses BY NAME - and it does it with a plain test, not by sourcing a library from inside a
+           # function (Fable 25/11: the source and the call ran on every install, switch off included, and a
+           # tree-less release bundle has no lib/versions.sh).
+           rm -f "$record"
+           say "version_record_is_a_link: ${TARGET_DIR:-$INSTALL_DIR}/installed.txt points at the current version; write the record into the staging tree (WA_VERSION_STAGING)"
+           return 1
+         fi
+         mv -f "$record" "${TARGET_DIR:-$INSTALL_DIR}/installed.txt"; }
 }
 
 health() { curl -s -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
@@ -1004,6 +1117,25 @@ wait_health() {
   return 1
 }
 
+# STAGE ONLY (WA_VERSION_STAGING set): write the program, this very script and the install's record into the
+# staging tree, then stop. NOTHING of the live install is touched and the node is NOT restarted here: the deploy
+# seals the staging tree (scripts/version-install.sh: one folder, one pointer rename) and restarts the node after
+# the pointer already names the new version, which is what makes the rollback a pointer move instead of a copy.
+if [ "$TARGET_DIR" != "$INSTALL_DIR" ]; then
+  [ -d "$TARGET_DIR" ] || { say "WA_VERSION_STAGING=$TARGET_DIR is not a directory"; exit 1; }
+  mkdir -p "$TARGET_DIR/scripts" || { say "cannot write the staging tree $TARGET_DIR"; exit 1; }
+  { cp -f "$NEW" "$TARGET_DIR/$EXE.new" && mv -f "$TARGET_DIR/$EXE.new" "$TARGET_DIR/$EXE"; } \
+    || { rm -f "$TARGET_DIR/$EXE.new"; say "cannot stage the program in $TARGET_DIR"; exit 1; }
+  chmod 0755 "$TARGET_DIR/$EXE" 2>/dev/null || true
+  { cp -f "$0" "$TARGET_DIR/scripts/upgrade.sh.new.$$" \
+      && mv -f "$TARGET_DIR/scripts/upgrade.sh.new.$$" "$TARGET_DIR/scripts/upgrade.sh"; } 2>/dev/null || true
+  # THE RECORD is written by the SAME writer as the live path (record_installed), which targets TARGET_DIR: with
+  # staging it lands as a real file in the tree that will be sealed, and it is never written over a link (fix 6).
+  record_installed || { say "cannot stage the install record in $TARGET_DIR"; exit 1; }
+  say "staged in $TARGET_DIR (program, upgrade.sh, record); the deploy seals it and moves the pointer before the restart"
+  exit 0
+fi
+
 # Copy rather than move: the caller's build tree keeps its binary, and a failed swap has something to
 # roll back to. If they are already the same file - a hard link, which is how an installed binary and
 # its build output often relate - there is nothing to copy and `cp` says so as an error.
@@ -1128,7 +1260,9 @@ if [ "$WATCHDOG" = "1" ]; then
   # files this script replaced before asking (the binary and the UI assets), which go back to the backup it
   # took for exactly this.
   if [ -f "$BACKUP" ]; then
-    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    command -v wa_version_restore_program >/dev/null 2>&1 \
+      && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+      || cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
     for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
@@ -1140,7 +1274,9 @@ if [ "$WATCHDOG" = "1" ]; then
 fi
 if [ -n "$MANAGED_UNIT" ]; then
   if [ -f "$BACKUP" ]; then
-    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    command -v wa_version_restore_program >/dev/null 2>&1 \
+      && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+      || cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
     for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
@@ -1155,7 +1291,9 @@ if [ -n "$MANAGED_UNIT" ]; then
 fi
 if [ "$SUPERVISED" = "1" ]; then
   if [ -f "$BACKUP" ]; then
-    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    command -v wa_version_restore_program >/dev/null 2>&1 \
+      && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+      || cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
     for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
@@ -1178,7 +1316,9 @@ for _ in $(seq 1 100); do
 done
 if port_busy "$PORT"; then say "port $PORT is still occupied; recovery requires checking the listener"; exit 1; fi
 if [ -f "$BACKUP" ]; then
-  cp -f "$BACKUP" "$INSTALLED"
+  command -v wa_version_restore_program >/dev/null 2>&1 \
+    && wa_version_restore_program "$INSTALLED" "$BACKUP" \
+    || cp -f "$BACKUP" "$INSTALLED"
   for asset in $(ui_closure recoverable); do
     [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
   done

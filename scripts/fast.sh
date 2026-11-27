@@ -939,6 +939,27 @@ if command -v node >/dev/null 2>&1; then
   # named here by its path (19-20/11: three of ten hidden tests did not discriminate, and every
   # review of that round carried a test MUST). Self-contained: a fixture repository, no binary.
   check discrimination node scripts/test-discriminates-test.mjs
+  # THE LANDING QUEUE ITSELF (hunk 1, 27/11): its journal is append-only and its submit is idempotent, and
+  # both facts are cheap shelf rows on a temp file - no node, no tree, no push.
+  check queue-journal node scripts/test-queue-journal.mjs
+  check queue-submit node scripts/test-queue-submit.mjs
+  # THE QUEUE TWO DECISIONS ABOUT A PERSON (hunk 2): what the path policy stops, and that an approval is
+  # for exactly (branch, sha, policy-hash) - a new sha voids it, and only the review lane may write one.
+  check queue-policy node scripts/test-queue-policy.mjs
+  check queue-approval node scripts/test-queue-approval.mjs
+  # THE RUNNER STATE MACHINE (hunk 3): a crash mid-landing resumes from main, and the order is priority then
+  # the id. Neither row pushes anything - the steps are injected - so both are shelf rows.
+  check queue-resume node scripts/test-queue-resume.mjs
+  check queue-order node scripts/test-queue-order.mjs
+  # THE DOOR IN THE FILE EVERY CALLER ALREADY KNOWS (hunk 4): submit queues and lands nothing, the policy
+  # applies at the door, and `land` is still there until hunk 5 retires it on purpose.
+  check queue-door node scripts/test-queue-door.mjs
+  # THE REJECTION REACHES ITS WORKER (hunk 5): the rework file, the wake through the carrier decision 4
+  # keeps (injected here), and the third rejection for a mission escalating in one line.
+  check queue-rework node scripts/test-queue-rework.mjs
+  # THE SHA THAT WAS READ IS THE SHA THAT LANDS: the queue pins a ref at the request s sha and hands the
+  # lander THAT, so a branch rewritten after submit is rejected stale_sha instead of landing a moved tip.
+  check queue-pin node scripts/test-queue-pin.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...
@@ -1145,12 +1166,21 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # `/status` is typed into it, and the screen must show the bar with its age and never "limits
   # unavailable", while the mid-run snapshot asks the provider nothing. On the base the age row and the
   # cost row both fail.
+  # THE LIMITS DOOR SECURITY (26/11): the wrapper owns two listeners (a provider and a redirect
+  # origin), the scratch HOME and the key; its Lua half is excluded from the bare loop for that reason.
+  WA_BIN="$bin" check status-limits-security node scripts/test-status-limits-security.mjs
   WA_BIN="$bin" check status-midrun-pty node scripts/test-status-midrun-pty.mjs
+  WA_BIN="$bin" check status-limits-pty node scripts/test-status-limits-pty.mjs
   # A COMMAND A RUN BLOCK RAN SAYS WHICH FILES IT CHANGED (chat-view-round-2, item 2): a scratch git
   # work tree, a run block whose `tools.bash` CREATES a file, and the card that names it - the base
   # emitted nothing for a script's command (the watcher sat after the managed-operation return) and
   # `git status -uno` hid every created file even on the direct path.
   WA_BIN="$bin" check bash-changes-pty node scripts/test-bash-changes-pty.mjs
+  # /sessions SWITCHES THREADS IN ONE PROCESS (sessions-is-a-balloon, Victor + Fable 26/11): the real
+  # binary in a private tmux pty, two seeded sessions and a fixture provider, and the ledger read by a
+  # SECOND process - the turn after the switch lands in the new session and not the old one, going back
+  # reverses it, and the provider key is in no file.
+  WA_BIN="$bin" check sessions-switch-pty node scripts/test-sessions-switch-pty.mjs
   # THE WINDOW'S CHROME (change/tui-chrome, Victor 21/11): the input box grows to max(3, 30% of the
   # window), scrolls with the transcript's scrollbar and takes the wheel when the pointer is over it.
   # And a fenced card's copy icon sits after its corner, where a click on it still copies the content.
@@ -1367,6 +1397,18 @@ check wit-lint bash scripts/wit-lint.sh
 # naming hooks.json, a doc describing a RETURN value), the baseline accepts the recorded holes, and
 # the marker alone turns a polling func green. Seconds, no toolchain.
 check wit-lint-selftest bash scripts/test-wit-lint.sh
+# ASYNC-BORN INTERFACES (Victor 26/11): every NEW or MOVED wit interface is async - a future per result, a stream
+# for progress, cancellation and backpressure declared - and a sync export passes only with a reason line in the
+# file. Existing worlds are grandfathered by an explicit list (wit/async-grandfather.txt), never by a pattern.
+# The land path needs no separate hook: scripts/landing-queue.mjs defaults to `bash scripts/fast.sh` (its line 227),
+# so these two are what the landing gate runs. Proved by running them with the same argv fast.sh uses.
+check wit-async node scripts/lint-wit-async.mjs
+check wit-async-selftest bash scripts/test-wit-async-lint.sh
+# SIGNED RELEASES ON THE FAST PATH (27/11): scripts/test-release-sign.lua shipped from 5185436b and was wired into no
+# runner, so nothing judged it and it rotted - by the time this line existed the fixture signed a set the publisher
+# then rewrote (release_signature_invalid ... signature_stale). It is wired here, and green, so the next drift is a
+# red row instead of a surprise at a release.
+check release-sign env WASM_AGENT_LUA_ROOT="$PWD" WA_FAST_BIN="$bin" WA_SCRIPT="$PWD/scripts/test-release-sign.lua" "$bin" --db "$work/release-sign.db"
 # The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
 # manifest not at all), a win line and the flag for the modules without one, a ledger's seconds, a
 # co-change pair over 70% and a decision inside the 30-day / 100-commit cooldown - plus the exit code

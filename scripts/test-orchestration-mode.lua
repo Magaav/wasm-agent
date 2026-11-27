@@ -71,7 +71,10 @@ check(type(refused.note)=='string' and refused.note:find('route_task',1,true) an
 check(refused.handoff and refused.handoff.tool=='subagent' and refused.handoff.arguments.profile==mode.PROFILE,'refusal carries the authored-handoff shape')
 local written_ok,written=pcall(host.read_file,target)
 check(not written_ok or written==nil,'refused write created no file')
-check(tools.dispatch(memory,'edit',{path=target,start_line=1,end_line=1,content='x'},'master',ctx).error=='orchestration_route_required','direct edit refused before a route')
+-- The fields are the ones `edit` DECLARES (the old start_line/end_line shape is not an argument of this
+-- tool, and since 25/11 an undeclared name is refused before anything else runs - which would have hidden
+-- the orchestration gate this row is about).
+check(tools.dispatch(memory,'edit',{path=target,old_string='x',new_string='y'},'master',ctx).error=='orchestration_route_required','direct edit refused before a route')
 check(tools.dispatch(memory,'write',{path=slot(),content='x'},'master',ctx).error=='orchestration_route_required','a second write refused before a route')
 check(tools.dispatch(memory,'bash',{command='touch '..slot()},'master',ctx).error=='orchestration_route_required','mutating bash refused before a route')
 check(tools.dispatch(memory,'operation',{action='start',command='touch '..slot()},'master',ctx).error=='orchestration_route_required','operation start refused before a route')

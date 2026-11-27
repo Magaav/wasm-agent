@@ -84,7 +84,10 @@ end
 M.elapsed = elapsed
 
 M.POLL = 1        -- seconds between reads; the deploy writes build-status.json many times a second
-M.HEARTBEAT = 30  -- seconds: an unchanged phase says so again at this interval, and only then
+M.HEARTBEAT = 30
+-- A full compile of this tree on a node like work, said out loud while it runs (Victor, 27/11: "we need
+-- instantaneous" - so at least the wait must be named, in seconds of reading, not discovered after 32 minutes).
+BUILD_MINUTES = 30  -- seconds: an unchanged phase says so again at this interval, and only then
 -- HOW LONG A FOLLOW WAITS FOR A REQUEST THE SENTINEL HAS NOT STARTED. A queued deploy can be held by
 -- design (the node is busy, a turn is finishing), so the bound is the installer's OWN idle bound -
 -- `WA_DEPLOY_IDLE_BOUND`, 1800 s, the number `scripts/upgrade.sh` writes into deploy-pending.json - and
@@ -244,7 +247,7 @@ function M.state(options)
       return snap({ key = "installed_with_problems", terminal = true, ok = false, clock_from = origin,
         body = "installed " .. (commit ~= "" and commit:sub(1, 12) or "(the installer named no commit)")
           .. ", with " .. tostring(problems) .. " problem(s): " .. (detail ~= "" and detail or "(no detail recorded)"),
-        detail = detail, commit = commit, sources = { p.deploy_result } })
+        detail = detail, commit = commit, problems = problems, sources = { p.deploy_result } })
     end
     if result.ok == true then
       return snap({ key = "installed", terminal = true, ok = true, clock_from = origin,
@@ -323,7 +326,21 @@ function M.state(options)
   -- 5. THE INSTALLER SAID IT IS INSTALLING A PUBLISHED BINARY: there is no n/total to show, because there
   --    is no build. "building 456/456 proving (published binary, no build)" contradicted itself (Fable
   --    24/11, B): the published path says what it is doing and drops the bar.
-  if declared == "published" then
+  -- THE LIVE BUILD OUTRANKS THE DECLARATION (Victor's update on work, 27/11: the screen said "installing the
+  -- published binary (no build)" for 32 minutes while deploy.sh compiled for 1961 s, and the deploy then failed).
+  -- `declared` is what the installer SAID it would do, read from its log; a fresh building record is what it IS
+  -- doing, read from its own status file. When the two disagree the status file is right, so the published
+  -- label is only reached when nothing is building now - and then step 6 shows the real phase and n/m.
+  -- What contradicts the declaration is COMPILING, not merely a status file: a real published install writes
+  -- `building installing` too (its own row, scripts/test-update-follow.sh case 3). So the test is the phase and
+  -- the count, which only a source build produces.
+  local compiling_now = false
+  if type(build) == "table" and trim(build.state) == "building"
+    and fresh_epoch(build.at, started and (started - 1)) then
+    local bphase, bdone = trim(build.phase), tonumber(build.done) or 0
+    compiling_now = bphase:match("^compil") ~= nil or bdone > 0
+  end
+  if declared == "published" and not compiling_now then
     return snap({ key = "downloading", body = "installing the published binary (no build)", sources = { p.deploy_out } })
   end
 
@@ -335,7 +352,16 @@ function M.state(options)
     local crate = trim(build.crate)
     local body = "building " .. duration(build) .. (phase ~= "" and phase or "working")
     if crate ~= "" and phase == "compiling" then body = body .. " " .. crate end
-    if declared == "build" then body = body .. " (from source, on this machine)" end
+    -- WHY IT IS BUILDING, not only that it is (Victor on work, 27/11: 32 minutes of cargo behind a line that never
+    -- said why a published binary was not used, and the answer - "no published binary for this commit" - was in
+    -- the installer's own log the whole time). The reason comes from that log; the estimate is the honest one for
+    -- a full compile on a machine like this, and it says "~" because it is an estimate.
+    if declared == "build" then
+      local why = M.build_reason(o, p)
+      body = body .. " (from source, on this machine: "
+        .. (why ~= "" and why or "no published binary for this commit")
+        .. ", ~" .. BUILD_MINUTES .. " min)"
+    end
     return snap({ key = "building", clock_from = tonumber(build.started_at) or started, body = body,
       done = tonumber(build.done), total = tonumber(build.total), sources = { p.build } })
   end
@@ -391,6 +417,18 @@ end
 -- binary` / `deploy: no published binary for this commit; building this tree`). `nil` until it says - and
 -- nil is NOT "build": the plan line says the installer looks for a covered release first, and the word
 -- "build" is printed only when the installer itself says so (Fable 24/11, A).
+-- The installer's own reason for building instead of installing, read from the same deploy output `declared()`
+-- reads. Empty when the log does not say - the caller then states the fact without inventing a cause.
+function M.build_reason(options, paths_in)
+  local p = paths_in or M.paths(options)
+  local text = read(p.deploy_out)
+  if not text then return "" end
+  local last = text:match("%-%-%- deploy [^\r\n]*%-%-%-(.*)$") or text
+  local line = last:match("deploy: no published binary for this commit[^\r\n]*")
+  if not line then return "" end
+  return trim(line:gsub("^deploy: ", ""):gsub("%s*%b()%s*$", ""))
+end
+
 function M.declared(options, paths_in)
   local p = paths_in or M.paths(options)
   local text = read(p.deploy_out)
@@ -424,6 +462,26 @@ function M.evidence_lines(options, limit)
   return kept
 end
 
+-- `--verbose`: the installer's own words, STREAMED as they arrive (mission update-is-one-line, item 4).
+-- Everything else goes to the deploy's log and is named in the last line; this is for the person who ASKED
+-- for the detail. It reads only what the deploy already wrote, from where the last read stopped: no second
+-- reader, no protocol, and nothing changes when nobody asks.
+function M.tail(options, p, from, sink)
+  local o = options or {}
+  local text = read((p or M.paths(o)).deploy_out)
+  if not text then return from or 0 end
+  local at = tonumber(from) or 0
+  if #text <= at then return #text end
+  local fresh = text:sub(at + 1)
+  for line in tostring(fresh):gmatch("[^\r\n]*[\r\n]+") do
+    at = at + #line
+    local value = trim(line)
+    -- the `--- deploy ... ---` header is the deploy's separator, not the installer's word
+    if value ~= "" and value:sub(1, 10) ~= "--- deploy" and type(sink) == "function" then sink(value) end
+  end
+  return at
+end
+
 -- The sentence with its clock. `now` defaults to the snapshot's own time, so a caller that already has
 -- a snapshot adds no second read of the clock.
 function M.text(snapshot, now)
@@ -433,6 +491,65 @@ function M.text(snapshot, now)
   local from = tonumber(snapshot.clock_from) or tonumber(snapshot.started_at)
   if not from then return body end
   return body .. " \194\183 " .. elapsed((tonumber(now) or tonumber(snapshot.at) or from) - from)
+end
+
+-- ---- the wait between snapshots is an EVENT, not a poll (brief item 9) -------------------------
+--
+-- MEASURED before this: the follower slept one second between reads (`M.POLL`), so a phase the deploy had
+-- already written could be up to a second late on the screen, and a command that finished in 200 ms still
+-- paid a 1 s sleep before saying so. A deploy only ever CHANGES FILES, so the wait is on a file change:
+-- `inotifywait` on the directories a deploy writes to, bounded by `M.HEARTBEAT` so an install that goes
+-- quiet still gets its clock redrawn and never looks dead.
+--
+-- The tool is not assumed: `inotify-tools` is present on this machine (4.26.270) and absent on a minimal
+-- host, and where it is absent the loop falls back to the 1 s poll - and SAYS SO, because a fixed poll on
+-- the path is exactly what this item forbids and a silent fallback would hide it.
+M.WAIT_TOOL = "inotifywait"
+local wait_tool_answer = nil
+function M.wait_tool(options)
+  local o = options or {}
+  if o.tool ~= nil then return o.tool == true end
+  if wait_tool_answer ~= nil then return wait_tool_answer end
+  local found = shell("command -v " .. M.WAIT_TOOL .. " >/dev/null 2>&1")
+  wait_tool_answer = found ~= nil and (found.code or 1) == 0
+  return wait_tool_answer
+end
+
+-- The directories a deploy writes into, in one list. Each is watched NON-recursively: the request lanes, the
+-- data directory (build-status.json, deploy-pending.json), the sentinel directory (deploy.out) and the
+-- install directory (installed.txt, deploy-result.json, deploy-state.json). A path that does not exist yet
+-- is skipped by the command's own error (2>/dev/null) and the others still fire: a deploy that has not made a
+-- lane yet is not a deploy nothing can be learned from.
+function M.watch_paths(options)
+  local p = (options and options.paths) or M.paths(options)
+  local list = { p.data, p.sentinel, p.queue, p.requests, p.claimed, p.done, p.failed, p.install }
+  local seen, out = {}, {}
+  for _, dir in ipairs(list) do
+    local value = trim(dir)
+    if value ~= "" and not seen[value] then seen[value] = true; out[#out + 1] = value end
+  end
+  return out
+end
+
+-- One wait: returns `{ event = bool, tool = bool, seconds = n }`. `o.run` is the seam a test drives (the
+-- command string is handed to it); `o.seconds` is the bound. Never blocks longer than the bound.
+function M.wait(options)
+  local o = options or {}
+  local bound = math.max(1, math.floor(tonumber(o.seconds) or M.HEARTBEAT))
+  if not M.wait_tool(o) then return { event = false, tool = false, seconds = bound } end
+  local paths = o.paths and M.watch_paths({ paths = o.paths }) or M.watch_paths(o)
+  if #paths == 0 then return { event = false, tool = true, seconds = bound } end
+  local quoted = {}
+  for _, dir in ipairs(paths) do quoted[#quoted + 1] = "'" .. dir .. "'" end
+  -- No -m: ONE event ends the wait (the loop takes a snapshot and waits again). The bound is `timeout`, so a
+  -- deploy that writes nothing for a while still returns and the heartbeat can speak.
+  local command = "timeout " .. bound .. " " .. M.WAIT_TOOL ..
+    " -q -e modify,close_write,create,moved_to,delete,attrib --format %w%f " .. table.concat(quoted, " ") .. " 2>/dev/null"
+  local run = o.run or shell
+  local ok, result = pcall(run, command)
+  if not ok or type(result) ~= "table" then return { event = false, tool = true, seconds = bound } end
+  local fired = trim(result.stdout or "") ~= ""
+  return { event = fired, tool = true, seconds = bound, exit = tonumber(result.code) }
 end
 
 -- The line after a failure: what this node still runs, and where the deploy's own output is. Empty when
@@ -450,6 +567,35 @@ function M.next_line(options, snapshot)
   return "next: " .. table.concat(parts, "; ")
 end
 
+-- ONE LOG FILE PER UPDATE (mission update-is-one-line, item 4). A deploy appends every install to one
+-- `deploy.out`, so "the log of the update I just ran" is a section of it. This writes THIS request's own
+-- section - the last `--- deploy ... ---` block - to its own file and returns its path, which is what the
+-- last line names. It never invents a log: no request id, no file, or a section with nothing in it answers
+-- nil and the caller names the deploy's own log instead.
+function M.request_log(options)
+  local o = options or {}
+  local request = trim(o.request)
+  local id = request:match("([^/\\]+)%.json$") or ""
+  if id == "" then return nil end
+  local p = o.paths or M.paths(o)
+  local text = read(p.deploy_out)
+  if not text then return nil end
+  -- THE LAST deploy's block: every deploy appends its own `--- deploy ... ---` header before it writes a
+  -- word, so the block that starts at the LAST header is this request's (the request wrote the newest one).
+  local at = nil
+  for start in text:gmatch("()%-%-%- deploy ") do at = start end
+  if not at then return nil end
+  local section = text:sub(at)
+  if trim(section) == "" then return nil end
+  local dir = slashes(p.config) .. "/update-log"
+  local path = dir .. "/" .. id .. ".log"
+  local made = shell("mkdir -p " .. "'" .. dir .. "' 2>/dev/null")
+  if not made or (made.code or 1) ~= 0 then return nil end
+  local ok = pcall(host.write_file, path, section)
+  if not ok then return nil end
+  return path
+end
+
 -- ---- the loop ----------------------------------------------------------------
 --
 -- Prints one line per change of body (and a heartbeat every M.HEARTBEAT seconds while nothing changes),
@@ -458,9 +604,22 @@ end
 function M.follow(options)
   local o = options or {}
   local out = o.out or function(line) print(line) end
+  -- THE ONE MOVING LINE (mission update-is-one-line, 25/11): when a screen is handed in, it owns what the
+  -- person sees and this loop prints no line of its own - it hands over a BODY (no clock: the screen draws
+  -- one clock for the whole command) and, at the end, nothing: the caller prints the last line.
+  local screen = o.screen
+  local verbose = o.verbose == true
   local clock = o.clock or clock_default
   local pause = o.sleep or function(seconds)
     if host.sleep then host.sleep(math.max(1, math.floor(seconds * 1000))) end
+  end
+  -- THE WAIT IS AN EVENT WHEN THE HOST CAN WATCH FILES (see M.wait). `o.sleep` is the seam the deterministic
+  -- tests drive: a caller that hands one gets it, unchanged. `o.wait` is the same seam one level down.
+  local function settle()
+    if o.sleep then return pause(poll) end
+    local waited = o.wait and o.wait({ seconds = M.HEARTBEAT, next = false }) or M.wait({ paths = o.paths, seconds = M.HEARTBEAT })
+    if waited and waited.tool == false then return pause(poll) end
+    return waited
   end
   local poll = tonumber(o.poll) or M.POLL
   local bound = tonumber(o.bound)
@@ -468,6 +627,9 @@ function M.follow(options)
     bound = tonumber(trim(host.getenv and host.getenv("WA_UPDATE_FOLLOW_BOUND") or "")) or M.UNPERFORMED_BOUND
   end
   local started = clock()
+  -- WHERE THE VERBOSE TAIL STARTS: at the end of the log as it is when this caller attaches, so --follow
+  -- does not replay a log that already exists.
+  local tail_at = verbose and #(read(M.paths(o).deploy_out) or "") or 0
   local rounds, printed = 0, 0
   local last_body, last_at = nil, nil
   local declared_printed = false
@@ -477,20 +639,33 @@ function M.follow(options)
       started_at = o.started_at, target = o.target, now = now })
     local body = trim(snapshot.body)
     -- THE INSTALLER SAID IT IS BUILDING: only now may the word "build" be printed (Fable 24/11, A). Once.
-    if not declared_printed and snapshot.declared == "build" then
+    -- WITH A SCREEN this is the phase body's own suffix ("(from source, on this machine)"): a second line
+    -- would be a second line on a screen that has one.
+    if not screen and not declared_printed and snapshot.declared == "build" then
       out(M.build_declared_line(o))
       printed = printed + 1
       declared_printed = true
       last_body, last_at = body, now
     end
-    if body ~= last_body or not last_at or (now - last_at) >= M.HEARTBEAT then
+    if screen then
+      -- the phase, not the clock: a body that did not change is not a change on a pipe, and on a terminal
+      -- it is the same line rewritten (the screen decides both). A TERMINAL snapshot draws nothing: the
+      -- last line says what happened (`update_screen.updated` / `not_updated`), and a phase that said
+      -- "installed" first would be the same fact twice.
+      if not snapshot.terminal then screen:phase(body, snapshot.clock_from) end
+      if verbose then
+        tail_at = M.tail(o, M.paths(o), tail_at, function(line) screen:line(line) end)
+      end
+      last_body, last_at = body, now
+    elseif body ~= last_body or not last_at or (now - last_at) >= M.HEARTBEAT then
       out(M.text(snapshot, now))
       printed = printed + 1
       last_body, last_at = body, now
     end
     if snapshot.terminal then
-      if snapshot.ok ~= true then
+      if snapshot.ok ~= true and not screen then
         -- THE INSTALLER'S OWN LAST LINES, above the advice: nobody should need a file path to read why.
+        -- With a screen they are NOT printed: the last line carries one reason and the log is named.
         for _, line in ipairs(M.evidence_lines(o, 8)) do
           out("  " .. line)
           printed = printed + 1
@@ -499,16 +674,19 @@ function M.follow(options)
         if advice then out(advice); printed = printed + 1 end
       end
       return { ok = snapshot.ok == true, state = snapshot.key, body = body, detail = snapshot.detail,
-        seconds = now - started, rounds = rounds, printed = printed }
+        problems = tonumber(snapshot.problems) or (snapshot.key == "installed_with_problems" and 1 or 0),
+        commit = snapshot.commit, seconds = now - started, rounds = rounds, printed = printed }
     end
     rounds = rounds + 1
     -- A REQUEST THE SENTINEL HAS NOT STARTED does not hold a terminal forever: past the installer's own
     -- idle bound, stop following and say so, with the one command that picks it up again.
     local idle = snapshot.key == "queued" or snapshot.key == "waiting" or snapshot.key == "unknown"
     if idle and bound > 0 and (now - (tonumber(o.started_at) or started)) >= bound then
-      out("stopped following after " .. elapsed(now - (tonumber(o.started_at) or started)) ..
-        ": the sentinel has not started this request (" .. body .. "); wa update --follow picks it up again")
-      printed = printed + 1
+      if not screen then
+        out("stopped following after " .. elapsed(now - (tonumber(o.started_at) or started)) ..
+          ": the sentinel has not started this request (" .. body .. "); wa update --follow picks it up again")
+        printed = printed + 1
+      end
       return { ok = false, state = snapshot.key, body = body, unknown = true, unperformed = true,
         seconds = now - started, rounds = rounds, printed = printed }
     end
@@ -516,7 +694,7 @@ function M.follow(options)
       return { ok = false, state = snapshot.key, body = body, unknown = true, timed_out = true,
         seconds = now - started, rounds = rounds, printed = printed }
     end
-    pause(poll)
+    settle()
   end
 end
 

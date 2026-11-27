@@ -49,6 +49,22 @@ do
   end
 end
 
+-- A NODE THAT STARTS AFTER A CUT FINISHES THE MIGRATION ITSELF (slice (b), requirement 5). The shell half
+-- renames a legacy path aside and then links it through the pointer, so a cut between the two leaves the path
+-- absent on purpose (the binary falls back to its compiled-in Lua and says so once). Putting it back cannot be a
+-- shell script - the script may be the thing that is missing - so it happens here, before the tree is needed and
+-- before the ledger is opened. It is inert on a node with no version pointer (today's layout) and it never
+-- replaces a real file or directory. Its own module, so the one rule has one place.
+do
+  local ok, repair = pcall(dofile, "lua/core/version_repair.lua")
+  if ok and type(repair) == "table" and type(repair.repair) == "function" then
+    local ok2, result = pcall(repair.repair, {})
+    if ok2 and type(result) == "table" and (result.repaired or 0) > 0 then
+      io.stderr:write("wa: finished a half-done version migration (" .. result.repaired .. " link(s) put back)\n")
+    end
+  end
+end
+
 memory.setup()
 
 local function line(item)
@@ -112,6 +128,13 @@ end
 -- first and falls through to this node's own update when the second word is not a node name.
 -- `wa update --all` is the read-only table of every node this node can see (lua/core/update_all.lua).
 if command == "update" or command == "--update" then
+  -- `wa update requests [--sweep]` FIRST: the record listing and the named sweep (update-requests-settle). Parsed here
+  -- because `requests` must never be mistaken for a node name by the fabric form below.
+  if args[2] == "requests" then
+    local rest = {}
+    for i = 2, #args do rest[#rest + 1] = args[i] end
+    os.exit(dofile("lua/core/update_requests_cli.lua").run(rest) or 0)
+  end
   -- `wa update --all`: one read-only table over the fabric (lua/core/update_all.lua). Parsed BEFORE the
   -- fabric form below, because that one reads its first word as a node name and falls through on a flag -
   -- and `--all` must never be mistaken for a node called `--all` on the path that installs things.
@@ -128,12 +151,13 @@ if command == "update" or command == "--update" then
   -- MEASURED on `work`, 24/11: `wa update` printed nothing for minutes while a build ran, and 361 s into
   -- a build that died it printed nothing at all. Nobody should have to know a file path, or a second
   -- command, to learn what the install they started is doing or how it ended.
-  local check, follow_only, detach = false, false, false
+  local check, follow_only, detach, verbose = false, false, false, false
   for i = 2, #args do
     local flag = tostring(args[i])
     if flag == "--check" then check = true
     elseif flag == "--follow" then follow_only = true
-    elseif flag == "--detach" then detach = true end
+    elseif flag == "--detach" then detach = true
+    elseif flag == "--verbose" then verbose = true end
   end
   local remote = dofile("lua/core/remote_update.lua").cli(args)
   if remote ~= nil then os.exit(remote) end
@@ -154,6 +178,18 @@ if command == "update" or command == "--update" then
     local answered = dofile("lua/core/remote_update.lua").run_accepted(accepted_id)
     print(tostring(answered and (answered.detail or answered.error) or "the accepted request produced no answer"))
     os.exit((answered and answered.ok == true) and 0 or 1)
+  end
+  -- THE SCREEN FIRST, THE MODULES AFTER (bug 4, Victor 27/11: "wa update took a really long time to output the
+  -- first line. We need instantaneous"). MEASURED before this reorder on this node: `wa update --follow` put its
+  -- first byte on a pipe at 585 ms, while `wa --version` answered in 6 ms - so the cost was this branch loading
+  -- update.lua, redact.lua and update_follow.lua (three dofiles) BEFORE the screen existed. The line is drawn
+  -- now, then the modules are read, because nothing on the first line depends on them.
+  -- the ONE line and the ONE last line (mission update-is-one-line); it decides nothing, it draws
+  local screen = dofile("lua/core/update_screen.lua")
+  local early_ui = nil
+  if not check then
+    early_ui = screen.new({ verbose = verbose })
+    early_ui:phase(screen.START)
   end
   local updater = dofile("lua/core/update.lua")
   local redact = dofile("lua/core/redact.lua")
@@ -190,44 +226,108 @@ if command == "update" or command == "--update" then
     end
     return
   end
-  local report, started_at, plan
+  -- ONE MOVING LINE, AND ONE LAST LINE THAT SAYS WHAT HAPPENED (mission update-is-one-line, Fable and
+  -- Victor 25/11). The screen is opened BEFORE anything is read, fetched or asked: the first line is on the
+  -- terminal in the first milliseconds. MEASURED with the old path on a scratch node with no network: the
+  -- first byte came at 1.2-1.6 s, because `updater.facts`, the git fetch, the sentinel round trip and the
+  -- pre-update backup all ran before anything was printed - and on `work` those seconds are a network's.
+  -- Nothing the installer says is printed: it goes to the log the last line names, and `--verbose` streams
+  -- it for the person who asks for it.
+  local ui = early_ui or screen.new({ verbose = verbose })
+  local function now_s() return tonumber(host.now and host.now() or os.time()) or 0 end
+  if not early_ui then ui:phase(screen.START) end
+  local asking_since = now_s()
+  local report, plan
+  -- `--verbose` notes: the sentences the quiet screen does not print (the install's plan, the sentinel's
+  -- queue line, the advice). Collected whatever the mode, printed only when somebody asked.
+  local notes = {}
   if follow_only then
     -- No request is written: attach to the newest deploy this node still has in flight, and say so
     -- plainly when there is none.
     local request, why = follow.latest({})
     if not request then
-      print(redact.text("nothing to follow: " .. tostring(why) .. "; `wa update` starts a new one"))
+      ui:finish(screen.not_updated("there is no deploy in flight to follow: " .. tostring(why)))
       os.exit(1)
     end
     report = { ok = true, request = request }
-    print(redact.text("following the newest deploy on this node: " .. tostring(request)))
+    notes[#notes + 1] = "following the newest deploy on this node: " .. tostring(request)
   else
-    started_at = tonumber(host.now and host.now() or os.time())
+    -- THE FAST PATH FIRST (budget: "already up to date" under 1 s and ONE request, no git fetch, no
+    -- sentinel round trip). It is a local read plus ONE `git ls-remote`, and it answers only when the
+    -- install record, the tree's HEAD and origin's main AGREE; any unknown falls through to the slow path.
+    local quick = updater.up_to_date({})
+    if quick.known == true and quick.current == true then
+      ui:finish(screen.current(quick.commit))
+      return
+    end
     report = updater.run({ reason = "requested with `wa update`" })
-    -- THE FIRST LINE SAYS WHAT THIS INSTALL IS: a download or a build, and how long that class takes.
-    -- Printed before the queue line because it answers the question a person asks when the screen has
-    -- shown nothing for a minute.
+    -- THE PLAN SAID WHAT THIS INSTALL IS: a download or a build (follow.plan). It is a note now: on the
+    -- screen the phase itself says `downloading` or `compiling`, from the installer's own words.
     if report.ok == true then
       plan = follow.plan({ target = report.commit or "", tree = report.tree, install = report.install })
-      for _, line in ipairs(plan.lines) do print(redact.text(line)) end
+      for _, line in ipairs(plan.lines or {}) do notes[#notes + 1] = redact.text(line) end
     end
-    print(redact.text(report.message or json.encode(report)))
-    if report.release and report.release.state == "behind" then print(redact.text("release: " .. report.release.message)) end
-    if report.observed and not report.ok then print(redact.text("observed: " .. tostring(report.observed))) end
-    if report.next then print(redact.text("next: " .. tostring(report.next))) end
-    if report.ok == false then os.exit(1) end
+    if report.message then notes[#notes + 1] = redact.text(report.message) end
+    if report.release and report.release.state == "behind" then notes[#notes + 1] = redact.text("release: " .. tostring(report.release.message)) end
+    if report.observed and not report.ok then notes[#notes + 1] = redact.text("observed: " .. tostring(report.observed)) end
+    if report.next then notes[#notes + 1] = redact.text("next: " .. tostring(report.next)) end
   end
-  if detach and not follow_only then
-    print(redact.text(follow.DETACHED))
+  if verbose then
+    for _, line in ipairs(notes) do ui:line(line) end
+    ui:line(redact.text(follow.HINT))
+  end
+  -- NOT UPDATED: one sentence, and the promise the person needs to walk away - the node still runs what it
+  -- ran. The log line names where the installer's own words are, when there are any.
+  if report.ok ~= true then
+    ui:finish(screen.not_updated(redact.text(report.message or report.error or report.status or "the update did not run")))
+    os.exit(1)
+  end
+  -- A QUESTION ALREADY ANSWERED: this node runs the commit an update would install. Nothing is written,
+  -- nothing is fetched and nothing is asked of the sentinel (`update.up_to_date`, the fast path).
+  if report.status == "current" then
+    ui:finish(screen.current(report.installed_commit or report.commit))
     return
   end
-  print(redact.text(follow.HINT))
+  local p = follow.paths({})
+  -- A RELEASE INSTALL QUEUES A UNIT AND IS NOT WATCHED FROM HERE: its log is the unit's own. MEASURED
+  -- 25/11: the old path followed a sentinel request that a release update never writes, and ended 1800 s
+  -- later on a failure it had invented.
+  if report.queued == true and report.request == nil then
+    ui:finish(screen.not_updated("the install is queued as " .. tostring(report.unit or "a unit") ..
+      " and had not reported when this command ended"), report.log or p.deploy_out)
+    return
+  end
+  if detach and not follow_only then
+    ui:finish(redact.text(follow.DETACHED), follow.request_log({ request = report.request }) or p.deploy_out)
+    return
+  end
   -- `triple` travels into the follow because the one line that may say "building from source" names the
   -- machine's channel: it is printed only when the installer itself declared a build.
-  local result = follow.follow({ request = report.request,
-    started_at = started_at or tonumber(host.now and host.now() or os.time()),
-    target = report.commit or "", triple = plan and plan.triple or nil, install = report.install })
-  if result.ok ~= true then os.exit(1) end
+  local result = follow.follow({ request = report.request, started_at = asking_since,
+    target = report.commit or "", triple = plan and plan.triple or nil, install = report.install,
+    screen = ui, verbose = verbose })
+  -- ONE LOG FILE PER UPDATE, named in the last line (item 4): a deploy appends every install to one file,
+  -- so this request's own section is copied to its own file. When the copy cannot be made the deploy's own
+  -- log is named instead - the person is never left without the words.
+  local log = follow.request_log({ request = report.request }) or p.deploy_out
+  local taken = math.max(0, now_s() - asking_since)
+  local commit = result.commit or report.commit or ""
+  if result.state == "installed" then
+    ui:finish(screen.updated(updater.version_at(report.tree, commit), commit, taken), log)
+    return
+  end
+  if result.state == "installed_with_problems" then
+    -- THE INSTALL HAPPENED and something else did not: the good news first, because it is the true one.
+    ui:finish(screen.with_problems(commit, result.problems, result.detail), log)
+    os.exit(1)
+  end
+  if result.unperformed or result.timed_out or result.unknown then
+    ui:finish(screen.not_updated("this deploy is still queued: the sentinel has not started it (" ..
+      tostring(result.body or "no phase reported") .. ")"), log)
+    os.exit(1)
+  end
+  ui:finish(screen.not_updated(result.detail or result.body or "the deploy did not install this node"), log)
+  os.exit(1)
   return
 end
 
@@ -257,6 +357,15 @@ end
 if command == "release" then
   -- `wa release cut`: the RELEASE loop (FACTORY.md rule 1) - a signed release from main's tip, rolled to the
   -- fleet. It is lua/core/land.lua's state machine with nothing to land, so that module answers it.
+  -- `wa release rehearse` (lua/core/release_rehearse.lua): the gates a cut depends on, run against the real fleet,
+  -- changing nothing. Not `wa update` and not a release: no build, tag, publish or deploy - it reads each ring
+  -- node own record and asks every node for its canaries. The release verb is the binary own (rust/wa-host/src/ release.rs)
+  -- plus this door, so the verb lives HERE and not in a second `command == release` branch.
+  if args[2] == "rehearse" then
+    local code = dofile("lua/core/release_rehearse.lua").run({ table.unpack(args, 3) })
+    if code and code ~= 0 then os.exit(code) end
+    return
+  end
   if args[2] == "cut" then
     local code = dofile("lua/core/land.lua").release_cli(args)
     if code and code ~= 0 then os.exit(code) end

@@ -69,6 +69,16 @@ local ARGUMENT_EXAMPLES = {
   tool_call = '{"name":"read","arguments":{"path":"README.md"}}',
   remote = '{"node":"<name>","capability":"bash","command":"ls -la"}',
 }
+-- The names a tool accepts without its schema declaring them (the runtime's own fields and the synonyms
+-- its handlers map): one list, lua/core/tool_arguments.lua INTERNAL. Passed to the contract layer, which
+-- refuses a name the schema never declares.
+local accepted_extra
+local function extra_names()
+  if accepted_extra ~= nil then return accepted_extra or nil end
+  local ok, module = pcall(dofile, 'lua/core/tool_arguments.lua')
+  accepted_extra = (ok and type(module) == 'table' and type(module.INTERNAL) == 'table') and module.INTERNAL or false
+  return accepted_extra or nil
+end
 local function schema_of(tool_list, name)
   for _, item in ipairs(tool_list or {}) do
     local fn = item["function"] or {}
@@ -84,14 +94,14 @@ local function parse_tool_arguments(name, text, tool_list, role)
       local catalog = tool_list
       local parameters = schema_of(catalog, name)
       if not parameters then catalog = tools.all(role); parameters = schema_of(catalog, name) end
-      local valid = parameters and json_contract.validate(parameters, completed)
+      local valid = parameters and json_contract.validate(parameters, completed, extra_names())
       local decoded = valid and json.decode(completed)
       if valid and name == "tool_call" then
         -- The wrapper's schema says little; the target's schema is what makes the repair safe.
         local target = type(decoded.name) == "string" and (schema_of(catalog, decoded.name) or schema_of(tools.all(role), decoded.name))
         local inner = json_contract.at(valid, { "arguments" })
         valid = target and inner and inner.kind == "object"
-          and json_contract.validate(target, json_contract.raw(completed, inner)) and valid or nil
+          and json_contract.validate(target, json_contract.raw(completed, inner), extra_names()) and valid or nil
       end
       if valid and type(decoded) == "table" then
         return decoded, nil, completed, "appended " .. closers .. " to close the arguments JSON"
@@ -3136,6 +3146,9 @@ function M:run_body(text, images)
           or provider.is_rate_limited(tostring(value))
           or provider.is_unknown_failure(tostring(value))
           or provider.is_transient(tostring(value))
+          -- A stall is retried too, but inside the SAME run and on its own budget (item 1): the
+          -- class is separate from `is_transient`, which refuses a response timeout on purpose.
+          or provider.is_stalled(tostring(value))
       end
       if type(value) ~= "table" then return false end
       -- An interrupted stream (`stream_complete=false`) is the lost-stream case below, which has
@@ -3168,6 +3181,10 @@ function M:run_body(text, images)
     -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it
     -- is default-on with a short budget so a hiccup costs a second and not a run.
     local empty_reply = provider.is_empty_reply(result)
+    -- The stall's own bucket (item 1): the provider answered nothing within its deadline, the short
+    -- replay inside `provider` already ran, and the pause below is the same run asking again.
+    local stalled = (not ok) and not provider.is_cancellation(tostring(result))
+      and provider.is_stalled(tostring(result))
     -- A lost link is waited for until it returns (provider.link_wait_is_unbounded), because a cap
     -- only converts a real outage into a dead run: measured 19/11, a 2-minute drop ended the run and
     -- nothing resumed it. An operator who wants a bound sets CONNECT_RETRIES/_WAIT_SECONDS by name.
@@ -3177,6 +3194,7 @@ function M:run_body(text, images)
       or rate_limited and provider.rate_limit_retries()
       or unknown_failure and provider.unknown_retries()
       or empty_reply and provider.empty_reply_retries()
+      or stalled and provider.stalled_attempts()
       or provider.transient_retries()
     -- A transient class that waits without a total cap (brief item 1) still must not spin on a wall: a
     -- failure whose TEXT repeats unchanged is bounded by its own ceiling and then named. Only the
@@ -3200,6 +3218,7 @@ function M:run_body(text, images)
         or rate_limited and provider.rate_limit_backoff_ms(transient_attempt, retry_after)
         or unknown_failure and provider.unknown_backoff_ms(transient_attempt)
         or empty_reply and provider.empty_reply_backoff_ms(transient_attempt)
+        or stalled and provider.stalled_backoff_ms(transient_attempt)
         or math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
       if wait_budget_ms and waited_ms + wait_ms > wait_budget_ms then break end
       waited_ms = waited_ms + wait_ms
@@ -3265,6 +3284,9 @@ function M:run_body(text, images)
         or empty_reply and string.format(
           "the provider returned an empty message (%s) - asking again in %dms (%s",
           reason, wait_ms, counted)
+        or stalled and string.format(
+          "the provider has not answered (%s) - pausing %ds and asking again (%s",
+          reason, math.floor(wait_ms / 1000), counted)
         or string.format("provider unavailable (%s) - retrying in %ds (%s",
           reason, math.floor(wait_ms / 1000), counted) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
@@ -3368,6 +3390,13 @@ function M:run_body(text, images)
         {outcome = cancelled and "run_cancelled" or "provider_failed"})
       -- The row is written once, by M:run's failure path: one named record, one announcement, one
       -- wake - not an empty assistant message followed by an error nobody hears.
+      -- A stall that survived its replays AND the turn's own pause says both numbers (mission
+      -- turn-survives-a-provider-stall, item 1): the failure must still read differently from a first
+      -- stall instead of looking like the request that only just went quiet.
+      if transient_attempt > 0 and provider.is_stalled(tostring(problem)) then
+        problem = tostring(problem) .. string.format(
+          " [the same request stalled again after %d in-run pause(s) of this turn]", transient_attempt)
+      end
       self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
       error(problem)
     end

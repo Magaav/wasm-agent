@@ -11,6 +11,7 @@ local paths = dofile("lua/core/paths.lua")
 -- Everything this REPL prints is captured by whatever launched it (a terminal,
 -- an orchestrator, a test), so it all goes out through the redactor.
 local redact = dofile("lua/core/redact.lua")
+local run_failure = dofile("lua/core/run_failure.lua")
 local updater = dofile("lua/core/update.lua")
 -- What a run looks like while it is running. The view owns the status line, the tool
 -- lines and the footer; this file owns the session, the commands and the prompt.
@@ -635,11 +636,17 @@ function M.run(argv)
   -- from tool children (rust/wa-operation/src/lib.rs, DENY_ENV). See lua/core/idle_reads.lua.
   local function snapshot_status(opts)
     if not (host.status_snapshot and view.editor and view.stdout) then return end
+    -- The console fills the limits rows itself from the door (it is the only side running mid-run),
+    -- so EVERY snapshot names them instead of drawing them: one marker line, expanded on each draw.
+    opts = opts or {}
+    opts.limits_marker = true
     local built, spec = pcall(status_panel, opts)
     if built then pcall(host.status_snapshot, json.encode(spec)) end
   end
 
-  refresh_status = function() snapshot_status({ color = view.live, cached = true }) end
+  -- limits_marker: the CONSOLE fills those rows itself, from the door, on every draw - mid-run the
+  -- interpreter is inside the turn and cannot repaint when a read lands (status-limits-load-on-open).
+  refresh_status = function() snapshot_status({ color = view.live, cached = true, limits_marker = true }) end
 
   -- The model's own wakes (docs/SELF-LOOP.md). A node fires them from its placement tick; an
   -- interactive CLI has no served scheduler, so it claims a due wake between waits and runs the turn
@@ -713,7 +720,9 @@ function M.run(argv)
       -- A STOP IS A STOP: if this run came back cancelled, its key is recorded here, at the end of the
       -- run it ended, before anything else can go wrong (change/esc-stops-now, item 3).
       if tostring(reply):find('run_cancelled', 1, true) then record_interrupt() end
-      view:failed(redact.text(tostring(reply)))
+      -- The failure, not the three paths Lua prefixed it with (item 2): `human_line` is the same
+      -- classification the row carries, with its leading locations stripped.
+      view:failed(redact.text(run_failure.human_line(tostring(reply))))
     else
       -- The view prints the reply when nothing streamed (an error before the first
       -- token, or a provider without streaming), so the turn is never silent.
@@ -878,6 +887,34 @@ function M.run(argv)
     seen_seq = ok and tonumber(bounds and bounds.last_seq) or seen_seq
   end
   mark_seen()
+  -- The facts of a turn this process is NOT running (a node wake): the CLI attaches by cursor and draws
+  -- them as they happen (mission turn-survives-a-provider-stall, item 3 / C2), instead of waiting for the
+  -- turn to end and replaying it as history. The cursor starts at the NEWEST fact so a fresh CLI does not
+  -- redraw a session's past; `catch_up` below keeps drawing the rows this does not cover (the answer).
+  local turn_tail = dofile("lua/core/turn_tail.lua")
+  local tail_state = nil
+  local function attach()
+    if not (view.editor and view.stdout) then return end
+    if not tail_state then
+      local telemetry = dofile("lua/core/telemetry.lua")
+      local newest = telemetry.events(agent.session_id, 0, 1)
+      local cursor = 0
+      if newest and newest.available then
+        local batch = telemetry.events(agent.session_id, 0, 1000)
+        for _, row in ipairs((batch and batch.events) or {}) do cursor = math.max(cursor, tonumber(row.seq) or 0) end
+      end
+      tail_state = { cursor = cursor }
+    end
+    local hold = host.transcript_hold
+    if hold then pcall(hold, true) end
+    pcall(turn_tail.poll, view, agent.session_id, tail_state)
+    -- Esc while attached (mission turn-survives-a-provider-stall, item 3 / C2b): the turn is not ours,
+    -- so the flag this process reads cannot stop it - the node's own POST /runs can. One key, one line,
+    -- and a local turn's Esc is untouched because this needs a run id the tail drew.
+    pcall(turn_tail.cancel_on_interrupt, view, agent.session_id, tail_state, input)
+    if hold then pcall(hold, false) end
+  end
+
   local function catch_up()
     if not (view.editor and view.stdout) then return end
     local ok, bounds = pcall(memory.session_message_bounds, agent.session_id)
@@ -893,7 +930,9 @@ function M.run(argv)
     last_caught = host.now()
     local hold = host.transcript_hold
     if hold then pcall(hold, true) end
-    pcall(view.replay, view, rows, { rule = false })
+    -- `answer = true`: this is a TURN, not history (mission turn-survives-a-provider-stall, item 3) - the
+    -- same blocks a typed turn shows, not the Commentary topic a replayed transcript uses.
+    pcall(view.replay, view, rows, { rule = false, answer = true })
     if hold then pcall(hold, false) end
   end
 
@@ -948,6 +987,7 @@ function M.run(argv)
     while true do
       record_interrupt()
       restart_if_due()
+      attach()
       catch_up()
       idle_refresh()
       sweep_handles_if_due()
@@ -1014,7 +1054,83 @@ function M.run(argv)
   -- from the same renderer. No arm below calls `print`, `host.panel` or `io.write` itself, and
   -- `scripts/test-cli-balloon.lua` fails when one does.
   local balloon = reload.require("lua/core/balloon.lua")
+  -- SWITCHING THREADS IN THIS PROCESS (sessions-is-a-balloon, Victor + Fable 26/11).
+  --
+  -- A thread is entered at start and used to be left only by starting the CLI again: `/session` prints
+  -- the id and the resume line because there was nothing else it could do. A switch is that boot's
+  -- last third - take the id, remember where we came from, replay that thread's newest messages under
+  -- a line that says whose they are - without a new process. Nothing is stopped: a turn running in
+  -- another process (a served session, a worker) keeps running, which is why the row says its state.
+  local switched_from = nil
+  local function switch_to(target)
+    target = tostring(target or "")
+    if target == "" then return false, "no session given" end
+    if target == tostring(agent.session_id) then return true end
+    local session = memory.session(target)
+    if not session then return false, "no such session: " .. target end
+    local parked_hold = dofile("lua/core/selfloop.lua").hold(target)
+    if parked_hold and parked_hold.kind == "park" then
+      return false, "session " .. target .. " is parked (wa session release " .. target .. ")"
+    end
+    local came_from = tostring(agent.session_id)
+    agent.session_id = target
+    switched_from = came_from
+    local name = tostring(session.title or "")
+    if name == "" then name = "(unnamed) " .. target:sub(1, 8) .. "\u{2026}" end
+    print(cli_view.paint("  \u{2192} switched to " .. redact.text(name) .. "  " .. target:sub(1, 8)
+      .. "\u{2026}", "dim", view.live))
+    -- The thread's newest messages, drawn once (the resume path's replay, with its own window).
+    local REPLAY = tonumber(host.getenv("WASM_AGENT_CLI_REPLAY")) or 400
+    if REPLAY > 0 then
+      local total = memory.message_count(target)
+      local rows = memory.session_messages(target, { limit = REPLAY }) or {}
+      local skipped = math.max(0, total - #rows)
+      local hold = host.transcript_hold
+      if hold then pcall(hold, true) end
+      local replayed, problem = pcall(view.replay, view, rows, { skipped = skipped })
+      if hold then pcall(hold, false) end
+      if not replayed then view:warn(redact.text("could not draw the thread: " .. tostring(problem))) end
+    end
+    refresh_model()
+    return true
+  end
+
   local ui = balloon.for_view(view, { print = print, redact = redact })
+
+  -- The id on the clipboard: OSC 52, which every terminal this CLI runs in understands and which needs no
+  -- `wl-copy` beside it (the link click already copies this way). The base64 is the session's own id, so
+  -- nothing but an id can ever be put there.
+  local function copy_id(id)
+    id = tostring(id or "")
+    if id == "" then return false end
+    local encoded = memory.base64_encode(id)
+    view:control("\27]52;c;" .. encoded .. "\7")
+    -- THE SAME NOTICE THE CLICK USES (the brief: the line confirms "copied", using the copied-notice):
+    -- the host notice row, not a transcript line - a copy must not push the conversation down, and
+    -- both ways of copying say the same sentence.
+    if host and host.editor_notice then
+      pcall(host.editor_notice, string.format("Copied (%d characters)", #id))
+    end
+    return true
+  end
+  -- Rename through the panel's own field, then the ledger: the title is what every list shows.
+  local function rename_session(id)
+    local session = memory.session(tostring(id or ""))
+    if not session then ui.say("  no such session") return false end
+    local page = {
+      title = "Rename " .. (tostring(session.title or "") ~= "" and tostring(session.title) or tostring(id):sub(1, 8)),
+      lines = { "the name every list shows for this thread" },
+      input = "line",
+      placeholder = "name",
+      hint = "Enter saves \u{b7} Esc cancels",
+    }
+    local answer = ui.show({page})
+    local text = type(answer) == "table" and answer.action == "submit" and tostring(answer.text or "") or ""
+    if text == "" then return false end
+    if not memory.rename_session(id, text) then ui.say("  the name was empty; nothing changed") return false end
+    ui.say("  renamed to " .. text)
+    return true
+  end
 
 
   while true do
@@ -1203,6 +1319,62 @@ function M.run(argv)
       })
       refresh_model()
       if not done then ui.say(redact.text(tostring(problem))) end
+    elseif line == "/sessions" or line:sub(1, 10) == "/sessions " then
+      -- The sessions on this node, as a balloon (lua/core/sessions_view.lua): one row per session,
+      -- with its state and age. Picking one switches (the switch itself is the REPL's, below); a pipe
+      -- gets the plain list.
+      local sessions = reload.require("lua/core/sessions_view.lua")
+      -- The list comes back after an action: `c` and `r` finish the panel (a page whose answer has gone to
+      -- the caller reads keys and does nothing), so the reader gets the list again, on the same row.
+      local focus = nil
+      local notice = nil
+      local workers_open = false
+      local filter = line:sub(11):gsub("^%s+", ""):gsub("%s+$", "")
+      if filter == "" then filter = nil end
+      while true do
+        local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
+          back = switched_from, selected = focus, filter = filter, notice = notice,
+          workers_open = workers_open })
+        if type(answer) ~= "table" then break end
+        if answer.action == "key" then
+          local option = (sessions.page({ session_id = agent.session_id, user_id = USER, limit = 200,
+            back = switched_from, filter = filter })).options[tonumber(answer.index) or 0] or {}
+          if answer.key == "copy" then
+            local copied = option.copy or option.session
+            if copy_id(copied) then notice = string.format("Copied (%d characters)", #tostring(copied)) end
+          elseif answer.key == "rename" then rename_session(option.session)
+          elseif answer.key == "filter" then
+            -- A field of its own: a name typed into the list would be read as letters (they are keys
+            -- there), so the filter is asked for on a page that has an input.
+            local asked = ui.show({ { title = "Filter sessions",
+              lines = { filter and ("now: " .. filter) or "the whole list" },
+              input = "line", placeholder = "a name, or the start of an id",
+              hint = "Enter filters \u{b7} Esc cancels" } })
+            local text = type(asked) == "table" and asked.action == "submit"
+              and (tostring(asked.text or ""):gsub("^%s+", ""):gsub("%s+$", "")) or nil
+            if text ~= nil then filter = (text ~= "") and text or nil end
+            focus = nil
+          end
+          focus = focus or tonumber(answer.index)
+        elseif answer.action == "select" then
+          -- The balloon hands back { action, page, index, option }: the id, the origin flag and the
+          -- group-heading flag all live on the ROW, not on the answer.
+          local row = type(answer.option) == "table" and answer.option or {}
+          if row.toggle then
+            -- The heading is not a session: Enter folds its group away, or opens it.
+            workers_open = not workers_open
+            focus, notice = nil, nil
+          else
+            local chosen = tostring(row.session or "")
+            local ok, problem = switch_to(chosen)
+            if not ok then ui.say("  " .. tostring(problem)) end
+            if ok and row.origin then switched_from = nil end
+            break
+          end
+        else
+          break
+        end
+      end
     elseif line == "/login" or line == "/provider" then
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
       -- login is a device code entered in the browser, an API key is pasted in the balloon's secret

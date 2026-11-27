@@ -45,7 +45,14 @@ pub extern "C-unwind" fn media(l: *mut wa_host_support::lua::LuaState) -> std::o
 fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => ask(op, &args, seam::WAIT_MS),
+        // The wait is the CALLER's, never a constant of this crate's: 0 queues the job and answers at
+        // once with its id (the handle), and a later call names that id to read its outcome. The shared
+        // bound - 60 s, 300 s at most - lives in `lua/core/codemode_pending.lua`, one number for every
+        // tool that can outlive its wait (Victor, 27/11: a slow answer is not a failure).
+        Ok(args) => match args.get("__job").and_then(Value::as_u64) {
+            Some(id) => settle(&queue(), id, wait_ms(&args)),
+            None => ask(op, &args, wait_ms(&args)),
+        },
         Err(_) => json!({"ok": false, "error": "email_invalid_request", "detail": "the arguments are not a JSON object"}),
     };
     wa_host_support::json::push_json(l, &answer);
@@ -82,6 +89,14 @@ fn from_epoch(value: i64) -> i64 {
     } else {
         value
     }
+}
+
+/// The wait this call asked for, under the SAME internal name the WhatsApp query uses: `__wait_ms` rides
+/// in the raw argument text and never in a tool's schema, so a closed schema stays closed. Absent means
+/// zero - queue it and answer the id at once - because the caller then holds a handle and will ask again;
+/// the shared bound (60 s, 300 s at most) is `lua/core/codemode_pending.lua`'s, not this crate's.
+fn wait_ms(args: &Value) -> u64 {
+    args.get("__wait_ms").and_then(Value::as_u64).unwrap_or(0)
 }
 
 fn ask(op: seam::Op, args: &Value, wait_ms: u64) -> Value {
@@ -139,7 +154,7 @@ fn settle(q: &Queue, id: u64, wait_ms: u64) -> Value {
                 "ok": true,
                 "id": id,
                 "state": "running",
-                "note": "the connector has not answered yet: call the same tool again with the same arguments - it is the same job (deduplicated) and answers when the connector does; if it stays running across calls, this node's email connector is not answering, so use the mcp_google_imap_* tools instead",
+                "note": "the connector has not answered yet: this id is the handle, and calling the same tool with {job: <id>} reads its outcome; a caller under the shared wait gets that resume itself (lua/core/codemode_pending.lua), and a query still running across the whole wait means this node's email connector is not answering, so use the mcp_google_imap_* tools instead",
             });
         }
         std::thread::sleep(Duration::from_millis(20));

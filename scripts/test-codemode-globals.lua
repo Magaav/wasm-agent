@@ -82,8 +82,33 @@ check(tostring(r.fix):find('There is no Buffer in this sandbox', 1, true) ~= nil
   and tostring(r.fix):find('capability: "write"', 1, true) ~= nil
   and tostring(r.fix):find('btoa', 1, true) ~= nil, 'and its fix names the body route, the peer write and btoa: ' .. shown(r))
 check(r.line == 1, 'and the line it happened on: ' .. shown(r))
-r = run('setTimeout(() => {}, 10);\nreturn "done";')
-check(tostring(r.fix):find('await sleep(ms)', 1, true) ~= nil, 'setTimeout names sleep: ' .. shown(r))
+-- 3b. TIMERS (27/11): the largest missing-global class. Measured over 7 days of retained run results:
+-- 91 `ReferenceError: setTimeout is not defined`, and of the 36 whose script was recoverable, 27 wrote
+-- `await new Promise(r => setTimeout(r, ms))`. Every timer runs on the one pause the host answers
+-- (`sleep`), so a wait spends none of the script's budget, and nothing is promoted to a job silently.
+r = run('const t0=Date.now(); await new Promise(res => setTimeout(res, 60)); return Date.now()-t0;')
+check(r.ok == true and (tonumber((value_of(r))) or 0) >= 50,
+  'await new Promise(r => setTimeout(r, 60)) really pauses: ' .. shown(r))
+r = run('let seen=""; setTimeout(() => { seen="callback"; }, 10); await sleep(40); return seen;')
+check(r.ok == true and value_of(r) == 'callback', 'setTimeout(fn, ms) runs the callback: ' .. shown(r))
+r = run('let seen="never"; const id=setTimeout(() => { seen="fired"; }, 20); clearTimeout(id); await sleep(60); return seen;')
+check(r.ok == true and value_of(r) == 'never', 'clearTimeout stops it: ' .. shown(r))
+r = run('let n=0; const id=setInterval(() => { n++; }, 10); await sleep(80); clearInterval(id); return n;')
+check(r.ok == true and (tonumber((value_of(r))) or 0) >= 2, 'setInterval repeats and clearInterval stops it: ' .. shown(r))
+r = run('await new Promise(res => setImmediate(res)); return "immediate";')
+check(r.ok == true and value_of(r) == 'immediate', 'setImmediate is a zero-delay timer: ' .. shown(r))
+r = run('setTimeout("not a function", 10); return "done";')
+check(r.ok == false and tostring(r.error):find('setTimeout takes a function', 1, true) ~= nil,
+  'setTimeout with something else says the shape: ' .. shown(r))
+-- The ceiling an uncleared interval really meets in a script: one pause is 5 s and a script pauses 30 s in
+-- total (lua/core/codemode.lua), so a repeating timer that nobody clears is stopped by that budget and its
+-- line names clearInterval AND the call that makes the work outlive the script. 30 s of real waiting, so
+-- it is the slow half.
+if os.getenv('WA_TIMERS_SLOW') == '1' then
+  local began = os.time()
+  r = run('let n=0; setInterval(() => { n++; }, 5000); await sleep(5000); await sleep(5000); await sleep(5000); await sleep(5000); await sleep(5000); await sleep(5000); return n;')
+  check(r.ok == false and tostring(r.code) == 'codemode_sleep_total_too_long', 'the script pause budget stops it (' .. (os.time() - began) .. ' s): ' .. shown(r))
+end
 r = run('return HOME;')
 check(tostring(r.fix):find('printenv HOME', 1, true) ~= nil, 'HOME names the command that reads it: ' .. shown(r))
 r = run('const x = require("fs");\nreturn x;')

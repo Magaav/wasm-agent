@@ -127,12 +127,51 @@ function M.tools()
   return dofile("lua/core/toolchain.lua").line()
 end
 
+-- THE WATCHER IS ONE LINE, AND ITS ABSENCE NAMES THE FIX (Fable 26/11, work).
+--
+-- MEASURED on work (a Docker container with no systemd), twice on 26/11: `wa-sentinel start` failed, its reason went to
+-- the container's stdout, and `wa status` - the page a person reads - said nothing about the watcher at all, running or
+-- not. The only surface that refused was `wa update`, and its sentence began by sending the reader somewhere else. So the
+-- fact gets a line here, ALWAYS: running with its pid, or not running with the one command that starts it.
+--
+-- `opts` is a test's seam (read_file, alive, sentinel, config): production calls it with nothing.
+function M.watcher_line(opts)
+  opts = opts or {}
+  local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
+  local config = opts.config or M.config_path()
+  local raw = ""
+  if type(reader) == "function" then raw = tostring(reader(config .. "/sentinel/sentinel.pid") or "") end
+  local pid = raw:match("^%s*(%d+)")
+  local alive = false
+  if pid then
+    if type(opts.alive) == "function" then alive = opts.alive(tonumber(pid)) == true
+    else
+      -- The same probe every other "is that process there" in this tree uses: `kill -0` reads without signalling.
+      local ok, answer = pcall(host.exec, "kill -0 " .. pid .. " 2>/dev/null", "", 20)
+      alive = ok and type(answer) == "table" and tonumber(answer.code) == 0
+    end
+  end
+  if alive then return "watcher   running (pid " .. pid .. ")" end
+  local sentinel = opts.sentinel
+  if sentinel == nil then
+    local ok, update = pcall(dofile, "lua/core/update.lua")
+    if ok and type(update) == "table" and type(update.install_dir) == "function" then
+      local named_ok, dir = pcall(update.install_dir)
+      if named_ok and type(dir) == "string" and dir ~= "" then sentinel = dir .. "/wa-sentinel" end
+    end
+    sentinel = sentinel or "wa-sentinel"
+  end
+  return "watcher   not running - start it: " .. sentinel .. " start"
+end
+
 -- Ordered: identity first, then what would break a turn, then the paths.
 function M.lines()
   local lines = {
     "node      " .. M.node_id(),
     "model     " .. M.model(),
     "session   " .. M.session(),
+    -- The watcher's fact, always: a page that says nothing about it is how two failed starts went unseen on work.
+    M.watcher_line(),
   }
   local unfinished = M.unfinished()
   if unfinished then lines[#lines + 1] = "unfinished " .. unfinished end
@@ -260,19 +299,23 @@ function M.age_text(seconds)
   return string.format("as of %d d ago", math.floor(s / 86400 + 0.5))
 end
 
--- Answers the limits, the problem that came with them, WHEN they were read, and whether this call
--- read them itself (`fresh`) or drew a reading already in hand (`cached`): the caller says the age
--- only for the second kind.
+-- Answers the limits, a named problem, how old the reading is, and the door's state.
+--
+-- The read is the HOST's now (provider.limits asks `host.limits_start`/`limits_poll`), so this never
+-- waits - mid-run or between runs. The snapshot memory below is kept only so a caller that must not
+-- talk to anything at all (`opts.cached`) still has the last numbers; it is never the reason a
+-- reading is missing.
 local function limits_of(id, opts)
   local seen = M._limits[id]
-  local now = host.now()
-  if seen and (opts.cached or now - seen.at < (opts.max_age or 30)) then
-    return seen.limits, seen.problem, seen.at, "cached"
+  local limits, problem, age, state = provider.limits(id)
+  if type(limits) == "table" and next(limits) ~= nil then
+    M._limits[id] = { at = host.now() - (tonumber(age) or 0), limits = limits, problem = problem }
+    return limits, problem, tonumber(age) or 0, state or "ready"
   end
-  if opts.cached then return nil, "read on the next /status between runs", nil, nil end
-  local limits, problem = provider.limits(id)
-  M._limits[id] = { at = now, limits = limits, problem = problem }
-  return limits, problem, now, "fresh"
+  if seen and type(seen.limits) == "table" and next(seen.limits) ~= nil then
+    return seen.limits, seen.problem, host.now() - seen.at, "ready"
+  end
+  return limits, problem, tonumber(age), state or "none"
 end
 
 -- `/status`: rows for the CLI's panel (or printed where there is none). `opts.color` paints the bars;
@@ -320,7 +363,14 @@ function M.session_lines(session_id, opts)
   for _, item in ipairs(reported_providers(settings.provider)) do
     lines[#lines + 1] = ""
     lines[#lines + 1] = bold(item.id) .. (item.id == settings.provider and dim("  (in use)") or "")
-    local limits, problem, at, freshness = limits_of(item.id, opts)
+    -- A snapshot the CONSOLE draws mid-run names the rows it must fill itself: the interpreter is
+    -- inside the turn then, so nothing here can repaint when the read lands. The marker is one line;
+    -- the console expands it from the door on every draw (rust/wa-capabilities/src/limits.rs).
+    if opts and opts.limits_marker then
+      lines[#lines + 1] = string.char(1) .. "limits:" .. tostring(item.id)
+      goto continue_provider
+    end
+    local limits, problem, age, state = limits_of(item.id, opts)
     local shown = 0
     for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
       local entry = type(limits) == "table" and limits[window[2]]
@@ -332,12 +382,21 @@ function M.session_lines(session_id, opts)
       end
     end
     if shown == 0 then
-      lines[#lines + 1] = dim("  limits unavailable" .. (problem and (": " .. problem) or ""))
-    elseif freshness == "cached" and at then
+      -- Nothing to draw yet: say WHAT is happening, never "come back between runs" - the read is
+      -- already on its way, on the host's own thread (Victor 25/11).
+      if state == "loading" then
+        lines[#lines + 1] = dim("  loading limits\226\128\166")
+      elseif state == "failed" and problem then
+        lines[#lines + 1] = dim("  limits: " .. problem)
+      else
+        lines[#lines + 1] = dim("  limits: asking the provider\226\128\166")
+      end
+    elseif tonumber(age) then
       -- The rows above are a reading, not a measurement taken now: say how old it is, so a bar on the
       -- screen mid-run cannot be read as this second's allowance.
-      lines[#lines + 1] = dim("  " .. M.age_text(host.now() - at))
+      lines[#lines + 1] = dim("  " .. M.age_text(age))
     end
+    ::continue_provider::
   end
   return lines
 end

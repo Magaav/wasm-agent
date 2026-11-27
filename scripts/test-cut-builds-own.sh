@@ -48,7 +48,10 @@ case "$CUT" in *publish-node-binaries.sh*) ok 1 "the cut's publish command is in
 case "$CUT" in *--named-from-cover*) ok 0 "the cut passes NO --named-from-cover" "$CUT" ;; *) ok 1 "the cut passes NO --named-from-cover" ;; esac
 case "$CUT" in *--ensure*) ok 0 "and no --ensure, the only path that can answer 'covered' and publish nothing" "$CUT" ;; *) ok 1 "and no --ensure, the only path that can answer 'covered' and publish nothing" ;; esac
 ok "$([ "$(grep -c 'ENSURE" = 1' "$ROOT/scripts/publish-node-binaries.sh")" -ge 1 ] && echo 1 || echo 0)" "the publisher's cover shortcut is gated on --ensure (the cut does not ask for it)"
-ok "$([ "$(grep -c -- '--named-from-cover' "$ROOT/scripts/publish-node-binaries.sh")" -ge 1 ] && echo 1 || echo 0)" "and --named-from-cover still exists as a flag the cut does not pass (removed in week 1)"
+# 25/11 said "removed in week 1", and this is the row that says it happened: the flag and the script
+# behind it are GONE, so a cover can no longer be renamed into a release of its own at all.
+ok "$([ "$(grep -c -- '--named-from-cover' "$ROOT/scripts/publish-node-binaries.sh")" = 0 ] && echo 1 || echo 0)" "and --named-from-cover is gone, so the cut cannot be pointed back at a cover"
+ok "$([ ! -e "$ROOT/scripts/publish-named-release.sh" ] && echo 1 || echo 0)" "and scripts/publish-named-release.sh itself is gone"
 
 # ---- 2. a SIGNED cover that really does cover this commit -------------------------------------------
 DIGEST="$(wa_compiled_inputs_digest "$ROOT" "$COMMIT")" || skip 'this commit cannot be digested'

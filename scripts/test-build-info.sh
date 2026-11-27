@@ -53,8 +53,15 @@ case "$VERSION_LINE" in
   "wasm-agent v$WANT_VERSION "*) ok "--version prints the product version then the bytes' own name" ;;
   *) bad "--version prints 'wasm-agent v<version> . v<sha>'" "$VERSION_LINE" ;;
 esac
-case "$VERSION_LINE" in
-  *"$WANT_VERSION"*"v"*) ok "--version carries both halves" ;;
+# THE SECOND HALF IS NOT ALWAYS `v<sha>` (27/11: main-health went red on 032f4dd4 with "wasm-agent
+# v0.1.3 · node-032f4dd4dcff"). A node installed from a published release names itself by that release,
+# and the terminal rule (`build_info::display_label`) prints such a name as it is - deliberately, with its
+# own unit test. The forms a build can carry are `v<sha>` (the bytes own label), `v<X.Y.Z>` (a channel
+# release) and `node-<sha>` (a published node release); the assertion is that the half after the · names
+# the bytes in one of them, not that it happens to be a git sha.
+BYTES_HALF="${VERSION_LINE#*" · "}"
+case "$BYTES_HALF" in
+  v[a-f0-9]*|node-[0-9a-f]*) ok "--version carries both halves ($BYTES_HALF)" ;;
   *) bad "--version carries both halves" "$VERSION_LINE" ;;
 esac
 

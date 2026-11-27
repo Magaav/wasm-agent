@@ -156,6 +156,18 @@ function M.text(info)
     .. tostring(info.why or "the run stopped without an answer") .. ": " .. tostring(info.detail or "")
 end
 
+-- The one line a person reads when a turn stops (mission turn-survives-a-provider-stall, item 2). Lua
+-- prefixes every re-raise with its own location, so a stall arrives as a chain of paths:
+-- `agent.lua:3366: provider.lua:1666: provider.lua:1599: provider_error: ...` - three paths the reader
+-- already knows, saying nothing about what happened. The paths are not the failure: `strip_locations`
+-- removes the leading ones and the SAME wording the row carries says what happened, so the bus fact and
+-- the reader's line cannot drift into two sentences for one failure.
+function M.human_line(problem)
+  local info = M.classify(problem)
+  local detail = strip_locations(tostring(info.detail or "")):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  return M.text({ code = info.code, why = info.why, detail = detail })
+end
+
 -- The one fact every announcement carries. Ids, a code and a bounded excerpt - never the whole
 -- error, never model text, so a bus subscriber cannot accidentally depend on either.
 function M.fact(info, opts)

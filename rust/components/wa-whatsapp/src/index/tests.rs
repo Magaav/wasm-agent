@@ -1179,8 +1179,11 @@ fn a_legacy_group_chat_a_search_hit_names_is_a_chat_every_question_accepts() {
     let numeric = seam::Request { op: "read".into(), chat: Some("5511999999999".into()), ..Default::default() };
     assert_eq!(numeric.validate().expect("a name to resolve").chat_name.as_deref(), Some("5511999999999"));
     assert_eq!(chat::jid("5511999999999").unwrap_err(), "bad_chat");
-    let send = seam::Request { op: "search".into(), chat: Some("5511999999999".into()), q: Some("x".into()), ..Default::default() };
-    assert_eq!(send.validate().unwrap_err().code, "bad_chat", "a search filter is an exact chat");
+    // A bare number as a search filter is still refused - now by the COMPONENT, which is where the
+    // subjects are: the seam carries a name, and only a group's subject opens the filter.
+    let send = verified(seam::Request { op: "search".into(), chat: Some("5511999999999".into()), q: Some("x".into()), ..Default::default() });
+    let refused = block_on(search(&store, &send)).unwrap();
+    assert_eq!(refused["error"], "whatsapp_search_bad_chat", "a search filter is an exact chat or a group subject: {refused}");
     // Nothing was written for a refused request, and the thread is still the one message.
     let answer = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some(LEGACY.into()), ..Default::default() }))).unwrap();
     assert_eq!(answer["count"], 1, "{answer}");
@@ -2536,12 +2539,51 @@ fn one_person_under_a_lid_and_a_number_is_one_candidate() {
     let same = candidate["same_person"].as_array().expect("same_person");
     assert_eq!(same.len(), 1);
     assert_eq!(same[0]["chat"], AB_PN);
+    // A folded chat is NAMED here, so it is not missing: `matched` counts chats, `count` counts rows,
+    // and nothing is truncated or hidden (25/11 - before this, the same answer said `matched: 2`,
+    // `count: 1`, `truncated: true` and named no missing row, because the fold is not a loss).
+    assert_eq!(answer["matched"], 2, "{answer}");
+    assert_eq!(answer["truncated"], false, "one person under two addresses hides nothing: {answer}");
+    assert!(answer.get("hidden").is_none(), "{answer}");
     // Somebody else with the same saved name is still a second person: ambiguity is about people.
     block_on(put(&store, &direct(LAURA_TWO, "Laura", "Z1", base() + 30, "oi"))).unwrap();
     block_on(set_contact(&store, &saved_by_number(LAURA_TWO, "Laura <3", base() + 31))).unwrap();
     let two = block_on(contacts(&store, &named("Laura <3"))).unwrap();
     assert_eq!(two["count"], 2, "{two}");
     assert_eq!(two["ambiguous"], true, "{two}");
+}
+
+/// A request with room for fewer chats than matched used to answer `matched: 3` beside two rows and a
+/// bare `truncated: true`: the reader counted a list that did not add up and could not tell how many
+/// were missing or where they went (measured 25/11). The answer now carries the count and the reason.
+#[test]
+fn a_limit_that_hides_matches_says_how_many_and_why() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+    block_on(put(&store, &direct(LAURA_TWO, "Laura", "L2", base() + 1, "oi"))).unwrap();
+    block_on(put(&store, &direct(BRUNO, "Laura", "L3", base() + 2, "e ai"))).unwrap();
+
+    let room_for_two = verified(seam::Request {
+        op: "contacts".into(), q: Some("Laura".into()), limit: Some(2), ..Default::default()
+    });
+    let answer = block_on(contacts(&store, &room_for_two)).unwrap();
+    assert_eq!(answer["matched"], 3, "{answer}");
+    assert_eq!(answer["count"], 2, "the list carries two rows: {answer}");
+    assert_eq!(answer["truncated"], true, "{answer}");
+    assert_eq!(answer["hidden"], 1, "the third match is counted, never dropped: {answer}");
+    let why = answer["hidden_why"].as_str().unwrap_or_default();
+    assert!(why.contains("names 2 of the 3 chats") && why.contains("limit:3"),
+        "the reason names both numbers and the way to see the rest: {why}");
+
+    // With room for all three the answer is whole: nothing truncated, nothing counted as missing.
+    let room_for_three = verified(seam::Request {
+        op: "contacts".into(), q: Some("Laura".into()), limit: Some(3), ..Default::default()
+    });
+    let whole = block_on(contacts(&store, &room_for_three)).unwrap();
+    assert_eq!(whole["count"], 3, "{whole}");
+    assert_eq!(whole["truncated"], false, "a whole list is not truncated: {whole}");
+    assert!(whole.get("hidden").is_none(), "and counts nothing as hidden: {whole}");
+    assert!(whole.get("hidden_why").is_none(), "{whole}");
 }
 
 /// A transcript is text this node already derived, so a search answer that cuts it must say so and
@@ -2724,6 +2766,7 @@ fn a_message_accepted_and_not_written_yet_is_named_pending_and_the_answer_says_i
         pending_total: 1,
         newest_seen: base() + 30_000,
         catching_up: false,
+        behind: vec![(FRESH_CHAT.to_string(), base())],
     };
     let asking = verified(seam::Request { op: "read".into(), chat: Some(FRESH_CHAT.into()), limit: Some(20), ..Default::default() });
     let behind = block_on(read_paced(&store, &asking, &pending)).unwrap();
@@ -2928,4 +2971,324 @@ fn a_search_that_mixes_chats_labels_every_hit_with_its_chat_and_a_read_never_mix
     // A read without a chat is refused, not answered with a mixture.
     let bare = seam::Request { op: "read".into(), ..Default::default() }.validate();
     assert_eq!(bare.unwrap_err().code, "chat_required");
+}
+
+/// P1.3 of whatsapp-index-heals-itself: a search hit carries the newest time the INDEX holds for that
+/// chat (`ChatCard.last`), not only the message's own time - a page of hits from three chats is only
+/// readable when each says how current its chat is. The item's own words: "newest_ts exists in index.rs
+/// but isn't exposed".
+#[test]
+fn a_search_hit_carries_the_newest_timestamp_its_chat_has() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "S1", base(), "o boleto vence amanha"))).unwrap();
+    block_on(put(&store, &direct(LAURA, "Laura", "S2", base() + 60_000, "boleto pago"))).unwrap();
+    let answer = block_on(search(&store, &search_request("boleto"))).unwrap();
+    let hits = answer["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 2);
+    println!("BEFORE/AFTER hit={}", serde_json::to_string(&hits[0]).unwrap());
+    for hit in hits {
+        assert_eq!(
+            hit["chat_newest_ts"].as_i64(),
+            Some(base() + 60_000),
+            "the chat's newest indexed time, not the hit's own: {hit}"
+        );
+    }
+}
+
+/// P2.3 of whatsapp-index-heals-itself: contacts pages, so chat 21 and beyond is reachable. `next` names
+/// the page's own last chat, and `before: next` continues exactly there - two pages never overlap, and the
+/// last page names no next.
+#[test]
+fn contacts_pages_with_a_cursor_so_the_rest_are_reachable() {
+    let store = Memory::new();
+    for i in 0..25u32 {
+        let chat = format!("55119777000{i:02}@s.whatsapp.net");
+        let name = format!("Contato {i:02}");
+        block_on(put(&store, &direct(&chat, &name, &format!("P{i:02}"), base() + i as i64 * 1000, "oi"))).unwrap();
+    }
+    let page = |before: Option<&str>| {
+        let request = verified(seam::Request {
+            op: "contacts".into(),
+            q: Some("Contato".into()),
+            limit: Some(20),
+            before: before.map(str::to_string),
+            ..Default::default()
+        });
+        block_on(contacts(&store, &request)).unwrap()
+    };
+    let chats = |answer: &serde_json::Value| -> Vec<String> {
+        answer["candidates"].as_array().expect("candidates").iter().map(|c| c["chat"].as_str().unwrap_or_default().to_string()).collect()
+    };
+
+    let first = page(None);
+    assert_eq!(first["matched"], 25, "the index knows twenty-five");
+    assert_eq!(chats(&first).len(), 20, "a page is the cap");
+    assert_eq!(first["truncated"], true);
+    let cursor = first["next"].as_str().expect("a cursor for the second page");
+    assert_eq!(Some(cursor), chats(&first).last().map(String::as_str), "the cursor is this page's last chat");
+
+    let second = page(Some(cursor));
+    assert_eq!(chats(&second).len(), 5, "the remaining five are a page away, not lost");
+    assert_eq!(second["matched"], 25, "the count is the index's, not the page's");
+    assert_eq!(second["truncated"], false);
+    assert!(second["next"].is_null(), "the last page names no next");
+    let first_page = chats(&first);
+    let second_page = chats(&second);
+    let overlap: Vec<&String> = second_page.iter().filter(|chat| first_page.contains(chat)).collect();
+    assert!(overlap.is_empty(), "two pages never overlap: {overlap:?}");
+
+    // A cursor the ranking no longer holds (the index moved between calls) is not an empty answer: the
+    // page starts at the beginning and the counts still say what the index has.
+    let stale = page(Some("55119777000999@s.whatsapp.net"));
+    assert_eq!(chats(&stale).len(), 20, "a stale cursor still answers a page");
+    assert_eq!(stale["matched"], 25);
+}
+
+/// P1.2 of whatsapp-index-heals-itself: while catching up, the answer NAMES the chats that are behind and
+/// the instant each fell behind - and a current answer names none, because there is no work to name.
+#[test]
+fn catching_up_names_the_chats_that_are_behind_and_since_when() {
+    let chat_a = "55119777000aa-like@s.whatsapp.net";
+    let chat_b = CHAT;
+    // Two chats behind, `chat_b` longer than `chat_a`; one chat already written (not in `behind`).
+    let pace = Pace {
+        pending: vec![(chat_a.to_string(), "M1".into())],
+        pending_total: 3,
+        newest_seen: base() + 120_000,
+        catching_up: false,
+        behind: vec![(chat_a.to_string(), base() + 60_000), (chat_b.to_string(), base())],
+    };
+    let state = index_state(&pace, base() + 120_000 - 30_000);
+    assert_eq!(state["state"], "catching_up", "records waiting is catching up: {state}");
+    let behind = state["behind"].as_array().expect("a list");
+    assert_eq!(behind.len(), 2);
+    assert_eq!(behind[0]["chat"], chat_b, "oldest first: the chat that waited longest is named first");
+    assert_eq!(behind[0]["since_ms"].as_i64(), Some(base()));
+    assert_eq!(behind[1]["chat"], chat_a);
+    assert_eq!(behind[1]["since_ms"].as_i64(), Some(base() + 60_000));
+    assert!(behind[0]["since_local"].as_str().unwrap_or_default().len() > 10, "a caller can read it as a time");
+    assert_eq!(state["pending"], 3, "the count is exact, the list is bounded");
+
+    // A queued history sync with nothing written yet: still catching up, and it names nobody rather than
+    // inventing a chat.
+    let queued = Pace { catching_up: true, ..Default::default() };
+    let state = index_state(&queued, base());
+    assert_eq!(state["state"], "catching_up");
+    assert_eq!(state["behind"].as_array().map(Vec::len), Some(0));
+
+    // Nothing waiting: `current`, and no `behind` list to misread.
+    let quiet = Pace { newest_seen: base(), ..Default::default() };
+    let state = index_state(&quiet, base());
+    assert_eq!(state["state"], "current");
+    assert_eq!(state["behind"].as_array().map(Vec::len), Some(0), "current never lists chats");
+}
+
+/// P1.4 of whatsapp-index-heals-itself: a text the STORE cut is not silently a whole text. The hit says
+/// the index holds a part, and names the op and the file that hold the rest.
+#[test]
+fn a_cut_transcript_names_the_op_and_the_file_that_hold_the_whole() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(CHAT, "Ana", "V1", base(), ""))).unwrap();
+    // Longer than a record keeps: `attach_text` is bounded at `record::MAX_TEXT`.
+    let long = format!("nota {} {}", "palavra ".repeat(600), "fim");
+    assert!(long.chars().count() > record::MAX_TEXT, "the fixture is longer than the bound");
+    block_on(attach_text(&store, CHAT, "V1", &long, Source::Transcript)).unwrap();
+
+    let stored = block_on(load(&store, CHAT, "V1")).unwrap().expect("the record");
+    let view = crate::view::message(&stored, None);
+    assert_eq!(view["transcript_cut"], true, "the answer says the index holds a part: {view}");
+    let full = &view["transcript_full"];
+    assert_eq!(full["tool"], "whatsapp_message", "the op that returns the stored part");
+    assert_eq!(full["chars_stored"], record::MAX_TEXT, "how much is held, stated");
+    assert_eq!(full["whole_in"]["tool"], "whatsapp_download", "and the op that returns the whole: the file");
+    assert_eq!(full["whole_in"]["chat"], CHAT);
+    assert_eq!(full["whole_in"]["id"], "V1");
+    // A text inside the bound is NOT marked cut, and keeps the old pointer shape (or none).
+    let view = crate::view::message(&direct(CHAT, "Ana", "V2", base(), "curta"), None);
+    assert!(view.get("transcript_cut").is_none(), "a whole text is never marked cut");
+}
+
+/// P2.2 of whatsapp-index-heals-itself: a GROUP is named by its subject and nothing else, so a search can
+/// be narrowed by that subject - and when several chats carry it, the answer is the candidates, never a
+/// pick. `contacts` already resolved a subject (`matched_source: group_subject`); this is the search half.
+#[test]
+fn search_narrows_by_a_group_subject_and_never_picks_among_several() {
+    let store = Memory::new();
+    let group = "120363000000000001@g.us";
+    block_on(put(&store, &direct(group, "", "G1", base(), "o boleto do condominio"))).unwrap();
+    block_on(set_subject(&store, group, "Família")).unwrap();
+    block_on(put(&store, &direct(LAURA, "Laura", "S1", base() + 1000, "boleto da Laura"))).unwrap();
+
+    // The subject resolves the chat, so the search sees only that group's messages.
+    let request = verified(seam::Request {
+        op: "search".into(),
+        q: Some("boleto".into()),
+        chat: Some("familia".into()),
+        ..Default::default()
+    });
+    let answer = block_on(search(&store, &request)).unwrap();
+    let hits = answer["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 1, "only the group carries that subject: {answer}");
+    assert_eq!(hits[0]["chat"], group);
+
+    // A subject nothing carries is a named refusal, not an empty answer.
+    let missing = verified(seam::Request {
+        op: "search".into(),
+        q: Some("boleto".into()),
+        chat: Some("ninguem tem este nome".into()),
+        ..Default::default()
+    });
+    let answer = block_on(search(&store, &missing)).unwrap();
+    assert_eq!(answer["error"], "whatsapp_search_bad_chat", "a name no group carries is the old refusal: {answer}");
+
+    // Two chats carrying the same subject: the candidates, and no pick.
+    let other = "120363000000000002@g.us";
+    block_on(put(&store, &direct(other, "", "G2", base() + 500, "outro boleto"))).unwrap();
+    block_on(set_subject(&store, other, "Família")).unwrap();
+    let ambiguous = verified(seam::Request {
+        op: "search".into(),
+        q: Some("boleto".into()),
+        chat: Some("familia".into()),
+        ..Default::default()
+    });
+    let answer = block_on(search(&store, &ambiguous)).unwrap();
+    assert_eq!(answer["error"], "whatsapp_search_chat_ambiguous", "never a silent pick: {answer}");
+    assert_eq!(answer["candidates"].as_array().map(Vec::len), Some(2));
+}
+
+/// P2.1 of whatsapp-index-heals-itself, the index half: subjects come from what the node already holds,
+/// a subject this node fetched is never overwritten, a chat the index has not seen is counted instead of
+/// invented, and the groups still nameless are listed for the sync to fetch.
+#[test]
+fn subjects_seed_from_what_the_node_holds_and_the_rest_are_listed() {
+    let store = Memory::new();
+    let nameless = "120363000000000011@g.us";
+    let fetched = "120363000000000012@g.us";
+    block_on(put(&store, &direct(nameless, "", "G11", base(), "oi"))).unwrap();
+    block_on(put(&store, &direct(fetched, "", "G12", base(), "oi"))).unwrap();
+    block_on(set_subject(&store, fetched, "Família")).unwrap();
+    block_on(put(&store, &direct(LAURA, "Laura", "S1", base(), "oi"))).unwrap();
+
+    // One group with no subject, one with a fetched subject, one chat the index has never seen.
+    let pairs = vec![
+        (nameless.to_string(), "Condomínio".to_string()),
+        (fetched.to_string(), "Um Nome Antigo".to_string()),
+        ("120363000000000099@g.us".to_string(), "Desconhecido".to_string()),
+    ];
+    let (applied, kept, unknown) = block_on(seed_subjects(&store, &pairs)).unwrap();
+    assert_eq!((applied, kept, unknown), (1, 1, 1), "one filled, one kept, one the index never saw");
+
+    let named = block_on(card_of(&store, nameless)).unwrap().expect("the card");
+    assert_eq!(named.subject, "Condomínio", "the journal's title filled the nameless group");
+    let kept_card = block_on(card_of(&store, fetched)).unwrap().expect("the card");
+    assert_eq!(kept_card.subject, "Família", "a fetched subject is never overwritten by an older title");
+
+    // A person chat is never given a subject, and the missing list is only groups.
+    let missing = block_on(subjects_missing(&store)).unwrap();
+    assert!(missing.is_empty(), "every group has a name now: {missing:?}");
+
+    let other = "120363000000000013@g.us";
+    block_on(put(&store, &direct(other, "", "G13", base(), "oi"))).unwrap();
+    assert_eq!(block_on(subjects_missing(&store)).unwrap(), vec![other.to_string()], "what a sync must fetch");
+}
+
+/// The decided limit rule (26/11): over the cap is CLAMPED AND SAID, never a refusal, and the same shape in
+/// all three list tools. Under the cap nothing is said - behaviour beyond the rule is identical.
+#[test]
+fn a_limit_over_the_cap_is_clamped_and_said_in_every_list_tool() {
+    let store = Memory::new();
+    for i in 0..25u32 {
+        let chat = format!("55119777100{i:02}@s.whatsapp.net");
+        block_on(put(&store, &direct(&chat, &format!("Contato {i:02}"), &format!("P{i:02}"), base() + i as i64 * 1000, "boleto"))).unwrap();
+    }
+    let run = |op: &str, limit: u32| -> serde_json::Value {
+        let request = match op {
+            "contacts" => verified(seam::Request { op: "contacts".into(), q: Some("Contato".into()), limit: Some(limit), ..Default::default() }),
+            "search" => verified(seam::Request { op: "search".into(), q: Some("Contato".into()), limit: Some(limit), ..Default::default() }),
+            _ => verified(seam::Request { op: "read".into(), chat: Some(CHAT.into()), limit: Some(limit), ..Default::default() }),
+        };
+        let answer = match op {
+            "contacts" => block_on(contacts(&store, &request)),
+            "search" => block_on(search(&store, &request)),
+            _ => block_on(read(&store, &request)),
+        };
+        answer.unwrap()
+    };
+
+    // Contacts keeps 20 of the 50 asked, and says which it asked for.
+    let over = run("contacts", 50);
+    assert_eq!(over["limit_asked"]["asked"], 50, "{over}");
+    assert_eq!(over["limit_asked"]["kept"], seam::CONTACTS_MAX);
+    assert!(over["limit_asked"]["said"].as_str().unwrap_or_default().contains("of 50 asked"), "the sentence names the ask");
+    assert_eq!(over["ok"], true, "clamped is not refused: {over}");
+
+    // Search keeps 50 of 80, read keeps 100 of 200: the same block, the same sentence shape.
+    let search_over = run("search", 80);
+    assert_eq!(search_over["limit_asked"]["asked"], 80, "{search_over}");
+    assert_eq!(search_over["limit_asked"]["kept"], seam::SEARCH_MAX);
+    let read_over = run("read", 200);
+    assert_eq!(read_over["limit_asked"]["kept"], seam::READ_MAX);
+    assert_eq!(read_over["limit_asked"]["asked"], 200);
+
+    // Under the cap: nothing is said, and the old shape is untouched.
+    let under = run("contacts", 5);
+    assert!(under.get("limit_asked").is_none(), "a kept limit is not a clamp: {under}");
+}
+
+/// P2.1's real source: a group message carries its subject in the message's own context
+/// (`ContextInfo.groupSubject`), so the index learns a group's name from traffic it already receives -
+/// no metadata lookup, no journal. A subject the node already fetched is never overwritten.
+#[test]
+fn a_group_message_teaches_the_index_its_subject() {
+    let store = Memory::new();
+    let group = "120363000000000021@g.us";
+    let mut first = direct(group, "", "G21", base(), "oi");
+    first.group = true;
+    first.chat_subject = "Condomínio".into();
+    block_on(put(&store, &first)).unwrap();
+
+    let card = block_on(card_of(&store, group)).unwrap().expect("the card");
+    assert_eq!(card.subject, "Condomínio", "the message's context named the group");
+    assert!(block_on(subjects_missing(&store)).unwrap().is_empty(), "nothing left to ask the phone for");
+
+    // A later message carrying an older subject does not overwrite what the node holds.
+    let mut second = direct(group, "", "G22", base() + 1000, "mais");
+    second.group = true;
+    second.chat_subject = "Outro Nome".into();
+    block_on(put(&store, &second)).unwrap();
+    assert_eq!(block_on(card_of(&store, group)).unwrap().expect("card").subject, "Condomínio");
+
+    // A direct chat is never given a subject, even if a context carried one.
+    let mut person = direct(LAURA, "Laura", "S21", base(), "oi");
+    person.chat_subject = "Nao e grupo".into();
+    block_on(put(&store, &person)).unwrap();
+    assert_eq!(block_on(card_of(&store, LAURA)).unwrap().expect("card").subject, "");
+
+    // And the ranking answers by that name, saying which field matched.
+    let answer = block_on(contacts(&store, &named("Condomínio"))).unwrap();
+    let best = &answer["candidates"][0];
+    assert_eq!(best["chat"], group);
+    assert_eq!(best["matched_source"], "group_subject", "the answer says the subject matched: {answer}");
+}
+
+/// P1.2's rule at the seam where it is decided: a RECORDED hole is catching up even when nothing is waiting
+/// to be written, and it names the chat that fell silent and the instant the index stopped.
+#[test]
+fn a_recorded_hole_is_catching_up_even_with_an_empty_inbox() {
+    let gap = Gap { chat: "120363000000000099@g.us".into(), from_ms: 1_760_000_000_000, to_ms: 1_760_086_400_000 };
+
+    let (catching_up, behind) = fold_gaps(false, Vec::new(), std::slice::from_ref(&gap));
+    assert!(catching_up, "a known hole is being behind, not current");
+    assert_eq!(behind, vec![(gap.chat.clone(), gap.from_ms)], "the chat and the instant it stopped");
+
+    // No holes and nothing pending: current, and nobody named.
+    let (catching_up, behind) = fold_gaps(false, Vec::new(), &[]);
+    assert!(!catching_up);
+    assert!(behind.is_empty());
+
+    // A chat already named (a record waiting) is not named twice: one entry per chat.
+    let (catching_up, behind) = fold_gaps(true, vec![(gap.chat.clone(), gap.to_ms)], std::slice::from_ref(&gap));
+    assert!(catching_up);
+    assert_eq!(behind.len(), 1, "one entry per chat: {behind:?}");
+    assert_eq!(behind[0].1, gap.to_ms, "the waiting record keeps its instant");
 }

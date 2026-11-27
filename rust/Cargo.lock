@@ -2155,9 +2155,11 @@ dependencies = [
  "tokio",
  "ureq",
  "wa-cli-views",
+ "wa-disk",
  "wa-email-index",
  "wa-email-outbox",
  "wa-features",
+ "wa-files",
  "wa-governance",
  "wa-grant-policy",
  "wa-host-support",
@@ -2168,6 +2170,7 @@ dependencies = [
  "wa-local-tz",
  "wa-mesh",
  "wa-operation",
+ "wa-operations-runner",
  "wa-queue",
  "wa-rendezvous",
  "wa-sqlite",
@@ -2198,6 +2201,18 @@ dependencies = [
  "wa-capabilities",
  "wa-host-support",
  "wa-kernel-runtime",
+]
+
+[[package]]
+name = "wa-disk"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ring",
+ "serde_json",
+ "wa-features",
+ "wa-host-support",
+ "wa-operation",
 ]
 
 [[package]]
@@ -2248,6 +2263,14 @@ dependencies = [
  "tempfile",
  "wa-grant-policy",
  "wa-host-support",
+]
+
+[[package]]
+name = "wa-files"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde_json",
 ]
 
 [[package]]
@@ -2457,6 +2480,34 @@ dependencies = [
  "wa-sqlite",
  "wa-tls",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "wa-operations-runner"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ring",
+ "serde_json",
+ "wa-disk",
+ "wa-features",
+ "wa-files",
+ "wa-host-support",
+ "wa-kernel-runtime",
+ "wa-operation",
+ "wa-tool-progress",
+]
+
+[[package]]
+name = "wa-operations-supervisor"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde_json",
+ "wa-disk",
+ "wa-files",
+ "wa-operations-runner",
+ "wa-tool-progress",
 ]
 
 [[package]]

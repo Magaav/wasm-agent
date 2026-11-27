@@ -82,6 +82,22 @@ impl Metrics {
         }
     }
 
+    /// The same counter, from the word a guest handed back (`Refusal::as_str()`): the seam that asks
+    /// the component for the refusal must not reconstruct a case only to count it, and the spellings
+    /// come from this crate so the two paths cannot drift.
+    pub fn record_refusal_word(&mut self, word: &str) {
+        use crate::protocol::Refusal as R;
+        if word == R::UnknownCaller.as_str() {
+            self.refused_unknown_caller += 1;
+        } else if word == R::Replayed.as_str() {
+            self.refused_replayed += 1;
+        } else if word == R::Stale.as_str() {
+            self.refused_stale_call += 1;
+        } else if word == R::BadSignature.as_str() {
+            self.refused_bad_signature += 1;
+        }
+    }
+
     pub fn record_decode(&mut self, who: Who, took_ms: i64) {
         match who {
             Who::Remote => {

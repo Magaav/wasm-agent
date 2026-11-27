@@ -235,6 +235,10 @@ gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # installer refuses a non-rooted scratch (`absolute existing install/home required`) and the whole gate
 # dies on a proof directory it created itself - measured 2026-10-26, gate lane #238 and #239.
 SERVICE_PROOF="$(git rev-parse --absolute-git-dir)/service-gate-$(date +%s)-$$"
+# A CONTAINER'S WATCHER START RETRIES AND SAYS SO (Fable 26/11, work): deploy/wa-start-watcher.sh - bounded backoff, a line
+# per try, and one give-up line in sentinel.log when it runs out. The entrypoint the image ships calls it instead of a bare
+# `wa-sentinel start`.
+gate_run bash scripts/test-sentinel-start-retry.sh
 gate_run node scripts/test-sentinel-service.cjs "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" "$(cygpath -w "$SERVICE_PROOF/cli")"
 gate_run powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/scripts/test-sentinel-service-installer.ps1")" -Scratch "$(cygpath -w "$SERVICE_PROOF/installer")"
 INTAKE_PROOF="$(git rev-parse --absolute-git-dir)/intake-gate-$(date +%s)-$$"
@@ -261,6 +265,10 @@ gate_run node scripts/test-gate-check.mjs
 # and no line saying why. Cheap: it never builds, and it keeps the fragile idiom from being copied.
 gate_run node scripts/test-main-module-entry.mjs
 gate_run node scripts/test-landing-queue.mjs
+# THE INVENTORY STAYS AN INVENTORY (Fable 27/11): every private wait below the shared 60 s and every crate that crosses a
+# queue or a socket must be named in docs/missions/reports/seam-inventory.md, and the inventory must carry at least one
+# KEEP with its reason. It derives the facts from the tree, so a new private wait cannot appear unlisted.
+gate_run node scripts/test-seam-inventory.mjs
 gate_run node scripts/test-deploy-pin-prune.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
 gate_run node scripts/test-full-gate-proof.mjs
@@ -342,6 +350,10 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-st
 # worker calls, the audio's lease rule, the component slot that mirrors a job, and the operator view.
 # The library above proves the two-node *logic*; these prove the host's dispatch and admission.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime stt_node::
+# The stt seam as a component (wit/stt): build the artifact, then prove the seam against it - the
+# guest admits a call, refuses its own replay from its own ledger, and the five capabilities answer
+# byte-identically with the component absent and installed (scripts/test-stt-seam.sh).
+gate_run bash scripts/test-stt-seam.sh --offline
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities graph::tests
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
 # fixtures, one per runner, each with its own end-to-end test in wa-kernel-runtime: `svc-echo-wasip1` (a plain
@@ -518,6 +530,9 @@ if [ "$lease_order" = "77" ]; then
 else
   [ "$lease_order" = "0" ] || exit "$lease_order"
 fi
+# `wa update requests` and its sweep, driven through the VERB the operator types, on a scratch home
+# (update-requests-settle, item 3 end to end; orphan-tests, 27/11).
+WA_BIN="$BIN" gate_run bash scripts/test-update-requests-cli.sh
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
 # fail() IN TWO HALVES (25/11, Fable's A, B, C): main own body before the swap, and the same four writes with a
 # verdict of its own after it. This branch had replaced it with printf + exit, which lost the status file, the
@@ -532,18 +547,32 @@ gate_run bash scripts/test-install-window.sh                             # the w
 # The version window (Fable 25/11, the orphan rule): a fixture feed, so no node, no network, no clock.
 # It lives on the gate rather than in the declared list for the same reason its sibling above does.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$DB.version-window" | grep "version window ok"
+# A FINISHED INSTALL SETTLES THE REQUEST IT SERVED (update-requests-settle): the STATE, finished_at and the
+# installed commit land in the record FILE, which is what a caller reads - and a second read rewrites nothing.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-settles.lua" "$BIN" --db "$DB.update-settles" | grep "update settles ok"
 # A CANARY THAT CANNOT SEE AN ACCOUNT IS NOT A BROKEN FEATURE (25/11 stop): not_proven is a third state beside
 # pass/fail/off, account canaries answer it only when the node has no account of that kind, and a canary proven
 # on no node asked is red.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db "$DB.canary-not-proven" | grep "canary not proven ok"
-# A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
-# install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
-# the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.
-gate_run bash scripts/test-publish-named-release.sh                          # a release named node-<sha12> for the cut, byte-identical to its cover
+
+# THE CUT CANARIES STEP IS ADVISORY UNTIL THE REHEARSAL IS GREEN (Fable 26/11, r6): the step runs, names every finding
+# - a FAIL, an unreachable node, a cutting canary proven nowhere, the rollback line - under the heading
+# LIVE CHECKS (advisory until rehearsed), and the cut continues to the tag. The row drives land.impl.canaries with
+# fixture canaries; the wrapper owns the scratch root the test-home guard needs and runs the tree under test.
+gate_run bash scripts/test-release-canaries-advisory.sh
+# THE TAG RULE (Fable 26/11): a full version takes Latest, a suffix never does; and WHEN a release may wear
+# the badge is decided at the END, by scripts/lib/release-latest.sh. Both rows extract the SHIPPED expression
+# and run it on the tags a cut meets - no copy of the rule, and no node, so seconds each (orphan-tests, 27/11).
+gate_run bash scripts/test-release-full-tag.sh
+gate_run bash scripts/test-release-latest-gate.sh
 # THE CUT BUILDS ITS OWN RELEASE (25/11, nextcloud-b): a tree-less node runs the binary EMBEDDED Lua, so a
 # release renamed from a cover gives it the cover Lua while --build-info names the release commit. A commit
 # whose compiled inputs a published release already covers must still be BUILT by the cut.
 gate_run bash scripts/test-cut-builds-own.sh                                # the cut builds node-<sha12> even when a signed cover already covers the commit
+# A COVER IS THE SAME PROGRAM ONLY IF ITS EMBEDDED LUA IS EQUAL TOO (week 1, 25/11): the publisher names
+# the Lua tree its bytes embed (lua_inputs=), and scripts/upgrade.sh - the one path that installs new
+# bytes - refuses a cover on a tree-less node unless that tree equals the target commit's, by name.
+gate_run bash scripts/test-cover-lua.sh                                    # a cover carries another commit Lua: the tree-less door refuses it, by name
 gate_run bash scripts/test-deploy-sweep-after-record.sh                  # a refused second deploy never sweeps a live install's staged file (Fable 25/11)
 
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
@@ -1058,6 +1087,9 @@ rm -f "$DB.update.lua"
 # the refusal names the command that starts one. It drives the real command path with a stub host, so it
 # needs no node, no install and no request box of this machine's.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$DB" | grep "update watcher decision ok"
+# THE WATCHER IS ON `wa status`, AND ITS ABSENCE NAMES THE FIX (Fable 26/11, work): the page a person reads said nothing
+# about the watcher while two starts had failed. Four answers on the module's seam, then the real path in a scratch home.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-status-watcher-line.lua" "$BIN" --db "$DB.status-watcher" | grep "status watcher line ok"
 # Whether a published release is newer than the one this node runs. Pure comparison plus a fixture
 # feed: no network, no clock. It is here because a node that cannot say "I am behind" updates only
 # when someone remembers to.
@@ -1109,6 +1141,12 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # `--check` answers for the installed commit and the one behind it from the local release list. It refuses a
 # home inside the operator's store (scripts/lib/scratch-home.sh) and touches no node but its own.
 WA_BIN="$BIN" gate_run bash scripts/test-update-follow.sh | grep 'update follow ok'
+# THE WAIT BETWEEN SNAPSHOTS IS AN EVENT, NOT A 1 s POLL (mission update-is-one-line, step 9): a phase the
+# deploy already wrote must not wait for a tick, and a command that finished in 200 ms must not pay a sleep.
+# The row proves `inotifywait` fires on a real file write, that the wait is bounded so it cannot hang the
+# command, and that the follower uses it (and that a caller handing a sleep seam still gets its sleep).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-wait.lua" "$BIN" --db "$DB.update-wait" | grep "update wait ok"
+
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 # No test may run the installer with the operator's real data dir: one run pauses every session here.
@@ -1562,6 +1600,44 @@ GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-alive
 # for 60 s with no request, no claimed request and no marker; killed, scripts-only and back-to-back, every resume
 # counted at the loopback model.
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-alive-hold.sh
+# THE VERSION FOLDERS (slice (b), Fable's nine requirements): one variable names versions/ and current in
+# the share root beside ui; a version folder is made once and sealed; an unchanged member is a HARD LINK;
+# installed.txt is a link to current's own record; retention keeps 3 and never current, the one before it, a
+# version a live process runs from, or a pinned one; and a full disk is refused by name before anything is
+# staged. Rows R3/R5 (a kill at every migration boundary) and R8 (the sentinel) come with their commits.
+gate_run bash scripts/test-versions.sh
+# THE INSTALLER OF A VERSION FOLDER, and a cut at every step boundary (R3): the install's own wa answers after a
+# SIGKILL at each of the 8 steps and the same install runs again to the end. It is an INSTALLER row, so it is
+# isolated by construction (scripts/lib/scratch-env.sh: clean prefix + stub systemctl + the checker) and refuses
+# to run unless the checker says ISOLATED - Fable's G condition, which is the row below it.
+WA_BIN="$BIN" gate_run bash scripts/test-version-install.sh
+# THE NODE SHAPE AND ITS TWO HALVES (version folders, Fable 25/11): the conversion (adopt, once per node, with its
+# rollback), the sentinel order/fallback, and the whole sequence through a failed restart and a failed move. Each
+# applies its own scratch env (scripts/lib/scratch-env.sh) and refuses a live node by name, so they run here the
+# way the row runner runs them (orphan-tests, 27/11: they were wired nowhere).
+gate_run bash scripts/test-versions-adopt.sh
+gate_run bash scripts/test-sentinel-version-move.sh
+gate_run bash scripts/test-version-sequence.sh
+# The shared scratch checker the version-folder rows use (scripts/lib/scratch-env.sh), judged on its own:
+# every live dimension refused by name, an IN-A-TURN run refused rather than stripped, ISOLATED when clean.
+gate_run bash scripts/test-scratch-env.sh
+# THE LUA CORE AS A PART (Fable 25/11): the lock line, the verifier and the declared interface - a good part
+# verifies, a truncated/flipped/tampered one is refused by name, an interface mismatch names BOTH digests, and a
+# tarball path that escapes is refused. Milliseconds; no install, no pointer, no network.
+gate_run bash scripts/test-lua-part.sh
+# A lua part is accepted only under the SAME trusted-key check as a node build (27/11): unsigned or signed by a key
+# this node does not carry is refused by name before anything is unpacked.
+gate_run bash scripts/test-lua-part-signature.sh
+# THE HOST DECLARES ITS LUA INTERFACE (wa --interface) and names the tree in force with its digest
+# (wa --build-info lua_tree/lua_tree_digest). A binary older than the verbs SKIPS by name.
+WA_BIN="$BIN" gate_run bash scripts/test-lua-interface.sh
+# THE G CONDITION ITSELF: the checker rejects every live dimension on its own (HOME, install dir, unit dir, the
+# real systemctl, the ledger path, XDG_CONFIG_HOME, a live port, a vault URL), the installer row asks it before
+# it runs anything, and neutralising a live-inheriting harness lands on ISOLATED with no live file changed.
+# The half requirement 5 asks for: on the next start, wa IT ITSELF puts back a link the pointer names and a cut
+# left absent - and never replaces a real directory. The module's contract (no pointer / half-done / real dir /
+# idempotent) has its own row; the shell row above proves the same through the real start path.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-repair.lua" "$BIN" --db "$DB.version-repair" | grep 'version repair ok'
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.
@@ -2266,6 +2342,10 @@ gate_run node tests/test-wa-fonts.mjs
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# A RESTART DRAWS THE SAME TRANSCRIPT A LIVE TURN DOES (Victor 27/11): one stored turn - text beside a
+# tool call, reasoning, and the model note - is drawn live and through every replay path (restart,
+# --continue, a node-run wake, a /sessions switch); no Commentary heading, no raw note tags, the same answer.
+WA_SCRIPT=scripts/test-restart-redraw.lua "$BIN" --db "$DB.view-redraw" | grep "restart redraw ok" || redraw=1
 # A STOP IS NOT A FAILURE TO REPLAY (change/esc-stops-now, item 4): a provider call that comes back
 # cancelled is asked exactly once, waits for nothing and writes no provider_retry row, while the
 # unclassified-provider bucket it used to fall into still replays its own kind of failure. Measured in
@@ -2508,6 +2588,10 @@ WA_BIN="$BIN" bash scripts/test-serve-cwd-boot.sh > "$DB.cwd-boot.log" 2>&1 || {
   echo "the serve-cwd boot fixture failed; its output:"; tail -20 "$DB.cwd-boot.log"; exit 1; }
 # A skip is named, never silently a pass: the row needs python3 and curl.
 grep -E "^(serve cwd boot ok|SKIP test-serve-cwd-boot)" "$DB.cwd-boot.log"
+# Slice 1 of ready-serve-own-program.md: the door's static tier answered by its own program
+# (`wa serve-static`) - two real processes, identical bytes, identical refusal, and a named refusal once the
+# program is gone.
+gate_run node scripts/test-serve-static.cjs "$BIN"
 ISOLATION_PORT=$(node scripts/free-test-port-block.cjs)
 WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolation.log" 2>&1 || {
   echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }
@@ -2980,6 +3064,10 @@ echo "attach tests ok"
 # Local mock provider only; no account, paid model or external browser required.
 gate_run node scripts/test-operation-control.cjs "$BIN"
 gate_run node scripts/test-operation-control.cjs "$BIN" --await
+# Slice 1 of ready-operations-own-program.md: the same operation verbs answered by the supervisor
+# (`wa operations-supervisor`) - two real processes, identical answers, identical cancellation, identical
+# env withholding.
+gate_run node scripts/test-operation-supervisor.cjs "$BIN"
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
 gate_phase_begin subagents

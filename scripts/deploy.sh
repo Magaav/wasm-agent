@@ -627,6 +627,12 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_PREFLIGHT"
   fi
   note "runtime worktree resolved before the build: $WA_RUNTIME_PREFLIGHT"
+  # WHAT THE PREFLIGHT VERIFIED, kept for the install-time question (Victor on work, 27/11: the deploy passed
+  # here, compiled for 1961 s, then refused with `deploy source must be the exact fetched origin/main` - a
+  # sentence that cannot be acted on because it does not say WHAT moved). Both shas are recorded now, so the
+  # late refusal names the difference instead of repeating the rule.
+  WA_RUNTIME_PREFLIGHT_HEAD="$(git -C "$BINDING_PREFLIGHT_REPO" rev-parse HEAD 2>/dev/null || true)"
+  WA_RUNTIME_PREFLIGHT_MAIN="$(git -C "$BINDING_PREFLIGHT_REPO" rev-parse "${WA_DEPLOY_MAIN_REF:-origin/main}" 2>/dev/null || true)"
 fi
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
@@ -1790,6 +1796,101 @@ UPGRADE="$ROOT/scripts/upgrade.sh"
 if [ -n "$EXPECTED_SHA" ]; then
   [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] || fail "source changed from expected SHA before install"
 fi
+# THE VERSION-FOLDER INSTALL: ONE SWITCH, OFF AT LANDING (Fable 25/11, condition b). It is turned on per node, on
+# Fable's word, the laptop first - so nothing in this branch changes how any node installs until someone sets it.
+# With it off, this file is byte-for-byte the install path it was.
+#
+# WHAT THE SWITCH DOES, in the order the case runs it (the sequence is immediately below, not somewhere else):
+#   1 convert    scripts/versions-adopt.sh converts an in-place node ONCE, verifies it, and rolls itself back if
+#                the verification fails - the deploy stops there with the in-place install untouched;
+#   2 stage      upgrade.sh runs with WA_VERSION_STAGING: it writes the program, itself and the record into the
+#                staging tree and exits 0 (no swap, no restart); the deploy adds lua-core, scripts and ui, and
+#                REFUSES BY NAME if any of them is missing - a version sealed without them would be incomplete
+#                while looking complete;
+#   3 seal+point scripts/version-install.sh seals the tree (one folder, one rename) and moves the pointer BEFORE
+#                any restart, so a restart can only ever run a complete, immutable version;
+#   4 restart    upgrade.sh runs again through the pointer: the installed program is already the new bytes, so it
+#                takes its own already-the-installed-one branch and only restarts and verifies;
+#   5 sentinel   scripts/lib/sentinel-move.sh moves the sentinel LAST, only once the node answered on the new
+#                version, and a failed start leaves the previous version supervising.
+# If the restart fails, current is moved BACK by one rename (no copy, no reinstall) and the sentinel makes the next
+# restart. NOT here: retiring upgrade.sh own $BACKUP copy, and the other two record writers guard calls.
+case "${WA_VERSION_FOLDERS:-0}" in
+  0) : ;;
+  1)
+    # THE SEQUENCE, in the order Fable approved. Nothing here runs unless the switch is on, and every step fails
+    # the deploy by name rather than continuing.
+    . "$ROOT/scripts/lib/versions.sh"
+    . "$ROOT/scripts/lib/sentinel-move.sh"
+    VF_SHARE="$(wa_share_root)"
+    VF_ID="$(wa_version_id "$EXPECTED_SHA")" || fail "version_folders_id: cannot name the version for $EXPECTED_SHA"
+    VF_PREV="$(wa_version_current 2>/dev/null || true)"
+
+    # 1. THE CONVERSION, first and verified: convert an in-place node once, or say it is already on a folder.
+    #    If it fails, its own rollback has already put the in-place install back and the deploy stops here.
+    bash "$ROOT/scripts/versions-adopt.sh" --install "$INSTALL_DIR" --share "$VF_SHARE" \
+      || fail "version_folders_adopt_failed: the conversion step failed; the in-place install is untouched"
+
+    # 2. STAGE the new version: upgrade.sh writes the program, itself and the record into the staging tree and
+    #    stops (no swap, no restart). It is the same invocation the live path uses, with one variable more.
+    [ -n "$VF_SHARE" ] && [ -n "$VF_ID" ] \
+      || fail "version_folders_names: an empty share root or version id (share='$VF_SHARE' id='$VF_ID') - refusing before anything is removed"
+    VF_STAGE="$VF_SHARE/versions/.stage-$VF_ID"
+    rm -rf "$VF_STAGE"; mkdir -p "$VF_STAGE" || fail "version_folders_stage_unwritable: $VF_STAGE"
+    WA_VERSION_STAGING="$VF_STAGE" \
+      WA_UPGRADE_FORCE_REASON="$([ "${FORCE:-0}" = 1 ] && printf '%s' "${REASON:-}")" \
+      WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+      WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
+      bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
+      || fail "version_folders_stage_failed: see $INSTALL_DIR/deploy-upgrade.log"
+    #    the trees the version also holds (the program and the record were staged by upgrade.sh). EACH ONE IS
+    #    REQUIRED: a version folder missing lua-core, scripts or ui is INCOMPLETE but would look complete once
+    #    sealed, so a missing or uncopyable member fails the deploy by name instead of being skipped (Fable 25/11
+    #    fix c - the first version wrote "cp -a ... || true" here).
+    [ -d "$LUA_STAGE" ] || fail "version_folders_member_missing: lua-core ($LUA_STAGE is not there)"
+    cp -a "$LUA_STAGE" "$VF_STAGE/lua-core" \
+      || fail "version_folders_member_failed: lua-core ($LUA_STAGE -> $VF_STAGE/lua-core)"
+    [ -d "$ROOT/scripts" ] || fail "version_folders_member_missing: scripts ($ROOT/scripts is not there)"
+    mkdir -p "$VF_STAGE/scripts" && cp -a "$ROOT/scripts/." "$VF_STAGE/scripts/" \
+      || fail "version_folders_member_failed: scripts ($ROOT/scripts -> $VF_STAGE/scripts)"
+    [ -d "$ROOT/ui" ] || fail "version_folders_member_missing: ui ($ROOT/ui is not there)"
+    cp -a "$ROOT/ui" "$VF_STAGE/ui" \
+      || fail "version_folders_member_failed: ui ($ROOT/ui -> $VF_STAGE/ui)"
+
+    # 3. SEAL it and MOVE THE POINTER - before any restart, so the restart runs a complete, immutable version.
+    bash "$ROOT/scripts/version-install.sh" --staging "$VF_STAGE" --commit "$EXPECTED_SHA" --install "$INSTALL_DIR" \
+      || fail "version_folders_seal_failed: the staged version could not be sealed or pointed at"
+
+    # 4. RESTART through the pointer. The installed program is now the new bytes, so upgrade.sh takes its own
+    #    "already the installed one" branch: it restarts and verifies, and its existing rollback is untouched - the
+    #    rollback BECOMING a pointer move is the next hunk, not a reason to change the swap today.
+    WA_UPGRADE_FORCE_REASON="$([ "${FORCE:-0}" = 1 ] && printf '%s' "${REASON:-}")" \
+      WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+      WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
+      bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
+      || {
+        # THE ROLLBACK IS THE POINTER (Fable 25/11: rollback = a pointer move + a restart, zero operator steps).
+        # The restart failed with the pointer on the new version; move it back to the one that was running, so the
+        # NEXT restart - and the sentinel is always there to make one - brings the node up on the version that
+        # worked. No file is copied, nothing is reinstalled, and the deploy says exactly what it did.
+        if [ -n "$VF_PREV" ]; then
+          wa_version_point "$VF_PREV" >/dev/null \
+            && note "version folders: the restart failed, so current is back on $VF_PREV (a pointer move, no reinstall); the sentinel brings the node up on it"
+        fi
+        fail "version_folders_restart_failed: see $INSTALL_DIR/deploy-upgrade.log (current ${VF_PREV:+is back on $VF_PREV; }the new version $VF_ID is sealed and kept)"
+      }
+
+    # 5. THE SENTINEL moves last, only now that the node answered on the new version; a failed start leaves the
+    #    previous version supervising (scripts/lib/sentinel-move.sh).
+    if [ -n "$VF_PREV" ]; then
+      WA_SENTINEL_NODE_HEALTHY=1 wa_sentinel_move "$INSTALL_DIR" "$VF_SHARE/versions/$VF_PREV" || \
+        note "the sentinel did not move cleanly (see above); the node is on $VF_ID"
+    fi
+    note "version folders: current -> $VF_ID (previous ${VF_PREV:-none}); the deploy continues with its own checks"
+    ;;
+  *) fail "version_folders_switch: WA_VERSION_FOLDERS must be 0 or 1, not $WA_VERSION_FOLDERS" ;;
+esac
+
 echo "deploy: installing through upgrade.sh"
 wa_phase installing
 # No log to follow: the heartbeat keeps the row alive through upgrade.sh's wait for an idle node.
@@ -1803,7 +1904,7 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     BINDING_SCRIPT="$(cygpath -w "$BINDING_SCRIPT")"; BINDING_REPO="$(cygpath -w "$BINDING_REPO")"
   fi
   WA_RUNTIME_WORKTREE="$("$NODE_BIN" "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
-    || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE"
+    || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE$(wa_runtime_binding_moved_note "$BINDING_REPO" "$WA_RUNTIME_PREFLIGHT_HEAD" "$WA_RUNTIME_PREFLIGHT_MAIN")"
   # The same question asked again, now that the build is done, and compared with the preflight answer: the
   # binding must still be clean and equal to main, and it must still be the tree step 0c chose. Comparison
   # lives in scripts/lib/runtime-binding.sh so it can be tested without a build (review of 18/11, item 9).

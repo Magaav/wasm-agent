@@ -3,6 +3,7 @@
 //! These are the only things the Lua agent cannot do by itself. Everything the
 //! agent *decides* lives in Lua; everything it *needs from the platform* lives
 //! here, so the same Lua can later run as a WASM component with these imports.
+pub(crate) use wa_files::{file_digest, file_magic_value, which_on_path};
 use wa_host_support::lua::{arg_integer, arg_string, cstr, lua_createtable, lua_pushinteger,
     lua_pushlstring, lua_pushnil, lua_pushnumber, lua_rawseti, lua_setfield, lua_touserdata,
     upvalue_index, LuaState};
@@ -194,22 +195,6 @@ pub extern "C-unwind" fn canonical_path(l: *mut LuaState) -> c_int {
     1
 }
 
-/// A bare name resolved through the PROCESS environment's PATH - the one a spawned child inherits, and
-/// the one the kernel uses to start a program (operations.rs, the `program` branch of `start`).
-///
-/// host.executable_on_path below is the same answer from Lua, and it is not the same as
-/// host.getenv("PATH"): that reads the host's config overrides first (resolved_env), so a node whose
-/// config sets a PATH named one interpreter while the child ran another (round 7).
-pub(crate) fn which_on_path(name: &str) -> Option<String> {
-    let path = std::env::var("PATH").ok()?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().to_string());
-        }
-    }
-    None
-}
 
 /// The shell `host.exec` runs commands with.
 ///
@@ -1125,128 +1110,13 @@ pub extern "C-unwind" fn file_magic(l: *mut LuaState) -> c_int {
     1
 }
 
-pub(crate) fn file_magic_value(path: &str) -> serde_json::Value {
-    use std::io::Read;
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) => return json!({"path": path, "magic": "missing",
-            "error": format!("{:?}", error.kind())}),
-    };
-    if metadata.is_dir() { return json!({"path": path, "magic": "unreadable", "size": metadata.len()}); }
-    if metadata.len() == 0 { return json!({"path": path, "magic": "empty", "size": 0}); }
-    // Round 9: a bounded HEAD, not four bytes. A PE's magic is not at its start - it is at the offset
-    // e_lfanew names - so four bytes cannot tell an MZ-only file from a real PE, and that difference is
-    // exactly what the allow-list needs. Still never the whole file: a hundred-megabyte interpreter costs
-    // these MAGIC_HEAD_BYTES and no more.
-    let mut head = Vec::with_capacity(MAGIC_HEAD_BYTES.min(metadata.len() as usize));
-    match std::fs::File::open(path) {
-        Ok(file) => match file.take(MAGIC_HEAD_BYTES as u64).read_to_end(&mut head) {
-            Ok(_) => {}
-            Err(error) => return json!({"path": path, "magic": "unreadable",
-                "error": format!("{:?}", error.kind())}),
-        },
-        Err(error) => return json!({"path": path, "magic": "unreadable",
-            "error": format!("{:?}", error.kind())}),
-    };
-    let magic = classify_magic(&head);
-    json!({"path": path, "magic": magic, "size": metadata.len()})
-}
 
-/// How many leading bytes the kind is decided from: a bounded head, never the whole file. Large enough
-/// for a PE's e_lfanew (typically 0x80-0x100) and for a universal binary's arch table.
-pub(crate) const MAGIC_HEAD_BYTES: usize = 4096;
 
-/// The most architectures a universal (fat) Mach-O header may name. It is also what separates 0xcafebabe
-/// the FAT BINARY from 0xcafebabe the JAVA CLASS: a class file follows it with minor+MAJOR version, and no
-/// Java class has a major below 45, while a fat header names one to a few architectures.
-const FAT_MAX_ARCH: u32 = 15;
 
-/// This HOST's own executable format: the only one a "native binary" may be. An ELF on macOS is a foreign
-/// binary, and foreign is not native - the allow-list admits what this node can actually run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostFormat { Elf, MachO, Pe, Unknown }
 
-pub(crate) fn host_format() -> HostFormat {
-    if cfg!(target_os = "linux") || cfg!(target_os = "android") { HostFormat::Elf }
-    else if cfg!(target_os = "macos") || cfg!(target_os = "ios") { HostFormat::MachO }
-    else if cfg!(target_os = "windows") { HostFormat::Pe }
-    // A host this build was not written for: no format is native there (unknown is not yes).
-    else { HostFormat::Unknown }
-}
 
-fn native_if(is_host: bool, family: &'static str) -> &'static str {
-    if is_host { family } else { "foreign" }
-}
 
-/// The host's own kind of each leading-byte shape: `elf`, `macho`, `pe` only for THIS host's format, and
-/// `foreign` for another platform's executable. Also `script` (a shebang), `text`, `binary`, `empty`,
-/// `missing` or `unreadable`.
-pub(crate) fn classify_magic(head: &[u8]) -> &'static str {
-    classify_magic_on(head, host_format())
-}
 
-/// The classifier with the HOST named, so every case is testable on any machine: an ELF is `elf` on
-/// Linux and `foreign` on macOS or Windows, and the same holds for the other two.
-pub(crate) fn classify_magic_on(head: &[u8], host: HostFormat) -> &'static str {
-    if head.starts_with(b"\x7fELF") { return native_if(host == HostFormat::Elf, "elf"); }
-    if head.len() >= 4 {
-        let magic = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
-        match magic {
-            // The thin Mach-O headers: 32/64-bit, each in both byte orders.
-            0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe => {
-                return native_if(host == HostFormat::MachO, "macho");
-            }
-            // The universal (fat) header, big-endian and its byte-swapped twin. Its count is what tells it
-            // apart from a Java class, which starts with the same four bytes.
-            0xcafe_babe => {
-                return match fat_arch_count(head, false) {
-                    Some(_) => native_if(host == HostFormat::MachO, "macho"),
-                    None => "binary",
-                };
-            }
-            0xbeba_feca => {
-                return match fat_arch_count(head, true) {
-                    Some(_) => native_if(host == HostFormat::MachO, "macho"),
-                    None => "binary",
-                };
-            }
-            _ => {}
-        }
-    }
-    // PE: "MZ" alone is not an executable - the COFF header starts at e_lfanew (offset 0x3c) and begins
-    // with "PE\0\0". A file whose e_lfanew is out of range, or does not point at "PE\0\0", is a DOS stub
-    // or a decoy, never a native binary.
-    if head.starts_with(b"MZ") {
-        return if pe_header_at(head).is_some() { native_if(host == HostFormat::Pe, "pe") } else { "binary" };
-    }
-    if head.starts_with(b"#!") { return "script"; }
-    if head.iter().all(|byte| *byte == 0x09 || *byte == 0x0a || *byte == 0x0d || (0x20..0x7f).contains(byte)) {
-        return "text";
-    }
-    "binary"
-}
-
-/// The architecture count of a universal header, or None when the header is not one: a count of 0 or more
-/// than FAT_MAX_ARCH, or a table that does not fit in the bytes read, is not a fat binary (and a Java
-/// class, whose next four bytes are a version, is never read as one).
-fn fat_arch_count(head: &[u8], little_endian: bool) -> Option<u32> {
-    if head.len() < 8 { return None; }
-    let raw = [head[4], head[5], head[6], head[7]];
-    let count = if little_endian { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) };
-    if count == 0 || count > FAT_MAX_ARCH { return None; }
-    // Each entry is 20 bytes: a header whose table is not even present is not a universal binary.
-    if head.len() < 8 + 20 * count as usize { return None; }
-    Some(count)
-}
-
-/// The offset a PE's COFF header is at, when these bytes really hold one.
-fn pe_header_at(head: &[u8]) -> Option<usize> {
-    if head.len() < 0x40 { return None; }
-    let offset = u32::from_le_bytes([head[0x3c], head[0x3d], head[0x3e], head[0x3f]]) as usize;
-    if offset < 0x40 || offset + 4 > head.len() { return None; }
-    if &head[offset..offset + 4] != b"PE\0\0" { return None; }
-    Some(offset)
-}
 
 /// host.file_sha256(path) -> hex, or nil plus a named reason.
 ///
@@ -1271,28 +1141,7 @@ pub extern "C-unwind" fn file_sha256(l: *mut LuaState) -> c_int {
     }
 }
 
-/// A file's sha256, read in chunks; bounded by FILE_DIGEST_MAX_BYTES.
-pub(crate) const FILE_DIGEST_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
-pub(crate) fn file_digest(path: &str) -> Result<String, String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|error| format!("unreadable: {error}"))?;
-    if let Ok(metadata) = file.metadata() {
-        if metadata.len() > FILE_DIGEST_MAX_BYTES {
-            return Err(format!("too_large: {} bytes", metadata.len()));
-        }
-    }
-    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buffer = vec![0u8; 256 * 1024];
-    loop {
-        match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => context.update(&buffer[..read]),
-            Err(error) => return Err(format!("unreadable: {error}")),
-        }
-    }
-    Ok(context.finish().as_ref().iter().map(|byte| format!("{byte:02x}")).collect())
-}
 
 /// Identify the image formats the provider path accepts from their bytes, never
 /// from an extension supplied by a file name.
@@ -2239,7 +2088,61 @@ fn retry_after_ms(headers: &ureq::http::HeaderMap) -> Option<u64> {
 }
 
     /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
-/// host.http(method, url, headers_json, body) -> {status, body} | {error}
+/// The agent for a limits read: the same transport a provider call uses, with the read bounded by the
+/// door's own eight seconds rather than the model call's budget.
+pub(crate) fn limits_agent(url: &str) -> Result<ureq::Agent, String> {
+    let read = crate::limits::READ_TIMEOUT_SECONDS;
+    let (connect, _, _) = http_timeouts();
+    let mut builder = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        // NO redirects: a limits read carries the provider key, and a redirect is exactly how that key
+        // would leave for another origin. ureq's default drops the Authorization header on a redirect
+        // (`redirect_auth_headers = Never`), but following none is the rule that needs no trust.
+        .max_redirects(0)
+        .timeout_connect(Some(std::time::Duration::from_secs(connect.min(read))))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(read)))
+        .timeout_recv_body(Some(std::time::Duration::from_secs(read)));
+    if wa_tls::is_tls(url) {
+        builder = builder.tls_config(wa_tls::tls_config().map_err(|error| error.to_string())?);
+    }
+    Ok(builder.build().into())
+}
+
+/// host.limits_start(provider, url) -> a JSON string (never a Lua table): the door's answer at once,
+/// `{"state": "loading", ...}`. Decode it with json.decode.
+/// The read happens on a thread of the host program's own; a turn never waits for it.
+pub extern "C-unwind" fn limits_start(l: *mut LuaState) -> c_int {
+    let provider = arg_string(l, 1).unwrap_or_default();
+    // A URL from the caller is refused, by name, and NOT repeated in the answer: the host resolves
+    // the provider's base URL itself, so no caller can aim the provider key at another host.
+    let supplied = arg_string(l, 2).unwrap_or_default();
+    if !supplied.trim().is_empty() {
+        push_json(l, &json!({"state": "failed",
+            "error": "limits_url_refused: this host resolves the provider's URL itself; a caller-given URL is refused"}));
+        return 1;
+    }
+    push_json(l, &crate::limits::start(&provider));
+    1
+}
+
+/// host.limits_poll(provider) -> a JSON string (never a Lua table): `{"state":
+/// "loading"|"ready"|"failed"|"none", usage?, age_s?, error?}`. Decode it with json.decode.
+pub extern "C-unwind" fn limits_poll(l: *mut LuaState) -> c_int {
+    let provider = arg_string(l, 1).unwrap_or_default();
+    push_json(l, &crate::limits::poll(&provider));
+    1
+}
+
+/// host.limits_forget(provider) -> nil. Drop this process's slot; the next start reads afresh.
+pub extern "C-unwind" fn limits_forget(l: *mut LuaState) -> c_int {
+    let provider = arg_string(l, 1).unwrap_or_default();
+    crate::limits::forget(&provider);
+    1
+}
+
+
+/// host.http(method, url, headers_json, body) -> a JSON string (never a Lua table): `{status, body}` or
+/// `{error}`. Decode it with json.decode.
 pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
@@ -4152,6 +4055,12 @@ struct ConsoleInput {
     /// ticker). It lives in that call's **block** in the transcript, never on the
     /// session-status-content row (Victor, 2026-11-10); kept so an unchanged phrase is not redrawn.
     tool_progress: String,
+    /// A panel whose limits rows the CONSOLE fills itself: the provider, and the spec those rows
+    /// belong in. Mid-run the interpreter is inside the turn, so only this thread can repaint the
+    /// rows when the read lands (crate::limits::row_texts). Cleared when the panel closes.
+    panel_limits: Option<(String, String, Value)>,
+    /// The limits rows the open panel is SHOWING, so a repaint happens only when they change.
+    panel_lines: Vec<Value>,
     /// The `/status` panel as Lua last described it (`host.status_snapshot`), shown by this thread when
     /// `/status` is submitted during a run - Lua is blocked in the model call then and cannot open it.
     status_snapshot: Option<Value>,
@@ -4189,7 +4098,22 @@ fn clear_selection(state: &mut ConsoleInput) {
 fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
     use wa_term::keymap::{self, Gesture, Pose};
     use wa_term::selection::Mouse;
-    if state.panel.is_some() { return; }
+    // AN OPEN PANEL OWNS ITS OWN ROWS (sessions-is-a-balloon): a click on a row that carries a copy
+    // payload puts that text on the clipboard - the full id behind a shortened row. Everything else a
+    // pointer does while a panel is open is still ignored, as before: the panel is the reader's, and a
+    // click on the transcript beneath it is not a command to it.
+    if let Some(panel) = state.panel.as_ref() {
+        if let Mouse::Press(row, _) = event {
+            if let Some(text) = panel.copy_at(row) {
+                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                let count = text.chars().count();
+                say(state, format!("Copied ({count} character{})", if count == 1 { "" } else { "s" }), false);
+                let frame = layout_frame(state);
+                let _ = wa_term::terminal_editor::write(&frame);
+            }
+        }
+        return;
+    }
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
     let (width, rows) = (editor.width, output_rows(None, editor));
     // Which gestures a pointer event means, and in which order they are tried, is the table's answer
@@ -4267,7 +4191,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                             return;
                         }
                     }
-                    // The notice row: a press takes the message away now.
+                    // The row the message floats over: a press there takes it away now.
                     Gesture::NoticeDismiss => {
                         if !over_transcript { return; }
                         if state.transcript.on_notice(row) && state.transcript.clear_notice() {
@@ -4516,17 +4440,19 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
 /// written - a copy, a paste, an attachment, the editor's own one-keystroke notes, a refusal. It
 /// used to live in `Editor::notice`, on the session status bar's row, which is exactly what Victor
 /// asked to stop (23/11 11:20Z: "so we never lose vision of the session status bar"): a message
-/// there pushed the run's own line aside. The row is above the pinned request at the top of the
-/// transcript, it is nobody else's, and it goes after about two seconds - or, when `sticky`, on the
-/// next key (an error the reader has to see).
+/// there pushed the run's own line aside. It FLOATS over the chat now, on the region's top row -
+/// the row under the pinned request while that one holds row 0 - so it takes no row and moves
+/// nothing (26/11: as a reserved row it shifted the whole conversation by one, twice per copy), and
+/// it goes after about two seconds - or, when `sticky`, on the next key (an error the reader has to
+/// see).
 fn say(state: &mut ConsoleInput, text: impl Into<String>, sticky: bool) -> bool {
     let text = text.into();
     state.transcript.notice(&text, std::time::Instant::now(), sticky)
 }
 
 /// The editor still composes its own one-keystroke notes in `Editor::notice` (`Interrupting\u{2026}`,
-/// `Draft kept`); they are TUI messages like any other, so they are handed to the notice row before
-/// the frame is drawn. `Editor::render` no longer paints that field, so the row it used to overwrite
+/// `Draft kept`); they are TUI messages like any other, so they are handed to the notice (the
+/// message that floats over the chat) before the frame is drawn. `Editor::render` no longer paints that field, so the row it used to overwrite
 /// - the session status bar - cannot be taken by a message again.
 fn flush_editor_notice(state: &mut ConsoleInput) -> bool {
     let text = state.editor.as_mut().map(|editor| std::mem::take(&mut editor.notice)).unwrap_or_default();
@@ -4747,6 +4673,15 @@ fn console_reader() {
                 let _ = refresh_editor_size();
                 expire_notice();
                 repaint_if_due();
+                // A /status panel open over a run draws its limits rows itself: the interpreter is
+                // inside the turn, so this thread is the only one that can repaint them.
+                limit_tick();
+            }
+            // While a panel waits on the door, the read is BOUNDED: the tick above only runs between
+            // keystrokes otherwise, and a `/status` panel that turned from loading to bars because the
+            // reader happened to press a key is not the panel this feature promised.
+            while limits_waiting() && !byte_ready(150) {
+                limit_tick();
             }
             let mut chunk = [0u8; 512];
             let read = read_chunk(&mut handle, &mut chunk);
@@ -4773,7 +4708,7 @@ fn console_reader() {
                     data.extend_from_slice(&chunk[..n]);
                     let (keys, mice, pending) = wa_term::selection::take(&data);
                     state.mouse_pending = pending;
-                    // An error on the notice row stays until the next KEY. A mouse report is not one:
+                    // An error on the notice stays until the next KEY. A mouse report is not one:
                     // the release of the very click that copied something arrives a few milliseconds
                     // after the press that set the message, and clearing on it made "Copied N
                     // characters" vanish before a reader could see it (measured: the tui-chrome row's
@@ -4852,9 +4787,21 @@ fn console_reader() {
                                 let running = state.editor.as_ref().is_some_and(|e| e.status);
                                 if running && text.trim() == "/status" {
                                     let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
-                                    if let (Some(spec), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
+                                    if let (Some(snapshot), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
+                                        let spec = crate::limits::expand_rows(&snapshot, epoch_seconds() as u64);
                                         state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
                                         state.host_panel = true;
+                                        // A spec that names a provider's limits keeps its rows live: the
+                                        // reader's tick repaints them when the read lands, mid-run and
+                                        // without the reader closing anything.
+                                        state.panel_limits = crate::limits::marker_of(&snapshot);
+                                        state.panel_lines = spec_lines(&spec);
+                                        if let Some((provider, _url, _)) = state.panel_limits.clone() {
+                                            // The panel opens the read now, off the turn, at once. The
+                                            // URL is the host's to resolve; the snapshot names only the
+                                            // provider.
+                                            let _ = crate::limits::start(&provider);
+                                        }
                                         continue;
                                     }
                                 }
@@ -4867,9 +4814,19 @@ fn console_reader() {
                                     if let wa_cli_views::Route::Local(spec) = route {
                                         let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
                                         if let Some((width, rows)) = dims {
-                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                            // The same live-rows contract as the mid-run snapshot: a
+                                            // published /status carries the marker, and the console
+                                            // fills it from the door on every draw.
+                                            // A published view is drawn AS IT IS: its lines can carry a
+                                            // model's or a tool's text, so a limits marker inside one
+                                            // is not the host's to obey (Fable, 26/11). Only the /status
+                                            // snapshot - written by this host from Lua's own status
+                                            // lines - can name a provider.
+                                            let drawn = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
+                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&drawn, width, rows));
                                             state.host_panel = true;
                                             state.balloon = true;
+
                                             continue;
                                         }
                                     }
@@ -4881,6 +4838,8 @@ fn console_reader() {
                                     state.balloon = false;
                                     state.host_panel = false;
                                     state.panel = None;
+                                    state.panel_limits = None;
+                                    state.panel_lines.clear();
                                 }
                                 // A queued Enter never ends anything; a send-now line raises the run's
                                 // interrupt exactly while a run is in flight (a Ctrl+Enter at an idle
@@ -5435,6 +5394,51 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
+}
+
+/// The lines a spec draws, as the panel is showing them: what a repaint compares against.
+fn spec_lines(spec: &Value) -> Vec<Value> {
+    spec.get("lines").and_then(Value::as_array).cloned().unwrap_or_default()
+}
+
+/// Repaint the open panel's limits rows from the door, in place. Called from the reader thread's tick,
+/// which is the only thing running while the interpreter is inside a turn; nothing is drawn when the
+/// rows did not change, so an idle panel costs one `row_texts` call per tick and no frame.
+fn refresh_panel_limits(state: &mut ConsoleInput) {
+    let Some((provider, _url, spec)) = state.panel_limits.clone() else { return };
+    if let Some(path) = std::env::var_os("WA_LIMITS_DEBUG").filter(|path| !path.is_empty()) {
+        use std::io::Write as _;
+        if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(log, "[limits] tick provider={provider} poll={}", crate::limits::poll(&provider));
+        }
+    }
+    if state.panel.is_none() { state.panel_limits = None; state.panel_lines.clear(); return }
+    let fresh = crate::limits::expand_rows(&spec, epoch_seconds() as u64);
+    // What the panel is SHOWING is the yardstick, not the spec: the spec keeps its marker (it is the
+    // template this repaint reads), so comparing with it would repaint once and then never again
+    // once the drawn rows were stored over it.
+    if fresh.get("lines") == Some(&Value::Array(state.panel_lines.clone())) { return }
+    let Some((width, rows)) = state.editor.as_ref().map(|editor| (editor.width, editor.row + 1)) else { return };
+    state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&fresh, width, rows));
+    state.panel_lines = spec_lines(&fresh);
+    let frame = layout_frame(state);
+    let _ = wa_term::terminal_editor::write(&frame);
+}
+
+/// Whether an open panel is waiting on the limits door (so the reader's read is bounded).
+fn limits_waiting() -> bool {
+    let (lock, _) = console_input();
+    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.panel_limits.is_some()
+}
+
+/// The tick's entry point: the console lock is taken only while a panel waits on the door.
+fn limit_tick() {
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let live = state.panel_limits.is_some();
+    if state.panel_limits.is_none() { return }
+    refresh_panel_limits(&mut state);
 }
 
 /// `host.status_snapshot(spec_json)`: the panel `/status` shows if it is submitted while a run is in
@@ -7982,7 +7986,8 @@ mod image_and_token_tests {
 /// "script" about the shell wrapper. It had no unit test of its own (found 18/11).
 #[cfg(test)]
 mod classify_magic_tests {
-    use super::{classify_magic, classify_magic_on, file_magic_value, HostFormat};
+    use wa_operations_runner::files::{classify_magic, classify_magic_on, HostFormat};
+    use super::file_magic_value;
 
     /// A PE stub whose e_lfanew points at a real "PE\0\0" header.
     fn pe() -> Vec<u8> {

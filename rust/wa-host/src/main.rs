@@ -118,6 +118,31 @@ fn load_lua_tree() -> Result<LuaTree, String> {
     Ok(LuaTree { commit, files })
 }
 
+/// WHAT TREE THIS PROCESS RUNS, for `wa --build-info` and for the Lua part's interface check (Fable 25/11):
+/// the installed tree's commit and a digest of its bytes, or ("embedded", "") when the compiled-in copy is what
+/// runs. The digest is over the same files the loader verified, in a stated order, so two nodes can compare it.
+pub(crate) fn lua_tree_report() -> (String, String) {
+    match installed_tree() {
+        Some(tree) => {
+            let mut names: Vec<&String> = tree.files.keys().collect();
+            names.sort();
+            let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+            for name in names {
+                hasher.update(name.as_bytes());
+                hasher.update(b"=");
+                if let Some(text) = tree.files.get(name) {
+                    let one = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
+                    hasher.update(one.as_ref());
+                }
+                hasher.update(b"\n");
+            }
+            let digest: String = hasher.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
+            (tree.commit.clone(), digest)
+        }
+        None => ("embedded".to_string(), String::new()),
+    }
+}
+
 fn installed_tree() -> Option<&'static LuaTree> {
     static TREE: std::sync::OnceLock<Option<LuaTree>> = std::sync::OnceLock::new();
     TREE.get_or_init(|| match load_lua_tree() {
@@ -169,7 +194,8 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn db_path(args: &[String]) -> String {
     flag(args, "--db").unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        // The node home by the product rule, never by the environment: the host reads the same file.
+        let home = wa_host_support::paths::resolve_home();
         format!("{home}/.wasm-agent/memory.db")
     })
 }
@@ -346,6 +372,13 @@ fn main() {
                 }
             }
         }
+    }
+    // `wa --interface`: the host DECLARES the Lua interface it offers, so a Lua part can be refused by name before
+    // a pointer ever names it (Fable 25/11, lua-core-is-a-signed-part item 3). It is the same digest the tree
+    // manifest carries as `capabilities`, answered before the interpreter and the database are touched.
+    if args.first().is_some_and(|arg| arg == "--interface") {
+        println!("{}", capabilities::digest());
+        return;
     }
     if args.first().is_some_and(|arg| arg == "--capability-digest") {
         println!("{}", capabilities::digest());
@@ -732,6 +765,25 @@ fn main() {
         return;
     }
 
+    // THE DOOR’S STATIC TIER (slice 1 of ready-serve-own-program.md): this binary in a second mode, owning
+    // the UI file bytes the door answers before admission. Its own process, its own files.
+    if command == "serve-static" {
+        if lua_args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h") {
+            println!("usage: wa serve-static [--root <ui dir>] [--port 8792] [--rendezvous <file>]\n  serve the web UI files as their own program (blocks until stopped)\n  the node reaches it through <home>/.wasm-agent/serve-static.json, which this program writes (no environment variable decides it)");
+            return;
+        }
+        let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8792);
+        let root = flag(&lua_args, "--root").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("ui"));
+        let home = wa_host_support::paths::resolve_home();
+        let rendezvous = flag(&lua_args, "--rendezvous").map(PathBuf::from).unwrap_or_else(|| {
+            PathBuf::from(home).join(".wasm-agent/serve-static.json")
+        });
+        if let Err(error) = wa_capabilities::serve_static::serve(root, port, rendezvous) {
+            eprintln!("serve-static: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if command == "serve" {
         if let Err(error) = lua.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
             eprintln!("lua error: {error}");

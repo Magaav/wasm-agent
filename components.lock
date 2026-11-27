@@ -251,9 +251,25 @@ model-gateway 827afeb60f67991c832acc6f5c62dc346582ee0cbb6fd0d89f4ca517bbcb40b8 4
 # `scripts/build-components.sh selfloop`, and twice (a real rebuild and a warm second run) for the same
 # sha256, with the toolchain and build root this file pins.
 selfloop 949c657d3dcd365095425133d755e6023ddc3fe7bd5735d87064872346cff0a8 247835
+# 26/11 first pin of stt (change/stt-becomes-a-component): the speech queue's wire layer becomes a
+# component - wit/stt's async world (wa:stt: admit, encode, signature-message, reply-ok, sanitize) over
+# wa-stt-remote, which is pure and builds for wasip2 as it is. The node asks the feature resolver
+# (features.stt - the switch is the feature, with no env override in product code) per call and falls back to
+# rust/wa-kernel-runtime/src/stt_node.rs, which keeps the queue, the worker thread, the clock, the
+# recogniser and the node's key. Built by scripts/build-components.sh stt: rustc 1.99.1, build root
+# /tmp/wa-component-build/src, two builds in two target dirs, same sha256 both times. 152,942 bytes.
+# 26/11 second pin of stt, same day: the world kept only what this node answers (admit, reply-ok,
+# sanitize) after the first pin carried encode and signature-message, which the producer composes and
+# signs inside wa-stt-remote and which therefore had no caller here. reply-ok is now routed, so every
+# export in the world is one the node actually asks. Two builds, same sha256, 146,696 bytes.
+stt bc7db7b0f63f3187edb02490ba73dca0d655ce70991eda791e14841a10f63d73 146696
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
 # its bytes are the ones published in components-033542eb9a37.
-wa-whatsapp 3ab893733cd6160b572c65afc7500bc3d3b067b04ebfd46c87ad053f3e0dcb80 8865574
+# Repin for the merge of origin/main (617fed07) into whatsapp-index-heals-itself: main's contacts answer
+# (hidden/hidden_why) and this branch's paging (next, before) and clamp (say_limit) are one answer now, so
+# the bytes are the build of the merged source, not either side's. Built on avell in the pinned root
+# (/tmp/wa-component-build/src) with rustc 1.100.0, wasi-sdk 34.0.
+wa-whatsapp b896fd523d789f414284dc7a3f5824b0a05d2a779b66b70b6fc5d726bdb6bcf9 8928763

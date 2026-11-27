@@ -64,6 +64,7 @@ pub mod service_ocr;
 pub mod services;
 // The node half of queue phase 2 for speech: the `stt.requests` queue, the relay handler a remote
 // worker calls, and the `stt_worker` role (docs/QUEUE.md, docs/WHATSAPP-TRANSCRIPTION.md).
+pub mod stt_host;
 pub mod stt_node;
 pub mod state_host;
 // `wa:kernel/sql`: the scoped database grant the memory component stands on (docs/KERNEL.md).

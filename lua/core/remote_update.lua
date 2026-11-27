@@ -1197,9 +1197,15 @@ function M.read_status(args, caller)
     contains_target = outcome.contains_target == true,
     server = record.server,
   }
+  -- SETTLE THE STATE TOO (update-requests-settle, Fable 26/11). This block already wrote the OUTCOME - and left
+  -- `state` at `queued` forever, which is why openclaw held 78 records saying queued about installs that worked: a
+  -- reader of the FILE (the cut's wait) reads `state`, and `installed` had no writer at all. The state is now what
+  -- the install proved, and the time it finished under the name a reader asks for.
   if (outcome.state == 'installed' or outcome.state == 'failed' or outcome.state == 'silent') and record.outcome == nil then
+    record.state = outcome.state
     record.outcome = outcome.state
     record.settled_at = math.floor(host.now())
+    record.finished_at = record.settled_at
     record.installed_commit = outcome.installed_commit
     record.detail = outcome.detail
     write_record(record)
@@ -1210,6 +1216,75 @@ end
 
 -- What this node would do, without doing it: the facts a master needs before it asks (or that a
 -- test needs to see). Read-only.
+-- THE SWEEP (update-requests-settle, Fable 26/11): a request no install will ever serve is CLOSED with a NAMED
+-- reason, never left `queued` forever. It deletes NOTHING - a closed record is a record with a state and a reason,
+-- and it stays readable - and it is idempotent: a second run closes nothing.
+--
+--   superseded_by <id>   a NEWER request from the same requester exists, so this one will never be served
+--   expired              nothing served it within the age (default 24 h: "no request older than a day says queued")
+--
+-- What it does NOT touch: a record that is installed/failed/refused/silent (settled already), and one that is
+-- younger than the age and still the newest its requester made.
+--
+--   M.sweep({ max_age_seconds = 86400, dry_run = true })  -> what it would close, closes nothing
+function M.sweep(opts)
+  opts = opts or {}
+  local max_age = tonumber(opts.max_age_seconds) or 86400
+  local now = math.floor(host.now())
+  local listing = shell('ls -1t ' .. quote(M.dir()) .. ' 2>/dev/null')
+  local closed, kept, scanned = {}, {}, 0
+  local seen_by_node = {}
+  local names = {}
+  for name in tostring(listing and listing.stdout or ''):gmatch('[^\r\n]+') do
+    if name:match('%.json$') then names[#names + 1] = name end
+  end
+  -- NEWEST FIRST BY THE RECORD'S OWN requested_at, not by file mtime: three records written in the same second have
+  -- no useful mtime order, and the row caught it (a superseded record was chosen as the survivor).
+  local ordered = {}
+  for _, name in ipairs(names) do
+    local id = trim((tostring(name):gsub('%.json$', '')))
+    local record = M.record(id)
+    if record then ordered[#ordered + 1] = { id = id, requested = tonumber(record.requested_at or 0) or 0 } end
+  end
+  table.sort(ordered, function(a, b) return a.requested > b.requested end)
+  for _, entry in ipairs(ordered) do
+    local id = entry.id
+    local record = M.record(id)
+    if record then
+      scanned = scanned + 1
+      local node = tostring(record.requester and record.requester.node_id or '')
+      local state = tostring(record.state or '')
+      if state == 'queued' then
+        local requested = tonumber(record.requested_at or 0) or 0
+        local reason
+        if node ~= '' and seen_by_node[node] then
+          reason = 'superseded_by ' .. seen_by_node[node]
+        elseif requested > 0 and (now - requested) > max_age then
+          reason = 'expired'
+        end
+        if reason then
+          closed[#closed + 1] = { id = id, reason = reason, age_seconds = requested > 0 and (now - requested) or nil }
+          if not opts.dry_run then
+            record.closed_reason = reason
+            record.closed_at = now
+            record.state = reason:match('^superseded_by') and 'superseded' or 'expired'
+            record.detail = tostring(record.detail or '') .. (record.detail and ' | ' or '') .. 'closed: ' .. reason
+            write_record(record)
+            audit('closed', record, reason)
+          end
+        else
+          kept[#kept + 1] = id
+        end
+      else
+        kept[#kept + 1] = id
+      end
+      if node ~= '' and not seen_by_node[node] then seen_by_node[node] = id end
+    end
+  end
+  return { ok = true, scanned = scanned, closed = closed, kept = #kept, dry_run = opts.dry_run == true,
+    max_age_seconds = max_age }
+end
+
 function M.check(args, caller)
   local author = nodes.author_of(caller)
   if not author then return { error = 'forbidden_role', effect = 'none' } end

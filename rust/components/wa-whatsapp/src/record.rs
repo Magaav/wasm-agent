@@ -132,6 +132,11 @@ pub struct Record {
     pub source: String,
     /// The id of the message this one quotes (a reply), or of the message an event acts on.
     pub quoted: String,
+    /// The group subject THIS MESSAGE carried in its context (`ContextInfo.groupSubject`, proto field 34,
+    /// `waproto` line 1646): WhatsApp puts it on a group message's context, so the index learns a group's
+    /// name from traffic it already receives - no metadata lookup, no journal (whatsapp-index-heals-itself
+    /// P2.1, "from what the node already holds"). Empty for a direct chat and for a message without one.
+    pub chat_subject: String,
     pub mentions: Vec<String>,
     /// Push name of the sender when the envelope carried one (a group's subject is not this).
     pub push_name: String,
@@ -167,6 +172,12 @@ pub struct Record {
     pub poll: Option<Poll>,
     /// Text the transcription pipeline attached to this message (`speech.recognize`).
     pub transcript: String,
+    /// True when the transcript WhatsApp/the recognizer produced was LONGER than [`MAX_TEXT`] and was cut
+    /// at it: the index then holds a part, and only the media file holds the whole. A cut that is not
+    /// recorded reads as a complete text (`whatsapp-index-heals-itself` item 4).
+    pub transcript_cut: bool,
+    /// The same for an OCR pass.
+    pub ocr_cut: bool,
     /// Text an OCR pass attached to this message.
     pub ocr: String,
     /// `view_once`, `ephemeral_media_not_retained`, `media_too_large`, `unsupported_kind`, …: why this
@@ -297,6 +308,7 @@ pub fn from_message(envelope: &Envelope, message: &wap::Message) -> Record {
         ts: envelope.ts,
         received: envelope.received,
         push_name: envelope.push_name.clone(),
+        chat_subject: subject_of(message),
         business: envelope.business.clone(),
         source: SOURCE_LIVE.to_string(),
         ..Record::default()
@@ -544,6 +556,16 @@ fn edit_text(edited: &wap::Message) -> String {
 }
 
 /// The context info of whichever body carries it (it is per-kind in the protobuf).
+/// The group subject a message's context carries, when it carries one: the honest source of a group's
+/// name on a node that is receiving traffic for it.
+pub fn subject_of(base: &wap::Message) -> String {
+    context_of(base)
+        .and_then(|context| context.group_subject.as_deref())
+        .map(|subject| subject.replace(['\n', '\r'], " "))
+        .map(|subject| subject.trim().chars().take(120).collect::<String>())
+        .unwrap_or_default()
+}
+
 pub fn context_of(base: &wap::Message) -> Option<&wap::ContextInfo> {
     // Every body kind carries its own `context_info`; the first one present is the message's.
     if let Some(value) = base.extended_text_message.as_option() {

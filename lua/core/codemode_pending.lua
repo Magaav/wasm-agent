@@ -659,6 +659,78 @@ do
   }
 end
 
+-- The mail index family: a query is a durable queue job on `email.query`, and the id the connector
+-- answers IS the handle - the same shape as a WhatsApp send's outbox job above, because it is the same
+-- question (how long may a call wait before it is a handle instead of an answer).
+--
+-- The rule it obeys (Victor, 27/11: a slow answer is not an error): a crate may not keep a private wait.
+-- `rust/wa-email-index` had `WAIT_MS = 2_000` and `rust/wa-capabilities/src/email_query.rs` spent it on
+-- every call, so a busy index turned a read into a 2 s deadline that then crossed the seam as a throw.
+-- Now the crate waits for nobody, the caller's wait is this file's shared one (`DEFAULT_WAIT_S`, 60 s,
+-- `MAX_WAIT_S`, 300 s), and a slow query answers a handle here and settles through `wait` like every
+-- other call that outlives its wait.
+--
+-- The three tools are one family on purpose: `email_search`, `email_read` and `email_media` are the same
+-- job on the same queue, so they cannot drift into three different waits.
+-- The factory both queue-job families use (the mail index here, the WhatsApp index in its own change): a
+-- tool that ENQUEUES a durable job and answers its id is the same question wherever it lives, so the answer
+-- - a handle named after the job, polled by id, never cancellable - is written once and registered per tool.
+-- A second copy would drift, and drift is how two crates ended up with two private 2 s waits.
+function M.queue_job_family(tool, opts)
+  opts = opts or {}
+  return {
+      -- The kind is the caller's, so a family that already has a name keeps it (`whatsapp_query`): the shape
+      -- is shared, the label is not something this factory should decide for it.
+      kind = opts.kind or "queue_job",
+      start = function(dispatch, opts, params, raw)
+        -- Queue and answer at once: the wait is this layer's, the same one every other call gets. The
+        -- two internal fields ride in the RAW argument text and never in `params` - an unknown name in a
+        -- tool's arguments is refused by name (`tool_arguments.lua`), so a closed schema stays closed.
+        local wire = {}
+        for key, value in pairs(type(params) == "table" and params or {}) do wire[key] = value end
+        wire.__wait_ms = 0
+        local ok, answer = pcall(dispatch, tool, params or {}, json.encode(wire))
+        if not ok then return { result = { error = tostring(answer), effect = "unknown", replay_allowed = false } } end
+        if type(answer) ~= "table" then return { result = answer } end
+        local id = tonumber(answer.id)
+        -- Only a still-running query becomes a handle: anything the connector already answered (a hit
+        -- list, a refusal by name, a lost job) is the answer and stays one.
+        if answer.state == "running" and id then
+          return { op = "email-" .. tostring(id), id = id, tool = tool }
+        end
+        return { result = answer }
+      end,
+      poll = function(dispatch, opts, record, ms)
+        -- The crate's own bounded read: `{job: <id>, wait_ms: <slice>}` answers the job's state, and one
+        -- short slice at a time keeps the wait interruptible by a stop.
+        local asked = { __job = record.id, __wait_ms = math.max(0, math.floor(tonumber(ms) or 0)) }
+        local ok, answer = pcall(dispatch, record.tool, {}, json.encode(asked))
+        if not ok then return nil, tostring(answer) end
+        if type(answer) ~= "table" then return nil, "email_answer_malformed" end
+        local running = answer.state == "running"
+        answer.settled = not running
+        return answer, (running and "still_running" or nil)
+      end,
+      settle = function(dispatch, opts, record, state) return state end,
+      -- A query is a read: it is already on the queue and it will answer. Saying so is different from
+      -- pretending it was stopped.
+      cancel = function(dispatch, opts, record)
+        return { op = record.op, tool = record.tool, cancelled = false, error = "not_cancellable",
+          why = "a query already queued is a read: it answers, and stopping the caller does not stop the index" }
+      end,
+      progress = function(dispatch, opts, record, state)
+        return { state = tostring(type(state) == "table" and state.state or "running"),
+          kind = opts.kind or "queue_job", job = record.id, tool = record.tool }
+      end,
+  }
+end
+
+do
+  for _, tool in ipairs({ "email_search", "email_read", "email_media" }) do
+    M.EXECUTORS[tool] = M.queue_job_family(tool)
+  end
+end
+
 -- The peer family (change/remote-pending, item 1): a remote bash is ADOPTED, not killed.
 --
 -- The call itself is dispatched first, exactly as it always was, and it now comes back as either the

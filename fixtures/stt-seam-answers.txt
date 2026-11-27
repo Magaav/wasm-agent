@@ -1,0 +1,12 @@
+pending null
+deliver_none null
+call_empty {"refused":"malformed:v"}
+call_notjson {"refused":"malformed:not_json"}
+submit_missing {"refused":"malformed:request"}
+submit_notjson {"refused":"malformed:request"}
+admin_status {"ok":{"counters":{"bytes_deleted":0,"bytes_moved":0,"enqueued":0,"fallback":0,"immediate":0,"lost_mid_job":0,"segments":0,"stale":0,"waited":0},"enabled":true,"jobs":[],"last_error":null,"local":{"avg_ms":null,"decoded":0,"estimate_ms":null},"me":"","owners":0,"producer":true,"producer_id":"","producer_name":"","queue":{"dead":0,"done":0,"expired":0,"leased":0,"oldest_ready_age_ms":0,"ready":0,"retrying":0},"recent":[],"remote":{"avg_ms":null,"decoded":0,"estimate_ms":null,"last_ms":0,"online":false},"worker":false,"worker_decodes":{"avg_ms":null,"decoded":0},"workers":[]}}
+admin_off {"enabled":true,"ok":true,"owners":0,"producer":true,"producer_id":"","producer_name":"","threads":"started","worker":false}
+admin_bad_role {"enabled":true,"ok":true,"owners":0,"producer":true,"producer_id":"","producer_name":"","threads":"already-running","worker":false}
+admin_job {"refused":"not_found"}
+admin_sweep {"ok":{"audio_purged":0,"expired":0,"leases_recovered":0}}
+admin_notjson {"refused":"malformed:request"}
