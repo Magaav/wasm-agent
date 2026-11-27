@@ -100,9 +100,15 @@ local function slow_capability()
   return json.encode({ error = 'whatsapp_read_slow', id = 42, state = 'queued', retry = true,
     detail = 'the wa-whatsapp component has not answered yet; the same call reads the same job' })
 end
+-- Which capability a tool calls is a catalog fact now: the read ops share `whatsapp_index` with the op
+-- in the request (2026-11-25), so a stand-in installed under a per-op NAME would silently stop being the
+-- one called. Each name goes through the row the catalogue holds; the ops that still have their own row
+-- (download, backfill, send, send_status) resolve to themselves.
+local whatsapp_door = dofile('lua/core/whatsapp.lua')
 for _, name in ipairs({ 'whatsapp_contacts', 'whatsapp_search', 'whatsapp_read', 'whatsapp_reactions',
   'whatsapp_media', 'whatsapp_download', 'whatsapp_backfill', 'whatsapp_send_status', 'whatsapp_send' }) do
-  host[name] = absent_capability
+  local row = whatsapp_door.by_verb[name:gsub('^whatsapp_', '')]
+  host[row and row.capability or name] = absent_capability
 end
 host.service = function() return json.encode({ { name = 'wa-whatsapp', state = 'stopped' } }) end
 local real_getenv = host.getenv

@@ -1497,6 +1497,12 @@ async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> (Option<outbox::
 /// This lane's worker identity: one lease, one name (the outbox uses the same name, and a lease belongs
 /// to one identity - the queue refuses a second concurrent lease for the same worker).
 const QUERY_WORKER: &str = "wa-whatsapp";
+
+/// The `op` word of a payload, read without validating it - the one question that is answered
+/// before `Request::decode` (the registry).
+fn payload_op(payload: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(payload).ok()?.get("op")?.as_str().map(str::to_string)
+}
 /// Lease length for one query: a scan of a local index is fast, and a killed instance's job is
 /// recovered by the next take instead of waiting for a human.
 const QUERY_LEASE_MS: u64 = 30_000;
@@ -2131,6 +2137,16 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
     };
     let job = taken.job;
     let id = job.id;
+    // The world's registry (`wa:whatsapp@0.2.0`, `ops.registry`): the op set and its effect classes,
+    // answered by the side that knows them. It is not an index question, so it never goes through
+    // `Request::decode` - the word is read from the payload and answered here, on the same queue.
+    if payload_op(&job.payload).as_deref() == Some(seam::REGISTRY_OP) {
+        let body = serde_json::to_vec(&seam::registry()).unwrap_or_default();
+        if let Err(error) = worker::done(seam::QUEUE.to_string(), id, QUERY_WORKER.to_string(), body).await {
+            query_note(format!("registry not settled for job={id}: {error:?}"));
+        }
+        return true;
+    }
     let (op_text, validated) = match seam::Request::decode(&job.payload) {
         Ok(request) => (request.op.clone(), request.validate()),
         Err(refusal) => (String::new(), Err(refusal)),

@@ -80,8 +80,12 @@ pub extern "C-unwind" fn message(l: *mut wa_host_support::lua::LuaState) -> std:
 }
 
 /// `host.whatsapp_reactions({chat, id})`.
+///
+/// The first op carried as DATA instead of a variant this module names: the bind says the word on the
+/// wire, `Request::validate` parses it, and nothing in this file has to be edited for the op to exist
+/// (see [`answer_text`], the first slice of "WhatsApp leaves the host").
 pub extern "C-unwind" fn reactions(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
-    answer(l, seam::Op::Reactions)
+    answer_text(l, "reactions")
 }
 
 /// `host.whatsapp_media({chat, id})`.
@@ -91,10 +95,45 @@ pub extern "C-unwind" fn media(l: *mut wa_host_support::lua::LuaState) -> std::o
 
 /// `host.whatsapp_download({chat, id})` - decrypt to the bounded directory and answer with the path.
 pub extern "C-unwind" fn download(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    // Its own row names the op, so this bind takes the arguments and no `op` field: delegating it to the
+    // generic door would have made `whatsapp_download({chat, id})` demand one (measured 25/11 - the row
+    // caught it, not a reviewer).
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(args) => component_absent(seam::Op::Download).unwrap_or_else(|| ask_download(&args)),
         Err(_) => seam::refusal(seam::Op::Download, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// `host.whatsapp_file({op, ...args})` - the ops that write into this node's bounded folder.
+///
+/// The third and last effect class, carried the same way: the question in the request, the class on the
+/// row. `download` is the same conversation as the other doors (validate, enqueue on `whatsapp.query`,
+/// wait) with one difference that stays here - its answer is a FILE the node writes from the job's
+/// progress stream, so it is the one path that does not end in a stored answer.
+pub extern "C-unwind" fn file(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer_file(l, "file")
+}
+
+/// The file door's answer: the class gate and the absent answer are the read door's, the wait is the
+/// download's own (`DOWNLOAD_WAIT_MS`: a CDN fetch plus a decrypt).
+fn answer_file(l: *mut wa_host_support::lua::LuaState, door: &str) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => match index_op(&args) {
+            Some(op) => match seam::Op::parse(op) {
+                Some(asked) if asked.effect() != seam::Effect::WritesFiles => seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is not what this door declares: ask whatsapp_{op}, the row that declares its effect"),
+                ),
+                _ => component_absent_text(op).unwrap_or_else(|| ask_download(&args)),
+            },
+            None => seam::refusal_text(door, "op_required", OP_REQUIRED),
+        },
+        Err(_) => seam::refusal_text(door, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
     1
@@ -146,13 +185,21 @@ pub(crate) fn component_missing() -> Option<(String, Option<String>)> {
 /// node, so the answer names it when the node was told (`WASM_AGENT_WHATSAPP_OWNER`) instead of
 /// pretending the job is in flight. A CLI or `WA_SCRIPT` process has no registry of its own and is
 /// skipped: only the serving node may call its own absent component absent.
+///
+/// One shaper for both spellings of the op (see [`component_absent_text`]): the answer a tool reads
+/// must not depend on whether its capability named a variant or the word on the wire.
 fn component_absent(op: seam::Op) -> Option<Value> {
+    component_absent_text(op.as_str())
+}
+
+/// [`component_absent`] for an op named as data: the same answer, in the tool's own words.
+fn component_absent_text(op: &str) -> Option<Value> {
     let (state, owner) = component_missing()?;
     let detail = match &owner {
         Some(owner) => format!("this node runs no {COMPONENT} component; the WhatsApp account is served by {owner}"),
         None => format!("this node runs no {COMPONENT} component"),
     };
-    let mut answer = seam::refusal(op, "whatsapp_component_absent", detail);
+    let mut answer = seam::refusal_text(op, "whatsapp_component_absent", detail);
     answer["component"] = json!(COMPONENT);
     answer["state"] = json!(state);
     if let Some(owner) = owner {
@@ -171,6 +218,98 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
     };
     wa_host_support::json::push_json(l, &answer);
     1
+}
+
+/// An op named as data: the same call as [`answer`], with the word on the wire instead of the enum.
+///
+/// This is the seam a move out of the hub needs. A bind says `answer_text(l, "reactions")`, so an op
+/// adds no variant and no match arm here - the set of ops is written down once, in `seam::Op` (the
+/// component's dispatch) and in `seam::Request::validate`, which parses the op out of the payload.
+///
+/// Nothing about the answer changes: the same `seam::Request`, the same `validate()`, the same dedupe
+/// key, the same `settle()`, and the same answer shapers - because `validate()` hands back the parsed
+/// `seam::Op` and every shaper downstream still takes it. What is gone is this file's list of ops.
+fn answer_text(l: *mut wa_host_support::lua::LuaState, op: &str) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => answer_with(op, &args),
+        Err(_) => seam::refusal_text(op, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// The answer for one already-read request: this node cannot answer at all, or validate, queue and wait.
+fn answer_with(op: &str, args: &Value) -> Value {
+    component_absent_text(op).unwrap_or_else(|| ask_text(op, args, seam::WAIT_MS))
+}
+
+/// `host.whatsapp_index({op, ...args})` - the read answers a component can grow without the host.
+///
+/// The op travels IN the request instead of in this crate's row list, which is what makes a new
+/// read-only op the component's business: `op` is checked by `seam::Request::validate` (the check the
+/// component itself runs), an op nothing here can answer is refused `bad_op` before a job exists, and
+/// the answer is byte for byte the one `whatsapp_<op>` gives - proved for every op it carries in this
+/// module's tests (`the_generic_row_answers_the_same_bytes_as_the_named_row_for_every_read_op`).
+///
+/// The word comes from the catalogue row that called it (`M.invoke`, `lua/core/whatsapp.lua`), never
+/// from the arguments a caller typed, so a model cannot reach an op its tool does not name.
+pub extern "C-unwind" fn index(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer_class(l, "index", seam::Effect::ReadOnly)
+}
+
+/// `host.whatsapp_request({op, ...args})` - the ops that ask the primary phone, behind the row that
+/// declares it.
+///
+/// The same forwarder as `whatsapp_index` (`backfill` is the same request, the same queue and the same
+/// settle), carried by the row whose effect class says what it does: a sandbox that joins `Network`
+/// calls serializes them, which is exactly what a read must not pay for and a phone request must.
+pub extern "C-unwind" fn request(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer_class(l, "request", seam::Effect::Network)
+}
+
+/// The generic door: the question in the request, and only the ops whose effect class this row declares.
+///
+/// The class is the OP's (`seam::Op::effect`), so a door cannot be talked into an effect it does not
+/// declare, and the refusal names the row that does - `whatsapp_index` is read-only and `backfill` asks
+/// the phone (measured 25/11: a ReadOnly row queued it before this check existed).
+fn answer_class(l: *mut wa_host_support::lua::LuaState, door: &str, want: seam::Effect) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => match index_op(&args) {
+            Some(op) if op == seam::REGISTRY_OP => {
+                if want != seam::Effect::ReadOnly {
+                    seam::refusal_text(
+                        op,
+                        "use_its_own_door",
+                        format!("{op} is the registry: ask whatsapp_index, the row that declares what it does"),
+                    )
+                } else {
+                    answer_registry(&args)
+                }
+            }
+            Some(op) => match seam::Op::parse(op) {
+                Some(asked) if asked.effect() != want => seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is not what this door declares: ask whatsapp_{op}, the row that declares its effect"),
+                ),
+                _ => answer_with(op, &args),
+            },
+            None => seam::refusal_text(door, "op_required", OP_REQUIRED),
+        },
+        Err(_) => seam::refusal_text(door, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// The one sentence a caller sees when the generic door is opened without saying which question it is.
+const OP_REQUIRED: &str = "op names the question and the arguments that op takes: {op: \"search\", ...}";
+
+/// The op a generic request carries, or `None` when it carries no usable one.
+fn index_op(args: &Value) -> Option<&str> {
+    args.get("op").and_then(Value::as_str).map(str::trim).filter(|op| !op.is_empty())
 }
 
 /// Build the request from the tool's arguments, in the one shape the component reads back.
@@ -259,6 +398,114 @@ fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: 
         Err(answer) => return answer,
     };
     settle(q, op, id, wait_ms)
+}
+
+/// [`ask`] for an op named as data.
+fn ask_text(op: &str, args: &Value, wait_ms: u64) -> Value {
+    ask_text_in(&queue(), op, args, wait_ms, &component_build())
+}
+
+/// The registry through the queue: enqueue the word, wait, answer the component's document itself.
+///
+/// It is not an index question (`Request::validate` would refuse it `bad_op`), so it is forwarded as it
+/// arrives and settled by its own wait - the same bound, the same poll, the same beat.
+fn answer_registry(args: &Value) -> Value {
+    component_absent_text(seam::REGISTRY_OP)
+        .unwrap_or_else(|| ask_registry_in(&queue(), args, &component_build()))
+}
+
+fn ask_registry_in(q: &wa_queue::Queue, args: &Value, build: &str) -> Value {
+    let payload = serde_json::to_vec(args).unwrap_or_else(|_| br#"{"op":"ops"}"#.to_vec());
+    let id = match q.enqueue(
+        EnqueueRequest::new(seam::QUEUE, payload)
+            .fresh_for(seam::FRESH_MS)
+            .max_attempts(seam::MAX_ATTEMPTS)
+            .dedupe(format!("{}|{build}", seam::REGISTRY_OP))
+            .dedupe_in_flight(),
+    ) {
+        Ok(enqueued) => enqueued.id.0,
+        Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
+    };
+    let deadline = Instant::now() + Duration::from_millis(seam::WAIT_MS.max(1));
+    loop {
+        match q.job(JobId(id)) {
+            Ok(Some(job)) => match job.state.as_str() {
+                "done" => {
+                    let Some(result) = job.result.as_deref() else {
+                        return seam::refusal_text(seam::REGISTRY_OP, "answer_missing", "the registry settled without a document");
+                    };
+                    return match serde_json::from_slice::<Value>(result) {
+                        Ok(document) => document,
+                        Err(_) => seam::refusal_text(seam::REGISTRY_OP, "answer_unreadable", "the stored registry is not readable"),
+                    };
+                }
+                "dead" | "expired" => {
+                    let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
+                    return seam::refusal_text(seam::REGISTRY_OP, "failed", reason.chars().take(160).collect::<String>());
+                }
+                state => {
+                    if Instant::now() >= deadline {
+                        return seam::slow_text(seam::REGISTRY_OP, id, state);
+                    }
+                }
+            },
+            Ok(None) => return seam::refusal_text(seam::REGISTRY_OP, "job_lost", "the registry job is not in the queue any more"),
+            Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
+        }
+        crate::serve::beat();
+        std::thread::sleep(POLL);
+    }
+}
+
+/// [`ask_text_in`] for a request that carries its own op (the generic row's path, driven by the tests).
+fn ask_index_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
+    ask_class_in(q, args, "index", seam::Effect::ReadOnly, wait_ms, build)
+}
+
+/// [`ask_index_in`] against any generic door: the same three steps, gated by the door's effect class.
+fn ask_class_in(q: &wa_queue::Queue, args: &Value, door: &str, want: seam::Effect, wait_ms: u64, build: &str) -> Value {
+    match index_op(args) {
+        Some(op) if op == seam::REGISTRY_OP => {
+            if want != seam::Effect::ReadOnly {
+                seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is the registry: ask whatsapp_index, the row that declares what it does"),
+                )
+            } else {
+                ask_registry_in(q, args, build)
+            }
+        }
+        Some(op) => match seam::Op::parse(op) {
+            Some(asked) if asked.effect() != want => seam::refusal_text(
+                op,
+                "use_its_own_door",
+                format!("{op} is not what this door declares: ask whatsapp_{op}, the row that declares its effect"),
+            ),
+            _ => ask_text_in(q, op, args, wait_ms, build),
+        },
+        None => seam::refusal_text(door, "op_required", OP_REQUIRED),
+    }
+}
+
+/// [`ask_in`] for an op named as data: validate, enqueue, wait - the same three steps, the same queue.
+fn ask_text_in(q: &wa_queue::Queue, op: &str, args: &Value, wait_ms: u64, build: &str) -> Value {
+    // The word arrives as data and the request builder takes the typed op (main's `request_of`), so the
+    // door parses it once here: a word this seam does not carry is refused by name instead of being
+    // forwarded as if it were one.
+    let typed = match seam::Op::parse(op) {
+        Some(typed) => typed,
+        None => return seam::refusal_text(op, "bad_op", format!("`{op}` is not a whatsapp op")),
+    };
+    let verified = match request_of(typed, args) {
+        Ok(verified) => verified,
+        Err(refusal) => return seam::refusal_text(op, refusal.code, refusal.detail),
+    };
+    let id = match enqueue(q, &verified, build) {
+        Ok(id) => id,
+        Err(answer) => return answer,
+    };
+    settle(q, verified.op, id, wait_ms)
 }
 
 fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified, build: &str) -> Result<u64, Value> {
