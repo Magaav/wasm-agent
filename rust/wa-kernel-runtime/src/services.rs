@@ -664,6 +664,44 @@ fn set(shared: &Shared, state: &str) {
 }
 
 /// Start a service (idempotent: a running one with the same pin is left alone).
+/// The node's own mapping from "a directory the component asked for" to "a directory the node owns".
+///
+/// A definition says `dirs: ["/downloads"]` - the guest name is the component's business - and this
+/// turns it into the grant the kernel actually applies: `<components>/<name>.<leaf>`, created here,
+/// written only to. For wa-whatsapp that is `<components>/wa-whatsapp.downloads`, the directory
+/// `whatsapp_query.rs` already owns and prunes, so the component can write a 40 MB video where the host
+/// can find it instead of pushing it through the job's progress stream (which `wa:queue` bounds at 1 MiB).
+///
+/// An entry that is already an object is left exactly as it is: `graph`'s two grants are built by its own
+/// capability (`rust/wa-capabilities/src/graph.rs`), and re-mapping them here would move a directory the
+/// node promised.
+fn resolved_dirs(request: &Value, name: &str) -> Value {
+    let mut out = request.clone();
+    let Some(list) = request.get("dirs").and_then(Value::as_array) else { return out };
+    let mut mapped = Vec::with_capacity(list.len());
+    for entry in list {
+        let Some(guest) = entry.as_str() else {
+            mapped.push(entry.clone());
+            continue;
+        };
+        if !guest.starts_with('/') || guest.contains("..") {
+            // An unusable guest is passed through untouched: `Grant::from_request` refuses it by name,
+            // which is the error an operator should see, not one invented here.
+            mapped.push(entry.clone());
+            continue;
+        }
+        let leaf: String = guest.trim_matches('/').chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') { ch } else { '.' })
+            .take(64).collect();
+        let leaf = if leaf.is_empty() { "data".to_string() } else { leaf };
+        let host = crate::components::component_dir().join(format!("{name}.{leaf}"));
+        let _ = std::fs::create_dir_all(&host);
+        mapped.push(json!({"host": host.to_string_lossy(), "guest": guest, "write": true}));
+    }
+    out["dirs"] = Value::Array(mapped);
+    out
+}
+
 pub fn start(request: &Value) -> Value {
     let name = request.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
     let installed = match load(&name) {
@@ -673,6 +711,8 @@ pub fn start(request: &Value) -> Value {
     if installed.manifest.get("kind").and_then(Value::as_str) != Some("service") {
         return json!({"ok": false, "error": "component_is_not_a_service"});
     }
+    // A definition names WHERE a component may write, never a host path (see `resolved_dirs`).
+    let request = &resolved_dirs(request, &name);
     let grant = match Grant::from_request(request).and_then(|g| g.check(&installed.manifest).map(|_| g)) {
         Ok(grant) => grant,
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
@@ -1734,4 +1774,24 @@ mod tests {
         assert!(log.contains("no wa:kernel/drain hook in this artifact"), "{log}");
         stop(name);
     }
+    /// The definition names the guest; the node names the host, and the host is inside the node's own
+    /// components directory, created before the component ever starts.
+    #[test]
+    fn a_guest_directory_becomes_a_directory_this_node_owns() {
+        let request = json!({"name": "wa-whatsapp", "dirs": ["/downloads"]});
+        let mapped = super::resolved_dirs(&request, "wa-whatsapp");
+        let dirs = mapped["dirs"].as_array().expect("a list");
+        assert_eq!(dirs.len(), 1, "{mapped}");
+        assert_eq!(dirs[0]["guest"], "/downloads");
+        assert_eq!(dirs[0]["write"], true, "a directory a component asks to write in must be writable: {mapped}");
+        let host = dirs[0]["host"].as_str().expect("an absolute host path");
+        assert!(host.ends_with("wa-whatsapp.downloads"), "inside the components dir, named for the grant: {host}");
+        assert!(std::path::Path::new(host).is_absolute(), "{host}");
+        // An entry the node did not write is left alone: graph's two grants are built by its own capability.
+        let already = json!({"dirs": [{"host": "/srv/graph", "guest": "/graph/root", "write": false}]});
+        assert_eq!(super::resolved_dirs(&already, "graph"), already);
+        // No `dirs` at all stays no `dirs`: nothing is granted by omission.
+        assert!(super::resolved_dirs(&json!({"name": "x"}), "x").get("dirs").is_none());
+    }
+
 }
