@@ -114,6 +114,16 @@ wa_record_install() {
     ancestors="$(wa_build_field "$info" ancestors)"; [ -n "$ancestors" ] || ancestors=unknown
   fi
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  # AN INSTALLED RECORD IS FINAL (Fable 26/11, the nextcloud-b row). MEASURED: a release install onto a node that
+  # was ALREADY at the target wrote commit=, release= and via=remote-update.sh and NO record_role at all, so
+  # verify-install.sh first question - whose record is this - had no answer, and the row that asks for
+  # record_role=final failed on a node whose update had settled 'installed'. The default is final because this
+  # writer IS the install own; a caller handing over an INTERIM record says record_role=interim and it passes
+  # through like any other field.
+  local role=final
+  for caller_field in "$@"; do
+    case "$caller_field" in record_role=*) role="${caller_field#record_role=}"; [ -n "$role" ] || role=final ;; esac
+  done
   tmp="$dir/.installed.txt.record.$$"
   {
     printf 'commit=%s\n' "$commit"
@@ -125,9 +135,10 @@ wa_record_install() {
     printf 'built_epoch=%s\n' "$epoch"
     printf 'contains_commits=%s\n' "$ancestors"
     printf 'recorded_utc=%s\n' "$stamp"
+    printf 'record_role=%s\n' "$role"
     for line in "$@"; do
       case "$line" in
-        commit=*|tree=*|dirty=*|build_info=*|build_source=*|built_epoch=*|contains_commits=*|recorded_utc=*)
+        commit=*|tree=*|dirty=*|build_info=*|build_source=*|built_epoch=*|contains_commits=*|recorded_utc=*|record_role=*)
           # The identity is the binary's. A caller's commit= is not written, and the drop is named so a
           # reader can see the caller was not believed rather than silently corrected.
           printf 'dropped_caller_field=%s\n' "${line%%=*}"

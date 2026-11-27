@@ -536,5 +536,18 @@ wa_manifest_source_commit "$WORK/bad.manifest" >/dev/null 2>&1
 same "a manifest naming something that is not a commit answers nothing" "$?" "1"
 wa_manifest_source_commit "$WORK/absent.manifest" >/dev/null 2>&1
 same "and a missing manifest answers nothing" "$?" "1"
+# AN INSTALLED RECORD IS FINAL (Fable 26/11, the nextcloud-b row). A release install onto a node that was ALREADY
+# at the target wrote commit=, release= and via=remote-update.sh and no record_role at all, and the row that asks
+# for record_role=final failed on a node whose update had settled 'installed'. The writer now answers final by
+# default and lets a caller say interim.
+ROLE="$WORK/role"
+mkdir -p "$ROLE"
+wa_record_install "$ROLE" "$STUB" 'via=release-install.sh' >/dev/null 2>&1
+same 'an install record is final by default' "$(sed -n 's/^record_role=//p' "$ROLE/installed.txt")" 'final'
+wa_record_install "$ROLE" "$STUB" 'via=upgrade.sh' 'record_role=interim' >/dev/null 2>&1
+same 'and a caller handing over an interim record is believed' "$(sed -n 's/^record_role=//p' "$ROLE/installed.txt")" 'interim'
+wa_record_install "$ROLE" "$STUB" 'record_role=' >/dev/null 2>&1
+same 'an empty record_role falls back to final instead of writing nothing' "$(sed -n 's/^record_role=//p' "$ROLE/installed.txt")" 'final'
+
 printf 'test-install-record: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1

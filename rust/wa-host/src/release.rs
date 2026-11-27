@@ -537,6 +537,14 @@ pub fn run(args: &[String]) -> Option<i32> {
     if args.first().map(String::as_str) == Some("cut") {
         return None;
     }
+    // `wa release rehearse` is the rehearsal (lua/core/release_rehearse.lua): the gates a cut depends on, run
+    // against the ring and changing nothing. It is not this binary's verb either - MEASURED 26/11: without this
+    // line the binary answered `release_unknown_verb: 'rehearse' (the verbs are 'verify' and 'trust-key')` and
+    // exited 2 BEFORE the interpreter booted, so the verb the Lua tree carries was unreachable in a shipped
+    // binary. `rehearse` says "not mine" and the Lua CLI answers, exactly as `cut` does.
+    if args.first().map(String::as_str) == Some("rehearse") {
+        return None;
+    }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") || args.is_empty() {
         println!("usage: wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig] [--key <file>]... [--quiet]");
         println!("       wa release verify --sums <dir|SHA256SUMS> [--sig <file>] [--key <file>]... [--quiet]");
