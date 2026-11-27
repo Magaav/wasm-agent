@@ -19,6 +19,9 @@ use crate::components::{component_dir, load_in, Installed};
 
 const COMPONENT: &str = "vision";
 const DEFAULT_MEMORY_MB: u64 = 256;
+/// One epoch tick is 10 ms (the same ticker `stt_host` arms): the deadline below is counted in ticks.
+const TICK: std::time::Duration = std::time::Duration::from_millis(10);
+const DEFAULT_TIMEOUT_MS: u64 = 180_000;
 
 wasmtime::component::bindgen!({
     path: "../../wit/vision",
@@ -121,6 +124,10 @@ fn with_instance<T>(config: &Config, body: impl FnOnce(&mut Served, &tokio::runt
             },
         );
         store.limiter(|state| &mut state.limits);
+        // Without a deadline the engine's epoch ticker interrupts the guest on its first tick (measured: the
+        // instantiation trapped with `wasm trap: interrupt`). One tick is 10 ms; the deadline is the call's
+        // own budget, so a wedged reader ends with `component_wedged` instead of holding the node.
+        store.set_epoch_deadline(DEFAULT_TIMEOUT_MS.div_ceil(TICK.as_millis() as u64).max(1));
         let mut linker: Linker<State> = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|error| format!("component_link_wasi:{error}"))?;
         wa::vision::assets::add_to_linker::<State, State>(&mut linker, |state| state)
