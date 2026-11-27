@@ -249,7 +249,7 @@ the operator's read-only query in §2 is what distinguishes the two.
 
 * §4.2 - a turn that continues must NOT write the failure row (`run_failure.lua:185-206`, which
   `memory.session_state` and `evidence.failure()` read); the pause is a SPAN plus one thin view line. The stall
-  pause (item 1, commit `dbb0d011`) does exactly that: the loop's own `status` line and one `provider_retry`
+  pause (item 1, commit `e11c0bba`) does exactly that: the loop's own `status` line and one `provider_retry`
   span, no assistant failure row - asserted by `scripts/test-stall-pauses-the-turn.lua`.
 * §4.3 - what the person should read for a turn that ran elsewhere: one prompt row, one run box, one status
   row that never resets, and one thin marker where it paused. That is the specification for the next write
@@ -293,6 +293,13 @@ No adjacent row regressed. The one row whose numbers changed states the new numb
 arithmetic (`1 try + 2 replays + the pause = 5`; both switches off = `2`, the loop once plus the run's own
 re-drive) - it was tightened, not loosened.
 
+
+**Rebased.** This branch was rebased onto `origin/main` `f6fea716`; the commits named above are the ones on
+the rebased branch (the earlier SHAs pointed at commits the rebase rewrote, and are gone). The rows were
+re-run on the rebased tip by this mission - `stall-line` 13/0, `stall-pauses-the-turn` 13/0,
+`turn-time-split` 12/0, `turn-tail` 10/0, `provider-stall-replay` 35/0, `cli-view` 569/0 - not taken from
+an earlier run.
+
 ## 10. Every claim, and the check behind it
 
 | claim | checked by |
@@ -314,12 +321,12 @@ re-drive) - it was tightened, not loosened.
 
 | brief item | commit | what it does | row |
 |---|---|---|---|
-| 2 - no raw stack reaches the person | `1f308b14` | `run_failure.human_line` classifies, strips the leading locations and renders the row's own wording; `chat.lua` prints it | `test-stall-line` 13 |
-| 1 - a stall pauses the turn | `dbb0d011` | the stall becomes its own class in the run's existing retry loop, with its own budget (`STALLED_ATTEMPTS`, default 2, clamp 1..4), backoff (2/4/8 s, capped 30 s) and the loop's waiting row stating it | `test-stall-pauses-the-turn` 13 (one stall = 2 asks, ONE turn, no failure row) |
-| 3 - a wake-started turn draws like a typed one (replay half) | `ef2ed218` | `replay()` gained `opts.answer`; `catch_up` passes it, so a wake turn's text is an answer, not the Commentary topic; history keeps the commentary treatment | `test-cli-view` 569 |
-| 3 - the CLI attaches to a node-run turn (C2a) | `8af1304e` | `lua/core/turn_tail.lua`: a cursor over `harness_events` draws the pause ("paused 2s: the provider has not answered (1/2)") and the model status; not a run, no timer | `test-turn-tail` 10 |
-| 4 - time split per turn | `83ec008b` | no new columns: `provider_retry.wait_ms`, `model_call.ms`, `tool`, all in one `run_id` | `test-turn-time-split` 12 |
-| 5 - why a long session's first response stalls | `1bea8962` | the 300 s is the node's flat override; in a clean environment the default is 90 s and the ceiling needs 872 000 estimated tokens | the table in §11 |
+| 2 - no raw stack reaches the person | `54edc030` | `run_failure.human_line` classifies, strips the leading locations and renders the row's own wording; `chat.lua` prints it | `test-stall-line` 13 |
+| 1 - a stall pauses the turn | `e11c0bba` | the stall becomes its own class in the run's existing retry loop, with its own budget (`STALLED_ATTEMPTS`, default 2, clamp 1..4), backoff (2/4/8 s, capped 30 s) and the loop's waiting row stating it | `test-stall-pauses-the-turn` 13 (one stall = 2 asks, ONE turn, no failure row) |
+| 3 - a wake-started turn draws like a typed one (replay half) | `78b29d92` | `replay()` gained `opts.answer`; `catch_up` passes it, so a wake turn's text is an answer, not the Commentary topic; history keeps the commentary treatment | `test-cli-view` 569 |
+| 3 - the CLI attaches to a node-run turn (C2a) | `e9279bc2` | `lua/core/turn_tail.lua`: a cursor over `harness_events` draws the pause ("paused 2s: the provider has not answered (1/2)") and the model status; not a run, no timer | `test-turn-tail` 10 |
+| 4 - time split per turn | `bf476941` | no new columns: `provider_retry.wait_ms`, `model_call.ms`, `tool`, all in one `run_id` | `test-turn-time-split` 12 |
+| 5 - why a long session's first response stalls | `ec62dd58` | the 300 s is the node's flat override; in a clean environment the default is 90 s and the ceiling needs 872 000 estimated tokens | the table in §11 |
 
 Adjacent rows re-run around the retry-loop change: §13. The pty harness is red on main, measured both
 ways: §12.
