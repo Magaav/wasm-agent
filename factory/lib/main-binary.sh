@@ -64,6 +64,19 @@ wa_main_binary_build() { # <sha> <root> <target>
   fi
   [ -n "$cargo_bin" ] || { echo "wa_main_binary: no cargo to build ${sha:0:12} (looked in the toolchain, ~/.cargo, mise and PATH)" >&2; return 1; }
   local cargo_dir; cargo_dir=$(cd "$(dirname "$cargo_bin")" && pwd); PATH="$cargo_dir:$PATH"
+  # CODE-MODE ASSETS: wa-capabilities/build.rs refuses to build without a prepared, verified asset directory
+  # (exit 101, "code-mode assets required"), so this build failed on every tree even with the members and the
+  # right crate. The repo owns both the path and the provisioner, so ask it (law 17) and export what it names.
+  local assets=""
+  if [ -r "$root/scripts/lib/build-requirements.sh" ]; then
+    assets=$(bash -c '. "$1/scripts/lib/build-requirements.sh"; wa_codemode_assets_dir "$1"' _ "$root" 2>/dev/null)
+  fi
+  if [ -n "$assets" ]; then
+    if [ ! -f "$assets/receipt.json" ] && [ -f "$root/scripts/provision-codemode-assets.mjs" ] && command -v node >/dev/null 2>&1; then
+      node "$root/scripts/provision-codemode-assets.mjs" "$assets" >/dev/null 2>&1 || true
+    fi
+    [ -d "$assets" ] && export WA_CODEMODE_BUILD_ASSETS="$assets"
+  fi
   mkdir -p "$target" 2>/dev/null || { echo "wa_main_binary: cannot create $target" >&2; return 1; }
   # ONE AT A TIME: two health runs must not build into the same target dir, and the loop has better things to do
   # than queue - the next tick picks it up.
