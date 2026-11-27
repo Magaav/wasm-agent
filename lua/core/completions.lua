@@ -30,13 +30,13 @@ local scan_after=0
 -- database is locked` in serve.log - a tick that met a lock and raised instead of waiting, losing that
 -- tick's completions for no reason.
 local sqlite_busy=dofile('lua/core/sqlite_busy.lua')
+local sql_answer=dofile('lua/core/sql_answer.lua')
+-- The owner runs the statement (lua/core/sql_answer.lua); the outbox keeps its own policy: a refusal is this
+-- module's error, and the retry below decides how long it waits first.
 local function sql_once(method,s,p)
-  local ok,raw=pcall(host[method],s,json.encode(p or {}))
-  if not ok then error(tostring(raw),0) end
-  local r=json.decode(raw)
-  if type(r)~='table' then error('no_result_from_host',0) end
-  if r.error then error(tostring(r.error),0) end
-  return r
+  local value,why=sql_answer.run(method,s,p)
+  if not value then error(tostring(why),0) end
+  return value
 end
 local function sql(method,s,p)
   return sqlite_busy.retry(method=='sql_exec' and 'completion outbox write' or 'completion outbox read',

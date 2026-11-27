@@ -62,13 +62,11 @@ end
 function M.age_ms(stamp) return age_ms(stamp) end
 
 --------------------------------------------------------------------------- ledger
+local sql_answer = dofile("lua/core/sql_answer.lua")
+-- The owner runs the statement (lua/core/sql_answer.lua); this module keeps the ledger's own policy: a failed
+-- statement is `nil, why`, and the two wrappers below decide when that becomes an error.
 local function sql(kind, statement, values)
-  local ok, raw = pcall(host[kind], statement, json.encode(values or {}))
-  if not ok then return nil, tostring(raw) end
-  local decoded = json.decode(raw)
-  if type(decoded) ~= "table" then return nil, "ledger_no_result" end
-  if decoded.error then return nil, tostring(decoded.error) end
-  return decoded
+  return sql_answer.run(kind, statement, values)
 end
 local function query(statement, values)
   local result, why = sql("sql_query", statement, values)
