@@ -42,9 +42,6 @@ pub const QUEUE: &str = "email.query";
 pub const FRESH_MS: i64 = 120_000;
 /// Attempts before a retryable query failure is final.
 pub const MAX_ATTEMPTS: u32 = 2;
-/// How long the node waits for the component to settle before answering "still running, here is the
-/// job id". Bounded because the caller is a Lua tool call on the node's own thread.
-pub const WAIT_MS: u64 = 2_000;
 /// The queue's result bound (64 KiB) with room for the JSON envelope around the answer.
 pub const RESULT_BOUND: usize = 60 * 1024;
 /// Most hits one answer may carry.
