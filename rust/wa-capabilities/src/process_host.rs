@@ -192,3 +192,58 @@ impl StreamProducer<Host> for EmptyStream {
         Poll::Ready(Ok(StreamResult::Dropped))
     }
 }
+
+#[cfg(test)]
+mod rows {
+    use super::*;
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    struct Noop;
+    impl Wake for Noop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn waker() -> Waker {
+        Waker::from(Arc::new(Noop))
+    }
+
+    /// ROW: `wait` returns the exit once the operation settled - the whole point of handing the guest one future.
+    #[test]
+    fn wait_returns_the_exit_it_was_given() {
+        let engine = wasmtime::Engine::default();
+        let mut store = wasmtime::Store::new(&engine, Host::new());
+
+        let outcome = Arc::new(Mutex::new(None));
+        let mut future = ExitFuture { outcome: outcome.clone() };
+        let waker = waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Before the operation settles the future is pending - not a made-up value.
+        let pending = Pin::new(&mut future).poll_produce(&mut cx, store.as_context_mut(), false);
+        assert!(matches!(pending, Poll::Pending), "a running child must not settle");
+
+        *outcome.lock().unwrap() = Some(Exit::Code(7));
+        let settled = Pin::new(&mut future).poll_produce(&mut cx, store.as_context_mut(), false);
+        match settled {
+            Poll::Ready(Ok(Some(Exit::Code(code)))) => assert_eq!(code, 7),
+            other => panic!("the exit must be delivered once: {other:?}"),
+        }
+    }
+
+    /// ROW: an argument with a space or a quote reaches the program as ONE argument - asserted by running a real
+    /// shell and comparing what came back, not by spelling the escaping out (the first version of this test did
+    /// that, and was wrong about the bytes while the code was right).
+    #[test]
+    fn quoting_keeps_arguments_whole() {
+        for argument in ["plain", "two words", "it's", "a$b", r"back\slash"] {
+            let quoted = shell_quote(argument);
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("printf %s {quoted}"))
+                .output()
+                .expect("sh must run");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), argument, "quoting {argument:?}");
+        }
+    }
+}
