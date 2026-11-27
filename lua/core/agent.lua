@@ -4176,8 +4176,9 @@ function M:run_body(text, images)
         if stopped_answer then
           pcall(function()
             local pending_calls = dofile('lua/core/codemode_pending.lua')
-            pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil,
+            local _, said = pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil,
               dispatch_ctx and dispatch_ctx.stop_notice or nil)
+            if said ~= nil and type(dispatch_ctx) == 'table' then dispatch_ctx.stop_notice = said end
           end)
         end
       end

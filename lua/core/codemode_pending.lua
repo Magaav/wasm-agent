@@ -1745,6 +1745,7 @@ end
 function M.close_open_native(scope, dispatch, note, tool)
   local index = M.open(scope)
   local closed = 0
+  local last_note, last_tool = nil, nil
   for _, record in pairs(index.ops or {}) do
     if record and record.native == true and record.state == "running" and (tool == nil or record.tool == tool) then
       local observed = nil
@@ -1758,10 +1759,18 @@ function M.close_open_native(scope, dispatch, note, tool)
         survivors = facts and facts.survivors or nil }
       record.state = (record.detached == true) and "running" or "cancelled"
       closed = closed + 1
+      last_note = record.stop and record.stop.note or nil
+      last_tool = record.tool
     end
   end
   if closed > 0 then M.save(scope, index) end
-  return closed
+  -- THE SENTENCE GOES BACK WITH THE COUNT: the caller (the tool loop, which still holds dispatch_ctx) puts it on the
+  -- run so the reader's line can say what the stop stopped. Format decided 27/11: a count and the record's id -
+  -- "stopped 1: bash; record <id>" - never the facts, which are read from the record on demand.
+  if closed > 0 then
+    return closed, (last_note or ('stopped ' .. tostring(closed) .. ': ' .. tostring(last_tool or 'call')))
+  end
+  return 0, nil
 end
 
 function M.native_settle(handle, dispatch, outcome)
