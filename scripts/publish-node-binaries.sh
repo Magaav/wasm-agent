@@ -632,7 +632,7 @@ else
   for zig_target in $ZIG_TARGETS; do
     triple="${zig_target%%.2.*}"
     started=$(date +%s)
-    ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked -p wa-host --target "$zig_target" ) > "$OUT/build-wa-$triple.log" 2>&1 \
+    ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked -p wa-host -p wa-term --target "$zig_target" ) > "$OUT/build-wa-$triple.log" 2>&1 \
       || { tail -20 "$OUT/build-wa-$triple.log" >&2; fail "build_failed: wa for $zig_target (log $OUT/build-wa-$triple.log)" 8; }
     ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --target "$zig_target" ) > "$OUT/build-sentinel-$triple.log" 2>&1 \
       || { tail -20 "$OUT/build-sentinel-$triple.log" >&2; fail "build_failed: wa-sentinel for $zig_target (log $OUT/build-sentinel-$triple.log)" 8; }
