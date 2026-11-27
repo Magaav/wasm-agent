@@ -1294,11 +1294,13 @@ function M.run(argv)
       -- the caller reads keys and does nothing), so the reader gets the list again, on the same row.
       local focus = nil
       local notice = nil
+      local workers_open = false
       local filter = line:sub(11):gsub("^%s+", ""):gsub("%s+$", "")
       if filter == "" then filter = nil end
       while true do
         local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
-          back = switched_from, selected = focus, filter = filter, notice = notice })
+          back = switched_from, selected = focus, filter = filter, notice = notice,
+          workers_open = workers_open })
         if type(answer) ~= "table" then break end
         if answer.action == "key" then
           local option = (sessions.page({ session_id = agent.session_id, user_id = USER, limit = 200,
@@ -1321,14 +1323,20 @@ function M.run(argv)
           end
           focus = focus or tonumber(answer.index)
         elseif answer.action == "select" then
-          -- { action = "select", page, index, option = <the chosen row> }: the id and the origin flag
-          -- live on the ROW, not on the answer.
-          local option = type(answer.option) == "table" and answer.option or {}
-          local chosen = tostring(option.session or "")
-          local ok, problem = switch_to(chosen)
-          if not ok then ui.say("  " .. tostring(problem)) end
-          if ok and option.origin then switched_from = nil end
-          break
+          -- The balloon hands back { action, page, index, option }: the id, the origin flag and the
+          -- group-heading flag all live on the ROW, not on the answer.
+          local row = type(answer.option) == "table" and answer.option or {}
+          if row.toggle then
+            -- The heading is not a session: Enter folds its group away, or opens it.
+            workers_open = not workers_open
+            focus, notice = nil, nil
+          else
+            local chosen = tostring(row.session or "")
+            local ok, problem = switch_to(chosen)
+            if not ok then ui.say("  " .. tostring(problem)) end
+            if ok and row.origin then switched_from = nil end
+            break
+          end
         else
           break
         end

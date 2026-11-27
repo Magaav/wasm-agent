@@ -83,8 +83,14 @@ function M.rows(opts)
   local rows = {}
   if here then rows[#rows + 1] = { row = here, here = true } end
   for _, row in ipairs(chat) do rows[#rows + 1] = { row = row } end
-  if #workers > 0 then rows[#rows + 1] = { worker_heading = #workers } end
-  for _, row in ipairs(workers) do rows[#rows + 1] = { row = row, worker = true } end
+  -- COLLAPSED BY DEFAULT (the brief: factory or worker sessions go under their own heading, collapsed
+  -- by default): the heading carries the count and nothing under it until the reader opens it.
+  if #workers > 0 then
+    rows[#rows + 1] = { worker_heading = #workers }
+    if opts.workers_open then
+      for _, row in ipairs(workers) do rows[#rows + 1] = { row = row, worker = true } end
+    end
+  end
   if opts.filter and opts.filter ~= "" then
     -- A name, or the beginning of an id (`wa --resume` lines carry those): the reader types what they
     -- have. Case-blind, and plain text - a name with a % or a - in it is a name, not a pattern.
@@ -134,8 +140,13 @@ function M.page(opts)
   end
   for _, entry in ipairs(rows) do
     if entry.worker_heading then
-      options[#options + 1] = { label = string.format("  %d mission session%s", entry.worker_heading,
-        entry.worker_heading == 1 and "" or "s"), hint = "under this heading", action = "collapse" }
+      local open = opts.workers_open
+      options[#options + 1] = {
+        label = string.format("%s %d mission session%s", open and "\u{25be}" or "\u{25b8}",
+          entry.worker_heading, entry.worker_heading == 1 and "" or "s"),
+        hint = open and ("Enter folds them away \u{b7} x") or ("Enter shows them \u{b7} x"),
+        toggle = true,
+      }
     else
       local row = entry.row
       local name = tostring(row.title or "")
