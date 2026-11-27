@@ -191,6 +191,18 @@ start_turn() { # <thread> - the turn is IN FLIGHT: its first answer asks for a 3
 }
 wait_turns() { for pid in $TURNS; do wait "$pid" 2>/dev/null; done; TURNS=""; }
 paused() { grep -q "deploy pending\|deploy waiting\|paused after" "$WORK/turn-$1.txt"; }
+
+# THE PAUSE IS A FACT, SO IT IS WAITED FOR (mission flaky-twice, measured: run 10 of the ten-run proof failed
+# `alive-a2 did not pause for the claimed request` at load 3.12 - not under load). The row used to `sleep 4`
+# and hope each session reached its step boundary inside that window before the request was claimed; a
+# session that took longer never paused at all, and the failure read as a product defect. This waits for the
+# pause the comment below describes - the sessions pause FOR the waiting request - and gives up with the
+# same diagnosis instead of silently betting on four seconds.
+wait_paused() { # <thread> <seconds>
+  local thread=$1 budget=$2
+  for _ in $(seq 1 "$((budget * 10))"); do paused "$thread" && return 0; sleep 0.1; done
+  return 1
+}
 resumes_of() { ledger "SELECT prompt FROM self_wakes WHERE session_id=(SELECT session_id FROM messages WHERE content LIKE '%install-aware request%' LIMIT 1) AND reason='deploy pending: resume after the node swap' ORDER BY created_at;" | wc -l | tr -d ' '; }
 rows_for() { # <thread> -> the resume rows of the session that thread created
   ledger "SELECT id, status, substr(replace(prompt,char(10),' '),1,60) FROM self_wakes WHERE reason='deploy pending: resume after the node swap' ORDER BY created_at;"
@@ -224,10 +236,13 @@ T0_COUNT=$(requests)
 for thread in alive-a1 alive-a2 alive-a3; do start_turn "$thread"; done
 wait_requests "$((T0_COUNT + 3))" 60 || { echo "  FAIL: the three turns never reached the model"; exit 1; }
 request req-a bbbb5555eeee6666
-# THE INCIDENT'S OWN FIRST PAUSE: the request WAITS for a moment before the sentinel claims it, and the sessions
-# reach their step boundary in that window and pause for it. (Claiming it first would let the pause happen only
-# because the fix's running state exists - which is not the sequence 21:15Z recorded.)
-sleep 4
+# THE INCIDENT'S OWN FIRST PAUSE: the request WAITS before the sentinel claims it, and the sessions reach their
+# step boundary in that window and pause for it. (Claiming it first would let the pause happen only because the
+# fix's running state exists - which is not the sequence 21:15Z recorded.) The window is the PAUSE ITSELF, not
+# four seconds: each session is waited for (30 s cap), so a slow machine does not turn a lost race into a red.
+for thread in alive-a1 alive-a2 alive-a3; do
+  wait_paused "$thread" 30 || { echo "  FAIL: $thread did not pause for the waiting request within 30 s"; tail -2 "$WORK/turn-$thread.txt"; exit 1; }
+done
 claim req-a
 start_deploy bbbb5555eeee6666 60 bbbb5555eeee6666
 finish req-a
