@@ -522,6 +522,9 @@ if [ "$lease_order" = "77" ]; then
 else
   [ "$lease_order" = "0" ] || exit "$lease_order"
 fi
+# `wa update requests` and its sweep, driven through the VERB the operator types, on a scratch home
+# (update-requests-settle, item 3 end to end; orphan-tests, 27/11).
+WA_BIN="$BIN" gate_run bash scripts/test-update-requests-cli.sh
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
 # fail() IN TWO HALVES (25/11, Fable's A, B, C): main own body before the swap, and the same four writes with a
 # verdict of its own after it. This branch had replaced it with printf + exit, which lost the status file, the
@@ -549,6 +552,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db 
 # LIVE CHECKS (advisory until rehearsed), and the cut continues to the tag. The row drives land.impl.canaries with
 # fixture canaries; the wrapper owns the scratch root the test-home guard needs and runs the tree under test.
 gate_run bash scripts/test-release-canaries-advisory.sh
+# THE TAG RULE (Fable 26/11): a full version takes Latest, a suffix never does; and WHEN a release may wear
+# the badge is decided at the END, by scripts/lib/release-latest.sh. Both rows extract the SHIPPED expression
+# and run it on the tags a cut meets - no copy of the rule, and no node, so seconds each (orphan-tests, 27/11).
+gate_run bash scripts/test-release-full-tag.sh
+gate_run bash scripts/test-release-latest-gate.sh
 # THE CUT BUILDS ITS OWN RELEASE (25/11, nextcloud-b): a tree-less node runs the binary EMBEDDED Lua, so a
 # release renamed from a cover gives it the cover Lua while --build-info names the release commit. A commit
 # whose compiled inputs a published release already covers must still be BUILT by the cut.
@@ -1595,6 +1603,13 @@ gate_run bash scripts/test-versions.sh
 # isolated by construction (scripts/lib/scratch-env.sh: clean prefix + stub systemctl + the checker) and refuses
 # to run unless the checker says ISOLATED - Fable's G condition, which is the row below it.
 WA_BIN="$BIN" gate_run bash scripts/test-version-install.sh
+# THE NODE SHAPE AND ITS TWO HALVES (version folders, Fable 25/11): the conversion (adopt, once per node, with its
+# rollback), the sentinel order/fallback, and the whole sequence through a failed restart and a failed move. Each
+# applies its own scratch env (scripts/lib/scratch-env.sh) and refuses a live node by name, so they run here the
+# way the row runner runs them (orphan-tests, 27/11: they were wired nowhere).
+gate_run bash scripts/test-versions-adopt.sh
+gate_run bash scripts/test-sentinel-version-move.sh
+gate_run bash scripts/test-version-sequence.sh
 # The shared scratch checker the version-folder rows use (scripts/lib/scratch-env.sh), judged on its own:
 # every live dimension refused by name, an IN-A-TURN run refused rather than stripped, ISOLATED when clean.
 gate_run bash scripts/test-scratch-env.sh
