@@ -136,20 +136,6 @@ function M.pending(owner,sid,rid)
 end
 -- Submission committed before admission fences dispatch. After admission, the
 -- call is in flight: steering cannot undo it or promise to cancel its effects.
---- True when the operator has said something that is queued and not yet read for this session - the fact a
---- hold asks before it decides to keep waiting. Read-only, one indexed row, no transaction: the hold asks it
---- once per slice and must never be the reason a message is late.
-function M.queued(sid, owner)
-  if type(sid) ~= 'string' or sid == '' then return false end
-  local rows
-  if owner ~= nil then
-    rows = query("SELECT id FROM steering_inbox WHERE session_id=? AND owner=? AND state='queued' LIMIT 1", { sid, owner })
-  else
-    rows = query("SELECT id FROM steering_inbox WHERE session_id=? AND state='queued' LIMIT 1", { sid })
-  end
-  return rows[1] ~= nil
-end
-
 function M.admit(owner,sid,rid)
   return memory.transaction(function()
     return not M.pending(owner,sid,rid)

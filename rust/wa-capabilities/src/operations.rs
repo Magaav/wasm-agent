@@ -1108,10 +1108,7 @@ fn progress_tick(state: &Value, tool: &str) {
     let Some(owner) = state["session"].as_str().filter(|session| !session.is_empty()) else { return };
     let stderr = state["stderr_path"].as_str().unwrap_or("");
     let elapsed = state["elapsed_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
-    // A job's own limit, from the record the tick is already reading: the row says it and says what Esc does.
-    let limit_seconds = state.get("timeout_ms").and_then(|value| value.as_u64()).map(|ms| ms as f64 / 1000.0);
-    crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr, owner,
-        limit_seconds);
+    crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr, owner);
 }
 
 /// One line about a CANCELLED foreground call, on the CLI's own stderr when WASM_AGENT_CANCEL_TRACE=1.

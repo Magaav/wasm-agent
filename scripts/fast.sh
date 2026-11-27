@@ -1420,12 +1420,6 @@ check module-report-selftest bash scripts/test-module-report.sh
 check fast-build-timing bash scripts/test-fast-build-timing.sh
 # A short and a long spelling of one commit are one commit (deploy refused bcacbf38 vs bcacbf38eb3b, 21/11).
 check commit-id bash scripts/test-commit-id.sh
-# A LONG JOB COSTS ONE TOOL ROUND, not a poll loop (waiting-costs-no-turns, 27/11). The stub model asks for
-# one `run` script that starts a job and ends with the handle live; `GET /calls` counts the model round
-# trips for exactly that shape and the reply says whether the settled output arrived in the ONE result.
-# Measured on one binary with two Lua roots: 6 s job - before 3 calls / 2 rounds / 71,340 request bytes,
-# after 2 / 1 / 47,459; 70 s job - before 4 / 3 / 96,428, after 2 / 1 / 47,467.
-check wct-serve-step bash scripts/test-wct-serve-step.sh
 
 # The measured build times of everything this run compiled, before the verdict, so the claim
 # and the numbers are one screen apart (no gate: scripts/lib/build-times.sh says why).
