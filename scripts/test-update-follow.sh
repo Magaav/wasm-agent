@@ -300,7 +300,10 @@ printf '%s' "$FINAL" | grep -Eq "^updated to (v[0-9][^ ]* \\()?${T12%????}\\)? i
 # THE BUILD IS DECLARED ONCE, by the phase itself, and only when the installer said so.
 DECLARED="$(grep -c "from source, on this machine" "$W/out.txt")"
 [ "$DECLARED" -ge 1 ] || fail 'the phases must say the build runs from source on this machine'
-grep -Eq "building [0-9]+/456 compiling wa-host .*from source, on this machine\)  [0-9]+:[0-9][0-9]" "$W/out.txt" \
+# THE CONTRACT CHANGED ON PURPOSE (bug 2, Victor 27/11): the phase must now also say WHY it is building, not only
+# that it is. The reason comes from the installer's own log line; the estimate is named so the wait is not a
+# surprise. The clock still closes the line.
+grep -Eq "building [0-9]+/456 compiling wa-host .*(from source, on this machine: no published binary for this commit[,;]? [^)]*)\)  [0-9]+:[0-9][0-9]" "$W/out.txt" \
   || fail 'a building phase with n/m, its source and its elapsed time was not printed'
 grep -q 'proving' "$W/out.txt" || fail 'the later phases were not printed'
 # NOTHING OF THE INSTALLER'S OWN OUTPUT REACHES THE SCREEN - that is the whole complaint.
