@@ -870,6 +870,8 @@ local function pin_restored_commit(restored)
 end
 
 -- What the peer can prove about one request, from files that survive the install it performs.
+-- Exported for the row that drives it (scripts/test-remote-update-record.lua): a failure record whose sentence nobody
+-- can test is how "no installer block" survived two retries. The local name stays, so no call site changes.
 local function outcome_of(record)
   local facts = M.facts()
   local sentinel_dir = facts.sentinel_dir
@@ -995,6 +997,8 @@ end
 -- WHERE THE ACCEPT RECORDS LIVE, and what they say. One directory, named by the id the master sent, so
 -- the deploy record (this file's own <id>.json), the caller's pending record and the accept record are
 -- one name read from three places - never a second answer to "what happened to my request".
+M.outcome_of = outcome_of
+
 function M.accept_root() return M.dir() .. '/accepted' end
 
 -- The generic phase of one id (lua/core/accepted.lua), in this module's words: a tail that finished
