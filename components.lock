@@ -293,7 +293,11 @@ wa-email 44c73d1b1df0f3d62362b5f99d56b183f5793f7f6ec2343aac5180d7e9890db8 565827
 # rust/components/wa-whatsapp/src/{index,view}.rs (the slow read answers {state:pending} and text:full
 # carries text_cap), so the bytes of the move branch no longer describe this tree. Built at the pinned
 # root with the pinned toolchain, rustc 1.100.0 / wasi-sdk 34.0.
-wa-whatsapp ead062e3377e22cf6030a504a98b396b0b5895791ca504c34dd6c29d903b4596 8935017
+# 27/11: the pin named bytes built with WA_COMPONENT_TOOLCHAIN=1.100.0, the diagnosis override the build
+# script warns is NOT the pinned compiler (scripts/build-components.sh:30). The tree built with its OWN
+# pinned toolchain (1.99.1) gives these bytes, so every publish after the read-slow landing was refused
+# `artifact_not_pinned: wa-whatsapp`. No source moved: components-lock-follows-source was already 5/0.
+wa-whatsapp ab97eb8013e25a80b5e8674fe8c576040535c0fe0216fe4017a57b84be017afa 8939566
 # SOURCES agent-core 7e841b7234b00801ecee490bc07f5c702b596d68228a5bf8c5298040d7f5fd4a
 # SOURCES codemode 4456e8599617fd853f7013cc1ec8e65623a45613163b76b13d19e280726a41e1
 # SOURCES graph 963d98538e92d3d7b12b7df989369636f8b2a4a7308b0791c19c6aae0de8beb5
