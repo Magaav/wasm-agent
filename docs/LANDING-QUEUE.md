@@ -29,6 +29,32 @@ of a rebase instead of by what changed.
 
 ## The five things it decides
 
+### 0. Whether you may land at all: the lane, and its token
+
+MEASURED 26/11 21:46Z: a worker ran `land --branch change/codemode-seam-leaves-the-host` from its own worktree. The merge
+went into the CANONICAL checkout, and the unpushed merge `5ed64ea4` diverged main from origin/main and blocked the install
+for twenty minutes. Every rule below is about the TREE and the ROW; none of them asked who was asking.
+
+So `land` (without `--dry-run`) and `reconcile` - the verbs that write the canonical checkout or push - refuse on any
+one of four facts, before anything is opened or written:
+
+- **a session/worker marker**: `WASM_AGENT_SESSION_ID`, `WA_SESSION_ID`, `WA_SESSION`, `WA_MISSION` or
+  `WASM_AGENT_IN_TURN=1`;
+- **a session ancestor**: an ancestor process that is a `wa` CLI (`serve` excepted) - a tool shell inside a chat carries
+  none of the markers above, so the process tree is what decides there;
+- **the repo is a linked worktree** of the canonical checkout: a landing merges into the canonical tree, so run the
+  queue from the canonical checkout or from an independent clone, never from a worker's own tree;
+- **the lane's token**: `<home>/.wasm-agent/lane/land.token`, a regular file, mode 0600 or stricter, 32 characters or
+  more. The lane creates it once:
+  `mkdir -p ~/.wasm-agent/lane && (umask 077; head -c 32 /dev/urandom | base64 > ~/.wasm-agent/lane/land.token)`.
+  The path is not readable from an environment variable and no flag skips it.
+
+`baseline --measure` is the lane's too (it checks the canonical checkout out to main's commit and back); `baseline
+--record <log>` is not (it reads a log and moves nothing). `--dry-run` and every read-only verb stay open to everyone.
+
+**What a worker does instead:** write `READY <sha>` in its ready file and let the orchestrator land it. A refusal says so
+by name, and a dry run is always available to check the branch without touching main.
+
 ### 1. One lander at a time, in order, with a lease
 
 ```

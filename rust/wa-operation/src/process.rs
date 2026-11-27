@@ -14,30 +14,6 @@ pub fn operation_nice() -> i32 {
         .map(|nice| nice.clamp(0, 19))
         .unwrap_or(10)
 }
-/// HOW A STOPPED COMMAND IS ENDED (week 1, "Esc stops what it started").
-///
-/// A stop is not the same act as a refusal: the reader pressed Esc on a command that may be halfway
-/// through writing a file, and SIGKILL gives that command no chance to put anything down. So a stop asks
-/// first - SIGTERM to the whole process group - and gives the group this long to go, then KILLs what is
-/// left. Short on purpose: a person who pressed Esc is entitled to the machine back, and the row that
-/// measures this product promises a usable prompt inside 300 ms, with the work gone behind it.
-pub const STOP_GRACE_MS: u64 = 250;
-
-/// What a stop did, in the words the operation's own record carries back to the caller.
-pub struct Stopped {
-    /// "TERM" when the group went on the polite signal, "KILL" when the grace ran out first, and "NONE"
-    /// when the group was already gone when the stop was asked for.
-    pub signal: &'static str,
-    /// The grace the group was given between TERM and KILL, in milliseconds.
-    pub grace_ms: u64,
-    /// Whether the group was STILL non-empty when the grace expired, so the KILL was needed.
-    pub needed_kill: bool,
-    /// Whether the group was still non-empty shortly after the KILL. Something that escaped the group,
-    /// sits in the kernel, or is a zombie nobody has reaped yet answers true here: the record then says
-    /// a process was still listed rather than claiming a clean kill it did not see.
-    pub survivors: bool,
-}
-
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod platform;
@@ -153,75 +129,6 @@ impl Process {
         }
         self.terminated = true;
         Ok(())
-    }
-    /// END A COMMAND A PERSON STOPPED: TERM to the whole process group, then KILL after the stated
-    /// grace (STOP_GRACE_MS), and what it took, for the record.
-    ///
-    /// The group is spawned as its own process group (process_group(0) in spawn), so ONE signal reaches
-    /// the shell AND everything it started - the sleep 30 behind a stopped command, a build's children -
-    /// which is the defect this exists for: before it, a stop ended the prompt and left the work running
-    /// to its own end.
-    ///
-    /// The direct child is reaped while the grace runs, because an unreaped child is still a member of
-    /// the group and kill(-pgid, 0) would keep saying "alive" about a corpse: without the reap the grace
-    /// would always run out and every stop would be reported as needing the kill.
-    pub fn stop(&mut self) -> io::Result<Stopped> {
-        let grace = std::time::Duration::from_millis(STOP_GRACE_MS);
-        let gone = Stopped { signal: "NONE", grace_ms: STOP_GRACE_MS, needed_kill: false, survivors: false };
-        // Do not signal a numeric PGID again after successful cleanup: after reaping, that number may be
-        // recycled while evidence is being persisted.
-        if self.terminated {
-            return Ok(gone);
-        }
-        match unsafe { libc::kill(-self.group, libc::SIGTERM) } {
-            0 => {}
-            _ => {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
-                }
-                self.terminated = true;
-                return Ok(gone);
-            }
-        }
-        let started = std::time::Instant::now();
-        while started.elapsed() < grace {
-            let _ = self.child.try_wait();
-            if !self.descendants()? {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let _ = self.child.try_wait();
-        let needed_kill = self.descendants()?;
-        if needed_kill && unsafe { libc::kill(-self.group, libc::SIGKILL) } < 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
-            }
-        }
-        self.terminated = true;
-        let mut survivors = false;
-        if needed_kill {
-            // 100 ms is enough for a reparented zombie to be reaped on a healthy node, and short enough
-            // that a truthful "still there" costs the stop nothing worth measuring.
-            let killed_at = std::time::Instant::now();
-            survivors = true;
-            while killed_at.elapsed() < std::time::Duration::from_millis(100) {
-                let _ = self.child.try_wait();
-                survivors = self.descendants()?;
-                if !survivors {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-        Ok(Stopped {
-            signal: if needed_kill { "KILL" } else { "TERM" },
-            grace_ms: STOP_GRACE_MS,
-            needed_kill,
-            survivors,
-        })
     }
     pub fn descendants(&self) -> io::Result<bool> {
         let rc = unsafe { libc::kill(-self.group, 0) };
