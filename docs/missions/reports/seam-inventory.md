@@ -28,7 +28,7 @@ question never becomes a `future`), and the wait is a number nobody shares.
 | 7 | sentinel <-> node | `rust/wa-sentinel/src/main.rs` (the request box, signal files) | the sentinel writes request files and signals a pid; the node reads them on its next tick | async by design, file-based | the sentinel's own bounds (`ALIVE_BOUND`, the deploy bound) | `wa-sentinel request`, the node's tick | not measured here | **KEEP** - the two processes must work while one of them is *down*, which a WIT seam cannot do (a component is only callable while the host runs it); the drop-box is the mechanism, documented in the sentinel's own header |
 | 8 | Lua -> CLI subprocess | `rg 'host\.exec\("wa ' lua/core/*.lua` | nothing crosses this way today | - | - | - | **0 hits** | **KEEP (nothing to move)** - the Lua core does not shell out to `wa`; the calls it makes are `host.*` capabilities |
 
-| 9 | the component hosts' own waits: hooks, mesh, selfloop | `rust/wa-kernel-runtime/src/hooks_host.rs`, `rust/wa-kernel-runtime/src/mesh_host.rs`, `rust/wa-kernel-runtime/src/selfloop_host.rs` (`DEFAULT_TIMEOUT_MS = 2_000` in each) | the host half of the `hooks`, `mesh` and `selfloop` worlds - a WIT seam already, with a private poll window | sync, then a timeout | **2 000 ms in three files** (`DEFAULT_TIMEOUT_MS`), the same 2 s as the index reads | the host bindings of those worlds | not measured here | **MOVE the WAIT (the seam is already WIT)** - brief queued: `component-hosts-share-the-wait.md` (priority 2) |
+| 9 | the component hosts' own waits: hooks, mesh, selfloop, memory, stt | `rust/wa-kernel-runtime/src/hooks_host.rs`, `rust/wa-kernel-runtime/src/mesh_host.rs`, `rust/wa-kernel-runtime/src/selfloop_host.rs`, `rust/wa-kernel-runtime/src/memory_host.rs` and `rust/wa-kernel-runtime/src/stt_host.rs` (`DEFAULT_TIMEOUT_MS = 2_000` in each - the stt one arrived with the stt component landing after this table was written, and the row that keeps this table true named it on 27/11) | the host half of the `hooks`, `mesh` and `selfloop` worlds - a WIT seam already, with a private poll window | sync, then a timeout | **2 000 ms in three files** (`DEFAULT_TIMEOUT_MS`), the same 2 s as the index reads | the host bindings of those worlds | not measured here | **MOVE the WAIT (the seam is already WIT)** - brief queued: `component-hosts-share-the-wait.md` (priority 2) |
 | 10 | browser control (CDP) in `wa-window` | `rust/wa-window/src/cdp.rs` (`LAUNCH_WAIT_MS = 40_000`, `PROBE_TIMEOUT_MS = 1_200`, `REQUEST_TIMEOUT_MS = 15_000`) | a websocket to a browser process the node launched - the outside world's protocol, like provider HTTP | sync request/response over a socket | three constants, none shared | the `wa-window` users (the UI's browser control) | not measured here | **KEEP** - the far side is a browser speaking CDP, not a part of wa; the law's own exception ("JSON stays where it is the outside world's format") applies, and a WIT seam cannot replace a protocol a third party owns |
 | 11 | the queue crate itself, the fabric, the kv tests | `rust/wa-queue/src` (the durable queue `wit/queue` binds), `rust/wa-fabric/src/sim.rs:246` (a simulation), `rust/wa-kv/src/tests.rs:103` (tests only) | the queue is the *mechanism* these other rows use; the fabric's queue use is a simulation, and kv's is a test | - | - | - | - | **ALREADY WIT / KEEP** - `wa-queue` IS the `wit/queue` seam (`queue-provider`, `producer-consumer`); `wa-fabric`'s boundary is `wit/fabric/fabric.wit:305,312` (`fabric-client`, `fabric-admin`) and its only queue use is `sim.rs`; `wa-kv`'s is in `tests.rs`, so nothing crosses in product code |
 
@@ -53,3 +53,39 @@ question never becomes a `future`), and the wait is a number nobody shares.
   per-surface ledger counts (how often a caller past the 2 s wait was handed a job id) were **not** measured here, and a
   brief that moves row 1 should measure them first.
 * It does not decide the WIT shape of a new world (terminal, OS process). That is the brief's job.
+
+## The second table: one question, one owner (ARCHITECTURE.md law 17)
+
+Each row is one question, the single place that answers it, the second answers found on 27/11, and where each is being
+merged. A row whose answer is ALREADY ONE has no duplicate and exists so the law also shows what a clean answer looks
+like. The KEEP list under the table is not an exemption from the law: each entry says why that number answers a DIFFERENT
+question. `scripts/test-one-question-one-owner.mjs` derives the names from the tree and refuses when one is missing from
+this table - which is how the list below got to twenty names instead of the four a first draft found.
+
+| question | its ONE owner | duplicates found today | where each is being merged |
+| --- | --- | --- | --- |
+| How long may this wait? | `lua/core/codemode_pending.lua` - `M.DEFAULT_WAIT_S = 60`, `M.MAX_WAIT_S = 300`, then a pending handle | `WAIT_MS` (whatsapp index 2 000, mail index 2 000), `DOWNLOAD_WAIT_MS` (10 000), `DEFAULT_TIMEOUT_MS` in FIVE files (`hooks_host.rs:38`, `mesh_host.rs:37`, `selfloop_host.rs:41`, `stt_host.rs:39` at 2 000; `codemode_seam.rs:46` at 120 000 - five answers, 60x apart), their own env knobs (`WA_HOOKS_COMPONENT_TIMEOUT_MS`, `WA_MEMORY_COMPONENT_TIMEOUT_MS`, `WA_MESH_COMPONENT_TIMEOUT_MS`, `WA_SELFLOOP_COMPONENT_TIMEOUT_MS`, `WA_CODEMODE_COMPONENT_TIMEOUT_MS` - a second knob per host), `WA_GRAPH_PARSE_TIMEOUT_MS`, `MAX_WAIT_MS` (stt-remote, 15 000), and `MAX_TIMEOUT_MS` (`rust/components/hooks/src/logic.rs:28`, 60 000 - the hooks COMPONENT clamping what its caller may ask for, the same 60 s the shared default names) | `whatsapp-read-waits-on-a-future`, `email-read-waits-on-a-future`, `component-hosts-share-the-wait`, `stt-question-returns-a-future` (queued; one brief owns the merge, one owner remains) |
+| How does a component get asked a question? | `wit/queue` (a job) and a WIT world for anything that returns a `future` | every `host.*` capability that enqueues a `wa_queue` job and then waits in the host for the answer | `whatsapp-read-waits-on-a-future`, `email-read-waits-on-a-future`, `stt-question-returns-a-future`, `terminal-and-operations-need-a-world` (queued) |
+| How does a build get installed? | the installer - `scripts/deploy.sh` with `scripts/lib/install-record.sh` as the one writer of `installed.txt` and the one ancestry verdict | `/update` (`lua/core/update.lua`, its own stop-file, waiting-request and watcher facts), `wa update` on the CLI, `scripts/upgrade.sh` (its own bounds) | `update-is-one-line.md` (queued) |
+| How is a turn drawn? | `lua/core/cli_view.lua` | `lua/core/chat.lua` draws the same turn again when it replays a resumed session | `the-turn-is-drawn-once.md` (queued by this task) |
+| How do I run one statement and read the host's answer? | `lua/core/sql_answer.lua` - `M.run` returns `value, why` and never raises; each caller keeps its own policy and message | JOINED 27/11: `agent_control.lua` (`nil, why`), `done_gate.lua` (raise with a store prefix), `completions.lua` (raise), `backup.lua` (raise) each spelled the same pcall/decode/refuse | done in this task (`8801b311`) |
+| What do we do when the database is locked? | `lua/core/sqlite_busy.lua` - `is_busy`, `patience_ms`, `retry` | `backup.lua`'s own `busy()` predicate (any text with "busy" or "locked") and its own `WA_BACKUP_BUSY_TIMEOUT_MS` knob (15 000) | done in this task (`d580fdf1`) |
+| Who owns the install record? | `scripts/lib/install-record.sh` - `wa_record_install` and `wa_ancestry_verdict` | ALREADY ONE - `wa --version` reads that record instead of re-deriving the program and the tree separately | - |
+
+### KEEP: each with the question it actually answers
+
+* `STATUSLINE_TIMEOUT_MS` (`rust/components/hooks/src/logic.rs:36`, 5 000): how long a statusline or hook SHELL command may
+  run - a subprocess on this machine, not a component answer.
+* `LAUNCH_WAIT_MS`, `PROBE_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS` (`rust/wa-window/src/cdp.rs`): how long may a THIRD PARTY's
+  debugger take to answer - the same exception the seam law makes for CDP, not a component call.
+* `WASM_AGENT_UI_HEARTBEAT_TIMEOUT_MS` (`rust/wa-window/src/main.rs`): how long may the window's own client go quiet
+  before it is considered gone - a liveness question, not a wait budget.
+* `WASM_AGENT_ADMISSION_TIMEOUT_MS`, `WASM_AGENT_SUBAGENT_AWAIT_MS` (`rust/wa-capabilities/src/serve.rs`): how long may an
+  HTTP client or a child process take - the OS and a foreign peer, not a component.
+* `WA_WATCHDOG_WAIT_MS` (`rust/wa-sentinel/src/watchdog.rs`): how long may a rollback of a PID we do not own take; it is
+  the same knob `upgrade.sh` reads, and the install owns it (`install-record.sh`/`upgrade.sh`), not the wait budget.
+* `RELEASE_TIMEOUT_MS` (`scripts/landing-queue.mjs`): how long a `gh` child may take to publish a release - a foreign CLI.
+* `FULL_WAIT_MS` (`scripts/test-codemode-wait-bound.lua`), `SHARED_WAIT_MS` (`scripts/test-seam-inventory.mjs`), 
+  `WA_EXPERIMENT_AWAIT_MS` (`scripts/experiment-tool-choice.lua`): test and experiment harnesses; they assert ABOUT the
+  budget and must not read it as a value, or the test would move with the bug.
+

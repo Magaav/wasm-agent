@@ -34,6 +34,8 @@ intake (an observed symptom, with evidence)
 
 Two invariants hold the whole thing up:
 
+0. **Every brief applies the subtask rule** (ARCHITECTURE.md law 17, Victor 27/11): whatever a task spots as a second
+   answer to a question that already has one owner is fixed inside that task, right away - not queued for later.
 1. **An agent's report is evidence, not verification.** Every acceptance in this batch
    came from re-running, re-reading, or re-attacking the artifact.
 2. **No effect before its proof.** A gate receipt is bound to an exact tree; a merge
