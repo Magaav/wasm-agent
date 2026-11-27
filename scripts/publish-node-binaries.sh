@@ -417,13 +417,13 @@ fi
 asset_list() {
   local triple
   for triple in $MANIFEST_TRIPLES; do
-    printf 'wa-%s-%s wa-sentinel-%s-%s wa-term-%s-%s\n' "$triple" "$SHORT" "$triple" "$SHORT" "$triple" "$SHORT"
+    printf 'wa-%s-%s wa-sentinel-%s-%s\n' "$triple" "$SHORT" "$triple" "$SHORT"
   done
 }
 
 if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
   say "would build $COMMIT for: $MANIFEST_TRIPLES"
-  say "with: cargo zigbuild --release --offline --locked -p wa-host -p wa-term --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
+  say "with: cargo zigbuild --release --offline --locked -p wa-host --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
   say "zig: ${ZIG_BIN:-none found (a build would refuse with zig_missing; pass WA_ZIG or install pip ziglang)}"
   [ -n "$ZIG_BIN" ] && say "cargo zigbuild uses: CARGO_ZIGBUILD_ZIG_COMMAND=$CARGO_ZIGBUILD_ZIG_COMMAND"
   say "cargo target dir: $TARGET_DIR (one directory for wa-host and wa-sentinel; --target-dir overrides)"
@@ -476,16 +476,14 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     # The frozen identity, never `date` at the moment of writing: see the stamp block above. The fallback
     # only fires on a run that could not write its stamp, and it says so there.
     echo "built_utc=${BUILT_UTC:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-    echo '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes'
+    echo '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes'
     for triple in $MANIFEST_TRIPLES; do
-      local wa="$dir/wa-$triple-$SHORT" sentinel="$dir/wa-sentinel-$triple-$SHORT" program="$dir/wa-term-$triple-$SHORT"
+      local wa="$dir/wa-$triple-$SHORT" sentinel="$dir/wa-sentinel-$triple-$SHORT"
       [ -f "$wa" ] || fail "binary_missing: $wa" 2
       [ -f "$sentinel" ] || fail "binary_missing: $sentinel" 2
-      [ -f "$program" ] || fail "binary_missing: $program" 2
-      printf '%s %s %s %s %s %s %s\n' "$triple" \
+      printf '%s %s %s %s %s\n' "$triple" \
         "$(wa_node_sha256 "$wa")" "$(wc -c < "$wa" | tr -d '[:space:]')" \
-        "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')" \
-        "$(wa_node_sha256 "$program")" "$(wc -c < "$program" | tr -d '[:space:]')"
+        "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')"
     done
   } > "$tmp" || fail "manifest_unwritable: $tmp"
   mv -f "$tmp" "$manifest" || fail "manifest_unwritable: $manifest"
@@ -554,7 +552,7 @@ if [ -n "$FROM" ]; then
       || fail "manifest_unwritable: $OUT/node-$SHORT.manifest" 2
   fi
   for triple in $MANIFEST_TRIPLES; do
-    for name in "wa-$triple-$SHORT" "wa-sentinel-$triple-$SHORT" "wa-term-$triple-$SHORT"; do
+    for name in "wa-$triple-$SHORT" "wa-sentinel-$triple-$SHORT"; do
       [ -f "$FROM/$name" ] || fail "binary_missing: $FROM/$name" 2
       cp -f "$FROM/$name" "$OUT/.$name.$$" && mv -f "$OUT/.$name.$$" "$OUT/$name" || fail "bundle_unwritable: $OUT/$name" 2
     done
@@ -563,15 +561,7 @@ if [ -n "$FROM" ]; then
   for triple in $MANIFEST_TRIPLES; do
     pin="$(wa_node_manifest_pin "$OUT/node-$SHORT.manifest" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
     set -- $pin
-    # THE PROGRAM IS VERIFIED TOO (wa-term-own-program): a release whose node is pinned and whose
-    # program is not is exactly the install this whole change exists to prevent, and it would be
-    # refused on every node instead of here.
-    [ "$#" -ge 4 ] || fail "manifest_incomplete: no row for $triple" 2
-    if ! term_pin="$(wa_node_manifest_program "$OUT/node-$SHORT.manifest" "$triple")"; then
-      fail "manifest_incomplete: the row for $triple does not pin wa-term - this release would install a node that cannot draw a prompt; republish with this script" 2
-    fi
-    set -- "$1" "$2" "$3" "$4" "${term_pin% *}" "${term_pin#* }"
-    for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4" "wa-term-$triple-$SHORT:$5:$6"; do
+    for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4"; do
       name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
       actual="$(wa_node_sha256 "$OUT/$name")" || fail 'sha256_tool_missing: no sha256sum or shasum' 7
       [ "$actual" = "$want_sha" ] || fail "artifact_not_pinned: $name is $actual, the manifest pins $want_sha" 5
@@ -645,15 +635,9 @@ else
     [ -f "$sentinel_bin" ] || sentinel_bin="$target_dir/$triple/release/wa-sentinel"
     [ -f "$wa_bin" ] || fail "binary_missing: no built wa for $zig_target under $target_dir" 8
     [ -f "$sentinel_bin" ] || fail "binary_missing: no built wa-sentinel for $zig_target under $target_dir" 8
-# THE PROGRAM THAT DRAWS THE TERMINAL ships in the same payload (wa-term-own-program): a node
-# installed without it starts and cannot open a prompt, which is why this work was once reverted.
-    term_bin="$target_dir/$zig_target/release/wa-term"
-    [ -f "$term_bin" ] || term_bin="$target_dir/$triple/release/wa-term"
-    [ -f "$term_bin" ] || fail "binary_missing: no built wa-term for $zig_target under $target_dir" 8
     cp -f "$wa_bin" "$OUT/.wa-$triple-$SHORT.$$" && mv -f "$OUT/.wa-$triple-$SHORT.$$" "$OUT/wa-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
     cp -f "$sentinel_bin" "$OUT/.wa-sentinel-$triple-$SHORT.$$" && mv -f "$OUT/.wa-sentinel-$triple-$SHORT.$$" "$OUT/wa-sentinel-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
-    cp -f "$term_bin" "$OUT/.wa-term-$triple-$SHORT.$$" && mv -f "$OUT/.wa-term-$triple-$SHORT.$$" "$OUT/wa-term-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
-    chmod +x "$OUT/wa-$triple-$SHORT" "$OUT/wa-sentinel-$triple-$SHORT" "$OUT/wa-term-$triple-$SHORT" 2>/dev/null || true
+    chmod +x "$OUT/wa-$triple-$SHORT" "$OUT/wa-sentinel-$triple-$SHORT" 2>/dev/null || true
   done
   BUILD_SECONDS=$(( $(date +%s) - build_started ))
   emit_manifest "$OUT" >/dev/null || fail "manifest_unwritable: $OUT" 2
@@ -666,15 +650,7 @@ fi
 for triple in $MANIFEST_TRIPLES; do
   pin="$(wa_node_manifest_pin "$OUT/node-$SHORT.manifest" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
   set -- $pin
-    # THE PROGRAM IS VERIFIED TOO (wa-term-own-program): a release whose node is pinned and whose
-    # program is not is exactly the install this whole change exists to prevent, and it would be
-    # refused on every node instead of here.
-    [ "$#" -ge 4 ] || fail "manifest_incomplete: no row for $triple" 2
-    if ! term_pin="$(wa_node_manifest_program "$OUT/node-$SHORT.manifest" "$triple")"; then
-      fail "manifest_incomplete: the row for $triple does not pin wa-term - this release would install a node that cannot draw a prompt; republish with this script" 2
-    fi
-    set -- "$1" "$2" "$3" "$4" "${term_pin% *}" "${term_pin#* }"
-    for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4" "wa-term-$triple-$SHORT:$5:$6"; do
+  for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4"; do
     name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
     file="$OUT/$name"
     [ -f "$file" ] || fail "binary_missing: $file" 2

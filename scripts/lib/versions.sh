@@ -170,7 +170,7 @@ wa_version_assemble() {
 wa_version_changed_members() {
   local stage="${1:?staging dir}" prev="${2:-}" name path sha
   [ -d "$stage" ] || { printf 'version_need_unknown: no staging dir %s\n' "$stage" >&2; return 2; }
-  for name in wa wa-sentinel wa-term lua-core scripts ui installed.txt; do
+  for name in wa wa-sentinel lua-core scripts ui installed.txt; do
     [ -e "$stage/$name" ] || continue
     if [ -n "$prev" ] && [ -e "$prev/$name" ]; then
       # A member is a file or a tree: compare it as ONE value (a tree by its file list and bytes), which is the same
@@ -247,7 +247,7 @@ wa_version_has_exchange() { # 0 when this mv can exchange two paths atomically
 wa_version_link_legacy() { # <install-dir>
   local install="${1:?install dir}" share ts name target aside tmp
   share="$(wa_share_root)"; ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  for name in wa wa-sentinel wa-term; do
+  for name in wa wa-sentinel; do
     target="$share/current/$name"; tmp="$install/$name.tmp.$$"
     [ -f "$target" ] || continue
     if [ -f "$install/$name" ] && [ ! -L "$install/$name" ]; then

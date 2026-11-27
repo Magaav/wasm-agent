@@ -71,6 +71,3 @@ harness-evaluator/state/
 
 # A runner row own scratch (scripts/fast.sh, the land dry run): never part of the tree.
 .wa-scratch/
-
-# the private cargo target dir a worker builds into (never committed: it is build output)
-.local-target/
