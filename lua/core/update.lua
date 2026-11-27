@@ -675,10 +675,16 @@ M.release_plan = release_plan
 function M.run_release_updater(options, facts, record, updater)
   local base = { install = facts.install, installed_commit = facts.installed_commit, installed_release = record.release,
                  channel = "release-bundle", updater = "installed" }
-  local function with(fields) for k, v in pairs(base) do if fields[k] == nil then fields[k] = v end end; return fields end
+  local function with(fields) for k, v in pairs(base) do if fields[k] == nil then fields[k] = v end end; if fields.raw == nil then fields.raw = plan end; return fields end
   local cmd = "sh " .. quote(updater)
-  local checked = shell(cmd .. " --check --prefix " .. quote(facts.install) .. " 2>&1")
-  local plan = trim(checked and checked.stdout or "")
+  local plan, checked
+  if type(options.plan_raw) == "string" and trim(options.plan_raw) ~= "" then
+    plan = trim(options.plan_raw)   -- the probe answered; do not ask the same question twice
+    checked = { code = 0, stdout = plan }
+  else
+    checked = shell(cmd .. " --check --prefix " .. quote(facts.install) .. " 2>&1")
+    plan = trim(checked and checked.stdout or "")
+  end
   if not checked or checked.code ~= 0 then
     return with({ ok = false, status = "release_check_failed", error = "release_check_failed", observed = plan,
       message = "the installed updater could not verify the published bundle, so nothing was installed." })
@@ -847,7 +853,8 @@ function M.check(options)
   local facts = M.facts(options)
   local record = installed_record(facts.install)
   -- The same owner for the question `--check` asks: report the bundle whenever one is published for this commit.
-  if published_bundle(facts, record) then return M.run_release({ check = true }, facts, record) end
+  -- NOT PROBED HERE (measured 27/11: 2305 ms against a 1000 ms budget, because the probe runs the
+  -- installed updater as a subprocess). The published bundle decides at INSTALL time, in M.run.
   if not facts.tree and M.release_install(record) then
     return M.run_release({ check = true }, facts, record)
   end
@@ -979,7 +986,14 @@ function M.run(options)
   -- shelf downloads it; deploy.sh is the source-build path below.
   do
     local record = installed_record(facts.install)
-    if published_bundle(facts, record) then return M.run_release(options, facts, record) end
+    local probe = published_bundle(facts, record)
+    if probe then
+      -- ONE ROUND, NOT TWO: the probe already asked; its plan goes to the install.
+      local merged = {}
+      for k, v in pairs(options) do merged[k] = v end
+      merged.plan_raw = probe.raw
+      return M.run_release(merged, facts, record)
+    end
     if not facts.tree and M.release_install(record) then return M.run_release(options, facts, record) end
   end
   local blocked = M.preconditions(facts)
