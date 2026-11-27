@@ -299,6 +299,24 @@ function M.age_text(seconds)
   return string.format("as of %d d ago", math.floor(s / 86400 + 0.5))
 end
 
+-- The rows one provider's limits draw, as strings: `  5h  <bar>   4%  resets in 3.0h`. The ONE builder - the
+-- `/status` page, the mid-run snapshot and its row all come through here (rust/wa-capabilities/src/limits.rs
+-- row_texts is the console's port of it, and its test pins the two against each other).
+function M.limit_rows(limits, opts)
+  opts = opts or {}
+  local rows = {}
+  for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
+    local entry = type(limits) == "table" and limits[window[2]]
+    if type(entry) == "table" then
+      local percent = tonumber(entry.percent) or 0
+      local reset = resets(entry.resetsAt):gsub("^ ", "")
+      rows[#rows + 1] = (string.format("  %-3s %s %3.0f%%  %s", window[1], M.bar(percent, 16, opts.color), percent, reset)
+        :gsub("%s+$", ""))
+    end
+  end
+  return rows
+end
+
 -- Answers the limits, a named problem, how old the reading is, and the door's state.
 --
 -- The read is the HOST's now (provider.limits asks `host.limits_start`/`limits_poll`), so this never
@@ -371,16 +389,16 @@ function M.session_lines(session_id, opts)
       goto continue_provider
     end
     local limits, problem, age, state = limits_of(item.id, opts)
-    local shown = 0
-    for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
-      local entry = type(limits) == "table" and limits[window[2]]
-      if type(entry) == "table" then
-        local percent = tonumber(entry.percent) or 0
-        lines[#lines + 1] = string.format("  %-4s %s %4s%%  %s", window[1], M.bar(percent, 24, opts.color),
-          string.format("%.0f", percent), dim((resets(entry.resetsAt):gsub("^ ", ""))))
-        shown = shown + 1
-      end
-    end
+    -- ONE NAMED BUILDER FOR A LIMITS ROW (27/11, Victor's `/status` regression). It was built inline here, so no row
+    -- could measure what the panel actually draws without running a whole session. Two things this fixes at once:
+    --   1. the row is now measurable (scripts/test-status-resets.lua calls exactly this);
+    --   2. it FITS THE PANEL. The reset time is the LAST thing on the line and the console cuts a row to its box
+    --      (clip_cells(text, width - BOX_CHROME)); at 24 cells of bar the row measured 53 and the reset fell off a
+    --      narrow panel - the exact shape this repo already recorded for the cost segment (55 cells, cut at 100
+    --      columns, 23/11). A 16-cell bar costs nothing a reader used and keeps the reset inside 44 cells.
+    local rows = M.limit_rows(limits, opts)
+    local shown = #rows
+    for _, row in ipairs(rows) do lines[#lines + 1] = row end
     if shown == 0 then
       -- Nothing to draw yet: say WHAT is happening, never "come back between runs" - the read is
       -- already on its way, on the host's own thread (Victor 25/11).
