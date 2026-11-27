@@ -16,7 +16,7 @@ use wasmtime::component::{
     Access, Accessor, Destination, FutureProducer, FutureReader, HasData, Resource, ResourceTable, StreamProducer,
     StreamReader, StreamResult,
 };
-use wasmtime::StoreContextMut;
+use wasmtime::{AsContextMut, StoreContextMut};
 
 wasmtime::component::bindgen!({
     world: "process-client",
@@ -121,18 +121,18 @@ impl wa::process::child::HostProcessWithStore<Host> for Host {
         match access.data_mut().table.get(&self_) {
             Ok(job) => {
                 let outcome = job.outcome.clone();
-                FutureReader::new(access, ExitFuture { outcome })
+                FutureReader::new(access.as_context_mut(), ExitFuture { outcome })
             }
             Err(_) => Err(wasmtime::Error::msg("process handle gone")),
         }
     }
 
     fn stdout(mut access: Access<'_, Host, Host>, _self: Resource<Job>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
-        StreamReader::new(access, EmptyStream)
+        StreamReader::new(access.as_context_mut(), EmptyStream)
     }
 
     fn stderr(mut access: Access<'_, Host, Host>, _self: Resource<Job>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
-        StreamReader::new(access, EmptyStream)
+        StreamReader::new(access.as_context_mut(), EmptyStream)
     }
 }
 
