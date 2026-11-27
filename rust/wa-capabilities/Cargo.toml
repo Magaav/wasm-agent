@@ -92,6 +92,7 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p
 tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
+wat = "1"
 # `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and no configuration
 # declared it, so `cargo test -p wa-capabilities` did not compile on main itself. A path
 # dev-dependency is what the import always assumed.
