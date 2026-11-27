@@ -520,6 +520,20 @@ wa_node_release_list() {
 
 # <repo> <commit> <triple> -> the four asset names of one target's row, on stdout, one per line.
 # The manifest is the release's identity, so it is fetched first and the binaries are named from it.
+# <dir> <triple> <short> -> the member files a release pins, one per line.
+# THE SUPERVISOR IS OPT-IN BY MANIFEST (decision 27/11): a release published before the two trailing columns existed
+# carries no supervisor asset, and the fetch loops treat a missing asset as terminal - so an unconditional member
+# would make every older release uninstallable. Nine fields in the row means the sibling is fetched, verified and
+# made executable; seven means the release predates it and installs exactly as it always did.
+wa_node_bundle_members() { # <dir> <triple> <short>
+  local dir="$1" triple="$2" short="$3" fields
+  printf 'wa-%s-%s\nwa-sentinel-%s-%s\n' "$triple" "$short" "$triple" "$short"
+  [ -f "$dir/node-$short.manifest" ] || return 0
+  fields="$(awk -v t="$triple" 'index(\$1,"="){next} \$1==t{print NF; exit}' "$dir/node-$short.manifest" 2>/dev/null)"
+  [ "${fields:-0}" -ge 9 ] 2>/dev/null && printf 'wa-operations-supervisor-%s-%s\n' "$triple" "$short"
+  return 0
+}
+
 wa_node_asset_names() {
   local commit="$1" triple="$2" short
   short="$(wa_node_short_sha "$commit")" || return 2
@@ -746,7 +760,7 @@ wa_node_binary_download() {
     cached_sha="$(wa_node_sha256 "$entry/wa-$triple-$short" 2>/dev/null)"
     cached_want="$(awk '{print $3}' "$entry/.complete" 2>/dev/null)"
     if [ -n "$cached_sha" ] && [ "$cached_sha" = "$cached_want" ]; then
-      for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+      for file in $(wa_node_bundle_members "$entry" "$triple" "$short"); do
         [ -f "$entry/$file" ] || continue
         [ -x "$entry/$file" ] || chmod +x "$entry/$file" 2>/dev/null || true
       done
@@ -787,7 +801,7 @@ wa_node_binary_download() {
     return "$rc"
   fi
   [ -z "$out" ] || printf '%s\n' "$out" >&2
-  for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+  for file in $(wa_node_bundle_members "$tmp" "$triple" "$short"); do
     if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "${WA_NODE_BINARIES_URL:-}" 2>&1)"; then
       rm -rf "$tmp"
       printf 'node_binary_missing: %s pins %s but the release does not carry it (%s)\n' "$tag" "$file" "$out" >&2
@@ -810,7 +824,7 @@ wa_node_binary_download() {
   # to end. The chmod comes AFTER the signature and every pin, so nothing is made executable that this
   # node has not already accepted, and a chmod that fails is a named refusal now rather than a
   # misleading message from upgrade.sh later.
-  for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+  for file in $(wa_node_bundle_members "$tmp" "$triple" "$short"); do
     [ -f "$tmp/$file" ] || continue
     chmod +x "$tmp/$file" 2>/dev/null \
       || { rm -rf "$tmp"; printf 'node_not_executable: %s could not be made executable\n' "$file" >&2; return 8; }
@@ -932,7 +946,7 @@ wa_node_release_digest_search() {
     out="$(wa_node_verify_signature "$repo" "$tag" "$tmp" 2>&1)"; rc=$?
     if [ "$rc" != 0 ]; then rm -rf "$tmp"; printf '%s\n' "$out" >&2; return "$rc"; fi
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+    for file in $(wa_node_bundle_members "$entry" "$triple" "$short"); do
       if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "$(wa_node_tag_base "$tag")" 2>&1)"; then
         rm -rf "$tmp"
         printf 'node_binary_missing: %s pins %s but the release does not carry it (%s)\n' "$tag" "$file" "$out" >&2
@@ -951,7 +965,7 @@ wa_node_release_digest_search() {
     # to end. The chmod comes AFTER the signature and every pin, so nothing is made executable that this
     # node has not already accepted, and a chmod that fails is a named refusal now rather than a
     # misleading message from upgrade.sh later.
-    for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+    for file in $(wa_node_bundle_members "$entry" "$triple" "$short"); do
       [ -f "$entry/$file" ] || continue
       chmod +x "$entry/$file" 2>/dev/null \
         || { rm -rf "$entry"; printf 'node_not_executable: %s could not be made executable\n' "$file" >&2; return 8; }

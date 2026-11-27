@@ -662,10 +662,20 @@ else
     term_bin="$target_dir/$zig_target/release/wa-term"
     [ -f "$term_bin" ] || term_bin="$target_dir/$triple/release/wa-term"
     [ -f "$term_bin" ] || fail "binary_missing: no built wa-term for $zig_target under $target_dir" 8
+    # AND THE SUPERVISOR `wa` RUNS FOR EVERY BASH/OPERATIONS CALL (P0, 27/11). It is built above (the zigbuild line names
+    # its crate) and the manifest demands it - but the copy into out/ still took only three binaries, so a publish that
+    # built for 170 s per target died on the asset it never placed: `binary_missing: .../out/wa-operations-supervisor-...`.
+    supervisor_bin="$target_dir/$zig_target/release/wa-operations-supervisor"
+    [ -f "$supervisor_bin" ] || supervisor_bin="$target_dir/$triple/release/wa-operations-supervisor"
+    [ -f "$supervisor_bin" ] || fail "binary_missing: no built wa-operations-supervisor for $zig_target under $target_dir" 8
     cp -f "$wa_bin" "$OUT/.wa-$triple-$SHORT.$$" && mv -f "$OUT/.wa-$triple-$SHORT.$$" "$OUT/wa-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
     cp -f "$sentinel_bin" "$OUT/.wa-sentinel-$triple-$SHORT.$$" && mv -f "$OUT/.wa-sentinel-$triple-$SHORT.$$" "$OUT/wa-sentinel-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
     cp -f "$term_bin" "$OUT/.wa-term-$triple-$SHORT.$$" && mv -f "$OUT/.wa-term-$triple-$SHORT.$$" "$OUT/wa-term-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
-    chmod +x "$OUT/wa-$triple-$SHORT" "$OUT/wa-sentinel-$triple-$SHORT" "$OUT/wa-term-$triple-$SHORT" 2>/dev/null || true
+    cp -f "$supervisor_bin" "$OUT/.wa-operations-supervisor-$triple-$SHORT.$$" \
+      && mv -f "$OUT/.wa-operations-supervisor-$triple-$SHORT.$$" "$OUT/wa-operations-supervisor-$triple-$SHORT" \
+      || fail "bundle_unwritable: $OUT" 2
+    chmod +x "$OUT/wa-$triple-$SHORT" "$OUT/wa-sentinel-$triple-$SHORT" "$OUT/wa-term-$triple-$SHORT" \
+      "$OUT/wa-operations-supervisor-$triple-$SHORT" 2>/dev/null || true
   done
   BUILD_SECONDS=$(( $(date +%s) - build_started ))
   emit_manifest "$OUT" >/dev/null || fail "manifest_unwritable: $OUT" 2
