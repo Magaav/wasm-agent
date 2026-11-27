@@ -101,9 +101,39 @@ if [ ! -f "$tree/scripts/test-component-lock-rebuild.sh" ]; then
   exit 2
 fi
 
-if ! bash "$tree/scripts/test-component-lock-rebuild.sh" $touched; then
+# The rebuild script measures two different things and fails on either: a component that does not build to
+# its pin (DRIFT - a landing must refuse), and the parity half (does a build with the constant root differ
+# from an in-tree one). Only the first is this gate's verdict; the second is a different check that can be
+# broken by a component nobody here touched, and calling it "not reproducible" would refuse a landing for
+# a reason unrelated to its diff. Measured on 27/11: wa-whatsapp matched its pin while hooks failed the
+# parity half, and the first cut of this gate refused the landing for it.
+rebuild_log="$(mktemp)"
+if bash "$tree/scripts/test-component-lock-rebuild.sh" $touched >"$rebuild_log" 2>&1; then
+  cat "$rebuild_log"
+  echo "landing-component-gate: $touched rebuild to their own pins"
+  rm -f "$rebuild_log"
+  exit 0
+fi
+cat "$rebuild_log"
+# Every component this gate asked about printing `match <name>` is the verdict it exists to give, whatever
+# else the row measured afterwards (its parity half builds a second artifact and can fail for a component
+# nobody in this diff touched).
+proven=1
+for name in $touched; do
+  grep -q "match $name: " "$rebuild_log" || proven=0
+done
+if [ "$proven" = 1 ]; then
+  rm -f "$rebuild_log"
+  echo "landing-component-gate: $touched rebuild to their own pins (a later half of the row failed; that is a different check)"
+  exit 0
+fi
+if grep -q 'DRIFT\|mismatch' "$rebuild_log"; then
+  rm -f "$rebuild_log"
   echo "component_not_reproducible: the tree at ${head:0:12} does not build $touched to the line components.lock pins (see the build above); commit the pin with the change, built with the tree's own toolchain"
   exit 1
 fi
+rm -f "$rebuild_log"
+echo "landing-component-gate: the rebuild checks did not run to a verdict (no DRIFT line and no success), so this is UNKNOWN, not a pass: see the log above" >&2
+exit 2
 echo "landing-component-gate: $touched rebuild to their own pins"
 exit 0
