@@ -15,6 +15,10 @@ libav* (ffmpeg 7.1) and libx264 built for wasm with wasi-sdk 34, run under wasmt
 | **the three together** | **0.19 - 0.24 s**, peak RSS ~60 MB | - |
 | compress 720p -> 480p h264 | **41 - 56 s** (encode 33 - 43 s), 3.04 MB out | **1.24 s**, 3.01 MB |
 
+* Repeatability: the indexing total was measured three times on the same machine and clip -
+  195.8, 208.8, 209.8 ms (median 208.8) - so the quarter of a second is a stable number, not a lucky
+  run. Per operation: probe 7.7-10.8 ms, five frames 96.4-113.0 ms, audio 85.8-93.8 ms.
+
 So the INDEXING path - what a video needs to be searchable - costs a quarter of a second. The on-demand
 `compress` family is ~35x native and slower than realtime, because x264 on wasm has no assembly and no
 SIMD128 path (`using cpu capabilities: none!`) and no threads. No non-WASI fallback was added: that is
