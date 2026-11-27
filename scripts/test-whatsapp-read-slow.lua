@@ -92,6 +92,44 @@ for _, ask in ipairs(asks) do
 end
 ok(#asks > 0 and missing == 0, "every ask carried the call's own budget (" .. #asks .. " asks, " .. missing .. " without)")
 
+-- ITEM 5's MEASURABLE HALF, counted rather than assumed: the SAME task - "what was said in this audio" -
+-- costs one tool call with `text: "full"` and two without it (the read, then the media call that holds the
+-- rest of the transcript). The tool calls a script makes are counted here, at the seam every call crosses.
+local function calls_for(ask_full)
+  local made = {}
+  local function counting(name, params, raw)
+    made[#made + 1] = name
+    local wire = json.decode(raw or "{}")
+    if type(wire) ~= "table" then wire = {} end
+    if name == "mcp_whatsapp_read" then
+      -- A snippet is cut, so the transcript is not in the answer; `full` carries it.
+      local text = ask_full and string.rep("a", 2000) or string.rep("a", 280)
+      return { header = { chat = "fixture" }, messages = { { id = "m1", text = text } }, count = 1 }
+    end
+    if name == "mcp_whatsapp_media" then
+      return { transcript = string.rep("a", 2000) }
+    end
+    return { error = "unexpected" }
+  end
+  if ask_full then
+    pending.invoke(counting, opts, "mcp_whatsapp_read", { chat = "fixture", id = "m1", text = "full" },
+      json.encode({ chat = "fixture", id = "m1", text = "full" }), 5)
+  else
+    -- The old shape: a snippet read, then a media call because the snippet was cut.
+    pending.invoke(counting, opts, "mcp_whatsapp_read", { chat = "fixture", id = "m1" },
+      json.encode({ chat = "fixture", id = "m1" }), 5)
+    pending.invoke(counting, opts, "mcp_whatsapp_media", { chat = "fixture", id = "m1" },
+      json.encode({ chat = "fixture", id = "m1" }), 5)
+  end
+  return #made, table.concat(made, " + ")
+end
+local before_calls, before_what = calls_for(false)
+local after_calls, after_what = calls_for(true)
+print("tool calls for one audio: before " .. before_calls .. " (" .. before_what .. ") -> after "
+  .. after_calls .. " (" .. after_what .. ")")
+ok(after_calls == 1, "the whole transcript costs ONE call: " .. after_what)
+ok(before_calls == 2, "and it cost two before: " .. before_what)
+
 if failed > 0 then
   print("whatsapp read slow: " .. failed .. " failed of " .. checks .. " checks")
   os.exit(1)
