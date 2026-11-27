@@ -939,6 +939,10 @@ if command -v node >/dev/null 2>&1; then
   # named here by its path (19-20/11: three of ten hidden tests did not discriminate, and every
   # review of that round carried a test MUST). Self-contained: a fixture repository, no binary.
   check discrimination node scripts/test-discriminates-test.mjs
+  # THE LANDING QUEUE ITSELF (hunk 1, 27/11): its journal is append-only and its submit is idempotent, and
+  # both facts are cheap shelf rows on a temp file - no node, no tree, no push.
+  check queue-journal node scripts/test-queue-journal.mjs
+  check queue-submit node scripts/test-queue-submit.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...
