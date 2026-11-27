@@ -875,9 +875,38 @@ local function outcome_of(record)
   local sentinel_dir = facts.sentinel_dir
   local id = record.sentinel_request_id or ''
   local outcome = { state = 'queued' }
+  -- THE DEPLOY OWN LAST VERDICT, for a record that would otherwise be silent (work, 27/11 twice: the record said "no
+  -- installer block for this request" while deploy.out held `refused(...)` and the exit line). Read once here, lazily,
+  -- and only when a failure needs it: deploy.out appends across installs, so only the last block's verdict is used, and
+  -- an empty log yields nothing rather than an invented sentence.
+  local deploy_out_verdict
+  local function last_deploy_verdict()
+    if deploy_out_verdict ~= nil then return deploy_out_verdict end
+    deploy_out_verdict = ''
+    local text = read(sentinel_dir .. '/deploy.out')
+    if not text then return deploy_out_verdict end
+    local block = text:match("%-%-%- deploy [^\r\n]*%-%-%-(.*)$") or text
+    local found
+    for line in block:gmatch("[^\r\n]+") do
+      local s = trim(line)
+      if s:find('refused%(') or s:find('^deploy: failed') or s:find('^install: the ') then found = s end
+    end
+    deploy_out_verdict = found or ''
+    return deploy_out_verdict
+  end
   local function settled(state, detail, extra)
     outcome.state = state
     outcome.detail = detail
+    if state == 'failed' then
+      local verdict = last_deploy_verdict()
+      if verdict ~= '' then
+        if detail == nil or detail == '' then
+          outcome.detail = verdict
+        elseif not tostring(detail):find(verdict, 1, true) then
+          outcome.detail = tostring(detail) .. ' - ' .. verdict
+        end
+      end
+    end
     for key, value in pairs(extra or {}) do outcome[key] = value end
     return outcome
   end
