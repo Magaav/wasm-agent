@@ -241,7 +241,7 @@ fn answer_text(l: *mut wa_host_support::lua::LuaState, op: &str) -> std::os::raw
 
 /// The answer for one already-read request: this node cannot answer at all, or validate, queue and wait.
 fn answer_with(op: &str, args: &Value) -> Value {
-    component_absent_text(op).unwrap_or_else(|| ask_text(op, args, seam::WAIT_MS))
+    component_absent_text(op).unwrap_or_else(|| ask_text(op, args, crate::serve::wait_ms(args)))
 }
 
 /// `host.whatsapp_index({op, ...args})` - the read answers a component can grow without the host.
@@ -426,7 +426,7 @@ fn ask_registry_in(q: &wa_queue::Queue, args: &Value, build: &str) -> Value {
         Ok(enqueued) => enqueued.id.0,
         Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
     };
-    let deadline = Instant::now() + Duration::from_millis(seam::WAIT_MS.max(1));
+    let deadline = Instant::now() + Duration::from_millis(crate::serve::wait_ms(args).max(1));
     loop {
         match q.job(JobId(id)) {
             Ok(Some(job)) => match job.state.as_str() {
