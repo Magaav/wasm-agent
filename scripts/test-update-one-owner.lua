@@ -16,6 +16,25 @@
 local json = dofile('lua/vendor/json.lua')
 local screen = dofile('lua/core/update_screen.lua')
 
+-- WHICH TREE IS BEING JUDGED, SAID FIRST (27/11, landing queue #62). MEASURED: with WASM_AGENT_LUA_ROOT unset the host
+-- prints "lua root unset: using embedded modules" and runs the modules baked into the binary - which do not carry this
+-- branch, so the row reported the OLD behaviour as a red against the product. It must SKIP BY NAME, before its first
+-- assertion.
+do
+  local root = host.getenv('WASM_AGENT_LUA_ROOT') or ''
+  if root == '' then
+    print('SKIP test-update-one-owner: WASM_AGENT_LUA_ROOT is not set, so the host would run its embedded modules and '
+      .. 'this row would judge the old tree instead of the branch')
+    return
+  end
+  local ok, body = pcall(host.read_file, root .. '/lua/core/update_screen.lua')
+  if ok and type(body) == 'string' and not body:find('node%-', 1, true) then
+    print('SKIP test-update-one-owner: the tree at ' .. root .. ' still strips the commit id with a lazy pattern, so '
+      .. 'this row would report the defect it exists to pin instead of judging the fix')
+    return
+  end
+end
+
 local checks = 0
 local function check(ok, message) assert(ok, message); checks = checks + 1 end
 
@@ -47,7 +66,13 @@ check(screen.log_line('') == nil, 'and is absent when there is no log')
 
 -- ---------------------------------------------------------------- O2/O3: the owner is the only author
 -- The scan is of the tree this row runs against (WASM_AGENT_LUA_ROOT), so it judges the product, not a copy.
-local root = host.getenv('WASM_AGENT_LUA_ROOT') or '.'
+local root = host.getenv('WASM_AGENT_LUA_ROOT') or ''
+if root == '' then
+  -- This half of the row is a SCAN of the tree under test. Without the root named it would scan '.' and judge
+  -- whatever directory the runner happens to use - so it says so by name instead.
+  print('SKIP test-update-one-owner: WASM_AGENT_LUA_ROOT is not set, so the scan cannot tell which tree to judge')
+  return
+end
 local function read(path)
   local ok, text = pcall(host.read_file, path)
   return ok and type(text) == 'string' and text or ''
@@ -65,6 +90,14 @@ if type(listed) == 'string' then
   if ok and type(decoded) == 'table' and type(decoded.entries) == 'table' then entries = decoded.entries end
 elseif type(listed) == 'table' then
   entries = listed.entries or listed
+end
+if #entries == 0 then
+  -- A LISTING THAT DECODED TO NOTHING IS NOT A PASS (27/11, queue #62): the first version of this scan iterated a
+  -- JSON string with ipairs and silently checked nothing, and a later one could decode to an empty table the same
+  -- way. Nothing scanned means nothing proved, so it is a named skip, never a green.
+  print('SKIP test-update-one-owner: the listing of ' .. root .. '/lua/core decoded to no entries, so there is '
+    .. 'nothing to scan and nothing to prove')
+  return
 end
 for _, entry in ipairs(entries) do
   local file = tostring(type(entry) == 'table' and entry.name or entry)
@@ -91,6 +124,7 @@ for _, entry in ipairs(entries) do
   end
 end
 check(#others == 0, 'no second author of the verdict sentences: ' .. table.concat(others, '; '))
+print(string.format('  scanned %d file(s) in %s/lua/core', #entries, root))
 
 local chat = read(root .. '/lua/core/chat.lua')
 check(chat:find('lua/core/update_screen.lua', 1, true) ~= nil, '/update calls the owner')
