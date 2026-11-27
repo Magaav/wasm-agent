@@ -264,7 +264,25 @@ selfloop 949c657d3dcd365095425133d755e6023ddc3fe7bd5735d87064872346cff0a8 247835
 # export in the world is one the node actually asks. Two builds, same sha256, 146,696 bytes.
 stt bc7db7b0f63f3187edb02490ba73dca0d655ce70991eda791e14841a10f63d73 146696
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
-wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
+# WHY THESE TWO WERE REPINNED (27/11, mission fix-components-lock-email-whatsapp). One commit moved both
+# components and repinned neither, and nothing checked, so every publish since e6bddc6f refused
+# `artifact_not_pinned: wa-email wa-whatsapp`:
+#
+#   `33f1eeec` (26/11, "whatsapp-read-is-consistent, re-applied ... the component change is not repinned")
+#   changed `rust/wa-queue` - which BOTH components link, wa-email through wa-email-outbox and wa-whatsapp
+#   through its index and outbox - and also `rust/wa-whatsapp-index`, `rust/wa-whatsapp-outbox` and
+#   `rust/components/wa-whatsapp/src/*`. The wa-whatsapp pin line was written by the merge `9c15db94` from the
+#   other side, so it looked newer than those sources while describing older bytes; that is why the guard
+#   below hashes FILES and not commit times.
+#
+#   `7839260f` (27/11, email-read-waits-on-a-future) then removed the mail index's private 2 s wait, which
+#   changed `wa-email` on its own. Its size is unchanged (565827) and its bytes are not: a source change with
+#   no size change is exactly the drift a pin cannot carry.
+#
+# Both artifact lines below are the builds of this tree; `scripts/test-components-lock-follows-source.lua` is
+# the guard that a future change cannot repeat this quietly.
+
+wa-email 44c73d1b1df0f3d62362b5f99d56b183f5793f7f6ec2343aac5180d7e9890db8 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
 # its bytes are the ones published in components-033542eb9a37.
@@ -272,4 +290,16 @@ wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
 # (hidden/hidden_why) and this branch's paging (next, before) and clamp (say_limit) are one answer now, so
 # the bytes are the build of the merged source, not either side's. Built on avell in the pinned root
 # (/tmp/wa-component-build/src) with rustc 1.100.0, wasi-sdk 34.0.
-wa-whatsapp b896fd523d789f414284dc7a3f5824b0a05d2a779b66b70b6fc5d726bdb6bcf9 8928763
+wa-whatsapp a7638f6f09c1a8a1f70334decfa4f66ec43622e459c35cb55c0d0461a8230c99 8930806
+# SOURCES agent-core 7e841b7234b00801ecee490bc07f5c702b596d68228a5bf8c5298040d7f5fd4a
+# SOURCES codemode 4456e8599617fd853f7013cc1ec8e65623a45613163b76b13d19e280726a41e1
+# SOURCES graph 963d98538e92d3d7b12b7df989369636f8b2a4a7308b0791c19c6aae0de8beb5
+# SOURCES hooks 9ca8820055971ab7a532549511c446bb16a2fa1bcc14c32bf0139b8be5552fd0
+# SOURCES memory 0f970ab90801c636a5ed6d7beeacabe43df5d725c068a08ad7f35517d26d9eeb
+# SOURCES mesh c82e5d45fe45fd16b02391c7da6103e319d61d3190a0d387622e61ba86494de3
+# SOURCES model-gateway 3f958b4c710cbd34113e9c38496c606098ea4a9df39c248a5adffd829644279e
+# SOURCES selfloop c7f20da9dd79111ffadd87479a13034f92f56d632e143454ba03940af7f21baf
+# SOURCES stt 646efcd5dc6663bafaa4fbba3645ff6fc0b856934e311eddbc28f1b9ae33e62f
+# SOURCES telemetry-sink a05024a258ef6d406635aad7f2926e88056001d725c280c619c14c12f3b75849
+# SOURCES wa-email 0770be529a0b6ed5b9cab5318dd2ac8fd5b64856c4a87f55da6c33c49c7d35b2
+# SOURCES wa-whatsapp b420936ee58fbbeb8f6f85e161efdb1c610bc71567da9865f2cee30149bcc14b
