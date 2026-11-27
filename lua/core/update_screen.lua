@@ -58,7 +58,7 @@ M.START = "checking for updates"
 -- that commit `node-1857d15887c` and a compiled install's build id spells it `va1857d15`; both are the same
 -- commit, so the prefix is stripped here and the same spelling is printed for both kinds.
 function M.identity(version, commit)
-  local sha = trim(commit):gsub("^node-", ""):gsub("^va", ""):sub(1, 8)
+  local sha = trim(commit):gsub("^node%-", ""):gsub("^va", ""):sub(1, 8)
   local tag = trim(version)
   if tag ~= "" and tag:sub(1, 1) ~= "v" then tag = "v" .. tag end
   if sha == "" then return tag ~= "" and tag or "" end
@@ -68,7 +68,7 @@ end
 
 -- "updated to v0.1.2 · 82f57859 in 0:48". The install FINISHED: the one line that says so exists.
 function M.updated(version, commit, seconds)
-  local sha = trim(commit):gsub("^node-", ""):gsub("^va", ""):sub(1, 8)
+  local sha = trim(commit):gsub("^node%-", ""):gsub("^va", ""):sub(1, 8)
   local tag = trim(version)
   if tag ~= "" and tag:sub(1, 1) ~= "v" then tag = "v" .. tag end
   local who
@@ -81,7 +81,7 @@ end
 
 -- "already up to date (82f57859)": an answer, not a step. The commit is what this node RUNS.
 function M.current(commit)
-  local sha = trim(commit):gsub("^node-", ""):gsub("^va", "")
+  local sha = trim(commit):gsub("^node%-", ""):gsub("^va", "")
   if sha == "" then return "already up to date" end
   return "already up to date (" .. sha:sub(1, 8) .. ")"
 end
@@ -89,7 +89,7 @@ end
 -- "installed 82f57859, with 1 problem: <the problem>". The install HAPPENED and something else did not:
 -- the node serves the new build, and the line says the good news first because it is the true one.
 function M.with_problems(commit, problems, detail)
-  local sha = trim(commit):gsub("^node-", "") :gsub("^va", "")
+  local sha = trim(commit):gsub("^node%-", "") :gsub("^va", "")
   local who = sha ~= "" and sha:sub(1, 8) or "the new build"
   local count = math.max(1, math.floor(tonumber(problems) or 1))
   local what = trim(detail)
