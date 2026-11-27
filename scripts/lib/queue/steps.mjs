@@ -17,9 +17,21 @@ import path from 'node:path';
 // describes, and the one this file exists not to reproduce.
 export const CAPS = {merge: 120_000, rows: 1_800_000, push: 120_000};
 
+// A CHILD GETS A GIT WITHOUT A WORKSPACE. `land-quick.sh` exports GIT_DIR/GIT_WORK_TREE for its own tree,
+// and `git -C <dir>` does NOT override them: a runner started from such a shell would answer every
+// question about the wrong repository (this is what turned the queue-pin row red inside the queue at q#42
+// while it was green by hand). The three variables are removed here, once, for every child.
+// Computed per call, not once at load: a caller may set a variable (a fixture does) after this module is
+// imported, and a snapshot taken at load time would silently drop it.
+function cleanGitEnv() {
+  const env = {...process.env};
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete env[key];
+  return env;
+}
+
 function run(cmd, args, {timeoutMs, env = {}} = {}) {
   return new Promise((resolve) => {
-    const child = execFile(cmd, args, {timeout: timeoutMs, env: {...process.env, ...env}, maxBuffer: 8 * 1024 * 1024},
+    const child = execFile(cmd, args, {timeout: timeoutMs, env: {...cleanGitEnv(), ...env}, maxBuffer: 8 * 1024 * 1024},
       (error, stdout, stderr) => {
         const timedOut = Boolean(error && error.killed);
         resolve({code: error ? (error.code ?? 1) : 0, stdout: stdout ?? '', stderr: stderr ?? '', timedOut});

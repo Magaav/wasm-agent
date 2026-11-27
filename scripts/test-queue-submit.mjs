@@ -15,6 +15,13 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {openJournal, verdict} from './lib/queue/journal.mjs';
 
+// THE LANDER RUNS THESE ROWS WITH GIT_DIR EXPORTED (land-quick.sh sets it for its own tree), and `git -C`
+// does not override it: a row that spawns git would then read and write the CANONICAL checkout instead of
+// its fixture. That is what turned this row red inside the queue (q#42) while it was green by hand, so
+// every git call here runs with the workspace variables REMOVED.
+const GIT_ENV = {...process.env};
+for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete GIT_ENV[key];
+
 let checks = 0;
 const fail = (message) => { console.error(`FAIL test-queue-submit: ${message}`); process.exit(1); };
 const ok = (condition, message) => { if (!condition) fail(message); checks += 1; };
@@ -26,12 +33,12 @@ const home = path.join(work, 'home');
 fs.mkdirSync(home, {recursive: true});
 const dbFile = path.join(home, 'lane', 'landing-queue.db');
 const repo = execFileSync('git', ['rev-parse', '--show-toplevel'], {encoding: 'utf8'}).trim();
-const sha = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
+const sha = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {encoding: 'utf8', env: GIT_ENV}).trim();
 
 const run = (args, options = {}) => {
   try {
     const out = execFileSync(process.execPath, [new URL(import.meta.url).pathname.replace(/test-queue-submit\.mjs$/, 'queue.mjs'), ...args],
-      {encoding: 'utf8', env: {...process.env, WASM_AGENT_HOME: home, TMPDIR: work}, ...options});
+      {encoding: 'utf8', env: {...GIT_ENV, WASM_AGENT_HOME: home, TMPDIR: work}, ...options});
     return {code: 0, out};
   } catch (error) {
     return {code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}`};

@@ -18,6 +18,13 @@ import {openJournal, submit} from './lib/queue/journal.mjs';
 import {pinRequest, pinRefName, landQuick} from './lib/queue/steps.mjs';
 import {runOnce} from './q-runner.mjs';
 
+// THE LANDER RUNS THESE ROWS WITH GIT_DIR EXPORTED (land-quick.sh sets it for its own tree), and `git -C`
+// does not override it: a row that spawns git would then read and write the CANONICAL checkout instead of
+// its fixture. That is what turned this row red inside the queue (q#42) while it was green by hand, so
+// every git call here runs with the workspace variables REMOVED.
+const GIT_ENV = {...process.env};
+for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete GIT_ENV[key];
+
 let checks = 0;
 const fail = (message) => { console.error(`FAIL test-queue-pin: ${message}`); process.exit(1); };
 const ok = (condition, message) => { if (!condition) fail(message); checks += 1; };
@@ -29,7 +36,7 @@ process.on('exit', () => { try { fs.rmSync(work, {recursive: true, force: true})
 // A clone-shaped fixture: main, a branch, and a commit to move it to.
 const repo = path.join(work, 'clone');
 fs.mkdirSync(repo, {recursive: true});
-const git = (...args) => execFileSync('git', ['-C', repo, ...args], {encoding: 'utf8'}).trim();
+const git = (...args) => execFileSync('git', ['-C', repo, ...args], {encoding: 'utf8', env: GIT_ENV}).trim();
 git('init', '-q', '--initial-branch=main');
 git('config', 'user.email', 'row@example.invalid');
 git('config', 'user.name', 'row');
@@ -117,11 +124,11 @@ eq(accepted.outcome, 'landed', 'and the lander accepts the pinned ref that still
 // lander. This case drives landQuick with two DIFFERENT trees and asserts which one gets the ref.
 const clone = path.join(work, "clone2");
 fs.mkdirSync(clone, {recursive: true});
-execFileSync("git", ["-C", clone, "init", "-q", "--initial-branch=main"]);
-execFileSync("git", ["-C", clone, "-c", "user.email=r@e.invalid", "-c", "user.name=r", "commit", "-q", "--allow-empty", "-m", "one"]);
+execFileSync("git", ["-C", clone, "init", "-q", "--initial-branch=main"], {env: GIT_ENV});
+execFileSync("git", ["-C", clone, "-c", "user.email=r@e.invalid", "-c", "user.name=r", "commit", "-q", "--allow-empty", "-m", "one"], {env: GIT_ENV});
 // The sha the request names must exist in the LANDER tree, because that is where the pin is written.
-const _cloneSha = execFileSync("git", ["-C", clone, "rev-parse", "HEAD"], {encoding: "utf8"}).trim();
-execFileSync("git", ["-C", clone, "update-ref", "refs/remotes/origin/main", _cloneSha]);
+const _cloneSha = execFileSync("git", ["-C", clone, "rev-parse", "HEAD"], {encoding: "utf8", env: GIT_ENV}).trim();
+execFileSync("git", ["-C", clone, "update-ref", "refs/remotes/origin/main", _cloneSha], {env: GIT_ENV});
 const fourth = submit(db, {branch: "change/lander", sha: read, mission: "pin"});
 
 // A lander that records the ref it was handed and the environment it ran with, then succeeds.
