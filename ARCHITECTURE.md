@@ -310,6 +310,12 @@ brief that will (the table at the end of this section says which).
 - **Law 13. A new gate runs advisory until a rehearsal is green on the real fleet; only then does it block** (26/11: the
   canary step stopped the v0.1.2 cut six times on its own defects - a gate that has never passed on the fleet is a
   source of outages, not a guard).
+- **Law 14. A landing has guards, never a gate:** the who-check, the branch's own rows on the merged tip, revert on a
+  real red. The full suite runs beside the train (the health loop) and at a release cut, never inside a landing.
+- **Law 15. Every wait has a reason and a cap.** A wait that cannot end (an install record for a landing that installs
+  nothing; a quiet tree while workers always run) is refused by the landing's self-check.
+- **Law 16. An incident is answered with a guard that costs nothing per landing, plus a revert.** A new wait on the
+  landing path needs Fable's word and its measured cost.
 
 ### What enforces each law
 
