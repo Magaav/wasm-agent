@@ -547,17 +547,17 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
             Err(error) => return seam::refusal(op, "queue_failed", one_line(&error.to_string())),
         };
         match job.state.as_str() {
-            "done" => return settled_answer(op, &job),
+            "done" => return with_job(settled_answer(op, &job), id),
             "dead" | "expired" => {
                 let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
                 if let Some(code) = seam::permanent_code(&reason) {
                     let mut answer = refused(op, code, &reason, None);
                     answer["state"] = Value::String(seam::state_word(job.state.as_str()).to_string());
-                    return answer;
+                    return with_job(answer, id);
                 }
                 let mut answer = seam::refusal(op, "failed", reason.chars().take(160).collect::<String>());
                 answer["state"] = Value::String(seam::state_word(job.state.as_str()).to_string());
-                return answer;
+                return with_job(answer, id);
             }
             state => {
                 if Instant::now() >= deadline {
@@ -569,6 +569,21 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
         crate::serve::beat();
         std::thread::sleep(POLL);
     }
+}
+
+/// The job that answered, in the answer itself.
+///
+/// `job` is the queue id, and it is what makes a FRESH answer distinguishable from a replayed one from
+/// outside the process: two identical calls answered by one job id are one answer, and two calls answered
+/// by two ids are two reads of the index. Before this field the difference was invisible - which is why the
+/// reads that answered 15:40, 16:15 and 15:44 in a row could not be told apart from three honest ones by
+/// anything but the numbers inside them, and why the cross-process row for that bug had nothing to assert.
+/// The slow path already names the same id (it IS the handle `wait(op)` continues).
+fn with_job(mut answer: Value, id: u64) -> Value {
+    if let Value::Object(map) = &mut answer {
+        map.insert("job".to_string(), Value::from(id));
+    }
+    answer
 }
 
 /// The tool's answer from a job the component settled.

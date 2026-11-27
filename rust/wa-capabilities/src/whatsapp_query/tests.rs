@@ -498,7 +498,12 @@ fn the_op_named_as_data_answers_the_same_bytes_as_the_typed_op() {
     let settled = seam::answer(seam::Op::Reactions, component_answer.clone());
     data_q.done_by(taken.id, COMPONENT, &serde_json::to_vec(&settled).unwrap()).unwrap();
     let answered = settle(&data_q, seam::Op::Reactions, taken.id.0, 1);
-    assert_eq!(json_text(&answered), json_text(&settled), "the tool answer is the component's answer");
+    // The tool answer is the component's answer plus the one thing the component cannot know: WHICH job
+    // gave it (`job`, the queue id). Everything the component wrote crosses untouched, and the extra field
+    // is what makes a fresh answer distinguishable from a replayed one from outside the process.
+    let mut expected = settled.clone();
+    expected["job"] = Value::from(taken.id.0);
+    assert_eq!(json_text(&answered), json_text(&expected), "the tool answer is the component's answer, named by the job that gave it");
     assert_eq!(answered["ok"], true);
 }
 
@@ -711,4 +716,45 @@ fn the_host_carries_the_contacts_cursor_onto_the_wire() {
     let read = ask_in(&queue, seam::Op::Read, &serde_json::json!({"chat": "15550000001@lid", "before": "3EB0"}), 1, BUILD);
     let read_job = queue.job(wa_queue::JobId(read["id"].as_u64().expect("read job"))).unwrap().unwrap();
     assert_eq!(seam::Request::decode(&read_job.payload).expect("a request").before.as_deref(), Some("3EB0"));
+}
+
+/// The answer says WHICH job answered it, and two identical calls are two jobs.
+///
+/// Why this is a test and not a comment: before `job` the answer carried no way to tell a fresh read from
+/// one the queue replayed, so the 23/11 bug (three reads in a row answering 15:40, 16:15 and 15:44) was
+/// invisible from outside the process, and the cross-process row that bug needs had nothing to assert on.
+/// The id is the promise: two identical calls answered by one id are ONE answer; answered by two ids they
+/// are two reads of the index.
+#[test]
+fn the_answer_names_the_job_that_answered_it() {
+    let (_host, queue) = queue("names-its-job");
+    let args = serde_json::json!({"chat": "5511999999999@lid", "limit": 3});
+    let slow = ask_in(&queue, seam::Op::Read, &args, 1, BUILD);
+    let first = slow["id"].as_u64().expect("the pending handle names the job");
+    // The component answers that job, and the continuation names it: one call, one id, end to end.
+    let wa_queue::TakeOutcome::Job(taken) = queue.take(seam::QUEUE, "wa-whatsapp", None).unwrap() else {
+        panic!("the job must be takeable");
+    };
+    let answer = seam::answer(
+        seam::Op::Read,
+        serde_json::json!({"chat": "5511999999999@lid", "messages": [{"id": "3EB01", "text": "oi"}], "count": 1}),
+    );
+    queue.done_by(taken.id, "wa-whatsapp", &serde_json::to_vec(&answer).unwrap()).unwrap();
+    let settled = ask_in(&queue, seam::Op::Read, &serde_json::json!({"__job": first}), 1, BUILD);
+    assert_eq!(settled["job"].as_u64(), Some(first), "the settled answer names the job that produced it: {settled}");
+    assert_eq!(settled["count"], 1, "and it is still the component's own document: {settled}");
+    // The claim was released when the job settled, so the SAME question is a NEW job with its own id -
+    // the exact fact the 23/11 bug got wrong (one id answering an hour of calls).
+    let second = ask_in(&queue, seam::Op::Read, &args, 1, BUILD);
+    let next = second["id"].as_u64().expect("a fresh job, not the settled one");
+    assert_ne!(next, first, "two identical calls are two jobs: {second}");
+    // A refusal names its job too: the same field, whatever the job settled as.
+    let wa_queue::TakeOutcome::Job(taken2) = queue.take(seam::QUEUE, "wa-whatsapp", None).unwrap() else {
+        panic!("the second job must be takeable");
+    };
+    let refusal = seam::refusal(seam::Op::Read, "chat_not_found", "the chat is not indexed");
+    queue.done_by(taken2.id, "wa-whatsapp", &serde_json::to_vec(&refusal).unwrap()).unwrap();
+    let refused = ask_in(&queue, seam::Op::Read, &serde_json::json!({"__job": next}), 1, BUILD);
+    assert_eq!(refused["job"].as_u64(), Some(next), "a refusal names its job too: {refused}");
+    assert_eq!(refused["error"], "whatsapp_read_chat_not_found", "{refused}");
 }
