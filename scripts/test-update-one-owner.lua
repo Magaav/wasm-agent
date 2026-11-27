@@ -13,6 +13,7 @@
 --   O4  the last line is ONE line (no newline in it) and the log line is one line naming a path.
 --
 --   WASM_AGENT_LUA_ROOT=<repo> WA_SCRIPT=scripts/test-update-one-owner.lua wa --db <scratch>
+local json = dofile('lua/vendor/json.lua')
 local screen = dofile('lua/core/update_screen.lua')
 
 local checks = 0
@@ -54,13 +55,38 @@ end
 local OWNER = 'lua/core/update_screen.lua'
 local PHRASES = { 'updated to ', 'already up to date', 'Notting was changed', 'Nothing was changed.' }
 local others = {}
+-- host.list_dir ANSWERS A JSON DOCUMENT, not a Lua array (27/11): the first version of this scan iterated it with
+-- ipairs, which quietly did nothing - the scan passed on every tree and could not have caught a duplicate at all. A
+-- check that cannot fail is worse than none, so the listing is decoded and every .lua file in it is read.
 local listed = host.list_dir(root .. '/lua/core')
-for _, name in ipairs(type(listed) == 'table' and listed or {}) do
-  local file = tostring(name)
+local entries = {}
+if type(listed) == 'string' then
+  local ok, decoded = pcall(json.decode, listed)
+  if ok and type(decoded) == 'table' and type(decoded.entries) == 'table' then entries = decoded.entries end
+elseif type(listed) == 'table' then
+  entries = listed.entries or listed
+end
+for _, entry in ipairs(entries) do
+  local file = tostring(type(entry) == 'table' and entry.name or entry)
   if file:sub(-4) == '.lua' and ('lua/core/' .. file) ~= OWNER then
     local body = read(root .. '/lua/core/' .. file)
-    for _, phrase in ipairs({ 'updated to ', 'already up to date', 'Nothing was changed.' }) do
-      if body:find(phrase, 1, true) then others[#others + 1] = 'lua/core/' .. file .. ' builds "' .. phrase .. '"' end
+    -- A COMMENT IS NOT A SECOND AUTHOR (27/11, landing queue #57): the first version of this scan counted any
+    -- occurrence, so a file whose comment merely SAYS "updated to v0.1.2" turned the row red on a merged tip while
+    -- the product was right. What matters is a line that BUILDS the sentence: a string literal concatenated or
+    -- formatted, not prose after `--`.
+    for line in body:gmatch('[^\n]+') do
+      local trimmed = line:gsub('^%s+', '')
+      if trimmed:sub(1, 2) ~= '--' then
+        -- THE VERDICT STEMS, not the promise tail: 'Nothing was changed.' also closes a BACKUP refusal and a remote-pin
+        -- message (lua/core/backup_cli.lua:89, lua/core/remote_update.lua:1341), which are other sentences that happen to
+        -- share the promise. What belongs to this owner is the verdict: 'updated to ', 'already up to date', and the
+        -- 'not updated: ' that only a released update says.
+        for _, phrase in ipairs({ 'updated to ', 'already up to date', 'not updated: ' }) do
+          if trimmed:find(phrase, 1, true) then
+            others[#others + 1] = 'lua/core/' .. file .. ' builds "' .. phrase .. '"'
+          end
+        end
+      end
     end
   end
 end
