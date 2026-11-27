@@ -732,6 +732,25 @@ function M.limits(provider_id)
     -- with their age. Only a door that has nothing at all is reported as loading.
     -- The provider, and nothing else: the host resolves the URL itself (Fable, 26/11).
     pcall(host.limits_start, id)
+    -- A DOOR THAT HAD NOTHING IS WAITED FOR, BRIEFLY (27/11, main-health on 702e4342): the first
+    -- `/status` between runs drew "loading limits..." and nothing repainted it - the panel only redraws on
+    -- a key, so the reader who asked once saw a spinner and the reading that arrived a moment later was
+    -- never drawn. The read is a small GET on the host's own thread; waiting for its FIRST answer is
+    -- bounded here (12 x 25 ms = 300 ms, well inside the panel's own budget) and only when the door had
+    -- no reading at all. A failure or an old reading is still drawn as it is, never waited on.
+    if held.state == nil or held.state == "none" then
+      for _ = 1, 12 do
+        if type(host.sleep) == "function" then pcall(host.sleep, 25) end
+        local more, again = pcall(host.limits_poll, id)
+        if more and type(again) == "string" then
+          local next_held = json.decode(again)
+          if type(next_held) == "table" and next_held.state ~= nil and next_held.state ~= "none" and next_held.state ~= "loading" then
+            held = next_held
+            break
+          end
+        end
+      end
+    end
   end
   local failure = held.error and redact.text(tostring(held.error)) or nil
   local state = held.state
