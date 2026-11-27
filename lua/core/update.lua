@@ -835,7 +835,10 @@ local function published_bundle(facts, record)
   local probe = M.run_release({ check = true }, facts, record)
   if type(probe) ~= "table" then return nil end
   local state = tostring(probe.state or "")
-  if state == "behind" or state == "installable" or state == "available" then return probe end
+  -- release_plan PRINTS `bootstrap: install <dir>: current|update|adopt|fresh`, and nothing else: the first version of
+  -- this comparison tested "behind"/"installable"/"available", so every real plan answered nil and the law-17 decision
+  -- was inert in production. `current` means there is nothing to install.
+  if state == "update" or state == "adopt" or state == "fresh" then return probe end
   return nil
 end
 
