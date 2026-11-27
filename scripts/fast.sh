@@ -1218,6 +1218,10 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # origin), the scratch HOME and the key; its Lua half is excluded from the bare loop for that reason.
   WA_BIN="$bin" check status-limits-security node scripts/test-status-limits-security.mjs
   WA_BIN="$bin" check status-midrun-pty node scripts/test-status-midrun-pty.mjs
+# THE REPORT CITED A QUERY THAT DID NOT EXIST (27/11): docs/missions/reports/waiting-costs-no-turns.md names
+# wct-query.sql as its after-measurement, and the file was never in the tree. The row checks the query exists,
+# parses, still counts the four numbers the before was taken with, and answers a real 1-day window.
+check wct-query bash scripts/test-wct-query.sh
 # THE RESET TIME HAS TO SURVIVE THE PANEL (/status, Victor 27/11): a limits row is measured at the room a console
 # panel really gives (PANEL_ROOM cells after the box chrome) and must still say when it resets - the text is the LAST
 # field on the row, so it is the first thing a narrow panel cuts.
