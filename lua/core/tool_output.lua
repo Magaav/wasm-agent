@@ -327,6 +327,20 @@ function M.project(name, output)
     local simple = lean.ok ~= false and lean.error == nil
     for key in pairs(lean) do if not plain[key] then simple = false end end
     -- A note that does not fit the header is not silently dropped: the result keeps the JSON form.
+    -- A CALL THAT FAILED AND LEFT ITS STDERR BEHIND IS NAMED IN THE RESULT (refusals-that-help (j)). What it
+    -- costs: one line per such call, the first stderr line cut at 160 bytes, at most three calls - measured
+    -- on the run behind this fix, 0 bytes before and 118 bytes after for the one failed remote call.
+    local function dropped_lines(source)
+      local lines = {}
+      for _, call in ipairs(type(source.calls) == 'table' and source.calls or {}) do
+        if type(call) == 'table' and type(call.stderr_dropped) == 'string' and call.stderr_dropped ~= '' then
+          lines[#lines + 1] = 'note: ' .. tostring(call.name) .. ' exited ' .. tostring(call.exit or '?')
+            .. ' and the returned value dropped its stderr: ' .. call.stderr_dropped
+          if #lines >= 3 then break end
+        end
+      end
+      return lines
+    end
     local notes = simple and pending_lines(lean) or nil
     if notes then
       local header = 'status ' .. tostring(lean.status or 200) .. (lean.summary and (' \194\183 ' .. tostring(lean.summary)) or '')
@@ -336,6 +350,7 @@ function M.project(name, output)
         if type(call) == 'table' and call.sha256 then evidence[#evidence + 1] = call.sha256 .. ':' .. tostring(call.bytes or 0) end
       end
       if #evidence > 0 then header = header .. '\ncalls: ' .. table.concat(evidence, ' ') end
+      for _, line in ipairs(dropped_lines(lean)) do header = header .. '\n' .. line end
       -- The session's variables, names and sizes only (`vars.<name>` in a script reads one back).
       if lean.vars then header = header .. '\nvars: ' .. lean.vars end
       -- After calls: and vars: - WHAT BECAME OF A HANDLE while the model was not waiting, and what this

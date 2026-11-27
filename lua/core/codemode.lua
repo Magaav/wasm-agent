@@ -83,7 +83,13 @@ local function summary_of(calls)
  local parts={}
  for i,call in ipairs(calls) do
   if i>12 then parts[#parts+1]='+'..(#calls-12)..' more';break end
-  parts[#parts+1]=tostring(call.name)..' '..tostring(call.status or (call.ok and 200 or 500))..(call.why and call.why~='' and (' '..call.why) or '')
+  local part=tostring(call.name)..' '..tostring(call.status or (call.ok and 200 or 500))..(call.why and call.why~='' and (' '..call.why) or '')
+  -- A REMOTE CALL'S STATUS IS NOT ITS EXIT (refusals-that-help (j)). Measured: `tools.remote` bash on a peer
+  -- answered status 200 WITH process_exit_code 1 and stderr 'no such column: bucket_id', and the run line said
+  -- only 'remote 200' - so a failed command looked like success and its empty stdout read as 'no rows'.
+  if call.exit and call.exit~=0 then part=part..' exit='..tostring(call.exit) end
+  if call.stderr_bytes and call.stderr_bytes>0 then part=part..' stderr '..tostring(call.stderr_bytes)..' B' end
+  parts[#parts+1]=part
  end
  return table.concat(parts,' · ')
 end
@@ -729,6 +735,14 @@ local function settle_call(s,call)
       -- result (both loops settle through this one function, so both attach the same pictures).
       take_result_images(s,call,value,params)
      else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
+     -- WHAT THE CALL SAID ABOUT ITS OWN ENDING, read BEFORE the script's view is slimmed: a remote command
+     -- that exits non-zero still answers HTTP 200, and `bash_result.slim_for` keeps only the tool's declared
+     -- fields, so `process_exit_code` and `stderr` are gone by the time the call record is written.
+     local exit_code, stderr_text = nil, nil
+     if type(value)=='table' then
+       exit_code=tonumber(value.process_exit_code or value.code)
+       stderr_text=type(value.stderr)=='string' and value.stderr or nil
+     end
      local encoded=json.encode(value);local reference=output.store(encoded)
      value,success=script_value(value,success)
      -- The shape the script RECEIVES is the allow-list, whatever a producer added to the answer (the
@@ -747,7 +761,15 @@ local function settle_call(s,call)
        local command = type(params) == "table" and tostring(params.command or "") or ""
        read_only = command ~= "" and dofile("lua/core/orchestration_mode.lua").read_only_command(command) or nil
      end
-     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value),read_only=read_only}
+     local stderr_first=nil
+     if stderr_text and stderr_text~='' then
+       local line=stderr_text:match('([^\n]*)') or ''
+       if #line>160 then line=line:sub(1,160)..'...' end
+       stderr_first=line
+     end
+     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value),read_only=read_only,
+       exit=(exit_code~=nil and exit_code~=0) and exit_code or nil,
+       stderr_bytes=(stderr_text and #stderr_text>0) and #stderr_text or nil,stderr_first=stderr_first}
      if span then
        telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
      end
@@ -1384,6 +1406,22 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
       result.done_note='done: the calls that finished before this error, in order, with the answer each one '
         ..'produced. Read them instead of running the work again. An entry that carries `unread` instead of '
         ..'`result` is an answer too large for this block, and tool_result(sha256,offset,limit) reads it byte for byte.'
+    end
+  end
+  -- A FAILED CALL WHOSE STDERR THE SCRIPT'S OWN RETURN DROPPED IS NAMED ONCE (refusals-that-help (j)). The
+  -- measured script returned only `.stdout`, so the peer's "no such column: bucket_id" never reached the model
+  -- and the empty stdout read as "no rows". `stderr_first` does not travel: it is consumed here.
+  if type(result)=='table' then
+    local returned=result.returned~=nil and result.returned or result.value
+    local text
+    if type(returned)=='string' then text=returned
+    elseif returned~=nil then local ok,encoded=pcall(json.encode,returned); text=ok and encoded or nil end
+    for _,call in ipairs(type(result.calls)=='table' and result.calls or {}) do
+      local first=call.stderr_first
+      if type(first)=='string' and first~='' and ((call.exit and call.exit~=0) or call.ok==false) then
+        if not (type(text)=='string' and text:find(first,1,true)) then call.stderr_dropped=first end
+      end
+      call.stderr_first=nil
     end
   end
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end

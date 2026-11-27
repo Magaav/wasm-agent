@@ -1379,11 +1379,24 @@ local function adopt_bash(args, caller, author, request)
       if properties[key] ~= nil then
         start[key] = value
       else
-        return { error = "peer_bash_field_not_adoptable", field = tostring(key), effect = "none",
-          carried = (function() local list = {}; for name in pairs(properties) do list[#list + 1] = tostring(name) end; table.sort(list); return list end)(),
-          note = "this node's adoption path (budget_ms) cannot carry `" .. tostring(key)
-            .. "` into the supervised operation, so the call is refused rather than run without it; send the "
-            .. "same call without budget_ms, or declare the field on the operation tool's own schema." }
+        -- AN UNKNOWN FIELD NAMES ITSELF, THE FIELDS THAT WOULD HAVE BEEN TAKEN, AND THE NEAREST ONE
+        -- (refusals-that-help (k)). Measured: `tools.remote` bash with `time_seconds` was refused with 'a check
+        -- on what the node applied did not hold: peer bash field not adoptable' and the fix 'read detail, then
+        -- re-read the state' - naming neither the field nor the field the caller meant. The nearest name comes
+        -- from the schema validator's own helper, so 'q' -> 'query' stays one rule (law 18).
+        local list = {}
+        for name in pairs(properties) do list[#list + 1] = tostring(name) end
+        table.sort(list)
+        local ok_contract, contract = pcall(dofile, 'lua/core/json_contract.lua')
+        local nearest = ok_contract and type(contract) == 'table' and contract.nearest_name
+          and contract.nearest_name(tostring(key), properties) or nil
+        local message = 'unknown field ' .. tostring(key) .. '; accepted fields are ' .. table.concat(list, ', ')
+          .. (nearest and ('; nearest: ' .. tostring(nearest)) or '')
+        return { error = 'peer_bash_field_not_adoptable', field = tostring(key), nearest = nearest,
+          message = message, effect = 'none', carried = list, fix = message,
+          note = "this node's adoption path (budget_ms) carries the operation start's own fields, and `"
+            .. tostring(key) .. '` is not one of them, so the call is refused rather than run without it: '
+            .. message .. ". Send the field this node knows, or send the same call without budget_ms." }
       end
     end
   end

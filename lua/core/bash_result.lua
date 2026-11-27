@@ -97,6 +97,11 @@ function M.slim(value, args)
   if not envelope(value) then return value end
   local out = {}
   for key, item in pairs(value) do if M.KEEP[key] then out[key] = item end end
+  -- ONE NAME FOR THE EXIT (refusals-that-help (j)). KEEP keeps `code` and drops `process_exit_code` as a
+  -- duplicate of it, but a PEER's bash answer carries only `process_exit_code` - so on the remote path the
+  -- exit was dropped while the same command run here kept it, and a command that exited 1 reached the
+  -- caller as a success. The fact is kept under the one name KEEP declares for it.
+  if out.code == nil and type(value.process_exit_code) == 'number' then out.code = value.process_exit_code end
   local said = type(args) == 'table' and M.rg_replace(args.command) or nil
   if said then out.note = out.note and (out.note .. ' ' .. said) or said end
   return out

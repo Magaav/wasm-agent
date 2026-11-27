@@ -301,4 +301,9 @@ function M.validate(schema,text,extra)
  if failure then return nil,failure end
  return node
 end
+-- ONE OWNER FOR "THE NAME THE CALLER PROBABLY MEANT" (law 18): the schema validator above and the peer bash
+-- refusal in lua/core/server.lua both have to say it, and a second edit-distance implementation would drift
+-- from this one's prefix rule (which is why `q` suggests `query`).
+M.nearest_name = nearest
+
 return M
