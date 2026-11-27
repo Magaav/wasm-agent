@@ -89,6 +89,13 @@ pub const MAX_RESULT_BYTES: usize = 56 * 1024;
 /// is a pointer to it (`chat` + `id`), not a transcript dump.
 pub const MAX_TEXT_CHARS: usize = 280;
 
+/// The cap a caller gets when it asks for the whole text (`text: "full"`, whatsapp-read-slow-is-not-an-error
+/// item 3). An audio's transcript and an image's OCR text are the two things a snippet cannot answer: a
+/// model that receives 280 characters has to make a second call (`whatsapp_media`) to read the rest, which
+/// is a round for a fact the index already holds. The answer always STATES which cap it used
+/// (`text_cap`), so a cut is never mistaken for the whole of it.
+pub const MAX_FULL_CHARS: usize = 64_000;
+
 /// Most mentions, reactions or poll options one answer lists.
 pub const MAX_LISTED: usize = 16;
 
@@ -318,6 +325,9 @@ pub struct Request {
     /// (23/11: a search of old audios answered them by relevance, and a reader took the list for the
     /// tail of the conversation).
     pub order: Option<String>,
+    /// `read`/`message` only: `snippet` (the default, [`MAX_TEXT_CHARS`]) or `full` ([`MAX_FULL_CHARS`]).
+    /// Anything else is refused by name rather than quietly answered with a snippet.
+    pub text: Option<String>,
 }
 
 /// A request that passed every check, with the bounds already applied.
@@ -342,6 +352,8 @@ pub struct Verified {
     pub max_bytes: u64,
     /// How a `search` orders its hits (`None` = the op's default, see [`Request::order`]).
     pub order: Option<Order>,
+    /// The caller asked for the whole text rather than the snippet (`text: "full"`).
+    pub full: bool,
 }
 
 impl Request {
@@ -472,7 +484,19 @@ impl Request {
             }
             Op::Contacts => (clamp_limit(self.limit, CONTACTS_MAX, CONTACTS_MAX), 0),
         };
-        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order })
+        // `text` is `snippet` unless the caller asked for `full`; anything else is refused by name rather
+        // than quietly answered with the shorter cap (whatsapp-read-slow-is-not-an-error, item 3).
+        let full = match self.text.as_deref().map(str::trim) {
+            None | Some("") | Some("snippet") => false,
+            Some("full") => true,
+            Some(other) => {
+                return Err(Refusal::new(
+                    "bad_text_mode",
+                    format!("text must be snippet or full, not {other}"),
+                ))
+            }
+        };
+        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order, full })
     }
 
     /// The payload bytes for the queue.
@@ -560,6 +584,9 @@ impl Verified {
             limit: Some(self.limit),
             max_bytes: Some(self.max_bytes),
             order: self.order.map(|order| order.as_str().to_string()),
+            // The validated form carries the decision, not the caller's word, so a job payload always
+            // says which cap answered it: `full` goes back on the wire as `text: "full"`.
+            text: if self.full { Some("full".to_string()) } else { None },
         }
     }
 }

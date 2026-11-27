@@ -2898,7 +2898,7 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
     let mut messages: Vec<serde_json::Value> = Vec::with_capacity(merged.len());
     for (_, record) in &merged {
         let quote = quoted_snippet_any(store, &addresses, record).await?;
-        let mut message = crate::view::message(record, quote.as_deref());
+        let mut message = crate::view::message(record, quote.as_deref(), request.full);
         let folded = fold_reactions_any(store, &addresses, record).await?;
         if !folded.is_empty() {
             message["reactions"] = serde_json::Value::Array(folded);
@@ -3353,7 +3353,7 @@ fn score(record: &Record, tokens: &[String], q: Option<&str>) -> i64 {
 /// describe one message two ways - plus the two things only a search knows: the score, and the name of
 /// the chat it was found in (a hit that says `5519…@s.whatsapp.net` makes a reader ask who that is).
 fn hit_json(record: &Record, score: i64, chat_name: &str) -> serde_json::Value {
-    let mut hit = crate::view::message(record, None);
+    let mut hit = crate::view::message(record, None, false);
     hit["own"] = serde_json::Value::Bool(record.own);
     if !chat_name.is_empty() {
         hit["chat_name"] = serde_json::Value::String(chat_name.to_string());
