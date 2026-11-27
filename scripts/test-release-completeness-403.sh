@@ -43,8 +43,10 @@ export WA_NODE_BINARIES_URL="$W/shelf"
 answer=$(wa_release_tag_state Magaav/wasm-agent components-bbbbbbbbbbbb 2>&1); rc=$?
 [ "$rc" = 0 ] && ok '403 + a tag the node list holds answers published (rc 0)' || bad "not published (rc $rc): $answer"
 case "$answer" in *'release list the node already holds'*) ok 'and the answer names its source' ;; *) bad "no source named: $answer" ;; esac
+# A HELD LIST THAT DOES NOT MENTION THE TAG MAY STILL PREDATE THE RELEASE: unknown, never missing (review, 27/11).
 answer2=$(wa_release_tag_state Magaav/wasm-agent components-cccccccccccc 2>&1); rc=$?
-[ "$rc" = 1 ] && ok '403 + a tag the list does not hold answers missing (rc 1)' || bad "expected missing, got rc $rc: $answer2"
+[ "$rc" = 2 ] && ok '403 + a tag the list does not hold stays UNKNOWN (rc 2), never missing' || bad "expected unknown, got rc $rc: $answer2"
+case "$answer2" in *'may predate the release'*) ok 'and the reason says the list may be older than the release' ;; *) bad "reason unclear: $answer2" ;; esac
 export WA_NODE_BINARIES_URL="$W/empty"
 answer3=$(wa_release_tag_state Magaav/wasm-agent components-dddddddddddd 2>&1); rc=$?
 [ "$rc" = 2 ] && ok '403 with no list stays unknown (rc 2), never a verdict' || bad "expected unknown, got rc $rc: $answer3"

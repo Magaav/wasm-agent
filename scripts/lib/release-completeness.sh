@@ -95,7 +95,11 @@ wa_release_tag_state() { # <slug> <tag>
         listed="$(wa_node_release_list "$slug" 200 2>/dev/null || true)"
         if [ -n "$listed" ]; then
           if printf '%s\n' "$listed" | grep -qx "$tag"; then printf 'published (from the release list the node already holds)\n'; return 0; fi
-          printf 'missing (not in the release list the node already holds)\n'; return 1
+          # NOT IN A HELD LIST IS NOT "MISSING" (review of this change, 27/11): a list the node already holds can be
+          # OLDER than the release being asked about, and "missing" from a stale list is the same wrong verdict as
+          # "unknown is not published" - just in the other direction. Only a list fetched after the release existed may
+          # say missing, and this function cannot prove the list postdates the tag, so it says unknown and why.
+          printf 'unknown (the release API is rate limiting and the tag is not in the list this node already holds, which may predate the release: %s)\n' "$tag"; return 2
         fi
       fi
       printf 'unknown (the release API answered HTTP %s, which is rate limiting, not an answer; the node holds no release list to ask)\n' "$code"; return 2 ;;
