@@ -101,7 +101,8 @@ host.limits_poll = function(_id)
   if door.age_s then answer.age_s = door.age_s end
   return json.encode(answer)
 end
-host.limits_start = function(_id, url)
+host.limits_start = function(id, url)
+  door.asked = id
   starts = starts + 1
   door.started_with = url
   door.state = 'loading'
@@ -117,8 +118,14 @@ starts, polls = 0, 0
 local first = rows_text(status.session_lines(sid, { cached = true }))
 has(first, 'loading limits', 'the first open says the limits are loading: ' .. first)
 check(starts == 1, 'and the panel started exactly one read: ' .. starts)
-check(door.started_with == 'http://limits.test.invalid',
-  'naming the provider URL it would have called: ' .. tostring(door.started_with))
+-- THE DOOR RESOLVES THE URL, NOT THE PANEL (26/11, part a of change/status-limits-load-on-open): the
+-- panel asks for the PROVIDER and passes no URL, so no caller can aim the provider key at another host.
+-- This replaced an assertion that the panel named the URL it would call - true of the old contract and
+-- exactly the thing the change removed, so it now pins the new one instead of the old.
+check(door.asked ~= nil and tostring(door.asked) ~= '',
+  'the panel asks the door for the provider: ' .. tostring(door.asked))
+check(door.started_with == nil,
+  'and passes no URL - the host resolves it, so a caller-given one cannot reach it: ' .. tostring(door.started_with))
 check(first:find('read on the next /status', 1, true) == nil,
   'never again the old refusal to read')
 
