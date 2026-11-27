@@ -308,3 +308,26 @@ re-drive) - it was tightened, not loosened.
 | Esc's behaviour today | code: run_failure.lua:145/148/303-305/270-280, selfloop.lua:696/1215 |
 | /status says nothing about a pause | code: commands.lua:48/50 |
 
+## 14. This branch's verdict (mission continues after the report-first commit)
+
+**Landed, with the row that pins it:**
+
+| brief item | commit | what it does | row |
+|---|---|---|---|
+| 2 - no raw stack reaches the person | `1f308b14` | `run_failure.human_line` classifies, strips the leading locations and renders the row's own wording; `chat.lua` prints it | `test-stall-line` 13 |
+| 1 - a stall pauses the turn | `dbb0d011` | the stall becomes its own class in the run's existing retry loop, with its own budget (`STALLED_ATTEMPTS`, default 2, clamp 1..4), backoff (2/4/8 s, capped 30 s) and the loop's waiting row stating it | `test-stall-pauses-the-turn` 13 (one stall = 2 asks, ONE turn, no failure row) |
+| 3 - a wake-started turn draws like a typed one (replay half) | `ef2ed218` | `replay()` gained `opts.answer`; `catch_up` passes it, so a wake turn's text is an answer, not the Commentary topic; history keeps the commentary treatment | `test-cli-view` 569 |
+| 3 - the CLI attaches to a node-run turn (C2a) | `8af1304e` | `lua/core/turn_tail.lua`: a cursor over `harness_events` draws the pause ("paused 2s: the provider has not answered (1/2)") and the model status; not a run, no timer | `test-turn-tail` 10 |
+| 4 - time split per turn | `83ec008b` | no new columns: `provider_retry.wait_ms`, `model_call.ms`, `tool`, all in one `run_id` | `test-turn-time-split` 12 |
+| 5 - why a long session's first response stalls | `1bea8962` | the 300 s is the node's flat override; in a clean environment the default is 90 s and the ceiling needs 872 000 estimated tokens | the table in §11 |
+
+Adjacent rows re-run around the retry-loop change: §13. The pty harness is red on main, measured both
+ways: §12.
+
+**ONE item open: C2b - Esc on a turn a SERVED node owns.** `host.run_cancelled` is process-local
+(`host.rs:593`) and `scheduler.cancel_run` is in-process memory (`scheduler.rs:376`), so the cancel has to
+reach the node over its own door. The route and the credential are already in use by the window
+(`POST /runs`, headers `X-WA-Session` / `X-WA-Node`, `ui/app.js:230-233`); the missing fact is the BASE URL
+of a local `wa serve` as a sibling process sees it - `binding.status()` is `present=false` on a local node,
+`host.binding_state` needs an action, `wa serve --port` defaults to 8799 (`main.rs:744`) and publishes no
+file. That is a product contract to name, not a mechanism to invent, and it is why this item stops here.
