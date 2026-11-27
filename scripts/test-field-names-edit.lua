@@ -32,11 +32,12 @@ check(type(wrong) == 'table' and wrong.error ~= nil,
 check(type(wrong) == 'table' and tostring(wrong.input or ''):find('new_str', 1, true) ~= nil,
   'the refusal carries the name that was wrong: ' .. tostring(type(wrong) == 'table' and wrong.input))
 local fix = tostring(type(wrong) == 'table' and wrong.fix or '')
-check(fix:find('edits', 1, true) ~= nil,
+check(fix:find('edits', 1, true) ~= nil and fix:find('array of', 1, true) ~= nil,
   'the way on names the accepted field that carries old/new text: ' .. fix:sub(1, 300))
-check((type(wrong) == 'table' and (wrong.suggested_shape or wrong.did_you_mean)) == nil,
-  'NAMED GAP: this tool still answers without the shared did_you_mean/suggested_shape - the owner has'
-  .. ' the rule (json_contract.field_intent, pinned by the operation row) but this door is not wired to it yet')
+check(type(wrong) == 'table' and wrong.did_you_mean == 'edits',
+  'and the refusal names the field it meant: ' .. tostring(type(wrong) == 'table' and wrong.did_you_mean))
+check(type(wrong) == 'table' and tostring(wrong.suggested_shape or ''):find('old_text', 1, true) ~= nil,
+  'and its shape: ' .. tostring(type(wrong) == 'table' and wrong.suggested_shape))
 check(host.read_file(path) == 'alpha\nbeta\ngamma\n', 'and nothing ran')
 local right = tools.dispatch(memory, 'edit', { path = path, edits = { { old_text = 'beta', new_text = 'BETA' } } }, 'master', ctx)
 check(type(right) == 'table' and right.applied == true,

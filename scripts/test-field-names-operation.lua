@@ -18,6 +18,23 @@ local checks, failed = 0, 0
 local function check(ok, message)
   if ok then checks = checks + 1 else failed = failed + 1; print('FAIL ' .. message) end
 end
+-- THE SAME ANSWER THROUGH THE REAL DOOR (dispatch), not only from the owner: measured with a plain ctx,
+-- `operation {action:"status", label:"x"}` is refused as unknown_argument:label with the suggestion id.
+local memory = dofile('lua/core/memory.lua'); memory.setup()
+local tools = dofile('lua/core/tools.lua'); local policy = dofile('lua/core/codemode_policy.lua')
+local sid = memory.start_session('', 'field names operation', { user_id = 'master' })
+local ctx = { session_id = sid, user_id = 'master' }
+policy.pin(memory, 'master', ctx)
+for _, sent in ipairs({ 'name', 'label' }) do
+  local args = { action = 'status' }
+  args[sent] = 'op-1'
+  local through = tools.dispatch(memory, 'operation', args, 'master', ctx)
+  check(type(through) == 'table' and tostring(through.error):find('unknown_argument:' .. sent, 1, true) ~= nil,
+    'the real door refuses ' .. sent .. ' by name: ' .. json.encode(through or {}):sub(1, 240))
+  check(type(through) == 'table' and through.did_you_mean == 'id',
+    'and names id: ' .. tostring(type(through) == 'table' and through.did_you_mean))
+end
+
 local nodes = dofile('lua/core/nodes.lua')
 local reload = dofile('lua/core/reload.lua')
 local contract = reload.require('lua/core/json_contract.lua')

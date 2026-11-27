@@ -92,6 +92,23 @@ end
 
 -- What the call carries that the tool's schema does not declare: the one rule, in one place, so the row
 -- that measures it and the dispatch that runs it cannot disagree.
+-- THE CONTRACT MODULE, THROUGH THE SHARED LOADER (law 18): reload.require reads WASM_AGENT_LUA_ROOT first,
+-- so this works whatever the process's cwd is.
+local contract_module
+local function require_contract()
+  if contract_module ~= nil then return contract_module or nil end
+  local ok, module = pcall(dofile, 'lua/core/reload.lua')
+  if ok and type(module) == 'table' and type(module.require) == 'function' then
+    local loaded, contract = pcall(module.require, 'lua/core/json_contract.lua')
+    if loaded and type(contract) == 'table' and type(contract.field_intent) == 'function' then
+      contract_module = contract
+      return contract
+    end
+  end
+  contract_module = false
+  return nil
+end
+
 function M.undeclared(name, args, parameters)
   if type(args) ~= 'table' then return nil end
   if type(parameters) ~= 'table' then return nil end
@@ -187,7 +204,18 @@ function M.refusal(name, args, parameters, ctx)
   -- `unknown_argument:q - did you mean query?`), because a call refused at this door and the same call
   -- refused inside a run block must read as one refusal, not two.
   local first = unknown[1]
-  local did = nearest(first, declared)
+  -- THE ONE OWNER OF "WHAT DID THE CALLER MEAN" (refusals-that-help (b), law 17/18): the contract layer's
+  -- nearest name first, then its intent table for words a model uses for a field it never saw
+  -- (`new_str` -> `edits`, `name` -> `id`), and the shape of the field it names.
+  local contract = require_contract()
+  local did, how = nil, nil
+  if type(contract) == 'table' and type(contract.field_intent) == 'function' then
+    did, how = contract.field_intent(name, first, declared)
+  end
+  local shape = nil
+  if did and type(contract) == 'table' and type(contract.shape_of) == 'function' then
+    shape = contract.shape_of(declared[did])
+  end
   return {
     error = 'unknown_argument:' .. first .. (did and (' - did you mean ' .. did .. '?') or ''),
     tool = tostring(name),
@@ -195,10 +223,14 @@ function M.refusal(name, args, parameters, ctx)
     accepted = names,
     effect = 'none',
     did_you_mean = did,
+    suggested = did,
+    suggested_shape = shape,
+    suggested_reason = how,
     message = '`' .. tostring(name) .. '` does not take the argument `' .. first .. '` - its own schema '
       .. 'never declares that name, so nothing ran. It declares: ' .. list .. '.',
     fix = 'drop `' .. first .. '`' .. (did and (', did you mean `' .. did .. '`?') or '')
-      .. ' `' .. tostring(name) .. '` takes: ' .. list .. '.',
+      .. ' `' .. tostring(name) .. '` takes: ' .. list .. '.'
+      .. (did and shape and (' `' .. did .. '` is ' .. shape .. '.') or ''),
     input = table.concat(unknown, ', '),
   }
 end
