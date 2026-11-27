@@ -44,6 +44,9 @@ pub mod file_search;
 pub mod features;
 pub mod graph;
 pub mod host;
+/// The console's transcript handle: the same calls in process (default) or across the wire to the
+/// terminal program, over `wa-term-proto`: the wire is the only path.
+pub mod screen;
 pub mod http_transport;
 pub mod limits;
 // The runner itself, from its own crate (`ready-operations-slice-2.md`): the host no longer carries it.
@@ -75,6 +78,10 @@ pub mod fabric;
 /// mode (moved out of `wa-term` in its last slice: it is I/O, not display).
 /// The tool-progress rows are the runner's now (it waits on the child); the node reads the same store
 /// through `wa_tool_progress`, which both processes link.
+pub mod links;
+pub mod screen_guard;
+pub mod selection;
+pub mod tty;
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.
