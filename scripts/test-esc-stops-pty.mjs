@@ -906,13 +906,24 @@ if (crash) {
   }
   // THE FIRST CODE-MODE CALL IS ITS OWN ROW (Fable, 25/11): the warm-up paid it, this prints it, and a
   // loose bound keeps a real slowdown in first-use setup visible - charged to setup, never to the stop.
+  //
+  // THE BOUND IS LOAD-AWARE LIKE THE STOP'S (P0 on main, 27/11: `bash: the first code-mode call of the process
+  // is setup, not the stop (3000 ms loose bound)` and the same on `subagent`, both under main-health's own
+  // full suite). A flat 3000 ms here was the last wall in this row that ignored the machine: the same warm-up
+  // that costs ~1 s idle costs several on a suite-loaded node, and the row then reddened against the CODE for
+  // the load. `limitAt` is already this row's one answer to "how long may this wait" (LIMIT_MS idle,
+  // PER_LOAD_MS per unit of load), so the cold bound now extends it rather than keeping a second shape.
   for (const result of results) {
     const cold = result.coldMs;
-    check(result.name + ': the first code-mode call of the process is setup, not the stop (' + COLD_LIMIT_MS + ' ms loose bound)',
-      cold !== null && cold !== undefined && Number(cold) <= COLD_LIMIT_MS,
+    const coldLoad = Math.max(0, Number(result.loadAtEsc) || 0);
+    const coldLimit = COLD_LIMIT_MS + Math.round(coldLoad * PER_LOAD_MS);
+    check(result.name + ': the first code-mode call of the process is setup, not the stop (' + COLD_LIMIT_MS
+      + ' ms + ' + PER_LOAD_MS + ' ms per unit of load)',
+      cold !== null && cold !== undefined && Number(cold) <= coldLimit,
       (cold === null || cold === undefined)
         ? 'unknown: ' + (result.warmWhy || 'the warm-up left no tool|end row to read, so the cold cost is not measured')
-        : cold + ' ms, module cache ' + (result.warmCache ? 'written' : 'MISSING') + ' (scratch home ' + result.home + ')');
+        : cold + ' ms of ' + coldLimit + ' ms at load ' + coldLoad + ', module cache '
+          + (result.warmCache ? 'written' : 'MISSING') + ' (scratch home ' + result.home + ')');
   }
 
   // ---- display only: the row's words never reach the provider --------------------------------
