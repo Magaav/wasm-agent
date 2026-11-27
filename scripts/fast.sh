@@ -957,6 +957,9 @@ if command -v node >/dev/null 2>&1; then
   # THE REJECTION REACHES ITS WORKER (hunk 5): the rework file, the wake through the carrier decision 4
   # keeps (injected here), and the third rejection for a mission escalating in one line.
   check queue-rework node scripts/test-queue-rework.mjs
+  # THE SHA THAT WAS READ IS THE SHA THAT LANDS: the queue pins a ref at the request s sha and hands the
+  # lander THAT, so a branch rewritten after submit is rejected stale_sha instead of landing a moved tip.
+  check queue-pin node scripts/test-queue-pin.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...

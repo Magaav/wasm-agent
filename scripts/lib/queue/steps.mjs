@@ -28,14 +28,37 @@ function run(cmd, args, {timeoutMs, env = {}} = {}) {
   });
 }
 
+
+/// THE SHA THAT WAS READ IS THE SHA THAT LANDS (Fable 27/11, and v0 hit it today: serve branch was
+/// rewritten between the tip check and the merge, so the lander merged bytes nobody submitted).
+///
+/// `land-quick.sh` takes a branch NAME. This function pins the request sha at a ref of its own and hands the
+/// lander THAT ref - so a branch that moves after submit either lands the sha the queue read, or the lander
+/// refuses (its own tip check fails) and the request is rejected stale_sha. Never the moved tip.
+export function pinRefName({id, branch}) { return `change/q${id}-${String(branch || "branch").split("/").pop()}`; }
+
+export async function pinRequest({repo, request}) {
+  const ref = pinRefName({id: request.id, branch: request.branch});
+  const out = await run("git", ["-C", repo, "update-ref", `refs/heads/${ref}`, request.sha], {timeoutMs: CAPS.merge});
+  if (out.code !== 0) return {ok: false, ref, why: (out.stderr || out.stdout || "update-ref failed").trim()};
+  const sha = await run("git", ["-C", repo, "rev-parse", `refs/heads/${ref}`], {timeoutMs: CAPS.merge});
+  const got = (sha.stdout || "").trim();
+  if (got !== request.sha) return {ok: false, ref, why: `the ref ${ref} is ${got}, the request read ${request.sha}`};
+  return {ok: true, ref, sha: got};
+}
 /// The default executor: the mission tree's own lander, which merges in a worktree, runs the branch's own
 /// rows, pushes last and prints its phases with `+Ns:` stamps.
-export function landQuick({missionsDir, branch, dryRun = false}) {
+export function landQuick({missionsDir, repo, dryRun = false}) {
   const script = path.join(missionsDir, 'land-quick.sh');
   return async ({request}) => {
     if (!fs.existsSync(script)) return {ok: false, cause: 'other', detail: `no ${script}`};
+    // THE SHA THAT WAS READ IS THE SHA THAT LANDS. The lander is given a ref pinned at the request's sha,
+    // never the branch name: a branch that moved after submit makes the lander refuse (stale_sha), and a
+    // branch that moved and somehow still pointed here cannot make it land bytes nobody read.
+    const pin = await pinRequest({repo, request});
+    if (!pin.ok) return {ok: false, cause: 'stale_sha', detail: `could not pin ${request.sha.slice(0, 12)}: ${pin.why}`};
     const started = Date.now();
-    const out = await run('bash', [script, branch, ...(dryRun ? ['--dry-run'] : [])], {timeoutMs: CAPS.rows});
+    const out = await run('bash', [script, pin.ref, ...(dryRun ? ['--dry-run'] : [])], {timeoutMs: CAPS.rows});
     const text = `${out.stdout}${out.stderr}`;
     const base = {seconds: Math.round((Date.now() - started) / 1000), tail: text.trim().split('\n').slice(-6).join('\n')};
     if (out.timedOut) return {ok: false, cause: 'other', detail: `land-quick.sh hit its ${CAPS.rows / 60000} min cap`, ...base};

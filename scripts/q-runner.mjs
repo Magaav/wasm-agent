@@ -153,7 +153,10 @@ function parseArgs(argv) {
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
 if (invokedDirectly) {
   const {flags} = parseArgs(process.argv.slice(2));
-  const repo = flags.repo || process.env.WA_QUEUE_REPO || path.join(os.homedir(), 'wasm-agent', 'q-clone');
+  // NO ENVIRONMENT OVERRIDE (Fable 27/11): --repo or the fixed default, and nothing else. An env var that
+  // can point the runner at another tree is a bypass of the one rule that keeps a landing out of the
+  // canonical checkout, and it would be invisible in the unit file.
+  const repo = flags.repo || path.join(os.homedir(), 'wasm-agent', 'q-clone');
   const missions = flags.missions || path.join(os.homedir(), 'Work', 'missions');
   const dbFile = flags.db || defaultDb();
   const log = (line) => process.stdout.write(`${new Date().toISOString().replace(/\.\d+Z$/, 'Z')} q: ${line}\n`);
@@ -166,7 +169,7 @@ if (invokedDirectly) {
     process.exit(2);
   }
   const db = openJournal(dbFile);
-  const step = landQuick({missionsDir: missions, dryRun: Boolean(flags['dry-run'])});
+  const step = landQuick({missionsDir: missions, repo, dryRun: Boolean(flags['dry-run'])});
   // The lander is one program: it merges, regenerates, runs the branch's own rows and pushes last. The queue's
   // three transitions still bracket it, because the phases it reports are what a reader wants to see, and the
   // caps belong to the rows above.
