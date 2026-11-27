@@ -1,0 +1,28 @@
+{
+  "note": "Synthetic fixtures only: rendered text, no real document, no names, numbers or JIDs. The words below are what the engine in use today (rapidocr_onnxruntime, the Python worker scripts/whatsapp-ocr-local.py) answered on this node on 27/11, in the OCR venv /home/victor/.wasm-agent/ocr-venv.",
+  "engine": {
+    "package": "rapidocr_onnxruntime",
+    "version": "1.2.3",
+    "onnxruntime": "1.32.0",
+    "python": "3.14.8",
+    "note": "the tree documents 1.4.4 on python <3.13; this interpreter has no wheel for that pin, so the baseline was taken with the newest release that runs here - stated, not hidden"
+  },
+  "cases": [
+    {
+      "fixture": "document.png",
+      "ok": true,
+      "text": "meeting notes\nblue folder"
+    },
+    {
+      "fixture": "screenshot.png",
+      "ok": true,
+      "text": "settings\nsave changes"
+    },
+    {
+      "fixture": "notext.png",
+      "ok": false,
+      "error": "local_compute_unavailable",
+      "note": "the worker did not answer no_text_detected here: the engine itself errored on this input (a plain gradient). The component row must decide which refusal is correct for a text-free image and say why."
+    }
+  ]
+}
