@@ -55,24 +55,31 @@ local keyed = guard.reason({ home = "/w/row/home", scratch = "/w/row", root = fa
   exists = function(p) return p == "/w/row/home/.wasm-agent/" .. key_marker end })
 says(keyed, "carries a live node's own " .. key_marker, "and so does the node's key marker")
 
--- 6. THE ROOT IT READS FROM THE ENVIRONMENT is the contract's spelling, and only when the caller gave none.
+-- 6. THE LIBRARY READS NOTHING FROM THE ENVIRONMENT (Fable 27/11, read of b07050aa): the contract root is the
+-- CALLER's to pass, never a variable this library goes looking for. A home under the runner's own contract root is
+-- therefore REFUSED when the caller names no root - which is what "no env override in product code, ever" means in a
+-- library the product's rows share.
 ok(guard.reason({ home = "/w/row/home", scratch = "/w/row/tmp", root = "/w/row", exists = none }) == nil,
   "a caller-supplied root is used as given")
-checks = checks + 1
 local contract_root = ""
 if type(host) == "table" and type(host.getenv) == "function" then
   contract_root = host.getenv("WA_ROW_SCRATCH_ROOT") or ""
 end
 if contract_root ~= "" then
   local here = host.getenv("WASM_AGENT_HOME") or ""
-  local why = guard.reason({ home = here, scratch = "/nonexistent-scratch", exists = none })
-  if here:sub(1, #contract_root) == contract_root then
-    ok(why == nil, "under the runner, the contract root in the environment admits the row's own home (got " .. tostring(why) .. ")")
+  if here ~= "" and here:sub(1, #contract_root) == contract_root then
+    local why = guard.reason({ home = here, scratch = "/nonexistent-scratch", exists = none })
+    ok(why ~= nil, "a home under WA_ROW_SCRATCH_ROOT is REFUSED when the caller names no root (this library does not "
+      .. "read the environment): got " .. tostring(why))
+    local named = guard.reason({ home = here, scratch = "/nonexistent-scratch", root = contract_root, exists = none })
+    ok(named == nil, "and it is admitted once the CALLER passes that root (got " .. tostring(named) .. ")")
   else
-    ok(why ~= nil, "outside the runner, that same home is refused when it sits under no root (got " .. tostring(why) .. ")")
+    ok(true, "this run's home is not under WA_ROW_SCRATCH_ROOT, so that half cannot be exercised here")
+    ok(true, "and neither can the caller-named half")
   end
 else
-  ok(true, "no WA_ROW_SCRATCH_ROOT in this environment, so the environment half is not exercised here")
+  ok(true, "no WA_ROW_SCRATCH_ROOT in this environment, so that half is not exercised here")
+  ok(true, "and neither is the caller-named one")
 end
 
 print("home guard ok (" .. checks .. " checks): a ledger-writing row is admitted by its own run's root, and a real home is still refused")

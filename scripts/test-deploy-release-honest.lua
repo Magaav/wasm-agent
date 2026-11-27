@@ -16,8 +16,11 @@
 -- never start a paid turn.
 if not host then error("this test runs under the node (WA_SCRIPT), not plain Lua") end
 local home_guard = dofile("scripts/lib/test-home-guard.lua")
+-- THE CONTRACT ROOT IS THE ROW'S TO READ, never the library's (Fable 27/11): WA_ROW_SCRATCH_ROOT is a row-contract
+-- variable, so this row reads it and passes it in; scripts/lib/test-home-guard.lua uses only what it is handed.
+local contract_root = os.getenv("WA_ROW_SCRATCH_ROOT") or ""
 local guard_reason = home_guard.reason({ home = os.getenv("WASM_AGENT_HOME") or "",
-  scratch = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or "" })
+  scratch = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or "", root = contract_root })
 if guard_reason then
   error("this test writes a ledger: it refuses to run (" .. guard_reason .. ")")
 end
@@ -115,7 +118,7 @@ local install_dir = dofile("lua/core/update.lua").install_dir()
 -- THE SCRATCH ROOTS THIS RUN MAY NAME, asked of the one guard rather than spelled again (25/11, row
 -- 20261125T223323Z-17027): the row contract gives HOME=<root>/home, WA_INSTALL_DIR=<root>/install and
 -- TMPDIR=<root>/tmp, so the single GATE_ROOT/TMPDIR test refused a correct install directory in the runner.
-local roots = home_guard.roots({ scratch = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or "" })
+local roots = home_guard.roots({ scratch = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or "", root = contract_root })
 local function inside_a_root(value)
   for _, root in ipairs(roots) do
     if home_guard.under(value, root) then return true end

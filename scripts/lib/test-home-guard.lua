@@ -49,20 +49,18 @@ local function host_exists(path)
   return type(value) == "string" and value ~= ""
 end
 
---- The scratch roots THIS RUN may name, in the order a row tries them: the suite's (GATE_ROOT, else TMPDIR) and the
---- row contract's own (WA_ROW_SCRATCH_ROOT), which the orchestrator's runner exports and the fast path does not.
---- Exported so a row that asks "is this path inside my scratch space?" asks the SAME question the home guard asks,
---- instead of spelling a second rule (measured 25/11: nine Lua rows kept their own and refused a correct runner home).
+--- The scratch roots THIS RUN was GIVEN, in the order it tries them: the suite's (GATE_ROOT, else TMPDIR, as the caller
+--- passes it) and the contract root the caller names.
+---
+--- THE LIBRARY NEVER READS THE ENVIRONMENT (Fable 27/11, read of b07050aa): `WA_ROW_SCRATCH_ROOT` was read here through
+--- `host.getenv`, which made a test-side library answer from an environment variable - the one shape the product refuses
+--- everywhere else ("no env override in product code, ever"). The runner's contract variable is the ROW's to read: a row
+--- that wants the contract root passes it as `root`, and this function uses only what it was handed.
 function M.roots(opts)
   opts = opts or {}
   local roots = {}
   if type(opts.scratch) == "string" and opts.scratch ~= "" then roots[#roots + 1] = opts.scratch end
-  local contract_root = opts.root
-  if contract_root == nil and type(host) == "table" and type(host.getenv) == "function" then
-    local ok, value = pcall(host.getenv, "WA_ROW_SCRATCH_ROOT")
-    if ok and type(value) == "string" and value ~= "" then contract_root = value end
-  end
-  if type(contract_root) == "string" and contract_root ~= "" then roots[#roots + 1] = contract_root end
+  if type(opts.root) == "string" and opts.root ~= "" then roots[#roots + 1] = opts.root end
   return roots
 end
 
@@ -72,7 +70,7 @@ function M.under(child, root) return under(child, root) end
 -- nil when the home is safe, else one named reason. `opts`:
 --   home     the WASM_AGENT_HOME the test will write (required)
 --   scratch  the root the suite owns: GATE_ROOT, else TMPDIR (required)
---   root     the row contract's root (WA_ROW_SCRATCH_ROOT); read from the environment when not given
+--   root     the contract root the CALLER names (a row reads WA_ROW_SCRATCH_ROOT itself and passes it here)
 --   exists   optional `function(path) -> boolean`, for a test with no filesystem
 --   resolve  optional `function(path) -> path`, to compare real paths (symlinked /tmp)
 function M.reason(opts)
@@ -87,7 +85,7 @@ function M.reason(opts)
   -- still has to be UNDER one of them - this widens nothing about a real home.
   local roots = M.roots({ scratch = scratch, root = opts.root })
   if #roots == 0 then
-    return "no scratch root (GATE_ROOT, TMPDIR and WA_ROW_SCRATCH_ROOT are all unset), so a home cannot be told from a real one"
+    return "no scratch root was given (the caller passed neither GATE_ROOT/TMPDIR nor a contract root), so a home cannot be told from a real one"
   end
   local exists = opts.exists or host_exists
   local resolve = opts.resolve
