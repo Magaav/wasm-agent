@@ -39,6 +39,10 @@ function M.poll(view, session_id, state)
     local kind = tostring(row.kind or "")
     local phase = tostring(row.phase or "")
     local payload = row.payload or {}
+    -- The run the fact names: a pause and a model call are facts OF a run, so the tail can stop it by id
+    -- later (`cancel_on_interrupt`). A row with no run id leaves the last one standing.
+    local run_id = tonumber(payload.run_id) or tonumber(row.run_id)
+    if run_id then state.run_id = run_id end
     if kind == "provider_retry" then
       state.pauses = (state.pauses or 0) + 1
       if view and view.event then view:event({ type = "status", text = M.pause_line(payload) }) end
@@ -83,6 +87,31 @@ function M.cancel(session_id, run_id, opts)
     return { ok = false, error = "cancel_answer_unreadable" }
   end
   return decoded
+end
+
+-- ESC WHILE ATTACHED (item 3 / C2b's last step). The reader thread's Esc already means "interrupt the
+-- run" (`keymap.rs` console row), but `host.run_cancelled` is process-local, so for a turn ANOTHER process
+-- owns the key used to do nothing. Here the same key becomes the door above:
+--   * nothing happens unless this tail has a run id (a local turn keeps its own Esc, untouched),
+--   * the interrupt is CONSUMED once per key (cli_input:interrupt), so the same Esc is not also left in
+--     the draft and one key never stops two things,
+--   * the reader is told what happened in one line, and a node that did not answer is said so by name.
+-- Returns true when it asked the node to stop a turn.
+function M.cancel_on_interrupt(view, session_id, state, input, opts)
+  if not (state and state.run_id) then return false end
+  if not (input and input.interrupt) then return false end
+  local _, at = input:interrupt()
+  if not at then return false end
+  if state.stopped_at == at then return false end
+  state.stopped_at = at
+  local answer = M.cancel(session_id, state.run_id, opts)
+  if view and view.line then
+    local text = (answer and answer.ok)
+      and "  asked the node to stop this turn"
+      or ("  the node did not answer the stop request (" .. tostring(answer and answer.error or "no answer") .. ")")
+    pcall(view.line, view, text, "dim", view.live)
+  end
+  return true
 end
 
 return M

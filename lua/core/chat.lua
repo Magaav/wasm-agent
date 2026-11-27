@@ -908,6 +908,10 @@ function M.run(argv)
     local hold = host.transcript_hold
     if hold then pcall(hold, true) end
     pcall(turn_tail.poll, view, agent.session_id, tail_state)
+    -- Esc while attached (mission turn-survives-a-provider-stall, item 3 / C2b): the turn is not ours,
+    -- so the flag this process reads cannot stop it - the node's own POST /runs can. One key, one line,
+    -- and a local turn's Esc is untouched because this needs a run id the tail drew.
+    pcall(turn_tail.cancel_on_interrupt, view, agent.session_id, tail_state, input)
     if hold then pcall(hold, false) end
   end
 
