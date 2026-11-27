@@ -318,6 +318,68 @@ end
 --   cancel(dispatch, opts, record)      -> only for kinds whose effect can be stopped.
 M.EXECUTORS = {}
 
+-- The query family: `whatsapp_search/read/media/reactions/download/backfill` are ONE durable queue job
+-- in `wa-whatsapp` (`rust/wa-capabilities/src/whatsapp_query.rs`), so the job id the host answers when its
+-- budget runs out IS the handle. `wait_s: 0` asks once and keeps the id; `wait(op)` asks about that id with
+-- the call's remaining budget. Before this, a read that outlived the host's wait answered
+-- `ok = false ... _slow`, a script saw a THROW, and a sibling call in the same `Promise.all` lost its own
+-- answer with it (whatsapp-read-slow-is-not-an-error).
+--
+-- The two internal fields ride in the RAW argument text (`ctx.tool_arguments_json`, which `mcp.lua:1464`
+-- hands the host) and never in `params`: an unknown name there is refused by name
+-- (`tool_arguments.lua:192`), so a tool's closed schema stays closed and the host strips `__wait_ms` /
+-- `__job` itself. The budget is the shared one (`M.effective_ms`), never a constant in a crate - see
+-- `scripts/test-waits-follow-the-shared-rule.lua`.
+do
+  local QUERY = {
+    mcp_whatsapp_read = true, mcp_whatsapp_search = true, mcp_whatsapp_media = true,
+    mcp_whatsapp_reactions = true, mcp_whatsapp_download = true, mcp_whatsapp_backfill = true,
+  }
+  local function slow(answer)
+    return type(answer) == "table" and answer.ok == false and type(answer.error) == "string"
+      and answer.error:sub(-5) == "_slow"
+  end
+  local function send(dispatch, tool, params, extra)
+    local wire = {}
+    for key, value in pairs(params or {}) do wire[key] = value end
+    for key, value in pairs(extra or {}) do wire[key] = value end
+    local ok, answer = pcall(dispatch, tool, params or {}, json.encode(wire))
+    if not ok then return nil, tostring(answer) end
+    return answer, nil
+  end
+  for tool in pairs(QUERY) do
+    M.EXECUTORS[tool] = {
+      kind = "whatsapp_query",
+      start = function(dispatch, opts, params, raw)
+        -- Ask once without waiting: either the answer is already settled (the ordinary case, answered
+        -- exactly as before this executor existed) or the host names the job it put on the queue.
+        local answer, reason = send(dispatch, tool, params, { __wait_ms = 0 })
+        if not answer then return { result = { ok = false, error = reason, effect = "unknown" } } end
+        if type(answer) ~= "table" then return { result = answer } end
+        if slow(answer) and tonumber(answer.id) then
+          local id = tonumber(answer.id)
+          return { op = "waq-" .. tostring(id), id = id }
+        end
+        return { result = answer }
+      end,
+      poll = function(dispatch, opts, record, ms)
+        -- The id is the whole question: no arguments are kept, so nothing of the caller's is replayed or
+        -- written down.
+        local answer, reason = send(dispatch, record.tool or tool, {}, {
+          __job = record.id, __wait_ms = math.max(1, math.floor(tonumber(ms) or 0)),
+        })
+        if not answer then return nil, reason end
+        if type(answer) ~= "table" then return nil, "query_answer_malformed" end
+        if slow(answer) then return { settled = false }, "still_running" end
+        answer.settled = true
+        return answer, nil
+      end,
+      settle = function(dispatch, opts, record, state) return state end,
+    }
+  end
+end
+
+
 local function cancelled()
   local ok, raw = pcall(function() return host.run_cancelled and host.run_cancelled() end)
   if not ok or type(raw) ~= "string" then return false end
@@ -1100,6 +1162,12 @@ local function handle(record, waited_s, state)
   -- A remote op names the node it lives on: wait(op) and cancel(op) route there, and a caller that
   -- holds only the handle can always tell WHICH machine is still running its work (item 1).
   if record.node ~= nil then out.node = record.node end
+  -- The query family reports milliseconds BESIDE seconds (whatsapp-read-slow-is-not-an-error, item 4a): a
+  -- call that waited 2.4 s and one that waited 59 s are the same shape, and the caller deciding whether to
+  -- wait again needs the finer number. Other kinds keep the shape they always had.
+  if record.kind == "whatsapp_query" then
+    out.waited_ms = math.floor((tonumber(waited_s) or 0) * 1000)
+  end
   local source = type(state) == "table" and state or (type(record.progress) == "table" and record.progress or nil)
   if source then
     out.stdout_path = source.stdout_path

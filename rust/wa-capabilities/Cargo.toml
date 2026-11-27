@@ -89,9 +89,9 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p
 tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
-# `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and nothing declared it, so
-# the whole crate did not compile with `--tests`. It is a workspace member; a path dev-dependency is
-# what the import always assumed.
+# `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and no configuration
+# declared it, so `cargo test -p wa-capabilities` did not compile on main itself. A path
+# dev-dependency is what the import always assumed.
 wa-operations-runner = { path = "../wa-operations-runner" }
 # The archive's node-side tests run against a real namespace and a real keystore in a temp directory,
 # so nothing they measure is a mock of the storage the node actually uses.

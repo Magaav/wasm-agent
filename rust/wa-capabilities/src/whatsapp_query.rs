@@ -17,7 +17,8 @@
 //!
 //! Why the node waits instead of answering "queued": a search is a local kv read in a component that
 //! is already running, and a model that has to poll for the answer to "what did they say" would spend a
-//! turn doing it. The wait is bounded ([`wa_whatsapp_index::WAIT_MS`]) and heartbeats the node
+//! turn doing it. The wait is the ONE shared one ([`crate::serve::wait_ms`], 60 s by default
+//! with the 300 s ceiling `lua/core/codemode_pending.lua` enforces) and it heartbeats the node
 //! (`serve::beat`) while it waits, so a slow answer is an answer ("still running, here is the id") and
 //! never a frozen node. The dedupe key is the request itself, so a caller that asks again after a slow
 //! answer reads the *same* job instead of queueing a second scan.
@@ -42,7 +43,6 @@ const COMPONENT: &str = "wa-whatsapp";
 const POLL: Duration = Duration::from_millis(20);
 /// How long `whatsapp_download` waits for the decrypted bytes. Longer than a search (a CDN fetch plus a
 /// decrypt), still bounded: a slow one answers "still running" and the same call reads the same job.
-const DOWNLOAD_WAIT_MS: u64 = 10_000;
 /// The directory the decrypted media lands in, under the components directory.
 const DOWNLOAD_DIR: &str = "wa-whatsapp.downloads";
 /// How many files that directory keeps before the oldest go.
@@ -212,7 +212,8 @@ fn component_absent_text(op: &str) -> Option<Value> {
 fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => component_absent(op).unwrap_or_else(|| ask(op, &args, seam::WAIT_MS)),
+        Ok(args) => component_absent(op)
+            .unwrap_or_else(|| ask(op, &args, crate::serve::wait_ms(&args))),
         Err(_) => seam::refusal(op, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
@@ -240,7 +241,7 @@ fn answer_text(l: *mut wa_host_support::lua::LuaState, op: &str) -> std::os::raw
 
 /// The answer for one already-read request: this node cannot answer at all, or validate, queue and wait.
 fn answer_with(op: &str, args: &Value) -> Value {
-    component_absent_text(op).unwrap_or_else(|| ask_text(op, args, seam::WAIT_MS))
+    component_absent_text(op).unwrap_or_else(|| ask_text(op, args, crate::serve::wait_ms(args)))
 }
 
 /// `host.whatsapp_index({op, ...args})` - the read answers a component can grow without the host.
@@ -351,6 +352,7 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
         max_bytes: args.get("max_bytes").and_then(Value::as_u64),
         // `search` only (`seam::Order`); the seam refuses it on any other op rather than ignoring it.
         order: args.get("order").and_then(Value::as_str).map(str::to_string),
+        text: text("text"),
     };
     request.validate()
 }
@@ -379,6 +381,14 @@ fn component_build() -> String {
 /// The same, against a queue the caller owns: what the tests drive without touching the node's own
 /// component directory. `build` is the answering component's identity (see [`component_build`]).
 fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: &str) -> Value {
+    // A call that names `__job` CONTINUES a job it was already told about: the pending handle's `op`
+    // carries the id, and `lua/core/codemode_pending.lua`'s query executor starts with `__wait_ms: 0`,
+    // keeps the id, and asks about it with the call's remaining budget. There is no request to validate -
+    // the id is the whole question - and the answer is the settled answer the first call would have given.
+    // Both internal fields ride in the raw argument text and never in a tool's schema.
+    if let Some(job) = args.get("__job").and_then(Value::as_u64) {
+        return settle(q, op, job, wait_ms);
+    }
     let verified = match request_of(op, args) {
         Ok(verified) => verified,
         Err(refusal) => return seam::refusal(op, refusal.code, refusal.detail),
@@ -416,7 +426,7 @@ fn ask_registry_in(q: &wa_queue::Queue, args: &Value, build: &str) -> Value {
         Ok(enqueued) => enqueued.id.0,
         Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
     };
-    let deadline = Instant::now() + Duration::from_millis(seam::WAIT_MS.max(1));
+    let deadline = Instant::now() + Duration::from_millis(crate::serve::wait_ms(args).max(1));
     loop {
         match q.job(JobId(id)) {
             Ok(Some(job)) => match job.state.as_str() {
@@ -605,7 +615,7 @@ fn refused(op: seam::Op, code: &str, detail: &str, asked_op: Option<&str>) -> Va
 // ---- download ----------------------------------------------------------------------------------
 
 fn ask_download(args: &Value) -> Value {
-    ask_download_in(&queue(), args, DOWNLOAD_WAIT_MS, &component_build())
+    ask_download_in(&queue(), args, crate::serve::wait_ms(&args), &component_build())
 }
 
 fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {

@@ -3095,7 +3095,7 @@ fn a_cut_transcript_names_the_op_and_the_file_that_hold_the_whole() {
     block_on(attach_text(&store, CHAT, "V1", &long, Source::Transcript)).unwrap();
 
     let stored = block_on(load(&store, CHAT, "V1")).unwrap().expect("the record");
-    let view = crate::view::message(&stored, None);
+    let view = crate::view::message(&stored, None, false);
     assert_eq!(view["transcript_cut"], true, "the answer says the index holds a part: {view}");
     let full = &view["transcript_full"];
     assert_eq!(full["tool"], "whatsapp_message", "the op that returns the stored part");
@@ -3104,7 +3104,7 @@ fn a_cut_transcript_names_the_op_and_the_file_that_hold_the_whole() {
     assert_eq!(full["whole_in"]["chat"], CHAT);
     assert_eq!(full["whole_in"]["id"], "V1");
     // A text inside the bound is NOT marked cut, and keeps the old pointer shape (or none).
-    let view = crate::view::message(&direct(CHAT, "Ana", "V2", base(), "curta"), None);
+    let view = crate::view::message(&direct(CHAT, "Ana", "V2", base(), "curta"), None, false);
     assert!(view.get("transcript_cut").is_none(), "a whole text is never marked cut");
 }
 

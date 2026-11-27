@@ -78,7 +78,8 @@ pub const MAX_ATTEMPTS: u32 = 2;
 /// job id". Bounded because the caller is a Lua tool call on the node's own thread: a search is a
 /// local scan, and a node that blocks longer than this to answer "what did they say" is a node that
 /// stopped serving everything else.
-pub const WAIT_MS: u64 = 2_000;
+// No wait constant here: a tool answer obeys crate::serve::tool_wait_ms in wa-capabilities, and the
+// shared number lives in lua/core/codemode_pending.lua. See whatsapp-read-slow-is-not-an-error.
 
 /// Largest media one `whatsapp_download` may hand back. The bytes ride the job's progress stream,
 /// which `wa:queue` bounds at 1 MiB of chunks; 512 KiB of plaintext stays inside that with room for
@@ -93,6 +94,13 @@ pub const MAX_RESULT_BYTES: usize = 56 * 1024;
 /// Longest text a hit or a message carries in an answer. The full text stays in the index; an answer
 /// is a pointer to it (`chat` + `id`), not a transcript dump.
 pub const MAX_TEXT_CHARS: usize = 280;
+
+/// The cap a caller gets when it asks for the whole text (`text: "full"`, whatsapp-read-slow-is-not-an-error
+/// item 3). An audio's transcript and an image's OCR text are the two things a snippet cannot answer: a
+/// model that receives 280 characters has to make a second call (`whatsapp_media`) to read the rest, which
+/// is a round for a fact the index already holds. The answer always STATES which cap it used
+/// (`text_cap`), so a cut is never mistaken for the whole of it.
+pub const MAX_FULL_CHARS: usize = 64_000;
 
 /// Most mentions, reactions or poll options one answer lists.
 pub const MAX_LISTED: usize = 16;
@@ -348,6 +356,9 @@ pub struct Request {
     /// (23/11: a search of old audios answered them by relevance, and a reader took the list for the
     /// tail of the conversation).
     pub order: Option<String>,
+    /// `read`/`message` only: `snippet` (the default, [`MAX_TEXT_CHARS`]) or `full` ([`MAX_FULL_CHARS`]).
+    /// Anything else is refused by name rather than quietly answered with a snippet.
+    pub text: Option<String>,
 }
 
 /// A request that passed every check, with the bounds already applied.
@@ -372,6 +383,8 @@ pub struct Verified {
     pub max_bytes: u64,
     /// How a `search` orders its hits (`None` = the op's default, see [`Request::order`]).
     pub order: Option<Order>,
+    /// The caller asked for the whole text rather than the snippet (`text: "full"`).
+    pub full: bool,
     /// The count the caller ASKED for, when it was over this op's cap: the answer then says what it kept
     /// (`keeper`'s sentence), because a silently clamped list reads as "that is everything there is".
     /// Decided 26/11: over the cap is clamped AND said, never refused.
@@ -506,6 +519,19 @@ impl Request {
             }
             Op::Contacts => (clamp_limit(self.limit, CONTACTS_MAX, CONTACTS_MAX), 0),
         };
+        // `text` is `snippet` unless the caller asked for `full`; anything else is refused by name rather
+        // than quietly answered with the shorter cap (whatsapp-read-slow-is-not-an-error, item 3).
+        let full = match self.text.as_deref().map(str::trim) {
+            None | Some("") | Some("snippet") => false,
+            Some("full") => true,
+            Some(other) => {
+                return Err(Refusal::new(
+                    "bad_text_mode",
+                    format!("text must be snippet or full, not {other}"),
+                ))
+            }
+        };
+        
         // What the caller asked for, when it was more than this op keeps: the answer says so.
         let cap = match op {
             Op::Search => SEARCH_MAX,
@@ -515,7 +541,7 @@ impl Request {
             Op::Message | Op::Reactions | Op::Media | Op::Download => 1,
         };
         let limit_asked = self.limit.filter(|asked| *asked > cap);
-        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order, limit_asked })
+        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order, full, limit_asked })
 
     }
 
@@ -615,6 +641,9 @@ impl Verified {
             limit: Some(self.limit),
             max_bytes: Some(self.max_bytes),
             order: self.order.map(|order| order.as_str().to_string()),
+            // The validated form carries the decision, not the caller's word, so a job payload always
+            // says which cap answered it: `full` goes back on the wire as `text: "full"`.
+            text: if self.full { Some("full".to_string()) } else { None },
         }
     }
 }
@@ -889,7 +918,8 @@ pub fn refusal_text(op: &str, code: &str, detail: impl AsRef<str>) -> serde_json
     })
 }
 
-/// The answer when the component has not settled inside [`WAIT_MS`]: the job id, so the caller can
+/// The answer when the component has not settled inside the wait the CALL named (see
+/// `wa_capabilities::serve::tool_wait_ms`): the job id, so the caller can
 /// ask again (the dedupe key makes that a read of the same job, not a second scan).
 pub fn slow(op: Op, id: u64, state: &str) -> serde_json::Value {
     slow_text(op.as_str(), id, state)

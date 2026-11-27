@@ -408,6 +408,26 @@ pub(crate) fn test_set_run_cancel(flag: Option<Arc<AtomicBool>>) {
     set_current_run_cancel(flag);
 }
 
+/// The ONE wait a tool call obeys, in milliseconds.
+///
+/// `lua/core/codemode_pending.lua` owns the number (`DEFAULT_WAIT_S = 60`, ceiling 300 s) and hands the
+/// budget it computed to the call, because the budget is a property of the CALL and not of the process:
+/// a script that says `wait_s: 5` and one that says nothing run in the same host. A call that names none
+/// gets that same default. The fallback exists only so a caller outside a script is bounded at all, and
+/// it is the shared default rather than a crate's own smaller number - which is what the two
+/// `WAIT_MS = 2_000` index constants were, and why a slow read crossed the seam as a throw.
+///
+/// `scripts/test-waits-follow-the-shared-rule.lua` refuses any capability that keeps a private wait
+/// BELOW this one; this function is the only place a capability may read a wait from.
+pub fn wait_ms(args: &serde_json::Value) -> u64 {
+    // The budget the CALL named, and 0 when it named none: 0 is "queue the job and answer at once with
+    // its id", which is a real answer (the handle) rather than a guess at how long to hold the node.
+    // The shared bound - 60 s, 300 s at most - is `lua/core/codemode_pending.lua`'s, and the executor
+    // there is what spends it. main's `email_query.rs` carried this function; it lives here now so both
+    // the mail and the WhatsApp doors obey ONE rule.
+    args.get("__wait_ms").and_then(serde_json::Value::as_u64).unwrap_or(0)
+}
+
 fn env_usize(name: &str, fallback: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
 }

@@ -50,8 +50,8 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
         // bound - 60 s, 300 s at most - lives in `lua/core/codemode_pending.lua`, one number for every
         // tool that can outlive its wait (Victor, 27/11: a slow answer is not a failure).
         Ok(args) => match args.get("__job").and_then(Value::as_u64) {
-            Some(id) => settle(&queue(), id, wait_ms(&args)),
-            None => ask(op, &args, wait_ms(&args)),
+            Some(id) => settle(&queue(), id, crate::serve::wait_ms(&args)),
+            None => ask(op, &args, crate::serve::wait_ms(&args)),
         },
         Err(_) => json!({"ok": false, "error": "email_invalid_request", "detail": "the arguments are not a JSON object"}),
     };
@@ -95,9 +95,6 @@ fn from_epoch(value: i64) -> i64 {
 /// in the raw argument text and never in a tool's schema, so a closed schema stays closed. Absent means
 /// zero - queue it and answer the id at once - because the caller then holds a handle and will ask again;
 /// the shared bound (60 s, 300 s at most) is `lua/core/codemode_pending.lua`'s, not this crate's.
-fn wait_ms(args: &Value) -> u64 {
-    args.get("__wait_ms").and_then(Value::as_u64).unwrap_or(0)
-}
 
 fn ask(op: seam::Op, args: &Value, wait_ms: u64) -> Value {
     ask_in(&queue(), op, args, wait_ms)
