@@ -3102,6 +3102,11 @@ gate_run node scripts/test-health-wakes-rule.cjs "$BIN"
 # row names every unit whose ExecStart runs a factory script from outside a clone, and lists the _orch copies that
 # have a factory/ twin.
 gate_run node scripts/test-factory-runs-from-a-clone.mjs
+# A CRATE UNDER rust/ THAT CARGO CANNOT BUILD IS A CRATE NOBODY CAN TEST (27/11): cargo test -p wa-mesh refused
+# while its suite sat in the tree and bench-mesh.sh still asked for it, and the 435 wa-mesh-test-* dirs in /tmp came
+# from rows that could no longer run. Reachability is derived (members, then path dependencies, then a crate's own
+# [workspace]), in both directions: an unreachable crate, and a script asking cargo for a package it cannot build.
+gate_run node scripts/test-crates-are-reachable.mjs
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
   run_proof_fixture sentinelInstall 30 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
