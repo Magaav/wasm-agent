@@ -1824,6 +1824,7 @@ function M.close_open_native(scope, dispatch, note, tool)
         signal = (record.detached == true) and nil or signal,
         survivors = facts and facts.survivors or nil }
       record.state = (record.detached == true) and "running" or "cancelled"
+      record.closed_by = "the stop closer"
       -- EACH CALL NAMED FOR ITSELF (28/11). One shared sentence for every record closed in this pass named the
       -- wrong work twice: a settled-looking `echo warm` record carried the `sleep 30` sentence, and the count said
       -- "stopped 2" for one command. Each closed record now says its own tool and its own id.
@@ -1900,6 +1901,11 @@ function M.native_settle(handle, dispatch, outcome)
     return note
   end
   record.state = outcome.error ~= nil and "failed" or "settled"
+  -- WHO WROTE THIS (28/11, one instrumented run): the record now says which path closed it, so "did the call settle
+  -- itself or did the stop close it" is read off the disk instead of guessed from the source. `settled_at` is set
+  -- here and nowhere else.
+  record.settled_at = now_seconds()
+  record.closed_by = "the call itself"
   M.save(handle.scope, index)
   return nil
 end

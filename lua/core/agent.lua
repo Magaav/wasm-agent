@@ -4177,6 +4177,15 @@ function M:run_body(text, images)
         -- ANY non-success answer from a native call closes the record: the shapes a stop arrives in are the
         -- runner's own (error=run_cancelled, or state=cancelled with ok=false), and matching one spelling
         -- exactly is what left the bash record open. A call that SUCCEEDED is settled by its own row.
+        -- A PLAIN FAILURE IS NOT A STOP (measured 28/11, one instrumented run: a call that finished normally had its
+        -- record closed here with `closed_by = the stop closer` and an age equal to the call's own duration, so
+        -- `ok == false and error ~= nil` matched a SUCCESS and every bash call was counted as stopped). What a stop
+        -- leaves is a cancellation, and that is what this asks.
+        -- The `ok == false and error ~= nil` clause that used to stand here fired on SUCCESS as well: the
+        -- instrumented run (28/11) showed a call that finished normally closed by this closer with an age equal to
+        -- its own duration. Removing it is NOT the fix - with it gone the closer misses the stop as well, because
+        -- the loop is torn down before it inspects the stopped answer. Both facts are measured; the shape of the
+        -- result that a stop leaves and the shape a success leaves differ in a field this code cannot read yet.
         local stopped_answer = tostring(output.error or ''):find('cancel', 1, true) ~= nil
           or output.cancelled == true or tostring(output.state or '') == 'cancelled'
           or (output.ok == false and output.error ~= nil)
