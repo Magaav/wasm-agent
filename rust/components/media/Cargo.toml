@@ -1,0 +1,22 @@
+[package]
+name = "media"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The media capability's component (wasm32-wasip2): ffmpeg's libav* compiled from the sources this tree
+# vendors, behind the `wa:media` contract in `wit/media.wit`. Files in, files out - never media bytes in an
+# answer (docs/missions/reports/media-is-a-component.md).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 3

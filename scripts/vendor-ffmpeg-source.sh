@@ -34,7 +34,19 @@ for h in $(cd "$SRC" && find $LIBRARIES -name '*.h'); do
   cp "$SRC/$h" "$out"
   headers=$((headers+1))
 done
-for extra in config.h LICENSE.md COPYING.LGPLv2.1 COPYING.LGPLv3; do
+# The registry files ffmpeg GENERATES for a configuration (they name the codecs/demuxers/muxers this
+# build has). They are compiled but have no object named after them, so the .o pass above cannot find
+# them, and a vendored tree without them fails where it is hardest to read: at link time.
+for generated in libavcodec/codec_list.c libavcodec/parser_list.c libavcodec/bsf_list.c \
+                 libavformat/demuxer_list.c libavformat/muxer_list.c libavformat/protocol_list.c; do
+  [ -f "$SRC/$generated" ] || { echo "vendor-ffmpeg-source: $generated is missing from the build" >&2; exit 2; }
+  mkdir -p "$DEST/$(dirname "$generated")"
+  cp "$SRC/$generated" "$DEST/$generated"
+done
+
+# config_components.h is the second generated config header (it sits beside config.h and libavcodec's
+# decoders include it directly); a tree without it compiles until the first decoder and then stops.
+for extra in config.h config_components.h LICENSE.md COPYING.LGPLv2.1 COPYING.LGPLv3; do
   [ -f "$SRC/$extra" ] && cp "$SRC/$extra" "$DEST/$extra"
 done
 echo "vendor-ffmpeg-source: $copied C files, $headers headers -> $DEST"

@@ -1,0 +1,80 @@
+// The component's world: the contract from `wit/media/media.wit` at the repository root, carried beside the
+// crate because a component's world is resolved from its own `wit/` directory.
+package wa:media@0.1.0;
+
+interface types {
+    record failure {
+        code: string,
+        detail: string,
+    }
+    variant error {
+        failure(failure),
+        again(string),
+    }
+    record file {
+        path: string,
+        bytes: u64,
+        sha256: string,
+        mime: string,
+    }
+}
+
+interface probe {
+    use types.{error, file};
+    record stream {
+        kind: string,
+        codec: string,
+        width: u32,
+        height: u32,
+        sample-rate: u32,
+        channels: u32,
+    }
+    record description {
+        duration-ms: u64,
+        size-bytes: u64,
+        streams: list<stream>,
+        format: string,
+        has-audio: bool,
+        elapsed-ms: u64,
+    }
+    describe: async func(source: file) -> result<description, error>;
+}
+
+interface frames {
+    use types.{error, file};
+    record moment {
+        at-ms: u64,
+        scene: bool,
+    }
+    record request {
+        source: file,
+        moments: list<moment>,
+        max-pixels: u32,
+    }
+    record still {
+        at-ms: u64,
+        image: file,
+    }
+    take: async func(request: request) -> result<list<still>, error>;
+}
+
+interface audio {
+    use types.{error, file};
+    record request {
+        source: file,
+        sample-rate: u32,
+        channels: u32,
+    }
+    record track {
+        audio: file,
+        duration-ms: u64,
+        elapsed-ms: u64,
+    }
+    extract: async func(request: request) -> result<track, error>;
+}
+
+world media-service {
+    export probe;
+    export frames;
+    export audio;
+}
