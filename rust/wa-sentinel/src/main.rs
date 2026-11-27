@@ -4050,17 +4050,96 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// One line, because the operator question this answers is "is it up", and the `/health` document that
 /// used to be inlined here is four kilobytes of JSON that the answer had to be read past. That document
 /// has its own verb now (`wa-sentinel health`); it is evidence for a machine, not a status line.
-pub(crate) fn node_line(port: u16, up: bool, pid: Option<u32>) -> String {
-    format!(
-        "node:      {}  port {port}  {}",
-        if up { "up  " } else { "down" },
-        match pid {
-            Some(pid) => format!("pid {pid}"),
-            None if up => "pid unknown: the port answers but no owner could be read".to_string(),
-            None => "no process on the port".to_string(),
+///
+/// WHO ANSWERS (Fable 26/11, the work container). MEASURED on work: `wa-sentinel status` said
+/// `node:      down  port 8799  no process on the port` *while* `wa call work` was being answered. A person reading that
+/// line concludes the node is gone and the mesh says otherwise, and the line named neither the process that answered nor
+/// the door it answered on - so there was nothing to check next. The line therefore names the process when it can
+/// (`pid N (wa serve)`), says when that process is a `wa` CLI rather than a watcher (`pid N (wa chat - an interactive wa,
+/// not a watcher)`), and - when the node's port is empty but something with this home answers the mesh - appends that
+/// fact with its pid and door.
+///
+/// `who` and `mesh` are passed in rather than read here, so the wording is a test's: `describe_argv` takes a pid's argv
+/// and nothing else.
+pub(crate) fn node_line(port: u16, up: bool, pid: Option<u32>, who: Option<String>, mesh: Option<String>) -> String {
+    let owner = match pid {
+        Some(pid) => match who.filter(|named| !named.is_empty()) {
+            Some(named) => format!("pid {pid} ({named})"),
+            None => format!("pid {pid}"),
+        },
+        None if up => "pid unknown: the port answers but no owner could be read".to_string(),
+        None => "no process on the port".to_string(),
+    };
+    let mut line = format!("node:      {}  port {port}  {owner}", if up { "up  " } else { "down" });
+    if !up {
+        if let Some(mesh) = mesh.filter(|named| !named.is_empty()) {
+            line.push_str(&format!("; the mesh is answered by {mesh}, which is not this node"));
         }
-    )
+    }
+    line
 }
+
+/// What a process's own argv says it is, in the words a status line can use: `wa serve`, `wa chat - an interactive wa,
+/// not a watcher`, `wa-sentinel watch`, or the program's own name when it is neither.
+pub(crate) fn describe_argv(argv: &str) -> String {
+    let fields: Vec<&str> = argv.split_whitespace().collect();
+    let first = match fields.first() { Some(first) => *first, None => return String::new() };
+    let program = first.rsplit('/').next().unwrap_or(first);
+    let subcommand = fields.iter().skip(1).find(|arg| !arg.starts_with('-')).copied().unwrap_or("");
+    match program {
+        "wa-sentinel" | "wa-sentinel.exe" => {
+            if subcommand.is_empty() { "wa-sentinel".to_string() } else { format!("wa-sentinel {subcommand}") }
+        }
+        "wa" | "wa.exe" => match subcommand {
+            "" => "wa".to_string(),
+            "serve" => "wa serve".to_string(),
+            other => format!("wa {other} - an interactive wa, not a watcher"),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// A pid's own argv, space-separated, when this host can read it (`/proc`; nothing else is portable).
+#[cfg(not(windows))]
+pub(crate) fn process_argv(pid: u32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let joined = String::from_utf8_lossy(&raw).split('\0').filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+    let trimmed = joined.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+#[cfg(windows)]
+pub(crate) fn process_argv(_pid: u32) -> Option<String> { None }
+
+/// SOMETHING WITH THIS NODE'S HOME IS RUNNING WHILE NOTHING HOLDS ITS PORT (Fable 26/11, the work container).
+///
+/// MEASURED on work: `status` said `node: down  port 8799  no process on the port` while `wa call work` was answered -
+/// an interactive `wa` had this node's home open. The line named no process at all, so the next thing to check had to be
+/// guessed. This walks `/proc` for a `wa` door whose environment carries this node's home - skipping this process's own
+/// pid and skipping `wa serve`, which would be holding the port - and names the first: pid and door.
+#[cfg(not(windows))]
+pub(crate) fn mesh_answer() -> Option<String> {
+    let home = std::env::var("WASM_AGENT_HOME").unwrap_or_default();
+    if home.is_empty() { return None; }
+    let needle = format!("WASM_AGENT_HOME={home}");
+    let me = std::process::id();
+    let mut entries: Vec<u32> = std::fs::read_dir("/proc").ok()?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .collect();
+    entries.sort_unstable();
+    for pid in entries {
+        if pid == me { continue; }
+        let argv = match process_argv(pid) { Some(argv) => argv, None => continue };
+        let what = describe_argv(&argv);
+        if what == "wa serve" || !(what == "wa" || what.starts_with("wa ") || what.starts_with("wa-sentinel ")) { continue; }
+        let environ = match std::fs::read(format!("/proc/{pid}/environ")) { Ok(raw) => raw, Err(_) => continue };
+        if String::from_utf8_lossy(&environ).split('\0').any(|pair| pair == needle) {
+            return Some(format!("pid {pid} ({what})"));
+        }
+    }
+    None
+}
+#[cfg(windows)]
+pub(crate) fn mesh_answer() -> Option<String> { None }
 
 /// The sentinel fact `status` prints. A sentinel has no port - it is a process that reads a queue and
 /// supervises the node - so the line says that instead of leaving a blank where a port would be.
@@ -4143,7 +4222,13 @@ fn status() -> Result<()> {
     // from a file could name the node that *was* serving this port, which is the mistake `status` must not
     // make. When the node is down there is nothing to ask.
     let node_pid = if node_up { pid_on_port(port) } else { None };
-    say(&node_line(port, node_up, node_pid));
+    say(&node_line(
+        port,
+        node_up,
+        node_pid,
+        node_pid.and_then(process_argv).as_deref().map(describe_argv),
+        if node_up { None } else { mesh_answer() },
+    ));
     // WHO IS THE WATCHER, decided by the fact a stray pid cannot fake: the lifetime lock only `watch` holds.
     // Measured 2026-10-20: a deploy's own child could not open the watcher process with SYNCHRONIZE, so a
     // status that required that open called a live watcher (pid 8528, serving requests, lock held) "down",

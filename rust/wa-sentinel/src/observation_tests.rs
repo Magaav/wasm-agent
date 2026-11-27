@@ -138,6 +138,51 @@ fn a_failed_start_is_written_to_the_sentinel_log() {
     assert_eq!(failed("start_failed").len(), 1, "a failed stop is not a failed start: {:?}", failed("start_failed"));
 }
 
+/// STATUS NAMES THE PROCESS THAT ANSWERS THIS NODE'S HOME WHEN NOTHING HOLDS ITS PORT (Fable 26/11, work).
+///
+/// MEASURED on work: `node:      down  port 8799  no process on the port` while `wa call work` was answered - an
+/// interactive `wa` had this node's home open. This starts a REAL child whose argv is `<home>/bin/wa chat --once` and
+/// whose environment carries this node's home, and requires `mesh_answer` to name it: pid and door, no guessing. The
+/// child is killed here and never adopted by anything else.
+#[test]
+fn the_mesh_line_names_the_interactive_process_with_this_home() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = Scratch::new("mesh-answer");
+    let home = std::env::var("WASM_AGENT_HOME").expect("the scratch home");
+    let bin = PathBuf::from(&home).join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    // A REAL long-lived process whose argv[0] is `<home>/bin/wa`: the copy of `sleep` is that process, because a
+    // shell script re-`exec`s and its argv would stop being `wa ...` at the first instruction - measured while writing
+    // this (the first version of the test named nothing, and the reason was `exec sleep`).
+    let door = bin.join("wa");
+    std::fs::copy("/bin/sleep", &door).expect("a long-lived binary under the door's name");
+    let mut child = std::process::Command::new(&door)
+        .args(["45"])
+        .env("WASM_AGENT_HOME", &home)
+        .spawn()
+        .expect("a live interactive door");
+    let mut answer = None;
+    for _ in 0..40 {
+        answer = crate::mesh_answer();
+        if answer.as_deref().map(|named| named.contains(&format!("pid {}", child.id()))).unwrap_or(false) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let named = answer.unwrap_or_else(|| "nothing was named".to_string());
+    assert!(
+        named.contains(&format!("pid {}", child.id())),
+        "the process holding this home is named by its pid: {named}"
+    );
+    assert!(
+        named.contains("an interactive wa, not a watcher"),
+        "and by its door, so a reader can tell it from a watcher: {named}"
+    );
+    assert!(!named.contains("wa serve"), "and never mistaken for the node itself: {named}");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = scratch;
+}
+
 /// 1. One line per (id, problem), naming the files it is missing, however many ticks go by.
 #[test]
 fn a_missing_file_is_reported_once_however_many_ticks_go_by() {
