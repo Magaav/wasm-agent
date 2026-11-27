@@ -1068,6 +1068,9 @@ rm -f "$DB.update.lua"
 # the refusal names the command that starts one. It drives the real command path with a stub host, so it
 # needs no node, no install and no request box of this machine's.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$DB" | grep "update watcher decision ok"
+# THE WATCHER IS ON `wa status`, AND ITS ABSENCE NAMES THE FIX (Fable 26/11, work): the page a person reads said nothing
+# about the watcher while two starts had failed. Four answers on the module's seam, then the real path in a scratch home.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-status-watcher-line.lua" "$BIN" --db "$DB.status-watcher" | grep "status watcher line ok"
 # Whether a published release is newer than the one this node runs. Pure comparison plus a fixture
 # feed: no network, no clock. It is here because a node that cannot say "I am behind" updates only
 # when someone remembers to.
