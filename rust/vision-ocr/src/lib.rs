@@ -21,10 +21,22 @@ pub struct Engine { det: Model, rec: Model, dict: Vec<String> }
 struct BoxI { x0: i32, y0: i32, x1: i32, y1: i32 }
 
 impl Engine {
+    /// The engine from the two model files and the dictionary text. A caller that has the bytes (a
+    /// component carries them) uses `from_bytes` instead.
     pub fn load(models: &Path, dict_path: &Path) -> Engine {
-        let det = Model::load_file(models.join("ch_PP-OCRv3_det_infer.onnx")).expect("det");
-        let rec = Model::load_file(models.join("ch_PP-OCRv3_rec_infer.onnx")).expect("rec");
-        let dict = std::fs::read_to_string(dict_path).expect("dict").split('\n').map(|s| s.to_string()).filter(|s| s != "\n").collect::<Vec<_>>();
+        let det_bytes = std::fs::read(models.join("ch_PP-OCRv3_det_infer.onnx")).expect("det model");
+        let rec_bytes = std::fs::read(models.join("ch_PP-OCRv3_rec_infer.onnx")).expect("rec model");
+        let dict = std::fs::read_to_string(dict_path).expect("dict");
+        Engine::from_bytes(&det_bytes, &rec_bytes, &dict)
+    }
+
+    /// The same engine from bytes: the models are the engine's own assets, so a component embeds them and
+    /// a row reads them from the directory they ship in. The dictionary travels WITH them (it was read
+    /// from the rec model's own metadata), so a model swap cannot leave a stale dictionary behind.
+    pub fn from_bytes(det_bytes: &[u8], rec_bytes: &[u8], dict_text: &str) -> Engine {
+        let det = Model::load(det_bytes.to_vec()).expect("det model");
+        let rec = Model::load(rec_bytes.to_vec()).expect("rec model");
+        let dict = dict_text.split('\n').map(|s| s.to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>();
         Engine { det, rec, dict }
     }
 

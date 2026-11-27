@@ -1,0 +1,57 @@
+/// `wa:vision` — images become words, as a component (`docs/WHATSAPP-OCR.md`, `docs/CORE-SPLIT.md`).
+///
+/// The kernel owns OCR today: `wa:kernel/vision` (`rust/wa-kernel-runtime/src/service_ocr.rs`,
+/// `vision_host.rs`) runs a **Python worker** (`scripts/whatsapp-ocr-local.py`, RapidOCR/ONNX) behind one warm
+/// process, and every caller reaches it through the kernel. This package is that layer as a seam: the same
+/// reading, one interface, no Python on the path.
+///
+/// **What it answers and what it does not.** The words, where each line sits in the image, and how sure the
+/// reader is. It does not decide *whether* a message may be read (that is the connector's), it does not store
+/// anything, and it never echoes a path it was given.
+///
+/// **Every waiting call here is async** (the async rule, Victor 26/11): a model run suspends the guest's
+/// task and the runtime keeps serving other tasks; there is no sync export and therefore no reason line.
+package wa:vision@0.1.0;
+
+interface types {
+    /// One line the reader found. The corners are in the IMAGE's own pixels, not the model's resized
+    /// canvas, so a caller can crop or highlight without knowing anything about the pipeline.
+    record line {
+        /// The words, as the reader spelled them. The component never invents punctuation and never
+        /// joins two lines: one line of the image is one entry.
+        text: string,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        /// The mean per-character confidence over the line, 0.0 to 1.0, rounded to the third decimal.
+        confidence: f32,
+    }
+
+    /// Every way a read can fail, in the words the node already prints for the same faults
+    /// (`scripts/whatsapp-ocr-local.py`), so the two paths answer the same vocabulary.
+    variant refusal {
+        /// The image is there and readable, and holds no text. Not a failure of the reader.
+        no-text-detected,
+        /// Larger than the 20 MiB the node will hand a reader, carrying its size in bytes.
+        image-too-large(u64),
+        /// Bytes that are not an image this build decodes, carrying the decoder's own short reason.
+        unsupported-image(string),
+        /// More text than the record will carry (12000 characters), carrying the length it produced.
+        text-too-long(u64),
+        /// The engine itself could not answer, carrying its short reason. Never a silent empty answer.
+        engine-failed(string),
+    }
+}
+
+interface vision {
+    use types.{line, refusal};
+
+    /// Read one image (PNG or JPEG bytes; the component sniffs the format rather than trusting a name).
+    /// Lines come back in reading order: top to bottom, then left to right.
+    read: async func(image: list<u8>) -> result<list<line>, refusal>;
+}
+
+world vision-component {
+    export vision;
+}
