@@ -1474,6 +1474,9 @@ check run-logged-once env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/tes
 # owner, and NO second author anywhere in lua/core. It caught a real defect on the way in - `gsub("^node-", "")` in Lua
 # strips only "nod" ( `-` is a lazy quantifier), so the last line said `updated to v0.1.2 (e-82f578)`.
 check update-one-owner env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-update-one-owner.lua" "$bin" --db "$work/update-one-owner.db"
+# THE TURN NOTE READS BOTH SHAPES (27/11, turn-note-is-lean): old notes (what hurt/what it buys/focus) and the lean ones
+# (tool/cost/hurt), plus the silent case - no block, no note.
+check turn-note-shapes env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-turn-note-shapes.lua" "$bin" --db "$work/turn-note-shapes.db"
 # SIGNED RELEASES ON THE FAST PATH (27/11): scripts/test-release-sign.lua shipped from 5185436b and was wired into no
 # runner, so nothing judged it and it rotted - by the time this line existed the fixture signed a set the publisher
 # then rewrote (release_signature_invalid ... signature_stale). It is wired here, and green, so the next drift is a
