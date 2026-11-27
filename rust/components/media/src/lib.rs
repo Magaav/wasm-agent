@@ -1,18 +1,17 @@
 //! The media capability's component: ffmpeg's libav* behind `wa:media`.
 //!
-//! This slice implements `probe` for real - it is the operation the measurement showed costs 8 ms, and the
-//! one everything else starts from. `frames` and `audio` answer `again("not implemented in this slice")`
-//! instead of pretending: a component that returns a plausible empty answer is worse than one that says it
-//! is not done (docs/missions/reports/media-is-a-component.md carries the numbers and the order).
+//! This slice implements `probe` for real - it is the operation the measurement showed costs 8 ms, and the one
+//! everything else starts from. `frames` and `audio` answer `again("not implemented in this slice")` instead of
+//! pretending: a component that returns a plausible empty answer is worse than one that says it is not done
+//! (docs/missions/reports/media-is-a-component.md carries the numbers and the order).
 //!
-//! The bindings are GENERATED from the vendored headers by `build.rs` (bindgen + the wasi-sdk's libclang),
-//! so no FFI struct here is written by eye.
+//! The FFI surface is four functions and a handful of accessors in `ffi.rs`; the struct fields are read by the
+//! C compiler in `native/ffmpeg_access.c`, so no struct layout is written by eye (ffi.rs says why bindgen could
+//! not do it on this node).
 
 #![allow(non_camel_case_types, non_snake_case, dead_code, clippy::all)]
 
-mod ffi {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
+mod ffi;
 
 wit_bindgen::generate!({
     path: "wit",
@@ -22,16 +21,26 @@ wit_bindgen::generate!({
 use std::ffi::{CStr, CString};
 use std::time::Instant;
 
-struct Component;
-
 fn failure(code: &str, detail: String) -> wa::media::types::Failure {
     wa::media::types::Failure { code: code.to_string(), detail }
 }
 
-fn error_code(code: &str) -> i32 {
-    // `AVERROR_*` are negative errno-style codes; the message is the library's own.
-    code & 0x7fff_ffff
+/// ffmpeg's negative return codes, as the four-character tag they are made of: `averror(-541478725)` says
+/// nothing a person can act on, `averror(EOF)` says the file ended.
+fn error_code(value: i32) -> String {
+    if value >= 0 {
+        return value.to_string();
+    }
+    let tag = (-value) as u32;
+    let bytes = tag.to_be_bytes();
+    if bytes.iter().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()) {
+        String::from_utf8_lossy(&bytes).into_owned()
+    } else {
+        value.to_string()
+    }
 }
+
+struct Component;
 
 impl exports::wa::media::probe::Guest for Component {
     fn describe(
@@ -72,54 +81,45 @@ impl exports::wa::media::probe::Guest for Component {
 
             let mut streams = Vec::new();
             let mut has_audio = false;
-            let count = (*context).nb_streams as usize;
+            let count = ffi::wa_stream_count(context) as u32;
             for index in 0..count {
-                let stream = *(*context).streams.add(index);
-                if stream.is_null() {
-                    continue;
-                }
-                let params = (*stream).codecpar;
-                if params.is_null() {
-                    continue;
-                }
-                let kind = match (*params).codec_type {
-                    ffi::AVMediaType_AVMEDIA_TYPE_VIDEO => "video",
-                    ffi::AVMediaType_AVMEDIA_TYPE_AUDIO => "audio",
-                    ffi::AVMediaType_AVMEDIA_TYPE_SUBTITLE => "subtitle",
+                let kind = match ffi::wa_stream_kind(context, index) {
+                    ffi::KIND_VIDEO => "video",
+                    ffi::KIND_AUDIO => "audio",
+                    ffi::KIND_SUBTITLE => "subtitle",
                     _ => continue,
                 };
                 if kind == "audio" {
                     has_audio = true;
                 }
-                let codec = ffi::avcodec_get_name((*params).codec_id);
-                let codec = if codec.is_null() { String::new() } else { CStr::from_ptr(codec).to_string_lossy().into_owned() };
-                streams.push(exports::wa::media::probe::Stream {
+                let codec = ffi::wa_stream_codec(context, index);
+                let codec = if codec.is_null() {
+                    String::new()
+                } else {
+                    CStr::from_ptr(codec).to_string_lossy().into_owned()
+                };
+                streams.push(exports::wa::media::probe::MediaStream {
                     kind: kind.to_string(),
                     codec,
-                    width: (*params).width.max(0) as u32,
-                    height: (*params).height.max(0) as u32,
-                    sample_rate: (*params).sample_rate.max(0) as u32,
-                    channels: (*params).ch_layout.nb_channels.max(0) as u32,
+                    width: ffi::wa_stream_width(context, index).max(0) as u32,
+                    height: ffi::wa_stream_height(context, index).max(0) as u32,
+                    // 0 is "not read", not "zero": these two are only used by `audio`, which is not in this
+                    // slice, and a made-up number would be worse than an absent one.
+                    sample_rate: 0,
+                    channels: 0,
                 });
             }
 
-            // The format's own name, when the demuxer has one: `AVInputFormat.name` is a comma list of its
-            // aliases and the first is the one a person recognises.
-            let format = if (*context).iformat.is_null() {
+            // The demuxer's own name: `AVInputFormat.name` is a comma list of aliases, and the first is the one
+            // a person recognises.
+            let name = ffi::wa_format_name(context);
+            let format = if name.is_null() {
                 String::new()
             } else {
-                let name = (*(*context).iformat).name;
-                if name.is_null() {
-                    String::new()
-                } else {
-                    CStr::from_ptr(name).to_string_lossy().split(',').next().unwrap_or_default().to_string()
-                }
+                CStr::from_ptr(name).to_string_lossy().split(',').next().unwrap_or_default().to_string()
             };
-            let duration_ms = if (*context).duration > 0 {
-                ((*context).duration / 1000) as u64
-            } else {
-                0
-            };
+            let duration_us = ffi::wa_duration_us(context);
+            let duration_ms = if duration_us > 0 { (duration_us / 1000) as u64 } else { 0 };
             ffi::avformat_close_input(&mut context);
 
             Ok(exports::wa::media::probe::Description {
