@@ -2087,6 +2087,17 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     }
     let top = scores.first().copied().unwrap_or(0);
     let top_count = scores.iter().filter(|score| **score == top).count();
+    // How many matching chats this answer NAMES: the candidates, plus each one folded into an earlier
+    // candidate as `same_person`. A folded chat is named, so it is not hidden; what is left of `matched`
+    // is a chat the answer could not show, and the only thing that can leave a chat out without naming
+    // it is the caller's limit (a fold never drops a chat it does not name). Measured 25/11: an answer
+    // of `matched: 3` with 2 candidates and `truncated: true` said the list did not add up and never
+    // said by how much or why - a reader had to count, and could not tell a limit from a lost row. The
+    // number and the sentence beside it are the fix: `hidden` is how many, `hidden_why` is what and how
+    // to see them.
+    let named = candidates.len() + folded.iter().filter(|folded| **folded).count();
+    // Cursor-aware: a chat on a page behind `before` is not hidden, it is reachable in one step.
+    let hidden = total.saturating_sub(after_cursor + named);
     let mut answer = serde_json::json!({
         "q": query,
         "candidates": candidates,
@@ -2101,6 +2112,16 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     // Over the cap is CLAMPED AND SAID (decided 26/11), never a refusal: the answer carries what was asked
     // and what this node keeps, so a short list never reads as "that is all there is".
     seam::say_limit(&mut answer, request);
+    // What the reader cannot reach FROM HERE, counted and explained (25/11: `matched: 3`, `count: 2` and a
+    // bare `truncated: true` made a reader count a list that did not add up). Two ways out, so the
+    // sentence names the one the answer carries: a bigger `limit`, and, when this is not the last page,
+    // `before: next`.
+    if hidden > 0 {
+        answer["hidden"] = serde_json::Value::from(hidden);
+        answer["hidden_why"] = serde_json::Value::String(format!(
+            "this answer names {named} of the {total} chats whose name matches; ask again with limit:{total} to see all of them"
+        ));
+    }
     if top_count == 1 {
         if let Some(first) = answer["candidates"].as_array().and_then(|list| list.first()).cloned() {
             answer["chat"] = first["chat"].clone();

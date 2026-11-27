@@ -286,14 +286,17 @@ eq(selfloop.notes_append({ text = big, now = T0 }, notes_ctx).error, "notes_too_
   "an append past the document bound is refused, not truncated")
 
 -- ---- the tool arms reach the module (the model calls these, not the CLI) ---------------------
-local via_tool = tools.dispatch(memory, "wake", { in_seconds = 30, reason = "via the tool", now = T0 + 500 }, "master", ctx)
+-- The clock is the row's own (selfloop.set_test_clock, above). `now` BESIDE an argument is not an argument
+-- of these tools - since 25/11 an undeclared name is refused by name instead of being ignored, and a tool
+-- that honoured `now` from the model could be told the present is wherever it likes (lua/core/selfloop.lua).
+local via_tool = tools.dispatch(memory, "wake", { in_seconds = 30, reason = "via the tool" }, "master", ctx)
 check(via_tool.ok, "the wake tool dispatches: " .. json.encode(via_tool))
-local via_list = tools.dispatch(memory, "wake_list", { now = T0 + 500 }, "master", ctx)
+local via_list = tools.dispatch(memory, "wake_list", {}, "master", ctx)
 check(via_list.count >= 1, "the wake_list tool dispatches")
-eq(tools.dispatch(memory, "notes_write", { text = "tool notes", now = T0 }, "guest",
+eq(tools.dispatch(memory, "notes_write", { text = "tool notes" }, "guest",
   { user_id = "guest", role = "guest", session_id = notes_ctx.session_id }).error,
   "selfloop_forbidden_session", "a guest cannot write notes into a master session")
-check(tools.dispatch(memory, "notes_write", { text = "tool notes", now = T0 }, "master", notes_ctx).ok,
+check(tools.dispatch(memory, "notes_write", { text = "tool notes" }, "master", notes_ctx).ok,
   "notes_write through the tool arm works")
 
 -- ---- the real probe sandbox: read-only tools, a shaped answer, an effect refused -------------

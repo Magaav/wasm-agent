@@ -77,12 +77,12 @@ end
 check(host.write_file(feature_health.installed_registry_path(), json.encode(bad)), "the failing registry is written")
 local ok, answer = deployed({})
 local ok, answer = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir })
-eq(ok, false, "a failed canary makes the step red")
-eq(answer.error, "canary_failed", "and names the reason")
-contains(answer.detail, "whatsapp-copilot-reply (post)", "the red names the feature and the stage")
-contains(answer.next, "whatsapp-copilot-reply", "with no ring, the next line names the feature to fix")
-contains(answer.next, "before cutting again", "and says the cut does not go on")
-check(answer.next:find("0123456789abcdef0123456789abcdef01234567", 1, true) == nil,
+eq(ok, true, "a failed canary is ADVISORY: the step is ok and the cut continues (Fable 26/11)")
+contains(table.concat(answer.advisory or {}, " | "), "whatsapp-copilot-reply (post)", "the advisory names the feature and the stage")
+contains(table.concat(answer.advisory or {}, " | "), "FAIL:", "under the FAIL word")
+contains(tostring(answer.notice), "LIVE CHECKS", "and a notice is raised")
+contains(tostring(answer.observed), "LIVE CHECKS (advisory until rehearsed)", "the report line carries the heading")
+check(tostring(answer.observed):find("0123456789abcdef0123456789abcdef01234567", 1, true) == nil,
   "and NEVER the commit this run shipped (the one that failed)")
 local evidence = host.read_file(land.evidence_path(run.id, "canaries")) or ""
 contains(evidence, "FAIL", "the evidence file keeps the failing row")
@@ -122,10 +122,10 @@ contains(fleet_evidence, "whatsapp-copilot-reply", "and its rows")
 deployed({ { node = "scratch-a", mode = "tree" } })
 local ok_unproven, unproven = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir,
   remote_call = function() return { error = "relay_timeout", detail = "the relay did not answer" } end, fleet_canaries = true })
-eq(ok_unproven, false, "a node that cannot be asked is not green")
-eq(unproven.error, "canary_unproven", "and it is named as unproven, not as a canary failure")
-contains(unproven.detail, "scratch-a", "the node is named")
-contains(unproven.observed, "relay_timeout", "with the peer's own reason")
+eq(ok_unproven, true, "a node that cannot be asked is ADVISORY too, and it is still named")
+contains(table.concat(unproven.advisory or {}, " | "), "NOT PROVEN", "under NOT PROVEN")
+contains(table.concat(unproven.advisory or {}, " | "), "scratch-a", "the node is named")
+contains(table.concat(unproven.advisory or {}, " | "), "relay_timeout", "with the peer's own reason")
 
 -- 2d. A PEER'S CANARY FAILS: red by name, with the NODE and the stage.
 local peer_failure = json.encode({ ok = false, failed = 1, features = {
@@ -134,9 +134,8 @@ local peer_failure = json.encode({ ok = false, failed = 1, features = {
 deployed({ { node = "scratch-b", mode = "tree" } })
 local ok_peer_failed, peer_failed = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir,
   remote_call = function() return { output = peer_failure } end, fleet_canaries = true })
-eq(ok_peer_failed, false, "a peer's failing canary stops the release")
-eq(peer_failed.error, "canary_failed", "as a canary failure")
-contains(peer_failed.detail, "scratch-b whatsapp-transcription (no_transcript)", "naming the node, the feature and the stage")
+eq(ok_peer_failed, true, "a peer's failing canary is ADVISORY: named, and the cut continues")
+contains(table.concat(peer_failed.advisory or {}, " | "), "scratch-b whatsapp-transcription (no_transcript)", "naming the node, the feature and the stage")
 
 -- 2e. THE ROLLBACK LINE NAMES THE PREVIOUS RELEASE, per node (review item 2) - never the commit that just
 --     failed. The previous journal is a fixture written under this test's own run root.
@@ -148,10 +147,11 @@ check(host.write_file(previous_dir .. "/journal.json", json.encode({ run = "fixt
 deployed({ { node = "scratch-b", mode = "tree" } })
 local ok_rollback, rollback = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir,
   remote_call = function() return { output = peer_failure } end })
-eq(ok_rollback, false, "the same failure is still red")
-contains(rollback.next, "scratch-b: wa update scratch-b --commit " .. previous_commit, "the rollback names the previous release's commit for that node")
-contains(rollback.next, "back to v0.2.9", "and the tag it was published as")
-local not_this_run = rollback.next:find("0123456789abcdef0123456789abcdef01234567", 1, true) == nil
+eq(ok_rollback, true, "the same failure is advisory now, and still named")
+local rollback_text = table.concat(rollback.advisory or {}, " | ")
+contains(rollback_text, "scratch-b: wa update scratch-b --commit " .. previous_commit, "the rollback names the previous release's commit for that node")
+contains(rollback_text, "back to v0.2.9", "and the tag it was published as")
+local not_this_run = rollback_text:find("0123456789abcdef0123456789abcdef01234567", 1, true) == nil
 check(not_this_run, "the rollback does NOT name the commit this run shipped")
 
 -- 3. ALL GREEN: the step passes and says what it asked.

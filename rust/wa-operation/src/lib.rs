@@ -1577,7 +1577,27 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                     if descendants {
                         reason.get_or_insert("background_descendants: use an explicit operation and keep its shell waiting".into());
                     }
-                    cleanup = Some(match process.terminate() {
+                    // A STOP ASKS FIRST (week 1, "Esc stops what it started"): a cancel or a deadline
+                    // ends the command's whole process group with TERM, then KILL after the stated
+                    // grace, and the record says which signal it took and whether anything was still
+                    // listed after it. Every other end of a command keeps the old abrupt kill: those are
+                    // a refusal (a shell that left descendants behind) and this process going away.
+                    let stop_asked = matches!(reason.as_deref(), Some("cancelled") | Some("deadline_exceeded"));
+                    let outcome = if stop_asked {
+                        let asked = process.stop();
+                        if let Ok(ref what) = asked {
+                            entry.state.lock().unwrap()["stop"] = json!({
+                                "signal": what.signal,
+                                "grace_ms": what.grace_ms,
+                                "needed_kill": what.needed_kill,
+                                "survivors": what.survivors,
+                            });
+                        }
+                        asked.map(|_| ())
+                    } else {
+                        process.terminate()
+                    };
+                    cleanup = Some(match outcome {
                         Ok(()) => "terminated",
                         Err(e) => {
                             reason.get_or_insert(format!("cleanup_failed:{e}"));

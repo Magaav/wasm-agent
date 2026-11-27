@@ -47,6 +47,11 @@ const CARD_BORDER: &str = "\x1b[38;2;119;119;119m";
 /// (`lua/core/cli_view.lua` paints `48;2;68;68;68` there), so the top row and the bubble it stands
 /// for are the same band. Claude Code keeps the same row at the top of its window.
 const PIN_BAND: &str = "\x1b[38;2;255;255;255m\x1b[48;2;68;68;68m";
+/// The mark a pinned request ends with when the row shows only part of it: three literal dots, not the
+/// one-glyph ellipsis a clipped row uses (Victor, 25/11: "three dots at the end of the line"). A
+/// request that carries more than its first line, or a first line wider than the window, is cut - and a
+/// cut that says nothing reads as the whole message.
+const PIN_MARK: &str = "...";
 /// The notice row's colour: the view's warm accent, the one the footer's one-keystroke notes wear
 /// (`wa_term::terminal_editor::NOTICE`), so a message looks the same wherever it is written from.
 const NOTICE: &str = "\x1b[38;2;215;119;87m";
@@ -710,14 +715,30 @@ impl Transcript {
     }
 
     /// The pinned row: the prompt mark and the request's first line, on the band the chat draws the
-    /// reader's own turn on. The caller clips it to the window with an ellipsis.
-    fn pin_line(&self, index: usize) -> String {
-        let text = self.blocks.get(index)
-            .and_then(|block| block.lines.iter().find(|line| !line.trim().is_empty()))
-            .map(|line| crate::selection::plain(line))
+    /// reader's own turn on - then three dots whenever the row is not the whole request.
+    ///
+    /// WHY THE MARK IS HERE. The pin is one row by construction (it must never reflow the chat under
+    /// it), so a request of several lines was drawn as its first line and nothing said the rest was
+    /// there: the reader read a message that ended cleanly in the middle of a sentence (25/11). The
+    /// row now ends with three dots when the request carries more than one line, and when the first
+    /// line is itself wider than the window - the two ways this row can show part of a message - so a
+    /// cut is always visible. It stays inside the window: the room for the mark is reserved BEFORE
+    /// the text is cut, never after.
+    fn pin_row(&self, index: usize, width: usize) -> String {
+        let lines: Vec<String> = self.blocks.get(index)
+            .map(|block| block.lines.iter()
+                .map(|line| crate::selection::plain(line).trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect())
             .unwrap_or_default();
-        let text = text.trim();
-        format!("{PIN_BAND}{text}\x1b[K{RESET}")
+        let more = lines.len() > 1;
+        let text = lines.first().cloned().unwrap_or_default();
+        let room = width.saturating_sub(PIN_MARK.len());
+        let too_wide = visible(&text) > room;
+        if !more && !too_wide { return format!("{PIN_BAND}{text}\x1b[K{RESET}") }
+        // A window narrower than the mark itself: the mark is all there is room for, cut to it.
+        if width <= PIN_MARK.len() { return format!("{PIN_BAND}{}\x1b[K{RESET}", cut_cells(PIN_MARK, width)) }
+        format!("{PIN_BAND}{}{PIN_MARK}\x1b[K{RESET}", cut_cells(&text, room))
     }
 
     /// Whether the pointer at `(row, col)` is on the pinned request: a press there scrolls to it.
@@ -984,9 +1005,10 @@ impl Transcript {
         let pin = if rows >= 2 {
             let first = self.pin_first(width, rows);
             self.pinned_block(width, first)
-                // Clipped with an ellipsis, one row, never wider than the window (a very long or
-                // multi-line request is one row of the reader's own words).
-                .map(|index| clip_row(&self.pin_line(index), width))
+                // One row, never wider than the window, ending in three dots when it is not the
+                // whole request (a very long or multi-line request is one row of the reader's own
+                // words, and the dots are what say so).
+                .map(|index| self.pin_row(index, width))
         } else { None };
         // A frame that keeps the rows it had paints ONCE: the second pass is only for the frame in
         // which the pinned row appears or goes, and that is a change of state, not a per-frame cost.
@@ -1606,6 +1628,21 @@ fn wrap_band(cells: &[(String, char, usize)], width: usize, fill: &str) -> Vec<S
 /// new tail could add a row - which moved every row above and below it, the bounce Victor reported on
 /// 19/11. Clipped, the row is one row whatever it says, and the full output still lands in the block
 /// when the call settles.
+/// A plain row cut to `width` display cells, with nothing added: the caller owns the mark that says
+/// the row was cut (the pinned request ends in three literal dots, `pin_row`). Cut by CELLS, never at a
+/// space, so a wide glyph is not split and the row can never come out one cell wider than asked.
+fn cut_cells(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cells = cell_width_of(ch);
+        if used + cells > width { break }
+        out.push(ch);
+        used += cells;
+    }
+    out
+}
+
 fn clip_row(line: &str, width: usize) -> String {
     let width = width.max(1);
     if width == 1 { return wrap_rows(line, 1).remove(0).chars().next().map(String::from).unwrap_or_default(); }
@@ -3028,6 +3065,39 @@ mod tests {
             "and the answer is still the last row: {view:?}");
     }
 
+    /// A request of several lines is ONE row up there by construction, so the rest of it used to
+    /// disappear without a sign: the reader read a sentence that ended cleanly halfway. It now ends
+    /// with three literal dots (Victor, 25/11), and a one-line request that fits still ends with
+    /// nothing - the mark means "there is more", so it may not be decoration.
+    #[test]
+    fn a_pinned_request_longer_than_one_line_ends_in_three_dots() {
+        let mut long = plain(Transcript::default());
+        long.block(false); for n in 0..4 { long.write(&format!("welcome {n}\n")); }
+        long.block(false);
+        long.write_marked("\u{276f} a question that runs on\nand carries a second line\n\n", true);
+        long.block(false); for n in 0..12 { long.write(&format!("answer {n}\n")); }
+        let view = settled(&mut long, 40, 8);
+        let text = crate::selection::plain(&view[0]);
+        assert!(is_pin(&view[0]) && text.contains("a question that runs on"), "{view:?}");
+        assert!(text.ends_with(PIN_MARK),
+            "a request that carries more than one line ends in three dots: {text:?}");
+        assert!(!text.contains('\u{2026}'),
+            "three literal dots, not the one-glyph ellipsis a clipped row uses: {text:?}");
+        assert!(visible(&view[0]) <= 40, "and the row stays inside the window: {}", visible(&view[0]));
+        assert!(!view[0].contains("second line"), "one row, never the rest of the message: {view:?}");
+
+        let mut short = plain(Transcript::default());
+        short.block(false); for n in 0..4 { short.write(&format!("welcome {n}\n")); }
+        short.block(false); short.write_marked("\u{276f} short question\n\n", true);
+        short.block(false); for n in 0..12 { short.write(&format!("answer {n}\n")); }
+        let short_view = settled(&mut short, 40, 8);
+        let short_text = crate::selection::plain(&short_view[0]);
+        assert!(is_pin(&short_view[0]) && short_text.contains("short question"), "{short_view:?}");
+        assert!(!short_text.ends_with(PIN_MARK),
+            "a one-line request that fits is whole, so it carries no dots: {short_text:?}");
+    }
+
+
     /// The row under the pinned request is the chat's OWN row: the region is one row shorter, not
     /// overdrawn (the brief). The proof is exact: the same chat with no request mark draws the same
     /// rows, one row further down.
@@ -3084,7 +3154,11 @@ mod tests {
         let view = settled(&mut t, 40, 8);
         assert!(is_pin(&view[0]), "{view:?}");
         assert!(visible(&view[0]) <= 40, "the row never overflows its window: {view:?}");
-        assert!(view[0].contains("\u{2026}"), "and says so with an ellipsis: {view:?}");
+        // The mark changed on 25/11: three literal dots, not the one glyph (Victor: "three dots at the
+        // end of the line"). The row still says it was cut, and it is still one row inside the window.
+        assert!(crate::selection::plain(&view[0]).ends_with(PIN_MARK),
+            "and says so with three dots: {view:?}");
+        assert!(!view[0].contains("\u{2026}"), "not the one-glyph ellipsis: {view:?}");
         assert!(!is_pin(&view[1]), "one row, never two: {view:?}");
     }
 

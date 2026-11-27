@@ -2539,12 +2539,51 @@ fn one_person_under_a_lid_and_a_number_is_one_candidate() {
     let same = candidate["same_person"].as_array().expect("same_person");
     assert_eq!(same.len(), 1);
     assert_eq!(same[0]["chat"], AB_PN);
+    // A folded chat is NAMED here, so it is not missing: `matched` counts chats, `count` counts rows,
+    // and nothing is truncated or hidden (25/11 - before this, the same answer said `matched: 2`,
+    // `count: 1`, `truncated: true` and named no missing row, because the fold is not a loss).
+    assert_eq!(answer["matched"], 2, "{answer}");
+    assert_eq!(answer["truncated"], false, "one person under two addresses hides nothing: {answer}");
+    assert!(answer.get("hidden").is_none(), "{answer}");
     // Somebody else with the same saved name is still a second person: ambiguity is about people.
     block_on(put(&store, &direct(LAURA_TWO, "Laura", "Z1", base() + 30, "oi"))).unwrap();
     block_on(set_contact(&store, &saved_by_number(LAURA_TWO, "Laura <3", base() + 31))).unwrap();
     let two = block_on(contacts(&store, &named("Laura <3"))).unwrap();
     assert_eq!(two["count"], 2, "{two}");
     assert_eq!(two["ambiguous"], true, "{two}");
+}
+
+/// A request with room for fewer chats than matched used to answer `matched: 3` beside two rows and a
+/// bare `truncated: true`: the reader counted a list that did not add up and could not tell how many
+/// were missing or where they went (measured 25/11). The answer now carries the count and the reason.
+#[test]
+fn a_limit_that_hides_matches_says_how_many_and_why() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+    block_on(put(&store, &direct(LAURA_TWO, "Laura", "L2", base() + 1, "oi"))).unwrap();
+    block_on(put(&store, &direct(BRUNO, "Laura", "L3", base() + 2, "e ai"))).unwrap();
+
+    let room_for_two = verified(seam::Request {
+        op: "contacts".into(), q: Some("Laura".into()), limit: Some(2), ..Default::default()
+    });
+    let answer = block_on(contacts(&store, &room_for_two)).unwrap();
+    assert_eq!(answer["matched"], 3, "{answer}");
+    assert_eq!(answer["count"], 2, "the list carries two rows: {answer}");
+    assert_eq!(answer["truncated"], true, "{answer}");
+    assert_eq!(answer["hidden"], 1, "the third match is counted, never dropped: {answer}");
+    let why = answer["hidden_why"].as_str().unwrap_or_default();
+    assert!(why.contains("names 2 of the 3 chats") && why.contains("limit:3"),
+        "the reason names both numbers and the way to see the rest: {why}");
+
+    // With room for all three the answer is whole: nothing truncated, nothing counted as missing.
+    let room_for_three = verified(seam::Request {
+        op: "contacts".into(), q: Some("Laura".into()), limit: Some(3), ..Default::default()
+    });
+    let whole = block_on(contacts(&store, &room_for_three)).unwrap();
+    assert_eq!(whole["count"], 3, "{whole}");
+    assert_eq!(whole["truncated"], false, "a whole list is not truncated: {whole}");
+    assert!(whole.get("hidden").is_none(), "and counts nothing as hidden: {whole}");
+    assert!(whole.get("hidden_why").is_none(), "{whole}");
 }
 
 /// A transcript is text this node already derived, so a search answer that cuts it must say so and

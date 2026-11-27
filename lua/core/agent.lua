@@ -69,6 +69,16 @@ local ARGUMENT_EXAMPLES = {
   tool_call = '{"name":"read","arguments":{"path":"README.md"}}',
   remote = '{"node":"<name>","capability":"bash","command":"ls -la"}',
 }
+-- The names a tool accepts without its schema declaring them (the runtime's own fields and the synonyms
+-- its handlers map): one list, lua/core/tool_arguments.lua INTERNAL. Passed to the contract layer, which
+-- refuses a name the schema never declares.
+local accepted_extra
+local function extra_names()
+  if accepted_extra ~= nil then return accepted_extra or nil end
+  local ok, module = pcall(dofile, 'lua/core/tool_arguments.lua')
+  accepted_extra = (ok and type(module) == 'table' and type(module.INTERNAL) == 'table') and module.INTERNAL or false
+  return accepted_extra or nil
+end
 local function schema_of(tool_list, name)
   for _, item in ipairs(tool_list or {}) do
     local fn = item["function"] or {}
@@ -84,14 +94,14 @@ local function parse_tool_arguments(name, text, tool_list, role)
       local catalog = tool_list
       local parameters = schema_of(catalog, name)
       if not parameters then catalog = tools.all(role); parameters = schema_of(catalog, name) end
-      local valid = parameters and json_contract.validate(parameters, completed)
+      local valid = parameters and json_contract.validate(parameters, completed, extra_names())
       local decoded = valid and json.decode(completed)
       if valid and name == "tool_call" then
         -- The wrapper's schema says little; the target's schema is what makes the repair safe.
         local target = type(decoded.name) == "string" and (schema_of(catalog, decoded.name) or schema_of(tools.all(role), decoded.name))
         local inner = json_contract.at(valid, { "arguments" })
         valid = target and inner and inner.kind == "object"
-          and json_contract.validate(target, json_contract.raw(completed, inner)) and valid or nil
+          and json_contract.validate(target, json_contract.raw(completed, inner), extra_names()) and valid or nil
       end
       if valid and type(decoded) == "table" then
         return decoded, nil, completed, "appended " .. closers .. " to close the arguments JSON"
@@ -2944,6 +2954,12 @@ function M:run_body(text, images)
   -- ledger AFTER the stripped message it is about (18/11 round 2, finding 4), and the removed markup
   -- rides with that row as the evidence (finding 3).
   local fake_notice, fabricated_step
+  -- WHAT A STOP STOPPED, carried from the round that was stopped to the one that ends the run (week 1,
+  -- "Esc stops what it started"). A stopped call answers one sentence on its own record
+  -- (lua/core/codemode_pending.lua, stop_work); the code-mode layer keeps it on this run's tool
+  -- context (lua/core/codemode.lua, cancel_error), which is rebuilt every round - so it is taken
+  -- here, at run scope, where the cancellation check below can still reach it.
+  local stop_notice
   while true do
     round = round + 1
     -- The deploy pause (lua/core/deploy_pause.lua). This is the step boundary: between decisions,
@@ -2975,7 +2991,12 @@ function M:run_body(text, images)
     end
     -- Unified cancellation: a foreground run's scoped cancel and a supervised
     -- child's cancel both answer here, so the loop checks one name.
-    if foreground_cancelled() then error("run_cancelled") end
+    -- The sentence a stop produced travels WITH the code word, never instead of it: every matcher in this
+    -- tree looks for `run_cancelled` (run_failure.lua, provider.lua, selfloop.lua), and the reader's line
+    -- adds what came after it (lua/core/cli_view.lua).
+    if foreground_cancelled() then
+      error(stop_notice and ("run_cancelled: " .. tostring(stop_notice)) or "run_cancelled")
+    end
     local child_state = child_status()
     if child_state and child_state.cancelled then error("subagent_cancelled") end
     while self:maybe_compact(messages) do
@@ -4143,6 +4164,11 @@ function M:run_body(text, images)
           redact.text(tostring(audit_why or "unknown")):sub(1, 120) .. ") - the node keeps it and retries") })
       end
       output = redacted_output
+      -- See `stop_notice` above: the round after a stop is the one that ends the run, so the note the
+      -- stopped call left on this round's tool context has to outlive this round.
+      if type(dispatch_ctx) == "table" and type(dispatch_ctx.stop_notice) == "string" then
+        stop_notice = dispatch_ctx.stop_notice
+      end
       if type(output)=="table" and output.error=="graph_patch_review_required" then
         remember_audit_leads(output.audit)
       elseif function_.name=="graph" and args.action=="audit_assess"

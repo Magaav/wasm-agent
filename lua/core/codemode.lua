@@ -21,6 +21,16 @@ local refusal=dofile('lua/core/refusal.lua')
 -- `summary: "read 200 · contacts 400 schema_extra:arguments.query · send 200"`, so the model reads what
 -- happened to each call before it reads any payload. Both loops record it; finish() writes the line.
 local status_lib=dofile('lua/core/status.lua')
+-- The names a tool accepts without its schema declaring them: the runtime's own fields and the synonyms
+-- its handlers map, in the ONE list that already exists (lua/core/tool_arguments.lua INTERNAL). The
+-- contract layer refuses a name the schema never declares, so the caller that knows the tool passes this.
+local accepted_extra
+local function extra_names()
+ if accepted_extra~=nil then return accepted_extra or nil end
+ local ok,module=pcall(dofile,'lua/core/tool_arguments.lua')
+ accepted_extra=(ok and type(module)=='table' and type(module.INTERNAL)=='table') and module.INTERNAL or false
+ return accepted_extra or nil
+end
 local function call_status(value) return status_lib.of(value) end
 local function call_why(value)
  if type(value)~='table' or (value.ok~=false and value.error==nil) then return nil end
@@ -90,6 +100,16 @@ local session_results=dofile('lua/core/codemode_results.lua')
 -- on the managed operations the node already supervises - this file only names which tool call an
 -- operation is (`lua/core/codemode_pending.lua`).
 local pending_calls=dofile('lua/core/codemode_pending.lua')
+-- THE STOP NAMES WHAT IT STOPPED (week 1, "Esc stops what it started"). The pending layer answers a
+-- stopped call with one sentence (`stop_note`: `stopped: sleep 30, after 0.7 s (nothing survived the
+-- 250 ms grace)`), which settles into this run's ctx; the cancel error then carries it, so the reader's
+-- own line can say what went with the run. It is display text and a ledger fact, never part of a
+-- request the provider sees: the run is over by the time this string exists.
+local function cancel_error(ctx)
+  local note=type(ctx)=='table' and type(ctx.stop_notice)=='string' and ctx.stop_notice or nil
+  if note==nil or note=='' then return 'run_cancelled' end
+  return 'run_cancelled: '..note
+end
 -- What a command's answer keeps for the caller, in one allow-list (lua/core/bash_result.lua).
 local bash_result=dofile('lua/core/bash_result.lua')
 -- What a connector answers, learned from its settled answers for the connector index (keys only).
@@ -637,7 +657,7 @@ local function settle_call(s,call)
    if wait_error then value,success={error=wait_error,effect='none'},false
    else
     stripped=contract.normalize_names(current['function'].parameters,stripped)
-    local _,err=contract.validate(current['function'].parameters,stripped or '{}')
+    local _,err=contract.validate(current['function'].parameters,stripped or '{}',extra_names())
     -- The refusal carries the rejected argument text AND the tool's own schema, so the fix can name
     -- the arguments this tool takes instead of letting the model guess (13/11: `notes_write` answered
     -- `notes_text_required` three times before the model found `text`).
@@ -650,6 +670,10 @@ local function settle_call(s,call)
      local live_started=tonumber(host.now()) or 0
      local called,result=pcall(pending_calls.invoke,s.dispatch,s.popts,call.tool,params,stripped,wait_s);admitted=true
      live_settled(ctx,call.id,call.tool,result,called,live_started)
+     -- The stop's sentence, kept on this run's ctx for the cancel error below (see cancel_error).
+     if called and type(result)=='table' and type(result.stop_note)=='string' and type(ctx)=='table' then
+       ctx.stop_notice=result.stop_note
+     end
      if called then
       -- A command's answer keeps what a caller acts on (lua/core/bash_result.lua). The dispatcher already
       -- slimmed a DIRECT call; this one is the same shape built from the operation record by the pending
@@ -825,7 +849,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
   while not done do
    local _,context_error=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
    if context_error then error(context_error) end
-   if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error('run_cancelled')end
+   if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error(cancel_error(ctx))end
    local admitted_now=json.decode(host.quickjs('admit',json.encode({id=sandbox,owner=scope})))
    if not admitted_now.ok then error(admitted_now.error)end
    local call=table.remove(pending,1)
@@ -948,7 +972,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
   -- rechecked, and a cancelled run stops before another effect.
   local _,context_error=guard_policy.admit(memory,role,ctx)
   if context_error then loop_error=context_error
-  elseif host.run_cancelled and json.decode(host.run_cancelled()).cancelled then loop_error='run_cancelled'
+  elseif host.run_cancelled and json.decode(host.run_cancelled()).cancelled then loop_error=cancel_error(ctx)
   else
    local progress,reason=seam({op='advance',session=session,reply=reply})
    reply=nil
@@ -1110,6 +1134,50 @@ local function fixed_tail(fix, tail)
  if type(tail)~='string' or tail=='' then return fix end
  if fix:find(tail,1,true) then return fix end
  return fix..tail
+end
+-- ── THE FINISHED RESULTS OF A BLOCK THAT STOPPED (25/11, item 3) ────────────────────────────────────
+-- Bounded twice so a failure never costs more context than a success: one answer up to DONE_EACH bytes
+-- and the whole block up to DONE_TOTAL. An answer over that is a POINTER, never a silent cut: the entry
+-- carries `unread` {sha256, offset, bytes} and tool_result reads it byte for byte. The entries are in the
+-- order the calls settled, which is the order the script made them.
+local DONE_EACH=1200
+local DONE_TOTAL=4000
+local function settled_answers(calls)
+  local done,used={},0
+  for _,call in ipairs(calls or {}) do
+    if type(call)=='table' then
+      local entry={n=#done+1,id=call.id,name=call.name,ok=call.ok==true}
+      local evidence=type(call.evidence)=='table' and call.evidence or nil
+      if evidence and type(evidence.path)=='string' then
+        local raw=host.read_file(evidence.path)
+        if type(raw)=='string' and raw~='' then
+          -- AN ANSWER THAT CARRIED A CONFIGURED SECRET IS A POINTER, NEVER AN INLINE COPY. Redaction of a
+          -- whole answer is the presentation's job (lua/core/redact.lua, lua/core/codemode_view.lua) and it
+          -- is not something this block can prove for a bag it decodes here: measured on
+          -- scripts/test-codemode-model-boundary.lua, an inline copy of a finished call put a configured
+          -- value back into the model's text. So the answer travels by reference, and `redacted` says why.
+          local clean,hits=dofile('lua/core/redact.lua').secrets(raw)
+          local redacted=next(hits or {})~=nil
+          local fits=not redacted and (#raw<=DONE_EACH and used+#raw<=DONE_TOTAL)
+          if fits then
+            local decoded_ok,decoded=pcall(json.decode,raw)
+            entry.result=decoded_ok and decoded or raw
+            used=used+#raw
+          else
+            entry.unread={sha256=evidence.sha256,offset=1,bytes=evidence.bytes or #raw}
+            if redacted then
+              local names={}
+              for name in pairs(hits) do names[#names+1]=tostring(name) end
+              table.sort(names)
+              entry.redacted=names
+            end
+          end
+        end
+      end
+      done[#done+1]=entry
+    end
+  end
+  return done
 end
 local function explain(result,source,budget,origin,origin_line)
  if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
@@ -1301,6 +1369,30 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local function finish(result)
   if type(result)~='table' then return result end
   result=explain(result,source,budget,origin,origin_line)
+  -- A BLOCK THAT STOPPED HANDS BACK WHAT IT FINISHED (25/11, item 3). Measured: a script that ran a
+  -- command and then hit a failing call answered only the error and a sentence naming the command
+  -- ("Already done, not undone: bash"). The command's output was in this node's evidence store and
+  -- nowhere the model could see it without already knowing its hash, so the model re-ran work that had
+  -- already finished - and a bash call is not always repeatable. A failed block now carries `done`.
+  -- A healthy block never does: its own items and value are the answer, and its bytes must not move.
+  if result.ok==false and result.done==nil then
+    local done=settled_answers(result.calls)
+    -- ONE FAILED CALL IS ITS OWN ERROR, and repeating it costs bytes for nothing: measured on the scripted
+    -- task set, a single refused call answered `error` AND `done[1].result.error` with the same sentence
+    -- (+799 bytes a turn). The block hands back finished work when there IS some - another call settled
+    -- beside the failure, or the block stopped for a reason that is not a call at all (a timeout, a
+    -- stall, a syntax error), where a lone finished answer is exactly what was lost.
+    local failed_call=false
+    for _,call in ipairs(result.calls or {}) do
+      if type(call)=='table' and call.ok==false then failed_call=true end
+    end
+    if #done>0 and (#done>1 or not failed_call) then
+      result.done=done
+      result.done_note='done: the calls that finished before this error, in order, with the answer each one '
+        ..'produced. Read them instead of running the work again. An entry that carries `unread` instead of '
+        ..'`result` is an answer too large for this block, and tool_result(sha256,offset,limit) reads it byte for byte.'
+    end
+  end
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end

@@ -136,7 +136,7 @@ runs on the client too, while `bash` runs on this node.
 | `notes_compact` | `keep_lines?` | Keep the last lines of your notes and archive the rest |
 | `done_criteria` | `action` `checks?` `id?` `operator_quote?` `probes?` `reason?` `request?` `why?` | Record the acceptance checks a turn must pass, or close the gate on measured impossibility |
 | `skill` | `limit?` `name?` `offset?` `query?` `snapshot?` | Discover procedures by query or load a full skill by name |
-| `capabilities` | - | List the tools this account may use |
+| `capabilities` | `names?` `status?` | List the tools this account may use |
 | `lessons` | `action` `cause?` `fix?` `id?` `limit?` `query?` `rule?` `source?` `symptom?` `tags?` | Recall or add what this fleet learned the hard way (symptom, cause, fix, rule) |
 | `fleetview` | `lessons?` | One read-only view of the whole fleet: liveness, version, health, disk, components, work, incidents |
 | `tool_search` | `limit?` `names?` `query?` | Discover and load a permitted tool definition |

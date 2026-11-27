@@ -536,6 +536,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-version-window.lua" "$BIN" --db "$D
 # pass/fail/off, account canaries answer it only when the node has no account of that kind, and a canary proven
 # on no node asked is red.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-canary-not-proven.lua" "$BIN" --db "$DB.canary-not-proven" | grep "canary not proven ok"
+
+# THE CUT CANARIES STEP IS ADVISORY UNTIL THE REHEARSAL IS GREEN (Fable 26/11, r6): the step runs, names every finding
+# - a FAIL, an unreachable node, a cutting canary proven nowhere, the rollback line - under the heading
+# LIVE CHECKS (advisory until rehearsed), and the cut continues to the tag. The row drives land.impl.canaries with
+# fixture canaries; the wrapper owns the scratch root the test-home guard needs and runs the tree under test.
+gate_run bash scripts/test-release-canaries-advisory.sh
 # A RELEASE NAMED FOR THE CUT COMMIT, carrying the cover's bytes (25/11, Fable decision A): nextcloud could
 # install nothing of a commit whose compiled inputs a previous release already covered - the bytes existed,
 # the name did not. Stub channel + scratch vault: no network, no gh, no key of the operator's.
@@ -1109,6 +1115,12 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # `--check` answers for the installed commit and the one behind it from the local release list. It refuses a
 # home inside the operator's store (scripts/lib/scratch-home.sh) and touches no node but its own.
 WA_BIN="$BIN" gate_run bash scripts/test-update-follow.sh | grep 'update follow ok'
+# THE WAIT BETWEEN SNAPSHOTS IS AN EVENT, NOT A 1 s POLL (mission update-is-one-line, step 9): a phase the
+# deploy already wrote must not wait for a tick, and a command that finished in 200 ms must not pay a sleep.
+# The row proves `inotifywait` fires on a real file write, that the wait is bounded so it cannot hang the
+# command, and that the follower uses it (and that a caller handing a sleep seam still gets its sleep).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-wait.lua" "$BIN" --db "$DB.update-wait" | grep "update wait ok"
+
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 # No test may run the installer with the operator's real data dir: one run pauses every session here.
