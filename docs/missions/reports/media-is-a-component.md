@@ -32,6 +32,11 @@ Victor's call, which is the open question in the ready file.
   (`out of bounds memory access` inside `ff_mpv_encode_picture`), reproduced in a 20-line program with one
   synthetic frame and no decoder, and with `YUV420P` + `color_range` as well as the removed `YUVJ420P`. The
   stills in the measurement are PPM. The next step there is libjpeg-turbo for wasm, not more poking.
+* **libjpeg-turbo does not build on this node, and that is measured, not assumed:** its GitHub release
+  tarball carries no `configure` (a repo snapshot that expects cmake), the SourceForge artifact did not
+  download to a working tree in two attempts, and the node has neither cmake nor ninja. Two ways out, in
+  order of cost: install cmake (then `-DWITH_SIMD=0 -DENABLE_SHARED=off` builds it), or `autoreconf` the
+  source tree. Until one is done, stills stay PPM.
 * **Not done: the component itself.** No Rust crate, no build wiring, no rows. `wit/media/media.wit` is the
   contract they will be written against.
 * wasi-sdk 34's wasip2 components import `wasi:cli/exit@0.2.12`, which neither wasmtime 27 nor 36 implements,
