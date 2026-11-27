@@ -73,10 +73,6 @@ pub mod fabric;
 /// loops, read by every renderer.
 /// The node's own tty: the funnel every screen byte goes through, the launch animation's hold and raw
 /// mode (moved out of `wa-term` in its last slice: it is I/O, not display).
-pub mod links;
-pub mod screen_guard;
-pub mod selection;
-pub mod tty;
 /// The tool-progress rows are the runner's now (it waits on the child); the node reads the same store
 /// through `wa_tool_progress`, which both processes link.
 pub mod subagents;
