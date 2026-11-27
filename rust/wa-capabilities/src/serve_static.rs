@@ -7,11 +7,12 @@
 //! travels with the bytes, and the program that serves them is `wa serve-static` (this binary in a second
 //! mode).
 //!
-//! THE SWITCH, and its default: `WASM_AGENT_SERVE_STATIC` names the rendezvous file the program wrote.
-//! Unset - today's path, and every node until an operator says otherwise - leaves `static_reply` reading
-//! the files itself, byte for byte as before. When the switch DOES name a program that cannot answer, the
-//! door answers a NAMED refusal (503 + the reason): a node whose asset half is unreachable must not look
-//! like a node that simply has no such file.
+//! WHERE THE RENDEZVOUS COMES FROM, and what it is NOT: not an environment variable. The program writes a
+//! fixed file under the node home - `<home>/.wasm-agent/serve-static.json` - and the host reads that
+//! same file; nothing in product code is switched by the process environment. Absent, empty, `0` or `off`
+//! leaves `static_reply` reading the files itself, byte for byte as before. When the file DOES name a
+//! program that cannot answer, the door answers a NAMED refusal (503 + the reason): a node whose asset half
+//! is unreachable must not look like a node that simply has no such file.
 //!
 //! What stays in the host, named and not claimed: `/health`, `/version`, `/log` (they answer from THIS
 //! process's own state, so moving them would answer from the wrong process), every route that calls the
@@ -24,8 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// The switch: the rendezvous file of the static program; unset means the host reads the files itself.
-pub const SWITCH: &str = "WASM_AGENT_SERVE_STATIC";
+/// The program-writable rendezvous under the node home. The program writes it, the host reads it, and no
+/// process environment decides anything (Fable: no env override in product code, ever).
+pub const RENDEZVOUS: &str = "serve-static.json";
 const MAX_ANSWER: u64 = 64 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -72,12 +74,20 @@ pub(crate) fn content_type(path: &str) -> &'static str {
     }
 }
 
-/// The switch's value as a path, or `None` for the in-process default.
-pub fn switch_path() -> Option<PathBuf> {
-    switch_from(std::env::var(SWITCH).ok().as_deref())
+/// Where both sides meet: `<home>/.wasm-agent/serve-static.rendezvous`, resolved by the product's own home
+/// rule rather than by an environment variable.
+pub fn rendezvous_path() -> PathBuf {
+    PathBuf::from(wa_host_support::paths::resolve_home()).join(".wasm-agent").join(RENDEZVOUS)
 }
 
-/// The switch's rule as a pure function (a test must not mutate the process environment).
+/// The rendezvous as a path, or `None` for the in-process default: the FILE is the authority, and its own
+/// text carries the rule (`0`, `off`, `in-process` or empty mean the host reads the files itself).
+pub fn switch_path() -> Option<PathBuf> {
+    let text = std::fs::read_to_string(rendezvous_path()).ok()?;
+    switch_from(Some(text.as_str()))
+}
+
+/// That rule as a pure function (a test must not touch the filesystem).
 fn switch_from(value: Option<&str>) -> Option<PathBuf> {
     let value = value?.trim();
     if value.is_empty() || value == "0" || value == "off" || value == "in-process" {

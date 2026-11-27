@@ -768,7 +768,7 @@ fn main() {
     // the UI file bytes the door answers before admission. Its own process, its own files.
     if command == "serve-static" {
         if lua_args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h") {
-            println!("usage: wa serve-static [--root <ui dir>] [--port 8792] [--rendezvous <file>]\n  serve the web UI files as their own program (blocks until stopped)\n  the node reaches it through WASM_AGENT_SERVE_STATIC=<the rendezvous file>");
+            println!("usage: wa serve-static [--root <ui dir>] [--port 8792] [--rendezvous <file>]\n  serve the web UI files as their own program (blocks until stopped)\n  the node reaches it through <home>/.wasm-agent/serve-static.json, which this program writes (no environment variable decides it)");
             return;
         }
         let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8792);
