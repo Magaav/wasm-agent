@@ -175,6 +175,68 @@ elif [ -n "${WA_UPGRADE_RELEASE_TAG:-}" ]; then
   exit 3
 fi
 
+# ---- A COVER, ON A NODE THAT RUNS THE BINARY'S EMBEDDED LUA ----------------------------------------
+#
+# A release may be installed for a commit that is NOT its source commit. That is a COVER: another commit's
+# build, accepted because every COMPILED input is identical (wa_compiled_inputs_digest, scripts/deploy.sh's
+# fast path and the release digest search). It is sound for a node WITH a tree - deploy.sh stages THIS
+# commit's lua-core beside the binary and nothing ever reads the embedded copy - and it is UNSOUND for a node
+# with no tree, which runs the binary's EMBEDDED Lua, because the embedded Lua is not a compiled input.
+# MEASURED 25/11: node-3589b5ca9690 was published asserting 3589b5ca while carrying node-a1857d15887c's bytes;
+# a tree-less node installed it, ran a1857d15's Lua and recorded 3589b5ca.
+#
+# So: if these bytes are another commit's build and this install carries no Lua tree of its own, the two Lua
+# digests must be EQUAL and both named. A digest that differs, a release whose manifest has no lua_inputs row,
+# and a caller that names no digest are three different refusals, each by name, all before a byte is staged:
+# an install that cannot tell is refused, never passed.
+COVER_COMMIT=""
+COVER_LUA_VERIFIED=""
+COVER_LUA_INPUTS=""
+if [ -n "$RELEASE_DIR" ] && [ -n "${WA_UPGRADE_REQUESTED_COMMIT:-}" ]; then
+  cover_want="$(printf '%s' "$WA_UPGRADE_REQUESTED_COMMIT" | tr -d '[:space:]')"
+  cover_manifest="$(ls -1 "$RELEASE_DIR"/node-*.manifest 2>/dev/null | head -1)"
+  cover_source=""
+  [ -n "$cover_manifest" ] && cover_source="$(sed -n 's/^source_commit=//p' "$cover_manifest" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  if [ -n "$cover_source" ] && [ "$cover_source" != "$cover_want" ]; then
+    COVER_COMMIT="$cover_source"
+    # THE MANIFEST IS THE WITNESS HERE, so it is verified like one. It ships inside the release's
+    # SHA256SUMS - which wa_release_verify_candidate has just proved is signed by a trusted key - but
+    # nothing above compares the manifest's own bytes with the hash those sums declare for it, so a
+    # swapped manifest could claim a matching Lua tree for a signed binary that embeds another one.
+    cover_manifest_name="$(basename "$cover_manifest")"
+    cover_declared="$(grep -F "  $cover_manifest_name" "$RELEASE_DIR/SHA256SUMS" 2>/dev/null | head -1 | awk '{print $1}')"
+    cover_actual="$(sha256sum < "$cover_manifest" 2>/dev/null | awk '{print $1}')"
+    if [ -z "$cover_declared" ] || [ "$cover_declared" != "$cover_actual" ]; then
+      say "refused(release_cover_lua_manifest_unverified): $RELEASE_DIR/SHA256SUMS does not carry the hash of $cover_manifest_name (declared ${cover_declared:-nothing}, this file is ${cover_actual:-unreadable}), so the Lua tree it claims cannot be trusted - and on a node with no Lua tree of its own that claim is the whole decision; nothing was staged"
+      exit 3
+    fi
+    if [ ! -f "$INSTALL_DIR/lua-core/manifest.txt" ]; then
+      cover_have="$(sed -n 's/^lua_inputs=//p' "$cover_manifest" 2>/dev/null | head -1 | tr -d '[:space:]')"
+      cover_want_lua="$(printf '%s' "${WA_RELEASE_LUA_INPUTS:-}" | tr -d '[:space:]')"
+      case "$cover_want_lua" in
+        ''|*[!0-9a-f]*)
+          say "refused(release_cover_lua_unknown): $RELEASE_DIR is the build of $cover_source and this install has no Lua tree, so these bytes are run through their EMBEDDED Lua - and no Lua-tree digest for $cover_want was given, so whether the two are the same program cannot be told; nothing was staged. The caller that has the tree passes it (scripts/release-install.sh --lua-inputs, or WA_RELEASE_LUA_INPUTS)."
+          exit 3 ;;
+      esac
+      if [ "${#cover_want_lua}" != 64 ]; then
+        say "refused(release_cover_lua_unknown): WA_RELEASE_LUA_INPUTS=$cover_want_lua is not a sha256 of a Lua tree, so $cover_want's Lua cannot be compared with the Lua these bytes embed; nothing was staged"
+        exit 3
+      fi
+      case "$cover_have" in
+        ''|*[!0-9a-f]*)
+          say "refused(release_cover_lua_unrecorded): $cover_manifest names no lua_inputs row (source_commit=$cover_source), so the Lua these bytes embed cannot be compared with $cover_want's; nothing was staged"
+          exit 3 ;;
+      esac
+      if [ "$cover_have" != "$cover_want_lua" ]; then
+        say "refused(release_cover_lua_mismatch): these bytes embed Lua tree $cover_have and $cover_want has Lua tree $cover_want_lua, and this install has no Lua tree of its own to put beside them - installing it would run another program's Lua under $cover_want's name; nothing was staged"
+        exit 3
+      fi
+      COVER_LUA_VERIFIED=yes
+      COVER_LUA_INPUTS="$cover_have"
+    fi
+  fi
+fi
+
 # THE CANDIDATE AGAINST THIS HOST'S LIBC, before the prove gate and long before the swap. A binary that
 # needs a newer glibc than this host has cannot start here at all - 18/11, mail: commit 14963b6f needed
 # GLIBC_2.39 on a glibc 2.35 node, the sentinel retried 424 times, and the node was down for two days. The
@@ -449,6 +511,17 @@ record_install() {
     "$commit" "$branch" "$dirty" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$provenance" "$role" "$via" "$stamp" "$reason" > "$record"
   {
     printf 'tree=%s\nbuild_info=%s\n' "$tree" "$build"
+    # WHICH LUA THIS NODE RUNS, as a fact on disk and not only inside the binary. A tree-less install has no
+    # lua-core/manifest.txt to read, so the Lua it runs is the one the binary EMBEDS, and the release's own
+    # manifest names that tree (lua_inputs=). `lua_tree=` is the commit whose Lua is running - the same field
+    # a fast-path deploy writes - so `wa --version` names it (rust/wa-host/src/build_info.rs install_label)
+    # and a cover shows up as exactly what it is: the bytes are one commit's, the Lua another's.
+    if [ -n "$COVER_LUA_VERIFIED" ]; then
+      printf 'lua_inputs=%s\ncover_lua_verified=yes\n' "$COVER_LUA_INPUTS"
+    fi
+    if [ -n "$COVER_COMMIT" ]; then
+      printf 'binary_source_commit=%s\n' "$COVER_COMMIT"
+    fi
     if [ -n "${UPGRADE_ANCESTRY_OVERRIDE:-}" ]; then
       printf 'ancestry_override=%s\nancestry_override_by=%s\nancestry_override_at=%s\n' \
         "$(printf '%s' "$UPGRADE_ANCESTRY_OVERRIDE" | tr '\r\n' '  ')" "$(id -un 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

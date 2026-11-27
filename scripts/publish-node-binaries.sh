@@ -67,7 +67,6 @@ CHECK=0
 LOCAL=0
 ENSURE=0
 PUBLISH=0
-NAMED_FROM_COVER=0
 COMMIT=""
 GLIBC_FLOOR="2.31"
 TARGETS=""
@@ -103,7 +102,6 @@ while [ "$#" -gt 0 ]; do
     --local) LOCAL=1; shift ;;
     --ensure) ENSURE=1; shift ;;
     --publish) PUBLISH=1; shift ;;
-    --named-from-cover) NAMED_FROM_COVER=1; shift ;;
     --allow-empty-codemode) ALLOW_EMPTY=1; shift ;;
     -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown_option: $1" ;;
@@ -128,6 +126,15 @@ esac
 # tree and every node worktree.
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail "not_a_checkout: $ROOT"
 . "$ROOT/scripts/lib/node-binaries.sh"
+# THE LUA TREE THE BINARY EMBEDS (rust/wa-host/build.rs collects lua/core, lua/vendor and the four
+# AGENTS documents with include_str!). It is deliberately NOT a compiled input - a node WITH a tree stages
+# its own lua-core beside the binary and never reads the embedded copy - but a TREE-LESS node runs exactly
+# this, so a release records its digest (lua_inputs=) and a cover is verified against it
+# (scripts/upgrade.sh). One definition, the same file list the deploy already stages
+# (scripts/lib/lua-tree.sh).
+[ -f "$ROOT/scripts/lib/lua-tree.sh" ] \
+  || fail "lua_tree_lib_missing: $ROOT/scripts/lib/lua-tree.sh (the digest of the Lua a binary embeds is what makes a cover checkable)"
+. "$ROOT/scripts/lib/lua-tree.sh"
 . "$ROOT/scripts/lib/build-requirements.sh"
 # The glibc floor measurement, shared with the three installers (scripts/lib/glibc-floor.sh): the number this
 # script refuses to publish above and the number an installer refuses to run are the same measurement of the
@@ -387,18 +394,6 @@ if [ "$ENSURE" = 1 ]; then
       components_step || true
       publish_report
     fi
-    # A RELEASE NAMED FOR THIS COMMIT (25/11, Fable decision A). "Covered" is not installable on a node with
-    # no tree: scripts/release-install.sh fetches exactly node-<sha12> of the commit it is asked for, and a
-    # cut answered only by "covered: node-<other12>" published nothing, so that node answered
-    # node_release_unavailable. The bytes for this commit are the cover's (asserted, not assumed), so they are
-    # published once more under this commit's own name - a NEW release, never a replacement.
-    if [ "$NAMED_FROM_COVER" = 1 ] && [ "$ensure_tag" != "$(wa_node_release_tag "$COMMIT")" ]; then
-      named_args=(--commit "$COMMIT" --cover-tag "$ensure_tag" --out "$OUT/named-$SHORT")
-      [ -n "$(wa_node_release_repo "$ROOT" 2>/dev/null)" ] && named_args+=(--repo "$(wa_node_release_repo "$ROOT" 2>/dev/null)")
-      [ "$PUBLISH" = 1 ] && named_args+=(--publish)
-      bash "$ROOT/scripts/publish-named-release.sh" "${named_args[@]}" \
-        || fail "named_release_refused: the release named for $COMMIT could not be made from $ensure_tag" 2
-    fi
     exit 0
   fi
   say "not covered for$ensure_missing; building $MANIFEST_TRIPLES (a deploy of $COMMIT needs this release)"
@@ -434,6 +429,7 @@ if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
   say "cargo target dir: $TARGET_DIR (one directory for wa-host and wa-sentinel; --target-dir overrides)"
   say "code-mode assets: $CODEMODE${ASSETS:+ ($ASSETS)}${ASSETS_WHY:+ - $ASSETS_WHY}"
   say "compiled inputs: $(wa_compiled_inputs_digest "$ROOT" "$COMMIT" 2>&1) (a later commit with this digest installs this release)"
+  say "lua inputs: $(wa_lua_tree_digest "$ROOT" "$COMMIT" 2>&1) (the Lua tree this binary EMBEDS: a tree-less node runs it, so a cover must match it)"
   say "release tag: $TAG   (repo $REPO_SLUG)${LOCAL:+ [--local: not publishable]}"
   say "would write $OUT/node-$SHORT.manifest and: $(asset_list)"
   say "would print (not run) the gh release command; nothing was built"
@@ -448,7 +444,7 @@ cp "$ROOT/assets/fonts/waIcons-Regular.ttf" "$OUT/waIcons-Regular.ttf" \
 
 # ---- the artifact set, from a build here or from --from --------------------------------------------
 emit_manifest() { # <out dir> -> manifest path, after every member is checked
-  local dir="$1" triple manifest tmp digest
+  local dir="$1" triple manifest tmp digest lua_digest
   manifest="$dir/node-$SHORT.manifest"
   tmp="$dir/.node-$SHORT.manifest.$$"
   # The compiled-inputs digest is a fact about the COMMIT, not about this machine's build, so it is read
@@ -456,6 +452,10 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
   # release a docs-only descendant cannot use, which is the whole reason the row exists.
   digest="$(wa_compiled_inputs_digest "$ROOT" "$COMMIT")" || fail "compiled_inputs_unavailable: cannot digest the compiled inputs of $COMMIT" 2
   [ -n "$digest" ] || fail "compiled_inputs_unavailable: no sha256 tool for the compiled-inputs digest" 7
+  # A release with no lua_inputs row cannot serve a cover on a tree-less node, so it is refused HERE rather
+  # than discovered there: the row is a fact about $COMMIT that its tree answers, exactly like the digest above.
+  lua_digest="$(wa_lua_tree_digest "$ROOT" "$COMMIT")" || fail "lua_inputs_unavailable: cannot digest the Lua tree the binary of $COMMIT embeds" 2
+  [ -n "$lua_digest" ] || fail "lua_inputs_unavailable: no sha256 tool for the Lua-tree digest" 7
   {
     echo 'schema=wasm-agent-node-binaries/1'
     echo "source_commit=$COMMIT"
@@ -467,6 +467,7 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     echo "unpushed=${ALLOW_UNPUSHED_COMMIT:+yes}"
     [ -n "${ALLOW_UNPUSHED_REASON:-}" ] && echo "unpushed_reason=${ALLOW_UNPUSHED_REASON}"
     echo "compiled_inputs=$digest"
+    echo "lua_inputs=$lua_digest"
     echo "rustc_version=$(rustc --version 2>/dev/null | sed 's/^rustc //')"
     echo "zig_version=$(zig version 2>/dev/null || echo unknown)"
     [ -n "${BUILD_SECONDS:-}" ] && echo "build_seconds=$BUILD_SECONDS"
@@ -515,6 +516,15 @@ if [ -n "$FROM" ]; then
   if [ -n "$INCOMING" ] && [ "$INCOMING" != "$DIGEST" ]; then
     fail "compiled_inputs_mismatch: $FROM's manifest records compiled_inputs=$INCOMING and $COMMIT's tree is $DIGEST, so that manifest is not this commit's" 5
   fi
+  # The Lua row is recomputed for the same reason, and it is the row a TREE-LESS node is judged by: a
+  # manifest naming another Lua tree than $COMMIT's is a build of another PROGRAM, whatever its compiled
+  # inputs hash to (25/11: node-3589b5ca9690 carried node-a1857d15887c's bytes because the digests were equal).
+  LUA_DIGEST="$(wa_lua_tree_digest "$ROOT" "$COMMIT")" || fail "lua_inputs_unavailable: cannot digest the Lua tree the binary of $COMMIT embeds" 2
+  [ -n "$LUA_DIGEST" ] || fail "lua_inputs_unavailable: no sha256 tool for the Lua-tree digest" 7
+  LUA_INCOMING="$(wa_node_manifest_value "$OUT/node-$SHORT.manifest" lua_inputs)"
+  if [ -n "$LUA_INCOMING" ] && [ "$LUA_INCOMING" != "$LUA_DIGEST" ]; then
+    fail "lua_inputs_mismatch: $FROM's manifest records lua_inputs=$LUA_INCOMING and $COMMIT's Lua tree is $LUA_DIGEST, so those bytes embed another program than this commit's" 5
+  fi
   # The identity travels with the bytes, and it is never re-invented here: `--from` runs on a host that may
   # not be able to build, and a fresh built_utc is exactly what invalidates the signature made over the sums
   # the signing host saw.
@@ -525,17 +535,18 @@ if [ -n "$FROM" ]; then
     stamp_write "$FROM_UTC" "$FROM_SECONDS" || say "warning: the build stamp $BUILD_STAMP could not be written"
     say "identity taken from $FROM: built_utc=$FROM_UTC${FROM_SECONDS:+ build_seconds=$FROM_SECONDS}"
   fi
-  if [ "$INCOMING" = "$DIGEST" ]; then
+  if [ "$INCOMING" = "$DIGEST" ] && [ "$LUA_INCOMING" = "$LUA_DIGEST" ]; then
     # Already this commit's: NOT rewritten. A manifest rewritten byte-for-byte is still a different file to
     # anything that hashed it (mtime, inode, a concurrent reader), and the sums that name it must stay
     # exactly the bytes the signing host signed.
-    say "manifest kept byte-for-byte (compiled_inputs=$DIGEST already recorded)"
+    say "manifest kept byte-for-byte (compiled_inputs=$DIGEST, lua_inputs=$LUA_DIGEST already recorded)"
   else
-    awk -v d="$DIGEST" '
+    awk -v d="$DIGEST" -v l="$LUA_DIGEST" '
       /^compiled_inputs=/ {next}
+      /^lua_inputs=/ {next}
       {print}
-      /^source_tree=/ {print "compiled_inputs=" d; done = 1}
-      END {if (!done) print "compiled_inputs=" d}
+      /^source_tree=/ {print "compiled_inputs=" d; print "lua_inputs=" l; done = 1}
+      END {if (!done) {print "compiled_inputs=" d; print "lua_inputs=" l}}
     ' "$OUT/node-$SHORT.manifest" > "$OUT/.node-$SHORT.manifest.$$.tmp" \
       && mv -f "$OUT/.node-$SHORT.manifest.$$.tmp" "$OUT/node-$SHORT.manifest" \
       || fail "manifest_unwritable: $OUT/node-$SHORT.manifest" 2

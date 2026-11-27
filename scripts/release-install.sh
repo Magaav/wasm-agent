@@ -13,7 +13,13 @@
 # process and not the running node rewriting its own image.
 #
 # Usage:
-#   bash scripts/release-install.sh <40-hex commit>
+#   bash scripts/release-install.sh <40-hex commit> [--cover-commit <40-hex>] [--lua-inputs <sha256>]
+#
+# --cover-commit names the release whose bytes are ANOTHER commit's build (a cover: identical compiled inputs,
+# different commit). A tree-less node runs the binary's EMBEDDED Lua, so a cover is only installable when that
+# Lua is this commit's - and this node has no tree to compute that from, so the caller that HAS one passes the
+# result: --lua-inputs is the wa_lua_tree_digest of the commit being installed, and scripts/upgrade.sh refuses
+# the cover by name when the release's lua_inputs row disagrees with it, or when no digest was given at all.
 #
 # Exit codes: 0 installed and verified; 2 a named refusal (nothing staged); 3 installed but the
 # verification after the swap disagreed (upgrade.sh's own rollback is what put the old bytes back).
@@ -23,6 +29,16 @@ say() { printf '  %s\n' "$*"; }
 fail() { printf 'release_install: %s\n' "$*" >&2; exit 2; }
 
 COMMIT="${1:-}"
+[ "$#" -gt 0 ] && shift
+COVER_COMMIT=""
+LUA_INPUTS="${WA_RELEASE_LUA_INPUTS:-}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --cover-commit) [ "$#" -ge 2 ] || fail 'cover_commit_value_required'; COVER_COMMIT="$2"; shift 2 ;;
+    --lua-inputs) [ "$#" -ge 2 ] || fail 'lua_inputs_value_required'; LUA_INPUTS="$2"; shift 2 ;;
+    *) fail "unknown_option: $1" ;;
+  esac
+done
 INSTALL="${WA_INSTALL_DIR:-${WA_RELEASE_INSTALL:-}}"
 if [ -z "$INSTALL" ]; then
   if [ -f "${HOME:-}/.wasm-agent/install-dir.txt" ]; then
@@ -48,6 +64,21 @@ case "$COMMIT" in
   *[!0-9a-f]*|'') fail "release_commit_invalid: \"$COMMIT\" is not a hex commit id" ;;
 esac
 [ "${#COMMIT}" = 40 ] || fail "release_commit_invalid: \"$COMMIT\" is not a full 40-hex commit id"
+if [ -n "$COVER_COMMIT" ]; then
+  case "$COVER_COMMIT" in
+    *[!0-9a-f]*) fail "cover_commit_invalid: \"$COVER_COMMIT\" is not a hex commit id" ;;
+  esac
+  [ "${#COVER_COMMIT}" = 40 ] || fail "cover_commit_invalid: \"$COVER_COMMIT\" is not a full 40-hex commit id"
+  [ "$COVER_COMMIT" != "$COMMIT" ] || fail "cover_commit_pointless: --cover-commit names $COMMIT itself; ask for it as the release commit"
+  # A COVER ON A TREE-LESS NODE IS DECIDED BY TWO DIGESTS, one of which this node cannot compute. Refusing here
+  # rather than after the download says which fact is missing instead of leaving it to the installer one step
+  # later (scripts/upgrade.sh owns the comparison itself - release_cover_lua_mismatch).
+  case "$LUA_INPUTS" in
+    '') fail "release_cover_lua_unknown: a cover runs its binary's embedded Lua, and this node has no tree to compute the Lua-tree digest of $COMMIT from - pass --lua-inputs <sha256> (wa_lua_tree_digest <tree> $COMMIT), or install a release named for $COMMIT itself" ;;
+    *[!0-9a-f]*) fail "release_cover_lua_unknown: --lua-inputs \"$LUA_INPUTS\" is not a sha256 hex digest" ;;
+  esac
+  [ "${#LUA_INPUTS}" = 64 ] || fail "release_cover_lua_unknown: --lua-inputs must be 64 hex characters (a wa_lua_tree_digest), got ${#LUA_INPUTS}"
+fi
 
 UPGRADE="$INSTALL/scripts/upgrade.sh"
 [ -f "$UPGRADE" ] || fail "upgrade_script_missing: $UPGRADE is not installed, so nothing can stage or prove a new binary safely"
@@ -57,19 +88,39 @@ REPO="$(wa_node_release_repo "$INSTALL" 2>/dev/null)" || REPO=""
 [ -n "$REPO" ] || fail "release_repo_unknown: no owner/repo for the node release (set WA_NODE_RELEASE_REPO)"
 CACHE="$(wa_node_cache_root "$INSTALL")"
 SHORT="${COMMIT:0:12}"
+# THE BYTES' OWN COMMIT: this one when a release names it, the cover's when one was named. Everything below
+# reads the file the manifest pins for THAT commit, and the record is verified against it.
+SOURCE_COMMIT="$COMMIT"
 
 say "fetching node-$SHORT for $TRIPLE into $CACHE (manifest, signature and every pin verified)"
-DIR="$(wa_node_binary_download "$REPO" "$COMMIT" "$TRIPLE" "$CACHE" 2>&1)" || {
-  RC=$?
-  fail "release_download_failed($RC): $DIR"
-}
+DIR=""
+if ! DIR="$(wa_node_binary_download "$REPO" "$COMMIT" "$TRIPLE" "$CACHE" 2>&1)"; then
+  RC=$?; EXACT_ERR="$DIR"; DIR=""
+  # THE ANSWER A TREE-LESS NODE OWES when no release names the commit it was asked for: one line that says
+  # what is missing, why another commit's build is not a substitute here, and what the caller can do. A node
+  # with no tree runs the binary's EMBEDDED Lua (its install has no lua-core to stage), so a cover is only
+  # installable when that Lua is this commit's - a fact only a machine with the tree can compute.
+  [ -n "$COVER_COMMIT" ] || fail "release_cover_needed: no release names $SHORT and this node has no tree to build it from; a cover (another commit's build) is only installable when its embedded Lua tree is $COMMIT's, so pass --cover-commit <40-hex> --lua-inputs <sha256> (the coordinator's wa_node_release_digest_search plus wa_lua_tree_digest). The release channel said: $EXACT_ERR"
+  say "node-$SHORT is not published: taking the cover node-${COVER_COMMIT:0:12} (a build of $COVER_COMMIT, whose Lua tree must be $COMMIT's)"
+  DIR="$(wa_node_binary_download "$REPO" "$COVER_COMMIT" "$TRIPLE" "$CACHE" 2>&1)" || {
+    RC=$?
+    fail "release_download_failed($RC): $DIR (after node-$SHORT: $EXACT_ERR)"
+  }
+  SOURCE_COMMIT="$COVER_COMMIT"
+fi
 [ -d "$DIR" ] || fail "release_download_failed: wa_node_binary_download printed no directory"
-CANDIDATE="$DIR/wa-$TRIPLE-$SHORT"
+SOURCE_SHORT="${SOURCE_COMMIT:0:12}"
+CANDIDATE="$DIR/wa-$TRIPLE-$SOURCE_SHORT"
 [ -f "$CANDIDATE" ] || fail "release_binary_missing: $CANDIDATE is not in the verified release directory"
 [ -f "$DIR/SHA256SUMS" ] || fail "release_sums_missing: $DIR carries no SHA256SUMS, so upgrade.sh cannot verify the candidate"
 
 say "upgrading: bash scripts/upgrade.sh $CANDIDATE --release $DIR"
-if ! bash "$UPGRADE" "$CANDIDATE" --release "$DIR"; then
+# THE TWO FACTS THE INSTALLER CANNOT COMPUTE ON A TREE-LESS NODE, handed to the one place that judges a cover
+# (scripts/upgrade.sh: release_cover_lua_unknown / _unrecorded / _mismatch). WA_UPGRADE_REQUESTED_COMMIT is the
+# commit this node is being moved TO; WA_RELEASE_LUA_INPUTS is that commit's Lua-tree digest, from the caller
+# that has the tree.
+if ! WA_UPGRADE_REQUESTED_COMMIT="$COMMIT" WA_RELEASE_LUA_INPUTS="$LUA_INPUTS" \
+     bash "$UPGRADE" "$CANDIDATE" --release "$DIR"; then
   fail "upgrade_refused: scripts/upgrade.sh did not install $SHORT; it puts the previous bytes back itself, so this node is where it was. Its own words are above."
 fi
 
@@ -92,6 +143,11 @@ INFO="$("$INSTALL/wa" --build-info 2>/dev/null || true)"
 [ -n "$INFO" ] || fail "installed_but_unproven: $INSTALL/wa --build-info answered nothing, so the installed build cannot name its own commit"
 GOT="$(printf '%s\n' "$INFO" | sed -n 's/^commit=//p' | head -1)"
 [ -n "$GOT" ] || fail "installed_but_unproven: --build-info carries no commit= line, so what was installed cannot be compared with $COMMIT"
-[ "$GOT" = "$COMMIT" ] || fail "installed_but_unproven: the installed build names commit=$GOT, this release is $COMMIT"
+# The bytes are SOURCE_COMMIT's: this commit's own release, or a cover whose embedded Lua the installer proved
+# to be $COMMIT's (scripts/upgrade.sh, before it staged anything). Anything else is not what was asked for.
+[ "$GOT" = "$SOURCE_COMMIT" ] || fail "installed_but_unproven: the installed build names commit=$GOT, this release is $SOURCE_COMMIT"
 say "installed binary: --build-info commit=$GOT"
+if [ "$SOURCE_COMMIT" != "$COMMIT" ]; then
+  say "covered: $SHORT installed the bytes of $SOURCE_SHORT, whose embedded Lua tree is $COMMIT's (lua_inputs $LUA_INPUTS)"
+fi
 say "release install ok: $SHORT ($TRIPLE) on $INSTALL"
