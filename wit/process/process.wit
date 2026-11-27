@@ -1,0 +1,59 @@
+/// wa:process@0.1.0 - the OS-process seam as an async contract.
+///
+/// `wa-operation` is 8,772 lines reached from the host as an in-process crate (`rust/wa-operation/src/lib.rs:1`), so a
+/// change to it rebuilds the node's binary. This world is the missing piece named by the move-list: work that takes
+/// time returns a `future`, output that keeps coming is a `stream`, and dropping the handle is a decision about the
+/// work rather than a leak of it.
+package wa:process@0.1.0;
+
+interface types {
+    variant error {
+        refused(string),
+        again,
+        closed,
+        failed(string),
+    }
+
+    /// What to run. No shell string: the spawner owns the split, so a component cannot smuggle one.
+    record spec {
+        program: string,
+        arguments: list<string>,
+        environment: list<tuple<string, string>>,
+        working-directory: option<string>,
+    }
+
+    /// How a child ended: an exit code, or the signal that stopped it.
+    variant exit {
+        code(s32),
+        signal(u32),
+    }
+}
+
+interface child {
+    use types.{error, spec, exit};
+
+    resource process {
+        /// Start `spec`. Suspends while the child is created; a refusal (a grant, a guard, a missing program) is an
+        /// `error` here, because no process ever existed.
+        spawn: static async func(spec: spec) -> result<process, error>;
+
+        /// The child's stdout, in order, as it arrives. Ends when the child ends.
+        stdout: func() -> stream<list<u8>>;
+
+        /// The child's stderr, the same contract on its own stream.
+        stderr: func() -> stream<list<u8>>;
+
+        /// HOW IT ENDED, ONCE. Settles at the terminal state and never before; awaiting it twice is awaiting the same
+        /// future. `signal` with `0` when the caller asked and the child was already gone.
+        wait: func() -> future<exit>;
+
+        /// Ask the child to stop. `true` when the request was taken; the `wait` future is the truth in both cases, and
+        /// a stopped child is never re-run.
+        stop: async func(signal: option<u32>) -> result<bool, error>;
+    }
+}
+
+/// A guest that RUNS work imports `child`; the host owns the process tree and its accounting.
+world process-client {
+    import child;
+}
