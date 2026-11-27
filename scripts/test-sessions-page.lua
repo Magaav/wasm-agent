@@ -32,7 +32,9 @@ check(tostring(page.options[1].label):sub(1, 2) == '* ', 'and it is marked: ' ..
 local saw_worker_heading = false
 local workers = 0
 for _, option in ipairs(page.options) do
-  if option.action == 'collapse' then saw_worker_heading = true
+  -- The heading is a TOGGLE row now (collapsed by default, the brief's item 3): it carries the count
+  -- and nothing under it until the reader opens it, so this page shows the heading and no worker row.
+  if option.toggle then saw_worker_heading = true
   elseif option.worker then workers = workers + 1 end
   if option.session then
     check(#tostring(option.copy or '') == 36, 'a row carries its full id in copy: ' .. tostring(option.copy))
@@ -40,7 +42,7 @@ for _, option in ipairs(page.options) do
   end
 end
 check(saw_worker_heading, 'the factory session is under its own heading')
-check(workers >= 1, 'and it is inside that block: ' .. workers)
+check(workers == 0, 'and nothing under it until it is opened: ' .. workers)
 check(page.options[2].session ~= mission, 'the mission is not in the chat list')
 check(elapsed_ms < view.BUDGET_MS, string.format('200 sessions under %d ms (%.1f ms)', view.BUDGET_MS, elapsed_ms))
 
@@ -95,6 +97,25 @@ check(shown ~= nil, 'the unnamed session is on the page')
 check(shown ~= nil and shown:find('how do I rotate', 1, true) ~= nil,
   'and it is named by the first words of its first message: ' .. tostring(shown))
 check(shown ~= nil and not shown:find('open the vault page', 1, true), 'not by the answer')
+
+-- ---- the factory group is COLLAPSED by default, and opens on one key ---------------------------
+local mission_session = memory.start_session('node-x', 'mission', { user_id = 'master', title = 'mission: closed' })
+local shut = view.page({ session_id = here, user_id = 'master', limit = 200 })
+local heading, worker_rows_shut, worker_rows_open = nil, 0, 0
+for _, option in ipairs(shut.options) do
+  if option.toggle then heading = option end
+  if option.worker then worker_rows_shut = worker_rows_shut + 1 end
+end
+check(heading ~= nil, 'the factory sessions have a heading')
+local shut_text = tostring(heading and heading.label or '')
+check(shut_text:find('mission session', 1, true) ~= nil, 'the heading says what it holds: ' .. shut_text)
+check(worker_rows_shut == 0, 'and nothing under it until the reader opens it: ' .. worker_rows_shut)
+local opened = view.page({ session_id = here, user_id = 'master', limit = 200, workers_open = true })
+for _, option in ipairs(opened.options) do if option.worker then worker_rows_open = worker_rows_open + 1 end end
+check(worker_rows_open >= 1, 'opening it lists them: ' .. worker_rows_open)
+local lists_mission = false
+for _, option in ipairs(opened.options) do if option.session == mission_session then lists_mission = true end end
+check(lists_mission, 'the mission session is one of the rows once it is open')
 
 if failed > 0 then error(string.format('sessions page: %d of %d failed, first: %s', failed, checks, tostring(first)), 0) end
 print(string.format('sessions page ok (%d checks, %.1f ms for %d sessions)', checks, elapsed_ms, #page.options))
