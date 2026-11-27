@@ -256,4 +256,11 @@ wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
 # its bytes are the ones published in components-033542eb9a37.
-wa-whatsapp 3ab893733cd6160b572c65afc7500bc3d3b067b04ebfd46c87ad053f3e0dcb80 8865574
+# Repin for whatsapp-index-heals-itself (26/11): the component gained the reconnect gap (Gap, note_gap in
+# the drain, oldest_at_or_after, heal_asks and the one-a-minute heal round), group subjects learned from
+# the message's own context (ContextInfo.groupSubject) and fetched for the rest (subjects_tick), the ops
+# registry over the queue, the cut-text pointer (*_cut / whole_in) and the clamp said in every list answer.
+# Built on avell in the pinned root (/tmp/wa-component-build/src) with the toolchain this line's
+# predecessor used, rustc 1.100.0, wasi-sdk 34.0, and TWICE (a clean rebuild and a warm second run) for the
+# same sha256. Every other pin is unchanged.
+wa-whatsapp 237f8d9cf8065aac8914da371525890c3835a985a28ac56dacb27c2648a0631e 8928227
