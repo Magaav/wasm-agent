@@ -1106,12 +1106,14 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   -- 40 BYTES, because the row's own bound is bytes and the ellipsis is three of them: clipping to 39
   -- characters and appending the ellipsis made 42 bytes, which is what row 7 caught.
   if #what > 40 then what = what:sub(1, 37) .. "…" end
-  -- A REMOTE JOB SAYS WHERE (Fable 28/11): the row reads `remote work . bash`, so a reader knows the work is
+  -- A REMOTE JOB SAYS WHERE (Fable 28/11): the row reads `remote <node> . <capability>`, so a reader knows which machine runs the work
   -- on another machine. Every other call keeps the tool name it already had.
   local label = name
   if name == "remote" and type(params) == "table" then
     local capability = tostring(params.capability or "")
-    if capability ~= "" then label = "remote work · " .. capability end
+    local node = tostring(params.node or params.peer or "")
+    local prefix = node ~= "" and ("remote " .. node) or "remote"
+    if capability ~= "" then label = prefix .. " · " .. capability end
   end
   local record = { op = started.op, tool = label, what = what, kind = executor.kind or "operation", scope = scope,
     started_at = started_at, state = "running", reported = false, id = started.id,

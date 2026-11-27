@@ -621,6 +621,17 @@ mod tests {
 
     // ---- the clock and the bar ---------------------------------------------------------------
     /// THE EXTENDED ROW (Fable 28/11): the job own limit in the row, and what the key does.
+    /// TWO PEERS, TWO ROWS (Fable 28/11): `work` in the example was a machine, not a word, so a label must
+    /// carry the node the call named and never a constant.
+    #[test]
+    fn a_remote_row_names_the_peer_it_runs_on() {
+        let openclaw = Row::text("remote openclaw \u{b7} bash", 62.0, None, 0.0, None, true);
+        let work = Row::text("remote work \u{b7} bash", 62.0, None, 0.0, None, true);
+        assert!(openclaw.starts_with("\u{27f3} remote openclaw \u{b7} bash"), "{openclaw}");
+        assert!(work.starts_with("\u{27f3} remote work \u{b7} bash"), "{work}");
+        assert_ne!(openclaw, work);
+    }
+
     #[test]
     fn a_held_row_says_the_limit_and_what_esc_does() {
         let text = Row::text("bash", 190.0, None, 0.0, Some(300.0), true);
