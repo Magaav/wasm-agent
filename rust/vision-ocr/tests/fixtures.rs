@@ -4,7 +4,7 @@
 //! worker `scripts/whatsapp-ocr-local.py`) on three SYNTHETIC images - rendered text only, no real document,
 //! no names, numbers or JIDs. This row runs the same three through `vision-ocr` and compares the words.
 //!
-//! Where the models come from: they are the ones the engine already ships (%)**models are never copied into
+//! Where the models come from: they are the ones the engine already ships; **models are never copied into
 //! this repo** - `VISION_OCR_MODELS` names the directory (default: the node's OCR venv), and the row SKIPS by
 //! name when it is not there, because a skip is not a pass.
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ fn the_words_match_the_engine_in_use() {
         &std::fs::read_to_string(root.join("fixtures/vision/golden.json")).expect("golden"),
     )
     .expect("golden json");
-    let engine = vision_ocr::Engine::load(&models, &dict).expect("engine loads");
+    let engine = vision_ocr::Engine::load(&models, &dict);
     for case in golden["cases"].as_array().expect("cases") {
         let fixture = case["fixture"].as_str().expect("fixture");
         let img = image::open(root.join("fixtures/vision").join(fixture)).expect("fixture image").to_rgb8();
