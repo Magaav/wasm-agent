@@ -1222,6 +1222,9 @@ check release-channel bash scripts/test-release-channel-e2e.sh
 # scan ran at the 20 s default on a cold stage, and the bundle it would have used carries no wa-term and no
 # wa-operations-supervisor. This row is the guard on the bound, the named step and the built sidecars.
 check health-graded bash scripts/test-health-graded.sh
+# A FORGOTTEN SWAP IS A LINE, NOT AN AFTERNOON (28/11): the loop runs a copy under _orch that a human swaps, and a
+# stale lib made every tip print NOT GRADED while the fix sat landed in main. This row exercises the self-check.
+check health-swap-visible bash scripts/test-health-swap-visible.sh
 # THE REPORT CITED A QUERY THAT DID NOT EXIST (27/11): docs/missions/reports/waiting-costs-no-turns.md names
 # wct-query.sql as its after-measurement, and the file was never in the tree. The row checks the query exists,
 # parses, still counts the four numbers the before was taken with, and answers a real 1-day window.
