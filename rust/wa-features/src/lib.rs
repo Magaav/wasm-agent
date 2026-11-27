@@ -128,6 +128,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
+        id: "vision",
+        component: "vision",
+        env: "WA_VISION_COMPONENT",
+        native: "rust/wa-kernel-runtime/src/vision_host.rs",
+        summary: "a reading of an image (words, boxes, confidence) by the component instead of the kernel's worker",
+        default_enabled: DEFAULT_ENABLED,
+    },
+    FeatureSpec {
         id: "agent_core",
         component: "agent-core",
         env: "WA_AGENT_CORE_COMPONENT",
