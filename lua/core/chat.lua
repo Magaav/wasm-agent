@@ -1071,7 +1071,12 @@ function M.run(argv)
     if id == "" then return false end
     local encoded = memory.base64_encode(id)
     view:control("\27]52;c;" .. encoded .. "\7")
-    ui.say("  copied " .. id:sub(1, 8) .. "\u{2026}")
+    -- THE SAME NOTICE THE CLICK USES (the brief: the line confirms "copied", using the copied-notice):
+    -- the host notice row, not a transcript line - a copy must not push the conversation down, and
+    -- both ways of copying say the same sentence.
+    if host and host.editor_notice then
+      pcall(host.editor_notice, string.format("Copied (%d characters)", #id))
+    end
     return true
   end
   -- Rename through the panel's own field, then the ledger: the title is what every list shows.
@@ -1288,16 +1293,19 @@ function M.run(argv)
       -- The list comes back after an action: `c` and `r` finish the panel (a page whose answer has gone to
       -- the caller reads keys and does nothing), so the reader gets the list again, on the same row.
       local focus = nil
+      local notice = nil
       local filter = line:sub(11):gsub("^%s+", ""):gsub("%s+$", "")
       if filter == "" then filter = nil end
       while true do
         local answer = sessions.run(ui, { session_id = agent.session_id, user_id = USER, limit = 200,
-          back = switched_from, selected = focus, filter = filter })
+          back = switched_from, selected = focus, filter = filter, notice = notice })
         if type(answer) ~= "table" then break end
         if answer.action == "key" then
           local option = (sessions.page({ session_id = agent.session_id, user_id = USER, limit = 200,
             back = switched_from, filter = filter })).options[tonumber(answer.index) or 0] or {}
-          if answer.key == "copy" then copy_id(option.copy or option.session)
+          if answer.key == "copy" then
+            local copied = option.copy or option.session
+            if copy_id(copied) then notice = string.format("Copied (%d characters)", #tostring(copied)) end
           elseif answer.key == "rename" then rename_session(option.session)
           elseif answer.key == "filter" then
             -- A field of its own: a name typed into the list would be read as letters (they are keys

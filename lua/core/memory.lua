@@ -1218,6 +1218,18 @@ function M.rename_session(session_id, title)
   return true
 end
 
+-- The FIRST thing a person said in a thread, for the lists that name an unnamed session by it
+-- (/sessions): one row, the newest query the store has an index for. A thread with no user turn yet is
+-- "" - the caller decides what to show instead.
+function M.first_user_line(session_id)
+  session_id = tostring(session_id or "")
+  if session_id == "" then return "" end
+  local rows = query("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1",
+    { session_id }) or {}
+  local row = rows[1]
+  return row and tostring(row.content or "") or ""
+end
+
 function M.base64_decode(text)
   if type(text) ~= "string" or text == "" then return "" end
   text = text:gsub("%s", ""):gsub("=+$", "")

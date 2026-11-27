@@ -82,5 +82,19 @@ local encoded = memory.base64_encode(here)
 check(memory.base64_decode(encoded) == here, 'a copied id decodes back to itself')
 check(#here == 36, 'and an id is 36 characters, whatever the terminal says it copied')
 
+-- ---- an unnamed session is named by its first words --------------------------------------------
+local quiet = memory.start_session('node-x', 'chat', { user_id = 'master' })
+memory.append_turn(quiet, { role = 'user', content = 'how do I rotate the vault key  please' })
+memory.append_turn(quiet, { role = 'assistant', content = 'open the vault page' })
+local named = view.page({ session_id = here, user_id = 'master', limit = 200 })
+local shown = nil
+for _, option in ipairs(named.options) do
+  if option.session == quiet then shown = tostring(option.label) end
+end
+check(shown ~= nil, 'the unnamed session is on the page')
+check(shown ~= nil and shown:find('how do I rotate', 1, true) ~= nil,
+  'and it is named by the first words of its first message: ' .. tostring(shown))
+check(shown ~= nil and not shown:find('open the vault page', 1, true), 'not by the answer')
+
 if failed > 0 then error(string.format('sessions page: %d of %d failed, first: %s', failed, checks, tostring(first)), 0) end
 print(string.format('sessions page ok (%d checks, %.1f ms for %d sessions)', checks, elapsed_ms, #page.options))

@@ -139,11 +139,24 @@ function M.page(opts)
     else
       local row = entry.row
       local name = tostring(row.title or "")
-      if name == "" then name = "(unnamed) " .. M.short_id(row.id) end
+      if name == "" then
+        -- The brief: an unnamed session is named by the FIRST WORDS of the first message it holds. One
+        -- query per unnamed row, and only for a row whose title is empty - which is rare after the first
+        -- turn, and never happens for a thread that was titled when it started.
+        local said = memory.first_user_line and memory.first_user_line(row.id) or ""
+        said = tostring(said):gsub("%s+", " "):gsub("^%s+", "")
+        if said ~= "" then
+          name = clip(said, 44)
+        else
+          name = "(unnamed) " .. M.short_id(row.id)
+        end
+      end
       local age = M.since_text(math.max(0, now - (tonumber(row.updated_at) or now)))
       options[#options + 1] = {
         label = (entry.here and "* " or "  ") .. clip(name, 44),
-        hint = string.format("%s  %s  %d msg  %s", state_text(row), age,
+        -- The brief: ids are shown as "80b87e05-..." with a copy affordance. The full id is what
+        -- `copy` carries; the short form is only what the eye reads.
+        hint = string.format("%s  %s  %s  %d msg  %s", M.short_id(row.id), state_text(row), age,
           tonumber(row.message_count) or 0, tostring(row.node_id or "") ~= "" and row.node_id or "this node"),
         copy = row.id,
         session = row.id,
@@ -152,6 +165,9 @@ function M.page(opts)
     end
   end
   local page = {
+    -- A line above the list: what just happened (`Copied (36 characters)`), shown where the reader is -
+    -- a panel owns the screen's bottom, so the editor's own notice cannot be seen while it is open.
+    lines = opts.notice and { tostring(opts.notice) } or nil,
     title = string.format("Sessions (%d%s)%s", #options, total > #options and (" of " .. total) or "",
       (opts.filter and opts.filter ~= "") and ("  filtered: " .. clip(tostring(opts.filter), 40)) or ""),
     options = options,

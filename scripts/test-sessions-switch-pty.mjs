@@ -230,9 +230,12 @@ try {
   // The transcript above the page already says "switched to beta" from step 2, so the count is what
   // says whether THIS key moved the reader: a copy that picked a row would add one.
   const switches_before = (screen().match(/switched to/g) || []).length;
+  // The confirmation is the HOST's notice (the same one the click uses and copied-notice-floats
+  // floats), so it names what it sent: an id is 36 characters.
+  const copied_before = (screen().match(/Copied \(/g) || []).length;
   tmux(['send-keys', '-t', SESSION, 'c']);
-  await waitFor(() => screen().includes('copied ' + ids.a.slice(0, 8)), 'the copy confirmation', 30000);
-  check('c copies the id of this session and says so', true);
+  await waitFor(() => (screen().match(/Copied \(/g) || []).length > copied_before, 'the copy confirmation', 30000);
+  check('c copies the id of this session and says so', screen().includes('Copied (36 characters)'));
   const switches_after = (screen().match(/switched to/g) || []).length;
   check('and a copy does not switch', switches_after === switches_before,
     'switch lines ' + switches_before + ' -> ' + switches_after);
