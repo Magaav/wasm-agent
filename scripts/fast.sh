@@ -78,6 +78,7 @@ done
 # a refusal (exit 2) that nothing downstream can count as a failed row. "Unknown is not yes": a machine whose
 # free space cannot be measured is refused too, by the same path.
 . "$ROOT/scripts/lib/temp-floor.sh"
+. "$ROOT/scripts/lib/fast-cargo-lock.sh"
 if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
   case "$tmp_note" in
     tmp_unknown:*) tmp_code=tmp_unknown ;;
@@ -773,6 +774,21 @@ else
   fi
   base=$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD)
   changed=$( { git diff --name-only "$base" -- rust; git diff --name-only -- rust; git diff --name-only --cached -- rust; } | sort -u)
+  # THE LOCK AND THE MEMBERS GO TOGETHER (27/11, P0). 26dcbb41 deleted `members = [...]` from rust/Cargo.toml
+  # and nothing in this path noticed: with no members cargo wants the lock REWRITTEN, every `--locked` build
+  # refuses ("cannot update the lock file ... because --locked was passed"), and it surfaced only when the
+  # release publish failed hours later. The check is one `cargo metadata` and it names the cause instead.
+  if grep -qE '^rust/(Cargo\.toml|Cargo\.lock|[^/]+/Cargo\.toml)$' <<< "$changed"; then
+    s_ms=$(fast_now_ms)
+    if locked_out=$(wa_cargo_lock_matches "$PWD"); then
+      record_row pass rust 'rust: the lock matches the members' 0 "$(( $(fast_now_ms) - s_ms ))" 0 ''
+      ran=$((ran + 1))
+    else
+      record_row fail rust 'rust: the lock matches the members' 1 "$(( $(fast_now_ms) - s_ms ))" 0 \
+        "rust/Cargo.toml (or a member's Cargo.toml) changed and the lock no longer matches it: cargo --locked says \`$(printf '%s' "$locked_out" | tr '\n' ' ' | cut -c1-200)\`. Run \`cargo metadata --offline\` (or \`cargo update --workspace --offline\`) in rust/ and commit rust/Cargo.lock with this change."
+      ran=$((ran + 1)); fails=$((fails + 1))
+    fi
+  fi
   crates=""
   # The crates of the host split (docs/KERNEL.md) are listed by their directory, so a change under
   # rust/wa-term/ tests wa-term instead of rebuilding and testing the whole binary.
