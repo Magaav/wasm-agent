@@ -1173,6 +1173,15 @@ else
   done <<BINARY_LINES
 $BINARY_PLAN
 BINARY_LINES
+  # A COVERING RELEASE PUBLISHED BEFORE THE PROGRAM EXISTED has no `wa-term`: it was built when the node
+  # drew its own terminal and nothing was installed beside it. That release is still the right bytes for
+  # this tree's compiled inputs, and refusing it would make an update IMPOSSIBLE that worked yesterday -
+  # the pair rule is about what gets INSTALLED, never about refusing to update. So a set without the
+  # program is not used: this tree is built instead, which produces both, and the note says why.
+  if [ "$BINARY_RC" = 0 ] && command -v wa_node_set_has_program >/dev/null 2>&1      && ! wa_node_set_has_program "$BINARY_STAGE"; then
+    note "the covering release has no wa-term (published before the program shipped with the node): building this tree instead, so the node and its program are installed together"
+    BINARY_RC=8
+  fi
   case "$BINARY_RC" in
     0)
       PREBUILT_BINARIES=1

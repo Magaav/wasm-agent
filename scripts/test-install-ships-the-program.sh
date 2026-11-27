@@ -112,6 +112,32 @@ if [ -x "$stage_ok/wa" ]; then
 fi
 
 # ---------------------------------------------------------------------------------------------------
+# 4. A COVERING RELEASE PUBLISHED BEFORE THE PROGRAM EXISTED STILL UPDATES.
+#
+# The bytes for such a node are the newest published release whose compiled inputs match, and that
+# release has no wa-term because nothing installed one then. Refusing it would make an update that
+# worked yesterday impossible today: the pair rule is about what gets INSTALLED, so the deploy uses
+# those bytes for the NODE and still ends with a program - by building this tree.
+. "$ROOT/scripts/lib/node-binaries.sh"
+old_set="$WORK/old-set"; mkdir -p "$old_set"
+cp -f "$SRC/wa" "$old_set/wa"; printf 'fixture-sentinel' > "$old_set/wa-sentinel"
+wa_node_set_has_program "$old_set" \
+  && bad "a set without wa-term is reported as carrying the program" \
+  || pass "a covering release without wa-term is recognised as such"
+wa_node_set_has_program "$SRC" \
+  && pass "the pair's own directory is reported as carrying the program" \
+  || bad "wa_node_set_has_program says no for a directory that has wa-term"
+grep -q 'wa_node_set_has_program "$BINARY_STAGE"' "$ROOT/scripts/deploy.sh" \
+  && pass "the deploy asks that one function, so the deploy and the row cannot disagree" \
+  || bad "deploy.sh does not consult wa_node_set_has_program: the fallback is not wired"
+grep -q 'BINARY_RC=8' "$ROOT/scripts/deploy.sh" \
+  && pass "a set without the program falls back to building - it does not refuse the update" \
+  || bad "deploy.sh has no build fallback for a release that predates the program"
+grep -q 'refused(prebuilt_binary_incomplete)' "$ROOT/scripts/deploy.sh" \
+  && pass "an incomplete set (node or supervisor missing) is still refused by name" \
+  || bad "the prebuilt_binary_incomplete refusal disappeared - a half set would install"
+
+# ---------------------------------------------------------------------------------------------------
 # 3. THE VERSION NAMES IT, so a sealed version cannot omit the program.
 # ---------------------------------------------------------------------------------------------------
 if . "$ROOT/scripts/lib/versions.sh" 2>/dev/null && declare -f wa_version_members >/dev/null 2>&1; then

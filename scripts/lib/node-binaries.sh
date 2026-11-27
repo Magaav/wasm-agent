@@ -384,6 +384,15 @@ wa_node_manifest_pin() {
 
 # <file> -> "elf:<hex machine>" / "pe" / "unknown". Two bytes of header are enough to refuse a binary the
 # node cannot execute (an x86_64 `wa` installed on arm64 fails at exec time, after the swap).
+# <stage dir> -> 0 when the staged set carries the program that draws the terminal, 1 when it does not.
+# ONE DEFINITION, because two callers must agree about it: the deploy (which refuses to INSTALL a set
+# without the program) and the covering-release fallback (which must still UPDATE a node whose newest
+# release predates the program - it builds the tree instead of refusing the update).
+wa_node_set_has_program() {
+  local stage="$1"
+  [ -f "$stage/wa-term" ] || [ -f "$stage/wa-term.exe" ]
+}
+
 # <manifest> <triple> -> "<wa-term sha256> <bytes>" for the row that names the program; 2 no manifest,
 # 3 a row that does not pin it (an older release). The pair's reader above is unchanged on purpose: every
 # caller of it takes exactly <sha> <bytes> <sentinel sha> <sentinel bytes>.
