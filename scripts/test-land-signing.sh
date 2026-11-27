@@ -145,11 +145,19 @@ built="$WORK/built"
 mkdir -p "$built"
 mkelf "$built/wa-$TRIPLE-$SHORT" 3e
 mkelf "$built/wa-sentinel-$TRIPLE-$SHORT" 3e
+# The compiled AND Lua rows, computed here (cover-r, 27/11). A manifest that already records both is the one
+# a re-run has nothing to add to, which is what step 3 below is about: without lua_inputs the publisher
+# legitimately REWRITES the manifest to gain that row - the script being right and this fixture being an
+# older build's shape, which showed up on main as "'manifest kept byte-for-byte' not in ...".
+compiled_digest=$(. "$fixture/scripts/lib/node-binaries.sh"; wa_compiled_inputs_digest "$fixture" "$FIXTURE_SHA")
+lua_digest=$(. "$fixture/scripts/lib/lua-tree.sh"; wa_lua_tree_digest "$fixture" "$FIXTURE_SHA")
+[ -n "$compiled_digest" ] && [ -n "$lua_digest" ] || fail "the fixture cannot compute the digests the manifest must carry"
 cat > "$built/node-$SHORT.manifest" <<MANIFEST
 schema=wasm-agent-node-binaries/1
 source_commit=$FIXTURE_SHA
 source_tree=$(git -C "$fixture" rev-parse "$FIXTURE_SHA^{tree}")
-compiled_inputs=$(. "$fixture/scripts/lib/node-binaries.sh"; wa_compiled_inputs_digest "$fixture" "$FIXTURE_SHA")
+compiled_inputs=$compiled_digest
+lua_inputs=$lua_digest
 rustc_version=fixture
 zig_version=fixture
 glibc_floor=2.31
