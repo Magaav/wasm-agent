@@ -759,6 +759,7 @@ fn the_answer_names_the_job_that_answered_it() {
     let refused = ask_in(&queue, seam::Op::Read, &serde_json::json!({"__job": next}), 1, BUILD);
     assert_eq!(refused["job"].as_u64(), Some(next), "a refusal names its job too: {refused}");
     assert_eq!(refused["error"], "whatsapp_read_chat_not_found", "{refused}");
+}
 /// A file the COMPONENT wrote is checked by the host: inside this node's directory, the size it
 /// claims, and the digest the message carries. Nothing is taken on the component's word.
 #[test]
