@@ -260,19 +260,23 @@ function M.age_text(seconds)
   return string.format("as of %d d ago", math.floor(s / 86400 + 0.5))
 end
 
--- Answers the limits, the problem that came with them, WHEN they were read, and whether this call
--- read them itself (`fresh`) or drew a reading already in hand (`cached`): the caller says the age
--- only for the second kind.
+-- Answers the limits, a named problem, how old the reading is, and the door's state.
+--
+-- The read is the HOST's now (provider.limits asks `host.limits_start`/`limits_poll`), so this never
+-- waits - mid-run or between runs. The snapshot memory below is kept only so a caller that must not
+-- talk to anything at all (`opts.cached`) still has the last numbers; it is never the reason a
+-- reading is missing.
 local function limits_of(id, opts)
   local seen = M._limits[id]
-  local now = host.now()
-  if seen and (opts.cached or now - seen.at < (opts.max_age or 30)) then
-    return seen.limits, seen.problem, seen.at, "cached"
+  local limits, problem, age, state = provider.limits(id)
+  if type(limits) == "table" and next(limits) ~= nil then
+    M._limits[id] = { at = host.now() - (tonumber(age) or 0), limits = limits, problem = problem }
+    return limits, problem, tonumber(age) or 0, state or "ready"
   end
-  if opts.cached then return nil, "read on the next /status between runs", nil, nil end
-  local limits, problem = provider.limits(id)
-  M._limits[id] = { at = now, limits = limits, problem = problem }
-  return limits, problem, now, "fresh"
+  if seen and type(seen.limits) == "table" and next(seen.limits) ~= nil then
+    return seen.limits, seen.problem, host.now() - seen.at, "ready"
+  end
+  return limits, problem, tonumber(age), state or "none"
 end
 
 -- `/status`: rows for the CLI's panel (or printed where there is none). `opts.color` paints the bars;
@@ -320,7 +324,14 @@ function M.session_lines(session_id, opts)
   for _, item in ipairs(reported_providers(settings.provider)) do
     lines[#lines + 1] = ""
     lines[#lines + 1] = bold(item.id) .. (item.id == settings.provider and dim("  (in use)") or "")
-    local limits, problem, at, freshness = limits_of(item.id, opts)
+    -- A snapshot the CONSOLE draws mid-run names the rows it must fill itself: the interpreter is
+    -- inside the turn then, so nothing here can repaint when the read lands. The marker is one line;
+    -- the console expands it from the door on every draw (rust/wa-capabilities/src/limits.rs).
+    if opts and opts.limits_marker then
+      lines[#lines + 1] = string.char(1) .. "limits:" .. tostring(item.id)
+      goto continue_provider
+    end
+    local limits, problem, age, state = limits_of(item.id, opts)
     local shown = 0
     for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
       local entry = type(limits) == "table" and limits[window[2]]
@@ -332,12 +343,21 @@ function M.session_lines(session_id, opts)
       end
     end
     if shown == 0 then
-      lines[#lines + 1] = dim("  limits unavailable" .. (problem and (": " .. problem) or ""))
-    elseif freshness == "cached" and at then
+      -- Nothing to draw yet: say WHAT is happening, never "come back between runs" - the read is
+      -- already on its way, on the host's own thread (Victor 25/11).
+      if state == "loading" then
+        lines[#lines + 1] = dim("  loading limits\226\128\166")
+      elseif state == "failed" and problem then
+        lines[#lines + 1] = dim("  limits: " .. problem)
+      else
+        lines[#lines + 1] = dim("  limits: asking the provider\226\128\166")
+      end
+    elseif tonumber(age) then
       -- The rows above are a reading, not a measurement taken now: say how old it is, so a bar on the
       -- screen mid-run cannot be read as this second's allowance.
-      lines[#lines + 1] = dim("  " .. M.age_text(host.now() - at))
+      lines[#lines + 1] = dim("  " .. M.age_text(age))
     end
+    ::continue_provider::
   end
   return lines
 end

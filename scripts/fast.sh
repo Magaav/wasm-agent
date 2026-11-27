@@ -1145,7 +1145,11 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # `/status` is typed into it, and the screen must show the bar with its age and never "limits
   # unavailable", while the mid-run snapshot asks the provider nothing. On the base the age row and the
   # cost row both fail.
+  # THE LIMITS DOOR SECURITY (26/11): the wrapper owns two listeners (a provider and a redirect
+  # origin), the scratch HOME and the key; its Lua half is excluded from the bare loop for that reason.
+  WA_BIN="$bin" check status-limits-security node scripts/test-status-limits-security.mjs
   WA_BIN="$bin" check status-midrun-pty node scripts/test-status-midrun-pty.mjs
+  WA_BIN="$bin" check status-limits-pty node scripts/test-status-limits-pty.mjs
   # A COMMAND A RUN BLOCK RAN SAYS WHICH FILES IT CHANGED (chat-view-round-2, item 2): a scratch git
   # work tree, a run block whose `tools.bash` CREATES a file, and the card that names it - the base
   # emitted nothing for a script's command (the watcher sat after the managed-operation return) and
