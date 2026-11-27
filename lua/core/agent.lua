@@ -3408,7 +3408,11 @@ function M:run_body(text, images)
       -- A cancel can land *during* the provider call (the socket is shut down to wake a
       -- silent read). Report it as the cancellation it is, not as a provider fault.
       local cancelled = foreground_cancelled()
-      local problem = cancelled and "run_cancelled" or tostring(result)
+      -- THE READER'S LINE CARRIES WHAT WENT WITH THE STOP (28/11). This path - a cancel that lands DURING the
+      -- provider call - raised the bare code word, so the view had nothing to print beside "Interrupted by
+      -- user" even though the record and the sentence existed. The sentence is appended here, from the run.
+      local said = type(self.stop_notice) == "string" and self.stop_notice or nil
+      local problem = cancelled and (said and ("run_cancelled: " .. said) or "run_cancelled") or tostring(result)
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(problem):sub(1, 400) }
       telemetry.event(self.session_id,self.run_id,"","step","end",

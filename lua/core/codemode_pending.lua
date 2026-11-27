@@ -1745,7 +1745,7 @@ end
 function M.close_open_native(scope, dispatch, note, tool)
   local index = M.open(scope)
   local closed = 0
-  local last_note, last_tool = nil, nil
+  local last_note, last_tool, last_id = nil, nil, nil
   for _, record in pairs(index.ops or {}) do
     if record and record.native == true and record.state == "running" and (tool == nil or record.tool == tool) then
       local observed = nil
@@ -1761,6 +1761,7 @@ function M.close_open_native(scope, dispatch, note, tool)
       closed = closed + 1
       last_note = record.stop and record.stop.note or nil
       last_tool = record.tool
+      last_id = record.op
     end
   end
   if closed > 0 then M.save(scope, index) end
@@ -1768,7 +1769,10 @@ function M.close_open_native(scope, dispatch, note, tool)
   -- run so the reader's line can say what the stop stopped. Format decided 27/11: a count and the record's id -
   -- "stopped 1: bash; record <id>" - never the facts, which are read from the record on demand.
   if closed > 0 then
-    return closed, (last_note or ('stopped ' .. tostring(closed) .. ': ' .. tostring(last_tool or 'call')))
+    -- THE DECIDED SHAPE INCLUDES THE RECORD ID: "stopped 1: bash; record <id>". Without it the reader has a
+    -- count and no way to read the facts, and the row's own contract is a count, the work, and the pointer.
+    return closed, ('stopped ' .. tostring(closed) .. ': ' .. tostring(last_tool or 'call')
+      .. '; record ' .. tostring(last_id or '?'))
   end
   return 0, nil
 end
