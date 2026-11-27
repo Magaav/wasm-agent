@@ -35,7 +35,10 @@ fi
 
 # The branch's own tree, because the pin being judged is the branch's:
 # a temp worktree at $head so the lock and the Cargo.tomls are the ones that would land.
-tree="$(mktemp -d)"
+# The throw-away tree lives under the agent home, never /tmp: the node resolves a script path
+# against its own root and a /tmp tree is unreachable from it (measured 27/11).
+mkdir -p "$HOME/.wasm-agent/tmp" || exit 2
+tree="$(mktemp -d -p "$HOME/.wasm-agent/tmp" gate-XXXXXX)"
 cleanup() {
   git worktree remove --force "$tree" >/dev/null 2>&1 || rm -rf "$tree"
 }
@@ -44,6 +47,12 @@ if ! git worktree add --detach "$tree" "$head" >/dev/null 2>&1; then
   echo "landing-component-gate: cannot check out $head in a throw-away worktree" >&2
   exit 2
 fi
+
+# The closure row and the library it reads travel WITH the gate: the tree being judged may predate them
+# (a historical commit), and what must be read there is that tree's lock and Cargo.tomls, not its helpers.
+mkdir -p "$tree/scripts/lib" || exit 2
+cp -f "$ROOT/scripts/lib/component-closures.lua" "$tree/scripts/lib/component-closures.lua" || exit 2
+cp -f "$ROOT/scripts/lib/components_sources.lua" "$tree/scripts/lib/components_sources.lua" || exit 2
 
 changed="$(git diff --name-only "$base...$head" || true)"
 if [ -z "$changed" ]; then
@@ -56,7 +65,7 @@ if [ -z "$wa" ]; then
   echo "landing-component-gate: no wa binary on PATH, so the closures cannot be read (unknown, not a pass)" >&2
   exit 2
 fi
-home="$(mktemp -d)"
+home="$(mktemp -d -p "$HOME/.wasm-agent/tmp" gatehome-XXXXXX)"
 closures="$(cd "$tree" && WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$tree" WASM_AGENT_MANAGED=0 \
   WA_SCRIPT="$tree/scripts/lib/component-closures.lua" "$wa" --db "$home/t.db" 2>&1)"
 status=$?
@@ -84,6 +93,13 @@ if [ -z "$touched" ]; then
   exit 0
 fi
 echo "landing-component-gate: inputs of $touched moved - rebuilding each against its own pin"
+
+# The rebuild is the one script that must come from the tree being judged: it builds THAT tree. A tree
+# without it cannot answer, and an unanswerable gate is exit 2, never a pass.
+if [ ! -f "$tree/scripts/test-component-lock-rebuild.sh" ]; then
+  echo "landing-component-gate: ${head:0:12} has no scripts/test-component-lock-rebuild.sh, so its pin cannot be rebuilt (unknown, not a pass)" >&2
+  exit 2
+fi
 
 if ! bash "$tree/scripts/test-component-lock-rebuild.sh" $touched; then
   echo "component_not_reproducible: the tree at ${head:0:12} does not build $touched to the line components.lock pins (see the build above); commit the pin with the change, built with the tree's own toolchain"

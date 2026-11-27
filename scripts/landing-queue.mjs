@@ -1323,6 +1323,23 @@ async function commandLand(options) {
     // 3. The merge, the push, the readback - the landing itself. The token is re-read before each
     //    effect: a revoked holder (reconcile --force) must not push.
     heartbeat(db, id, lease);
+    // BEFORE THE MERGE: does this diff touch what any pinned component is BUILT from, and does that
+    // component still rebuild to its own line? A pin can be wrong while its `# SOURCES` line is right
+    // (27/11: bytes built with the diagnosis toolchain override), and no other landing check compares
+    // "what this tree builds" with "what this tree pins". Refuses before anything is merged.
+    const componentGate = spawnSync('bash', [path.join(canonical, 'scripts', 'landing-component-gate.sh'),
+      resolveCommit(canonical, 'origin/main'), options.branch], {cwd: canonical, encoding: 'utf8', timeout: 45 * 60 * 1000});
+    for (const line of String(componentGate.stdout || '').trim().split(/\r?\n/).filter(Boolean).slice(-6)) say(`#${id} ${line}`);
+    if (componentGate.status === 2) {
+      const why = `component_gate_unknown: the component pin gate could not answer (${String(componentGate.stderr || componentGate.stdout || '').trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || 'no reason'}); nothing was merged`;
+      finish('refused', why);
+      throw new QueueError(why, 75, 'component_gate_unknown');
+    }
+    if (componentGate.status !== 0) {
+      const why = `component_not_reproducible: ${options.branch} touches a pinned component's inputs and the tree does not build it to the line components.lock pins; commit the pin with the change, built with the tree's own toolchain. Nothing was merged`;
+      finish('refused', why);
+      throw new QueueError(why, 75, 'component_not_reproducible');
+    }
     const containing = git(canonical, ['merge-base', '--is-ancestor', options.branch, 'HEAD']);
     let merged = headAt;
     if (containing.status === 0) {
