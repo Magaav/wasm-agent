@@ -795,8 +795,20 @@ function pendingStop(home) {
   for (const name of names) {
     let parsed = null;
     try { parsed = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch { continue; }
-    for (const record of Object.values((parsed && parsed.ops) || {})) {
-      if (record && record.stop) return record.stop;
+    // WHAT THE OWNER SAW, READ WHERE IT WAS WRITTEN (28/11): the signal and the survivors are only observable by
+    // the process owner, so it writes them beside the scope's index (`<scope>.stop.json`, named by the call in
+    // lua/core/tools.lua) at the moment it kills the group. The record the answer names carries the count; the
+    // facts behind it are read here, on demand - never awaited by the answer itself.
+    const factsPath = path.join(dir, name.replace(/\.json$/, '') + '.stop.json');
+    let facts = null;
+    try { facts = JSON.parse(fs.readFileSync(factsPath, 'utf8')); } catch { facts = null; }
+    // THE CALL THE STOP ACTUALLY INTERRUPTED: the newest record, not the first one in the index. A scope keeps
+    // every call it ever made, so "the first record with a stop" answered the setup call's record and the check
+    // about the stopped one read the wrong work.
+    for (const record of Object.values((parsed && parsed.ops) || {})
+      .filter(r => r && r.stop)
+      .sort((a, b) => (b.started || 0) - (a.started || 0))) {
+      return facts ? Object.assign({}, record.stop, facts) : record.stop;
     }
   }
   return null;
@@ -990,7 +1002,9 @@ if (crash) {
     // after <n> s (...)`), carried to the view by the cancel error (lua/core/codemode.lua cancel_error).
     const finalText = (shell.finalRows || []).join('\n');
     check("bash: the stop names the command it stopped, on the reader's own line",
-      finalText.includes('stopped: sleep 30'), 'the screen after the stop:\n' + finalText);
+      // THE DECIDED SHAPE (28/11): a count, the tool, and the record id - never the facts, which are read
+      // from the record on demand. 'stopped: sleep 30' was the pre-decision sentence the answer waited for.
+      /Interrupted by user · stopped \d+: bash; record \S+/.test(finalText), 'the screen after the stop:\n' + finalText);
     // ... and the record behind it, read from the store the node itself reads
     // (lua/core/codemode_pending.lua M.dir(): <home>/.wasm-agent/codemode-pending).
     const stoppedRecord = pendingStop(shell.home);

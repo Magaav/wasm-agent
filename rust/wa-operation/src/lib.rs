@@ -320,6 +320,11 @@ pub struct Spec {
     /// child's stdin is the null device, which is what every start had before this field existed. The
     /// caller bounds the text (lua/core/tools.lua, STDIN_MAX_BYTES); this side only carries it.
     pub stdin: Option<String>,
+    /// WHERE THE STOP FACTS GO, when the caller named a record (28/11, the orchestrator's decision: the runner
+    /// writes them). The one owner of the process is the only place that OBSERVES the signal and the survivors,
+    /// so it is the only place that can say how the group ended without asking the caller to wait. Absent for
+    /// every operation nobody pointed at a record: nothing is written and nothing changes.
+    pub stop_record: Option<std::path::PathBuf>,
     /// This start is a CONTROL call: the node's own short read (an MCP connector read, a catalogue
     /// probe), not a workload. It is the only kind of start admitted into the two reserved slots, so a
     /// session that holds its whole share cannot stop the node from asking a question
@@ -343,6 +348,7 @@ impl Spec {
             promote_descendants: false,
             background: false,
             stdin: None,
+            stop_record: None,
             control: false,
         }
     }
@@ -1588,12 +1594,27 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                     let outcome = if stop_asked {
                         let asked = process.stop();
                         if let Ok(ref what) = asked {
-                            entry.state.lock().unwrap()["stop"] = json!({
+                            let facts = json!({
                                 "signal": what.signal,
                                 "grace_ms": what.grace_ms,
                                 "needed_kill": what.needed_kill,
                                 "survivors": what.survivors,
                             });
+                            entry.state.lock().unwrap()["stop"] = facts.clone();
+                            // AND THE CALLER'S OWN RECORD (28/11). The Esc answer carries a count and a record id and
+                            // never waits; the facts behind that id are written HERE, by the owner that observed the
+                            // signal, so a reader of the record does not have to ask this process anything. A failure
+                            // is not the work's problem: the kill already happened and the record keeps its state.
+                            if let Some(path) = spec.stop_record.as_ref() {
+                                let mut said = facts.clone();
+                                said["op"] = json!(dir.file_name().map(|n| n.to_string_lossy().to_string()));
+                                if let Some(parent) = path.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                                if let Ok(text) = serde_json::to_vec(&said) {
+                                    let _ = fs::write(path, text);
+                                }
+                            }
                         }
                         asked.map(|_| ())
                     } else {

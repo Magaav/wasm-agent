@@ -2425,6 +2425,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       -- A failure here must never cost the command: the record is best effort, the work is not.
       local ok_open, opened = pcall(pending_native.native_open, 'native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
       native_handle = ok_open and opened or nil
+      -- AND WHERE THE RUNNER PUTS WHAT IT SAW (28/11): the operations layer is the one owner that observes
+      -- the stop, so the call names the file it writes its facts to. The caller's answer never waits for it.
+      if native_handle ~= nil then
+        provenance.stop_record = pending_native.stop_record_path('native:' .. tostring(ctx.session_id or 'session'))
+      end
 
     end
     local started_at = host.now()

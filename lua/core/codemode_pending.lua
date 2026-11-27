@@ -155,6 +155,14 @@ end
 -- scope is the same hash the guest store and the results journal use (session x user x role x
 -- workspace x profile), so "the same scope" is one meaning in this node.
 function M.dir() return paths.data() .. "/codemode-pending" end
+
+-- WHERE THE RUNNER WRITES WHAT IT SAW (28/11, the orchestrator's decision): the signal and the survivors are
+-- observed only by the one owner of the process, so they are written beside this scope's index by that owner,
+-- while the answer the reader got carries a count and a record id and never waits for them. A reader of the
+-- record finds them next to it; nothing here invents them.
+function M.stop_record_path(scope)
+  return M.dir() .. "/" .. tostring(scope) .. ".stop.json"
+end
 local function index_path(scope) return M.dir() .. "/" .. tostring(scope) .. ".json" end
 
 local function now_seconds()
@@ -1758,8 +1766,16 @@ function M.close_open_native(scope, dispatch, note, tool)
         signal = (record.detached == true) and nil or signal,
         survivors = facts and facts.survivors or nil }
       record.state = (record.detached == true) and "running" or "cancelled"
+      -- EACH CALL NAMED FOR ITSELF (28/11). One shared sentence for every record closed in this pass named the
+      -- wrong work twice: a settled-looking `echo warm` record carried the `sleep 30` sentence, and the count said
+      -- "stopped 2" for one command. Each closed record now says its own tool and its own id.
+      if record.detached == true then
+        record.stop.note = 'still running: ' .. tostring(record.command) .. ' (op ' .. tostring(record.op) .. ')'
+      else
+        record.stop.note = 'stopped: ' .. tostring(record.command)
+      end
       closed = closed + 1
-      last_note = record.stop and record.stop.note or nil
+      last_note = record.stop.note
       last_tool = record.tool
       last_id = record.op
     end
