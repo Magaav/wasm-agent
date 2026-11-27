@@ -1080,6 +1080,12 @@ local function handle(record, waited_s, state)
   -- A remote op names the node it lives on: wait(op) and cancel(op) route there, and a caller that
   -- holds only the handle can always tell WHICH machine is still running its work (item 1).
   if record.node ~= nil then out.node = record.node end
+  -- The query family reports milliseconds BESIDE seconds (whatsapp-read-slow-is-not-an-error, item 4a): a
+  -- call that waited 2.4 s and one that waited 59 s are the same shape, and the caller deciding whether to
+  -- wait again needs the finer number. Other kinds keep the shape they always had.
+  if record.kind == "whatsapp_query" then
+    out.waited_ms = math.floor((tonumber(waited_s) or 0) * 1000)
+  end
   local source = type(state) == "table" and state or (type(record.progress) == "table" and record.progress or nil)
   if source then
     out.stdout_path = source.stdout_path
