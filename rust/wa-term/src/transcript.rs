@@ -168,6 +168,11 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     /// Where the last `view` painted the notice, as a 0-based index into the rows it returned
     /// (`None` = no message was showing). It is an overlay on a chat row, never a row of its own.
     notice_row: Option<usize>,
+    /// The balloon is up, so the chat has fewer rows than it is used to. The scrollbar decision
+    /// is LOCKED while that is true: it is `total > height`, and a balloon that lowered the height
+    /// would re-wrap the whole chat at a narrower width - which moves a frozen view by a row and is
+    /// exactly the "whole conversation shifts" the notice must never cause.
+    balloon_up: bool,
     /// The last `view` drew the pinned request, on row 1 of the region.
     pin_shown: bool,
     /// The columns the jump-to-bottom pill covered in the last `view` (1-based, inclusive), or
@@ -183,7 +188,7 @@ impl Default for Transcript {
             pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None, copy_hover: None,
             pending_card: Vec::new(), card_rows: HashMap::new(), notice: Notice::default(),
             first_row: isize::MAX, reserved: 0, below_rows: 0,
-            notice_row: None, pin_shown: false, pill_row: None }
+            notice_row: None, balloon_up: false, pin_shown: false, pill_row: None }
     }
 }
 
@@ -1034,6 +1039,7 @@ impl Transcript {
         // The rows the last frame gave the pin: the first pass is drawn with them, so a frame that
         // keeps its rows is painted once.
         let expected = self.pin_shown;
+        self.balloon_up = balloon_rows > 0;
         let mut reserved = balloon_rows + usize::from(expected);
         let mut shown = self.paint(width, height.saturating_sub(reserved).max(1), reserved);
         let rows = height.saturating_sub(reserved).max(1);
@@ -1110,7 +1116,9 @@ impl Transcript {
         } && width > 1;
         let mut text_width = (if self.bar { width - 1 } else { width }).max(1);
         let mut total = self.total_rows(text_width);
-        let want = wanted(self.scrollbar, total);
+        // While the balloon takes rows the bar keeps the state it had: the chat must not re-wrap for a
+        // message that is about to go away.
+        let want = if self.balloon_up { self.bar } else { wanted(self.scrollbar, total) };
         if want != self.bar {
             self.bar = want;
             text_width = (if want { width - 1 } else { width }).max(1);
