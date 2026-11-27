@@ -92,6 +92,31 @@ wa_main_binary_build() { # <sha> <root> <target>
   return 1
 }
 
+# THE BYTES A RUN MEASURES MUST NOT CHANGE UNDER IT (27/11, the storm's second cause).
+# MEASURED: _orch/health-loop-run.out says the binary the fast path used was sha256 a8e2ae2b and was 252a248 by
+# the end of the same run - the build target is shared, so any later build (a landing, the next tick, another
+# process) rewrote release/wa while rows were still running against it. main-health then refused the speed rows,
+# correctly: a number measured against an unknown binary is not a number.
+# The fix is not to DETECT the change but to remove the possibility: the first time a tip is graded, its binary
+# is COPIED to a path derived from the tip and the run is handed THAT. A rebuild replaces the build target, never
+# the pinned copy, so the path a run holds names one set of bytes for as long as the sha does.
+wa_main_binary_pin() { # <binary> <sha> <target> -> prints the pinned path
+  local bin=$1 sha=$2 target=$3 dir pinned tmp
+  [ -x "$bin" ] || { echo "wa_main_binary: $bin is not executable" >&2; return 1; }
+  dir=$target/pinned; mkdir -p "$dir" 2>/dev/null || { printf '%s\n' "$bin"; return 0; }
+  pinned=$dir/wa-${sha:0:12}
+  if [ -x "$pinned" ]; then printf '%s\n' "$pinned"; return 0; fi
+  # Copy beside the destination and rename: a reader never sees a half-written binary.
+  tmp=$pinned.tmp.$$
+  if cp "$bin" "$tmp" 2>/dev/null && chmod +x "$tmp" 2>/dev/null && mv -f "$tmp" "$pinned" 2>/dev/null; then
+    printf '%s\n' "$pinned"; return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  # A pin that cannot be made is not a licence to grade an unstable path: say so and let the caller refuse.
+  echo "wa_main_binary: could not pin $bin for ${sha:0:12} in $dir" >&2
+  return 1
+}
+
 wa_main_binary() { # <sha> [release-stage] [target-dir] [repo-root]
   local sha=${1:?usage: wa_main_binary <sha> [release-stage] [target-dir] [repo-root]}
   local stage=${2:-$HOME/.wasm-agent/health-releases}
@@ -102,9 +127,9 @@ wa_main_binary() { # <sha> [release-stage] [target-dir] [repo-root]
   # ONE call: the resolver is not free (it may look at the network), and asking twice could get two answers.
   local rerr; mkdir -p "$target" 2>/dev/null || true; rerr=$(mktemp -u "/tmp/wa-main-release.XXXXXX")
   local why_release
-  if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>"$rerr"); then rm -f "$rerr"; printf '%s\n' "$out"; return 0; fi
+  if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>"$rerr"); then rm -f "$rerr"; wa_main_binary_pin "$out" "$sha" "$target"; return $?; fi
   why_release=$(tail -1 "$rerr" 2>/dev/null); rm -f "$rerr"
-  if out=$(wa_main_binary_build "$sha" "$root" "$target"); then printf '%s\n' "$out"; return 0; fi
+  if out=$(wa_main_binary_build "$sha" "$root" "$target"); then wa_main_binary_pin "$out" "$sha" "$target"; return $?; fi
   echo "wa_main_binary: NO BINARY OF ${sha:0:12} - release: ${why_release:-none}; build: ${target}; the installed binary (~/.local/bin/wa) is NOT used" >&2
   return 1
 }
