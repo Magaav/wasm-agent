@@ -99,16 +99,19 @@ interface types {
 /// The door. `submit` is idempotent on (branch, sha): the same pair is the same request.
 interface submit {
     use types.{request, verdict, error};
-    submit: async func(branch: string, sha: string, mission: string, priority: bool) -> result<request, error>;
+    submit: async func(branch: string, sha: string, mission: string, priority: bool) -> future<result<request, error>>;
     /// The verdict, waited for. When the caller's turn has ended the verdict arrives as a wake instead; the
     /// caller does not have to stay alive to receive it.
-    await-verdict: async func(id: u64) -> result<verdict, error>;
+    await-verdict: async func(id: u64) -> future<result<verdict, error>>;
+    // sync-export: a read of the journal it already holds - no I/O to wait on, nothing to stream.
     status: func(id: u64) -> result<verdict, error>;
 }
 
 /// Progress, as a stream: dropping it cancels interest, and it resumes from an id after a restart.
 interface events {
     use types.{event, error};
+    // sync-export: it OPENS the stream and returns it; the waiting happens on the stream itself, so an
+    // async func here would add a suspension point where there is nothing to suspend on.
     events: func(since: u64) -> result<stream<event>, error>;
 }
 
@@ -116,7 +119,8 @@ interface events {
 /// environment variable, because an override is a bypass.
 interface review {
     use types.{request, approval, error};
-    approve: async func(branch: string, sha: string) -> result<approval, error>;
+    approve: async func(branch: string, sha: string) -> future<result<approval, error>>;
+    // sync-export: a read of the requests already waiting on a person - no I/O, nothing to await.
     pending: func() -> result<list<request>, error>;
 }
 
