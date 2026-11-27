@@ -86,33 +86,61 @@ wa_main_binary_build() { # <sha> <root> <target>
   fi
   local cap=${WA_MAIN_BUILD_CAP_SECONDS:-900} nice_level=${WA_MAIN_BUILD_NICE:-10} rc=0
   CARGO_TARGET_DIR="$target" nice -n "$nice_level" timeout "$cap" \
-    "$cargo_bin" build --release --offline -p wa-host --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
+    "$cargo_bin" build --release --offline -p wa-host -p wa-operations-supervisor -p wa-term --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
   if [ "$rc" = 0 ] && [ -x "$built" ]; then printf '%s\n' "$built"; return 0; fi
   echo "wa_main_binary: the build of ${sha:0:12} in $target failed (rc $rc, cap ${cap}s)" >&2
   return 1
 }
 
-# THE BYTES A RUN MEASURES MUST NOT CHANGE UNDER IT (27/11, the storm's second cause).
-# MEASURED: _orch/health-loop-run.out says the binary the fast path used was sha256 a8e2ae2b and was 252a248 by
-# the end of the same run - the build target is shared, so any later build (a landing, the next tick, another
-# process) rewrote release/wa while rows were still running against it. main-health then refused the speed rows,
-# correctly: a number measured against an unknown binary is not a number.
-# The fix is not to DETECT the change but to remove the possibility: the first time a tip is graded, its binary
-# is COPIED to a path derived from the tip and the run is handed THAT. A rebuild replaces the build target, never
-# the pinned copy, so the path a run holds names one set of bytes for as long as the sha does.
-wa_main_binary_pin() { # <binary> <sha> <target> -> prints the pinned path
-  local bin=$1 sha=$2 target=$3 dir pinned tmp
+# THE BYTES A RUN MEASURES MUST NOT CHANGE UNDER IT, AND THE PAIR STAYS A PAIR (27/11, the storm's two causes).
+# MEASURED, cause 1: _orch/health-loop-run.out says the binary the fast path used was sha256 a8e2ae2b and was
+# 252a248 by the end of the same run - the build target is shared, so any later build (a landing, the next tick,
+# another process) rewrote release/wa while rows were still running against it. main-health then refused the speed
+# rows, correctly: a number measured against an unknown binary is not a number.
+# MEASURED, cause 2 - and this one the first version of this function CAUSED: a node needs wa-term BESIDE it.
+# Pinning wa alone into <target>/pinned/ made every row the node runs answer
+#   wa: term_program_missing: no wa-term beside this node (<target>/pinned/wa-term)
+# so each row's first command produced nothing and the row failed on its own fixture ('the scratch checkout has a
+# commit to read' with an empty sha). 135 rows in the run that measured it. A pin is therefore a DIRECTORY per tip
+# that holds the pair, never a lone file.
+wa_main_binary_pin() { # <binary> <sha> <target> -> prints the path of the pinned wa
+  local bin=$1 sha=$2 target=$3 dir stage tmp
   [ -x "$bin" ] || { echo "wa_main_binary: $bin is not executable" >&2; return 1; }
-  dir=$target/pinned; mkdir -p "$dir" 2>/dev/null || { printf '%s\n' "$bin"; return 0; }
-  pinned=$dir/wa-${sha:0:12}
-  if [ -x "$pinned" ]; then printf '%s\n' "$pinned"; return 0; fi
-  # Copy beside the destination and rename: a reader never sees a half-written binary.
-  tmp=$pinned.tmp.$$
-  if cp "$bin" "$tmp" 2>/dev/null && chmod +x "$tmp" 2>/dev/null && mv -f "$tmp" "$pinned" 2>/dev/null; then
-    printf '%s\n' "$pinned"; return 0
+  dir=$target/pinned/${sha:0:12}
+  if [ -x "$dir/wa" ]; then printf '%s\n' "$dir/wa"; return 0; fi
+  mkdir -p "$target/pinned" 2>/dev/null || { printf '%s\n' "$bin"; return 0; }
+  # Copy into a fresh stage and rename: a reader never sees a half-written directory, and two runs pinning the
+  # same tip cannot interleave their copies.
+  stage=$dir.tmp.$$; rm -rf "$stage" 2>/dev/null || true
+  mkdir -p "$stage" 2>/dev/null || { printf '%s\n' "$bin"; return 0; }
+  if ! cp "$bin" "$stage/wa" 2>/dev/null || ! chmod +x "$stage/wa" 2>/dev/null; then
+    rm -rf "$stage" 2>/dev/null || true
+    echo "wa_main_binary: could not pin $bin for ${sha:0:12} in $dir" >&2; return 1
   fi
-  rm -f "$tmp" 2>/dev/null || true
-  # A pin that cannot be made is not a licence to grade an unstable path: say so and let the caller refuse.
+  # THE SET, NOT THE PAIR (27/11). MEASURED on the health target: a build there holds `wa` and `wa-term` and nothing
+  # else, so every host.exec answered
+  #   operations_supervisor_missing: wa-operations-supervisor is neither beside this binary nor on PATH
+  # and every row that runs a command failed on its own fixture - the 135 reds in that run, and the same shape as
+  # the ~130 in the storm. The supervisor's crate is `ln` and its INSTALLED name is wa-operations-supervisor, so a
+  # pinned directory must carry: wa, wa-term, and that program under the name the node looks for.
+  local sibling src
+  for sibling in wa-term; do
+    src=$(dirname "$bin")/$sibling
+    [ -x "$src" ] && { cp "$src" "$stage/$sibling" 2>/dev/null && chmod +x "$stage/$sibling" 2>/dev/null || true; }
+  done
+  src=$(dirname "$bin")/wa-operations-supervisor
+  [ -x "$src" ] || src=$(dirname "$bin")/ln
+  if [ -x "$src" ]; then
+    cp "$src" "$stage/wa-operations-supervisor" 2>/dev/null       && chmod +x "$stage/wa-operations-supervisor" 2>/dev/null || true
+  fi
+  # SAY WHAT IS MISSING, by name: a pin without these runs a node that refuses every command, and a reader must not
+  # have to learn that from a hundred red rows (the first version of this function sent a run that way).
+  for sibling in wa-term wa-operations-supervisor; do
+    [ -x "$stage/$sibling" ] || echo "wa_main_binary: ${sha:0:12} is pinned WITHOUT $sibling - the node will refuse to $([ "$sibling" = wa-term ] && echo 'run a program' || echo 'run a command')" >&2
+  done
+  rm -rf "$dir" 2>/dev/null || true
+  if mv -f "$stage" "$dir" 2>/dev/null; then printf '%s\n' "$dir/wa"; return 0; fi
+  rm -rf "$stage" 2>/dev/null || true
   echo "wa_main_binary: could not pin $bin for ${sha:0:12} in $dir" >&2
   return 1
 }
