@@ -118,3 +118,21 @@ pin and the seam shares `components::engine()` — see 6bfd2c4e.) Reported rathe
    already used in mesh and codemode, reused verbatim.
 
 No model-facing string changed: the five capabilities' answers are byte-identical to the pre-move build.
+
+## What changed after the first version of this report
+
+Four commits landed after the report was written, and each is a correction rather than a new move:
+
+* **`6bfd2c4e`** — the seam built an engine of its own with `Config::async_support`, which on this pin is a
+  no-op; it now shares `components::engine()`. The number this report first carried (+1.8%) came from that
+  build and is corrected above to **+1.9%**, with the cause named (the tokio runtime and the async call
+  plumbing, not the engine).
+* **`6f77eced`** — the node-level routed path is proven in `tests/stt_node_routed.rs`, a test target of its
+  own, because the switch (`WA_COMPONENTS_DIR`) is process-global and two neighbours in one binary shared
+  the guest's single instance.
+* **`248d35dc` / `0b447775`** — two documents claimed the switch had an env override (`WA_STT_COMPONENT`)
+  that no product code reads: the resolver's doc comment and the lock's comment on the `stt` pin. Both now
+  say what the code does — the `stt` **feature** decides, with the native node as the fallback.
+* **`03902dfa`** — the async rule became a row: `scripts/test-stt-seam.sh` checks `wit/stt` statically
+  (at least one `async func`; every sync export paired with a `SYNC ON PURPOSE` line; a declared stream or
+  a written reason there is none) and fails on a copy with the reason line deleted.
