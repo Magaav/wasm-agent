@@ -66,6 +66,24 @@ ok(type(search) == "table" and type(search.hits) == "table" and #search.hits == 
   "the sibling search keeps its own answer: " .. json.encode(search))
 ok(type(search) == "table" and search.error == nil, "and carries no error from the read beside it")
 
+-- (d) an audio needs no second call: `text: "full"` reaches the wire, so the read answers the whole
+-- transcript and nothing has to ask `whatsapp_media` for the rest.
+local before = #asks
+local full = pending.invoke(dispatch, opts, "mcp_whatsapp_read",
+  { chat = "fixture", id = "m1", text = "full" }, json.encode({ chat = "fixture", id = "m1", text = "full" }), 0)
+ok(type(full) == "table", "a full-text read answers: " .. tostring(full))
+local carried = nil
+for i = before + 1, #asks do
+  local wire = json.decode(asks[i].raw or "{}")
+  if type(wire) == "table" and wire.text ~= nil then carried = wire.text end
+end
+ok(carried == "full", "the request carries text = full to the component: " .. tostring(carried))
+local media_asks = 0
+for _, ask in ipairs(asks) do
+  if ask.name == "mcp_whatsapp_media" then media_asks = media_asks + 1 end
+end
+ok(media_asks == 0, "and no whatsapp_media call was made for the transcript (" .. media_asks .. ")")
+
 -- The budget was the CALL's, and nothing kept a constant of its own: every ask carried __wait_ms.
 local missing = 0
 for _, ask in ipairs(asks) do
