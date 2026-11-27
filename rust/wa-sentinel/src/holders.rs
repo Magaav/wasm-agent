@@ -54,25 +54,35 @@ pub(crate) struct Holder {
     /// operation settled. It starts after an install, never before, so the install never waits on it (see the
     /// module note, measurement 2).
     pub completion: bool,
+    /// The node says this RUN waited past its own queue bound (`queue_sessions.wait_bound_ms`), so it refuses it by
+    /// name the moment a thread frees. Named here for the operator, and it does NOT hold the bound: waiting for it
+    /// would fail an install on work that cannot begin and will not run (27/11).
+    pub expired: bool,
 }
 
 impl Holder {
     fn new(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
-        Holder { session: session.into(), label: label.into(), ms, queued: false, completion: false }
+        Holder { session: session.into(), label: label.into(), ms, queued: false, completion: false, expired: false }
     }
 
     pub(crate) fn admitted(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
-        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: false }
+        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: false, expired: false }
     }
 
     /// A child completion, admitted and not started. Its own constructor, because "admitted and not started"
     /// and "admitted, not started, and a completion" are the two answers the bound treats differently.
     pub(crate) fn completion(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
-        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: true }
+        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: true, expired: false }
+    }
+
+    /// A RUN the node has already bounded out: named, and not a hold. It is not a completion, so no rule about
+    /// completions applies to it.
+    pub(crate) fn expired_run(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: false, expired: true }
     }
 
     fn counted(label: impl Into<String>, completion: bool) -> Holder {
-        Holder { session: String::new(), label: label.into(), ms: 0, queued: false, completion }
+        Holder { session: String::new(), label: label.into(), ms: 0, queued: false, completion, expired: false }
     }
 }
 
@@ -135,6 +145,9 @@ pub(crate) fn holders_from(health: &Value) -> Vec<Holder> {
     // `queue_sessions` (`rust/wa-capabilities/src/serve.rs`, `pending_admitted`); a NODE THAT DOES NOT is still
     // read correctly, as the single unnamed holder it can prove.
     let queue = field_u64(health, "queue");
+    // The run bound the node publishes with its entries. Read, never invented: a sentinel that chose its own
+    // number would be judging the node against a rule the node does not run.
+    let wait_bound = health.get("queue_sessions").map(|sessions| field_u64(sessions, "wait_bound_ms")).unwrap_or(0);
     let mut listed = 0u64;
     let mut named = 0u64;
     let mut unnamed_completions = 0u64;
@@ -152,10 +165,17 @@ pub(crate) fn holders_from(health: &Value) -> Vec<Holder> {
             }
             named += 1;
             let label = if completion { "child completion, admitted, not started" } else { "admitted, not started" };
+            let waited = field_u64(entry, "waited_ms");
+            // THE NODE'S OWN EXPIRY (27/11): it publishes `wait_bound_ms` beside the entries and marks a run
+            // `expired`; an older node that names neither is read exactly as before.
+            let expired = !completion && entry.get("expired").and_then(Value::as_bool)
+                .unwrap_or(wait_bound > 0 && waited >= wait_bound);
             holders.push(if completion {
-                Holder::completion(session, label, field_u64(entry, "waited_ms"))
+                Holder::completion(session, label, waited)
+            } else if expired {
+                Holder::expired_run(session, label, waited)
             } else {
-                Holder::admitted(session, label, field_u64(entry, "waited_ms"))
+                Holder::admitted(session, label, waited)
             });
         }
     }
@@ -300,6 +320,9 @@ where
         // step boundary (lua/core/deploy_pause.lua), so a queued turn can never have one for this request - and
         // passing over it would start work under an install. It is reported, by name, and the request fails.
         if holder.queued {
+            // EXPIRED IS NOT A HOLD (27/11): the node said this run waited past its own bound and refuses it by
+            // name at the next free thread, so failing the install on it would fail on work that cannot start.
+            if holder.expired { continue; }
             named.get_or_insert_with(|| format!(
                 "session {} has a turn admitted and not started ({})", short(&holder.session), holder.label));
             continue;
