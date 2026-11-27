@@ -20,6 +20,7 @@ end
 local scope = string.rep("a", 64)
 local opts = { scope = scope, session = "read-slow-row" }
 local asks = {}
+local job_asks = 0
 
 -- The node's own capability, held slow: the read puts job 42 on the queue and says so; a call that names
 -- that job gets the settled answer. The search is decided at once, like any other call.
@@ -27,7 +28,10 @@ local function dispatch(name, params, raw)
   asks[#asks + 1] = { name = name, raw = raw }
   local wire = json.decode(raw or "{}")
   if type(wire) ~= "table" then wire = {} end
-  if wire.__job ~= nil then
+  -- The job takes one round to finish, like a real one: an ask that arrives before it settled says so
+  -- again. A stub that settles on the first re-ask would make `wait_s: 0` look patient.
+  if wire.__job ~= nil then job_asks = job_asks + 1 end
+  if wire.__job ~= nil and job_asks > 1 then
     return { header = { chat = "fixture", name = "Fixture" },
       messages = { { id = "m1", at = 1700000000, from = { name = "A" }, text = "one" } }, count = 1 }
   end
