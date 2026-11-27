@@ -6598,7 +6598,9 @@ mod terminal_tests {
     /// because a mouse test over an empty chat proves nothing.
     pub(super) fn program_screen() -> crate::screen::Screen {
         let beside = std::env::current_exe().ok().and_then(|exe| {
-            exe.ancestors().skip(1).take(6).map(|ancestor| ancestor.join("wa-term")).find(|path| path.is_file())
+            exe.ancestors().skip(1).take(6).flat_map(|ancestor| {
+                [ancestor.join("wa-term"), ancestor.join("release").join("wa-term")]
+            }).find(|path| path.is_file())
         });
         match beside {
             Some(path) => crate::screen::Screen::remote_at(path),

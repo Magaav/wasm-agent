@@ -35,9 +35,12 @@ fn program() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary's path");
     let mut tried = Vec::new();
     for ancestor in exe.ancestors().skip(1).take(6) {
-        let candidate = ancestor.join("wa-term");
-        if candidate.is_file() { return candidate }
-        tried.push(candidate.display().to_string());
+        // the same profile, then the release profile: a test target is built into debug/deps while the
+        // program the row builds lands in release/, and both are one cargo target dir apart.
+        for candidate in [ancestor.join("wa-term"), ancestor.join("release").join("wa-term")] {
+            if candidate.is_file() { return candidate }
+            tried.push(candidate.display().to_string());
+        }
     }
     panic!("no wa-term program found (tried {}): build it with 'cargo build -p wa-term --bin wa-term'", tried.join(", "));
 }
@@ -170,6 +173,24 @@ fn golden() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/term_log.txt");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("the golden at {}: {error}", path.display()));
     text.lines().map(str::to_string).collect()
+}
+
+/// THE RECORDER for `tests/golden/term_log.txt`. Ignored by default: it WRITES the golden instead of
+/// comparing with it, and a test that rewrites its own expectation is not a check. Run it by hand when
+/// the program's own drawing legitimately changed - a landing on main that moves the notice row or the
+/// pin is exactly that - and review the diff it makes, so the record says what the code does now and
+/// the comparison above keeps proving that the wire reproduces it.
+///
+/// `cargo test -p wa-capabilities --test term_remote -- --ignored record_the_golden`
+#[test]
+#[ignore = "records tests/golden/term_log.txt instead of comparing with it"]
+fn record_the_golden() {
+    let mut remote = Screen::remote_at(program());
+    assert!(remote.attach_error().is_none(), "the program answered the handshake");
+    let log = drive(&mut remote);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/term_log.txt");
+    std::fs::write(&path, format!("{}\n", log.join("\n")))
+        .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
 }
 
 #[test]
