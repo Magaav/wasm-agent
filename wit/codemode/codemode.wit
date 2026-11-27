@@ -231,7 +231,28 @@ interface codemode {
     finish: func(session: string) -> report;
 }
 
+/// The loop's own door to this component: one JSON call in, one JSON answer out.
+///
+/// `host.codemode(request_json)` is a capability like every other `host.*`, so the loop speaks JSON to
+/// it (`lua/core/codemode.lua`, `seam`). The two halves of that JSON - the request decoded into the
+/// records above, and the answer rendered back - are the seam's own vocabulary: a step's `kind`, a
+/// refusal's `kind`, `target: "global"`, `executed: false`, `effect: "none"`, the report's
+/// `sandbox_calls`. They used to live in the host and every change to them rebuilt the `wa` binary;
+/// they live here now. The typed `codemode` interface above stays the contract: this door renders it,
+/// it does not replace it.
+///
+/// The host keeps what is its own and not the seam's: the request's `session` (which keys the instance
+/// it keeps alive), `invalid_codemode_op`, `invalid_codemode_request:session_required`,
+/// `component_session_unknown`, `component_not_installed`, the epoch deadline, and `elapsed_ms`.
+interface control {
+    /// `{"op":"open"|"advance"|"finish", …}` in; `{"ok":true,"answer":{…}}` or
+    /// `{"ok":false,"error":"…"}` out. `answer` is the object the loop reads, unchanged - `opened` for
+    /// an open, `progress` for an advance, `report` for a finish.
+    serve: func(request: string) -> string;
+}
+
 world codemode-component {
     import wa:kernel/quickjs@0.1.0;
     export codemode;
+    export control;
 }

@@ -228,7 +228,18 @@ agent-core b24672b26ae4585f53bb6d4f5d9ab3cde61a663148385099eba4951ce8b57d53 3925
 # budget - and the two `codemode_sleep_*` refusal codes come with it. That moves the wasm bytes; everything
 # else in the component is the file above. Built with scripts/build-components.sh codemode at wasi-sdk 34:
 # 225,184 bytes.
-codemode 35cfcfe1145b3436a13b5bf4abb6e1cd6fb322fda3aab0d294d0d5c4dbd29960 216485
+# 25/11 repin of codemode alone (change/codemode-seam-leaves-the-host): the code-mode seam's JSON control
+# channel moved INTO the component. The request decode and the answer rendering - the shape of a step, of a
+# refusal and of a report, which lua/core/codemode.lua reads key by key - lived in
+# rust/wa-capabilities/src/codemode_seam.rs, so every change to them rebuilt the wa binary (f2d2c3cc added
+# error and answered; 1c19bf5c added the searchTools row shape). They are rust/components/codemode/src/
+# channel.rs now, behind one new export: wa:codemode/control serve(request) -> answer. The typed wa:codemode
+# interface is unchanged and the door renders it. The new host needs this artifact: served the older one it
+# names the failure (component_instantiate / component_failed) and the loop falls back to its native path
+# before a step is handed out, which is the documented rule for a mismatch.
+# Built by scripts/build-components.sh codemode: rustc 1.99.1, build root /tmp/wa-component-build/src, two
+# builds in two target dirs, same sha256 both times. 242,422 bytes.
+codemode 541bbba1ec2db6b71af48456a24544ab4ef9aa12d3bb724bb88cde9f8fdb1b26 242422
 graph 0539d0263a021f1734a5d2f6434320dafcbc8068c7b3f2a6f5adf038e4e718b5 8187401
 hooks f5fef7083eedac3269aecb50590297935be53e522d282f70bfa97e4bfa7e3e30 215897
 memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
