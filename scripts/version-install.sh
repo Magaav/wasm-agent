@@ -91,7 +91,9 @@ else
     # `--interface` is the answer - not a manifest read, which only describes a host already running.
     [ -n "$HOST_INTERFACE" ] || HOST_INTERFACE="$(wa_lua_part_host_interface "$STAGING/wa")" \
       || die "version_install_interface_unavailable: the staged program cannot declare its interface (nothing sealed, no pointer moved)"
-    wa_lua_part_fill "$LUA_PART" "$LUA_LOCK" "$STAGING/lua-core" "$HOST_INTERFACE" \
+    # THE VERIFIER IS THE STAGED HOST ITSELF, passed explicitly: it is the program that will RUN this tree, and the
+    # signature is checked with it rather than with whatever the environment or PATH happens to name.
+    wa_lua_part_fill "$LUA_PART" "$LUA_LOCK" "$STAGING/lua-core" "$HOST_INTERFACE" "$STAGING/wa" \
       || die "version_install_lua_part_refused: the part did not verify or its interface does not match (nothing was sealed, no pointer moved)"
   fi
   WA_VERSION_COMMIT="${COMMIT}" WA_VERSION_BINARY_COMMIT="${BINARY_COMMIT:-}" WA_VERSION_INSTALL_DIR="$INSTALL" \

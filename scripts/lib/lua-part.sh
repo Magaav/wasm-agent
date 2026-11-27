@@ -116,6 +116,9 @@ wa_lua_part_interface() {
 # so it IS the host's declaration until a verb prints it. That verb (wa --interface) is the next commit.
 wa_lua_part_fill() {
   local part="${1:?part}" lock="${2:?lock}" tree="${3:?tree dir}" host="${4:?host interface digest}" staging
+  # THE SIGNATURE COMES FIRST: an unsigned part, or one signed by a key this node does not trust, is refused by name
+  # before a single byte is read out of it - the lock line checks bytes, never authorship.
+  wa_lua_part_verify_signed "$part" "${5:?the verifier program: the host that will run this part}" || return $?
   wa_lua_part_verify_file "$part" "$lock" || return $?
   staging="${tree}.part.$$"
   rm -rf "$staging"
@@ -128,6 +131,68 @@ wa_lua_part_fill() {
   rm -rf "$tree"
   mv -T "$staging" "$tree" || { printf 'lua_part_dest_unwritable: %s\n' "$tree" >&2; return 6; }
   printf 'lua_part_filled %s interface=%s\n' "$tree" "$host"
+  return 0
+}
+
+# ---- THE PART MUST CARRY THE SAME TRUSTED-KEY COVER AS A NODE BUILD (27/11) --------------------------------------
+#
+# A lua part IS the node's whole Lua tree, so accepting one is accepting code that will run. The lock line (sha256,
+# bytes, interface) proves what the bytes ARE and never WHO produced them: anyone who can write the lock can pin
+# any tree. The node-build path already answers this - `wa release verify <SHA256SUMS> [SHA256SUMS.sig]` against
+# this node's trusted keys (rust/wa-host/src/release.rs, verify_release_at) - and this calls THAT, so there is one
+# verifier and one trust set, never a second opinion written in bash.
+#
+# Refusals, by name, BEFORE anything is unpacked:
+#   lua_part_unsigned                  no SHA256SUMS, or no SHA256SUMS.sig beside the part
+#   lua_part_signed_by_untrusted_key    a signature, by a key this node does not carry
+#   lua_part_signature_refused          anything else the binary refused, quoted in its own words
+#   lua_part_verifier_missing           no wa on PATH (and no WA_BIN): the check cannot run, so nothing passes
+wa_lua_part_verify_signed() {
+  # THE VERIFIER IS AN ARGUMENT, NEVER A LOOKUP (security read, Fable 27/11): ${WA_BIN:-wa} let whoever controls the
+  # environment, or PATH, choose the program that says "signed ok" - which is not a check at all. The caller passes
+  # the explicit program that will RUN the part (the staged host); a missing or non-executable one is refused by
+  # name instead of being replaced by something found on PATH.
+  local part="${1:?part}" program="${2:?the verifier program: the host that will run this part}" dir sums sig out rc why detail got want base
+  if [ ! -x "$program" ]; then
+    printf '%s\n' "lua_part_verifier_missing: $program is not executable, so the signature of $(basename "$part") cannot be checked" >&2
+    return 15
+  fi
+  dir="$(cd "$(dirname "$part")" 2>/dev/null && pwd)" || { printf '%s\n' "lua_part_missing: $part" >&2; return 2; }
+  sums="$dir/SHA256SUMS"; sig="$dir/SHA256SUMS.sig"
+  if [ ! -f "$sums" ] || [ ! -f "$sig" ]; then
+    if [ -f "$sums" ]; then detail='SHA256SUMS present, SHA256SUMS.sig absent'; else detail='SHA256SUMS and SHA256SUMS.sig absent'; fi
+    printf '%s\n' "lua_part_unsigned: $(basename "$part") is not covered by a signature ($detail); a lua part is installed only when a key this node trusts signs it" >&2
+    return 12
+  fi
+  out="$("$program" release verify "$sums" "$sig" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # THE VERIFIER'S SENTENCE, not the first line: a node whose terminal program is missing prints its own
+    # `term_program_missing` first, and quoting that would hide the refusal this function exists to report.
+    why="$(printf '%s\n' "$out" | grep -m1 -E 'signed by|does not trust|no trusted key|unsigned|does not verify' || printf '%s' "$out" | head -1)"
+    case "$out" in
+      *"does not trust"*|*"no trusted key"*) printf '%s\n' "lua_part_signed_by_untrusted_key: $why" >&2; return 13 ;;
+      *) printf '%s\n' "lua_part_signature_refused: $why" >&2; return 14 ;;
+    esac
+  fi
+  # A SIGNATURE IS NOT COVERAGE: the sums is signed, and that proves WHO wrote it - never that it says anything
+  # about THIS part. So the part's own name and digest must appear in the signed sums, or a genuine signature for
+  # some other release would vouch for any file dropped beside it.
+  local base want got
+  base="$(basename "$part")"
+  want="$(sha256sum < "$part" | awk '{print $1}')"
+  got="$(awk -v f="$base" '$2==f || $2=="*" f {print $1}' "$sums" | head -1)"
+  if [ -z "$got" ]; then
+    printf '%s\n' "lua_part_not_covered: the signed SHA256SUMS in $dir does not list $base, so the signature vouches for some other file" >&2
+    return 16
+  fi
+  if [ "$got" != "$want" ]; then
+    printf '%s\n' "lua_part_covered_digest_mismatch: the signed SHA256SUMS pins $base at $got, the part here is $want" >&2
+    return 17
+  fi
+  # The verifier's own line names the key; a node whose terminal program is missing also prints its complaint first,
+  # so the key is taken from the sentence that vouches and never from the raw blob.
+  out="$(printf '%s\n' "$out" | sed -n 's/^release signature verified: \([^ ]*\).*/\1/p' | head -1)"
+  printf '%s\n' "lua_part_signed_ok $(basename "$part") key=${out:-<unnamed>}"
   return 0
 }
 
