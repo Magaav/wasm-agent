@@ -19,6 +19,13 @@
 #   WA_PORT=8799 WA_INSTALL_DIR=/usr/local/bin scripts/upgrade.sh ./rust/target/release/wa
 set -uo pipefail
 
+# A VERDICT IS NOT INHERITED (Fable 26/11). WA_ANCESTRY_REUSED and WA_ANCESTRY_WHY are THIS process's answer about THIS
+# candidate, written by wa_ancestry_verdict below. An inherited value from a caller's environment would restamp the
+# record with a commit of the caller's choice on any path where the verdict never ran - a refusal that exits early, a
+# first install, a candidate that cannot report itself. They are cleared here, BEFORE anything is sourced, and never
+# exported, so no caller can hand this script an answer.
+unset WA_ANCESTRY_REUSED WA_ANCESTRY_WHY
+
 for required in dirname date mkdir sed tr wc uname; do
   command -v "$required" >/dev/null 2>&1 || { printf 'upgrade: shell_environment_missing:%s; no installation attempted\n' "$required" >&2; exit 127; }
 done
@@ -373,11 +380,23 @@ record_install() {
     dirty="$(wa_build_field "$UPGRADE_INFO" dirty)"
     build=yes
   fi
+  # A REUSED BUILD IS RESTAMPED WITH THE COMMIT BEING INSTALLED (Fable 26/11). The guard accepted the candidate
+  # because its stamp names an older commit whose TREE is this tree's tree and this tree contains the running commit
+  # (scripts/lib/install-record.sh, WA_ANCESTRY_REUSED). The record then has to say what is installed: the commit
+  # being installed. The older stamp is NOT thrown away - it moves to source_commit_hint, where a reader can see the
+  # build was reused instead of rebuilt.
+  if [ -n "${WA_ANCESTRY_REUSED:-}" ] && [ "$commit" != "$WA_ANCESTRY_REUSED" ]; then
+    say "restamped: ${WA_ANCESTRY_WHY:-the candidate is a reused build}; the record names the commit being installed ${WA_ANCESTRY_REUSED:0:12}"
+    REUSED_BUILD_STAMP="$commit"
+    commit="$WA_ANCESTRY_REUSED"
+    REUSED_BUILD=1
+  fi
   [ "$commit" = unknown ] && commit=""
   [ -n "$commit" ] || { commit=unknown; say "the installed binary cannot report its own build (build_info=absent): the record says commit=unknown rather than guessing"; }
   # A sentinel upgrade knows the exact installed bytes, but cannot prove that a
   # separately built binary corresponds to the checkout's current HEAD.
   source_hint="${SOURCE_COMMIT:-unknown}"
+  [ -n "${REUSED_BUILD_STAMP:-}" ] && source_hint="${REUSED_BUILD_STAMP} (reused build; installed as ${commit})"
   # The record's OWN identity is reused when the bytes it names are the bytes this script is placing: its
   # `sha256=` field is that claim and it is checkable here. `-ef` covers the hard-link case (the installed
   # file IS the built file); the wider check covers a deploy's build, which is a DIFFERENT file with

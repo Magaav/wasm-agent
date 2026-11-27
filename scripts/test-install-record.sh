@@ -89,6 +89,90 @@ wa_ancestry_verdict "$REPO" "$NEWER" "$BASE"; same "target contains running -> 0
 wa_ancestry_verdict "$REPO" "$NEWER" "$NEWER"; same "target is the running commit -> 0" "$?" "0"
 wa_ancestry_verdict "$REPO" "$NEWER" ""; same "no running commit -> 2 (a first install is not a downgrade)" "$?" "2"
 
+echo "test-install-record: a reused build - digest of compiled inputs, not a tree (incident 26/11 01:10Z)"
+# Fable shape: the guard asks whether the SOURCE of the commit being installed contains the running commit, and
+# whether the candidate binary IS that commit's build - answered by the digest of the COMPILED INPUTS (the same
+# definition the build cache and the manifest use). Tree equality is only the named fallback: it cannot pass a
+# scripts-only landing, which has a different tree and the same compiled inputs.
+CIN="$WORK/cinputs"
+mkdir -p "$CIN"
+git -C "$CIN" init -q 2>/dev/null
+git -C "$CIN" config user.email test@example.com; git -C "$CIN" config user.name test
+mkdir -p "$CIN/rust/wa-host/src" "$CIN/scripts"
+printf 'fn a() {}
+' > "$CIN/rust/wa-host/src/a.rs"; printf 'echo one
+' > "$CIN/scripts/x.sh"
+git -C "$CIN" add -A; git -C "$CIN" commit -qm 'the compiled source a build was made from'
+BUILT="$(git -C "$CIN" rev-parse HEAD)"
+printf 'fn a() { two(); }
+' > "$CIN/rust/wa-host/src/a.rs"
+git -C "$CIN" add -A; git -C "$CIN" commit -qm 'a compiled change, later reverted'
+RUNNING="$(git -C "$CIN" rev-parse HEAD)"
+git -C "$CIN" revert --no-edit HEAD >/dev/null 2>&1
+REVERT="$(git -C "$CIN" rev-parse HEAD)"
+same 'the revert restores the built tree exactly' "$([ "$(git -C "$CIN" rev-parse "$REVERT^{tree}")" = "$(git -C "$CIN" rev-parse "$BUILT^{tree}")" ] && echo same || echo differs)" 'same'
+same 'but its COMPILED INPUTS are the built commit ones' "$(wa_compiled_inputs_digest "$CIN" "$REVERT")" "$(wa_compiled_inputs_digest "$CIN" "$BUILT")"
+wa_ancestry_verdict "$CIN" "$BUILT" "$RUNNING"
+same 'revert to an old tree -> 0 (installs on the reused binary)' "$?" "0"
+same 'and the verdict names the commit being installed (the revert)' "$WA_ANCESTRY_REUSED" "$REVERT"
+shows 'the reason says the compiled inputs are that commit and it is a reused build' "$WA_ANCESTRY_WHY" 'reused build'
+
+# A SCRIPTS-ONLY LANDING ON A REUSED BINARY: a different tree, the same compiled inputs - the case tree equality
+# could never pass, and the reason the digest is the rule.
+printf 'echo two
+' > "$CIN/scripts/x.sh"
+git -C "$CIN" add -A; git -C "$CIN" commit -qm 'scripts only: nothing compiled changed'
+SCRIPTS_ONLY="$(git -C "$CIN" rev-parse HEAD)"
+same 'the scripts-only tree differs from the built one' "$([ "$(git -C "$CIN" rev-parse "$SCRIPTS_ONLY^{tree}")" = "$(git -C "$CIN" rev-parse "$BUILT^{tree}")" ] && echo same || echo differs)" 'differs'
+wa_ancestry_verdict "$CIN" "$BUILT" "$SCRIPTS_ONLY"
+same 'a scripts-only landing on the reused binary -> 0 (installs)' "$?" "0"
+same 'and it is restamped with the scripts-only commit' "$WA_ANCESTRY_REUSED" "$SCRIPTS_ONLY"
+
+# A TRULY OLDER COMMIT: the commit being installed does not contain what is running, whatever the digests say.
+wa_ancestry_verdict "$CIN" "$BUILT" "$RUNNING" 2>/dev/null >/dev/null
+wa_ancestry_verdict "$CIN" "$BUILT" "$RUNNING" >/dev/null 2>&1
+OLDCASE="$WORK/older"
+mkdir -p "$OLDCASE"
+git -C "$OLDCASE" init -q 2>/dev/null
+git -C "$OLDCASE" config user.email test@example.com; git -C "$OLDCASE" config user.name test
+mkdir -p "$OLDCASE/rust/wa-host/src"
+printf 'fn a() {}
+' > "$OLDCASE/rust/wa-host/src/a.rs"; git -C "$OLDCASE" add -A; git -C "$OLDCASE" commit -qm base
+O_BASE="$(git -C "$OLDCASE" rev-parse HEAD)"
+printf 'fn b() {}
+' > "$OLDCASE/rust/wa-host/src/b.rs"; git -C "$OLDCASE" add -A; git -C "$OLDCASE" commit -qm newer
+O_NEW="$(git -C "$OLDCASE" rev-parse HEAD)"
+# the tree being installed is the OLDER commit: it does not contain the running one, so a reused binary is no excuse
+wa_ancestry_verdict "$OLDCASE" "$O_NEW" "$O_NEW" >/dev/null 2>&1; : "$?"
+same 'a truly older commit is still refused' "$(wa_ancestry_verdict "$OLDCASE" "$O_BASE" "$O_NEW" >/dev/null 2>&1; echo $?)" '1'
+same 'and nothing is restamped' "$WA_ANCESTRY_REUSED" ""
+
+echo "test-install-record: a verdict from the CALLER environment is not inherited (Fable 26/11)"
+# MEASURED SHAPE: WA_ANCESTRY_REUSED is this process answer about this candidate, written by wa_ancestry_verdict.
+# An INHERITED value would restamp the record with a commit of the caller choice on any path where the verdict never
+# ran. upgrade.sh clears it at the very top, before anything is sourced, and never exports it.
+UPG="$ROOT/scripts/upgrade.sh"
+unset_line=$(grep -n '^unset WA_ANCESTRY_REUSED WA_ANCESTRY_WHY' "$UPG" | head -1 | cut -d: -f1)
+[ -n "$unset_line" ] && ok 'upgrade.sh clears the verdict' || bad 'upgrade.sh does not clear WA_ANCESTRY_REUSED'
+first_source=$(grep -nE '^[[:space:]]*([.][[:space:]]|source[[:space:]])' "$UPG" | head -1 | cut -d: -f1)
+if [ -n "$unset_line" ] && [ -n "$first_source" ] && [ "$unset_line" -lt "$first_source" ]; then
+  ok 'and it does so BEFORE anything is sourced'
+else
+  bad 'the clear is not above the first sourced file'
+fi
+same 'and nothing exports it' "$(grep -c 'export WA_ANCESTRY_' "$UPG" "$ROOT/scripts/lib/install-record.sh" | awk -F: '{s+=$2} END {print s}')" '0'
+# AND THE INSTALL ITSELF: a run with the verdict inherited must leave the record EXACTLY as a run without it does.
+INH="$WORK/inherit"; mkdir -p "$INH/a" "$INH/b"
+seed() { printf 'commit=1111111111111111111111111111111111111111\nsha256=deadbeef\nrecord_role=final\n' > "$1/installed.txt"; printf '#!/bin/sh\necho version=0.0.0\n' > "$1/wa"; chmod +x "$1/wa"; }
+seed "$INH/a"; seed "$INH/b"
+env WA_ANCESTRY_REUSED=2222222222222222222222222222222222222222 WA_INSTALL_DIR="$INH/a" \
+  bash "$UPG" "$INH/no-such-candidate" >/dev/null 2>&1 || true
+env WA_INSTALL_DIR="$INH/b" bash "$UPG" "$INH/no-such-candidate" >/dev/null 2>&1 || true
+WITH="$(cat "$INH/a/installed.txt" 2>/dev/null)"
+WITHOUT="$(cat "$INH/b/installed.txt" 2>/dev/null)"
+same 'an inherited verdict leaves the record byte-identical' "$WITH" "$WITHOUT"
+case "$WITH" in *2222222222*) bad 'the inherited commit reached the record' ;; *1111111111*) ok 'and no caller commit was written into it' ;; *) bad "the record was not the one the fixture seeded: $WITH" ;; esac
+
 echo "test-install-record: the 18/11 case - the running commit is missing from the deployer's history"
 # THE CASE THE GUARD USED TO FAIL OPEN ON. A deployer's checkout that does not carry the running commit used to
 # answer 2 ("cannot tell") for every cause at once, and every caller then only noted it and installed. Two
