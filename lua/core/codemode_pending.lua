@@ -1726,7 +1726,7 @@ function M.native_open(scope, tool, params, detached)
   for _ in pairs(index.ops) do n = n + 1 end
   local id = tostring(params and params.id or (tostring(tool) .. "-native-" .. tostring(now_seconds()) .. "-" .. tostring(n + 1)))
   local record = {
-    op = id, kind = tool, tool = tool, state = "running", started = now_seconds(),
+    op = id, kind = tool, tool = tool, state = "running", started = now_seconds(), native = true,
     detached = detached == true,
     command = params and (params.command or params.code) or nil,
     node = params and params.node or nil, scope = scope,
@@ -1735,6 +1735,33 @@ function M.native_open(scope, tool, params, detached)
   index.count = open_count(index)
   M.save(scope, index)
   return { scope = scope, id = id, started = record.started, command = record.command, detached = record.detached }
+end
+
+-- CLOSED FROM THE UNWIND, not from the tool call (measured 27/11: a stop tears the tool call down and neither the
+-- return nor an error handler inside it ever runs, so every record was left state=running with no stop). The one
+-- place a live interpreter still exists after a stop is lua/core/agent.lua's run_body, where `run_cancelled` is
+-- caught; it calls this with the sentence it also prints. Facts are asked of the operations layer here, off the
+-- tool's path, so nothing the reader waits for pays for them.
+function M.close_open_native(scope, dispatch, note, tool)
+  local index = M.open(scope)
+  local closed = 0
+  for _, record in pairs(index.ops or {}) do
+    if record and record.native == true and record.state == "running" and (tool == nil or record.tool == tool) then
+      local observed = nil
+      if dispatch ~= nil and record.op ~= nil then observed = snapshot(dispatch, tostring(record.op)) end
+      local facts = type(observed) == "table" and type(observed.stop) == "table" and observed.stop or nil
+      local signal = facts and facts.signal or nil
+      record.stop = { command = record.command, after_s = now_seconds() - (record.started or now_seconds()),
+        detached = record.detached == true, note = note,
+        confirmed = (record.detached == true) and nil or true,
+        signal = (record.detached == true) and nil or signal,
+        survivors = facts and facts.survivors or nil }
+      record.state = (record.detached == true) and "running" or "cancelled"
+      closed = closed + 1
+    end
+  end
+  if closed > 0 then M.save(scope, index) end
+  return closed
 end
 
 function M.native_settle(handle, dispatch, outcome)

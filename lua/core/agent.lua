@@ -2359,6 +2359,17 @@ function M:run(text, images)
   if (not ok) and tostring(result):find('run_cancelled', 1, true) then
     pcall(function() telemetry.event(self.session_id, self.run_id, '', 'run', 'stopped', {}) end)
   end
+  -- AND THE RECORD OF WHAT THE STOP STOPPED (decision (a), 27/11): a stopped tool call is torn down before it can
+  -- close its own pending record, so it is closed here - the one place a live interpreter still exists after a
+  -- stop - with the same sentence the reader gets. Best effort: a record that cannot be written never changes
+  -- what happened to the work.
+  if (not ok) and tostring(result):find('run_cancelled', 1, true) then
+    pcall(function()
+      local pending_calls = dofile('lua/core/codemode_pending.lua')
+      local note = type(stop_notice) == 'string' and stop_notice or nil
+      pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil, note)
+    end)
+  end
   -- Now the record, the event, the bus fact and (when a rerun can finish it) the one wake.
   if (not ok) and self.failure==nil then
     local failure=self.pending_failure or {}
