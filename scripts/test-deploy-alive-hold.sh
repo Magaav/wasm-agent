@@ -125,6 +125,29 @@ wait_requests() { # <n> <seconds>
   return 1
 }
 
+# A COUNT THAT IS STILL MOVING IS NOT AN ANSWER, AND FIXED SECONDS ARE A GUESS (mission flaky-twice).
+# This row used to reach its exact-count lines after `sleep 4`, which is a bet that the node has finished by
+# then: under load the last resume sometimes landed later (a red against the code for a fact about the
+# machine) and, because the same window decides "no delivery in between", a late extra request could slip
+# past it too. The fact being waited for is that the count has SETTLED - it reached the target, then stopped
+# moving for a second - with a cap so a real bug still fails fast instead of hanging.
+wait_settled() { # <n> <seconds> -> prints the settled count
+  local want=$1 budget=$2 last="" steady=0
+  for _ in $(seq 1 "$((budget * 10))"); do
+    local now; now=$(requests)
+    if [ "$now" -ge "$want" ] && [ "$now" = "$last" ]; then
+      steady=$((steady + 1))
+      [ "$steady" -ge 10 ] && { printf '%s' "$now"; return 0; }
+    else
+      steady=0
+    fi
+    last=$now
+    sleep 0.1
+  done
+  printf '%s' "$(requests)"
+  return 1
+}
+
 # ---------------------------------------------------------------------------------------- the stub deploy
 # The REAL timeline, in the real scripts' own functions: the deploy states that it is running with the product's own
 # writer (scripts/lib/deploy-alive.sh), compiles (a sleep - the thing that took 430 s), THEN writes the installer's
@@ -226,8 +249,7 @@ echo "  ok: 30 s of the compile spent ZERO model requests with no request, no cl
 
 just_before=$(requests)
 wait_requests "$((just_before + 3))" 60 || { echo "  FAIL: the release never resumed the three sessions"; tail -6 "$WORK/serve.log"; ledger "SELECT id, status FROM self_wakes;"; exit 1; }
-sleep 4
-final_count=$(requests)
+final_count=$(wait_settled "$((T0_COUNT + 6))" 60) || true
 [ "$final_count" = "$((T0_COUNT + 6))" ] || { echo "  FAIL: $((final_count - T0_COUNT)) requests in total, expected 6 (3 pauses + exactly ONE resume each)"; exit 1; }
 echo "  ok: exactly ONE resume turn per session (3 pauses + 3 resumes = 6 requests, no delivery in between)"
 LINE1=$(ledger "SELECT prompt FROM self_wakes WHERE reason='deploy pending: resume after the node swap' ORDER BY created_at LIMIT 1;")
@@ -272,8 +294,9 @@ killed_at=$(date +%s)
 wait_requests "$((BEFORE + 2))" 40 || { echo "  FAIL: a killed deploy never released the session"; ledger "SELECT id, status FROM self_wakes;"; exit 1; }
 released_in=$(( $(date +%s) - killed_at ))
 [ "$released_in" -le 30 ] || { echo "  FAIL: the release came ${released_in}s after the kill, expected within 30 s"; exit 1; }
-sleep 3
-killed_total=$(requests)
+# The same fact as the first exact count: the killed case spent its two requests when the count SETTLES at
+# two, not three seconds after the kill (mission flaky-twice).
+killed_total=$(wait_settled "$((BEFORE + 2))" 60) || true
 [ "$killed_total" = "$((BEFORE + 2))" ] || { echo "  FAIL: the killed case spent $((killed_total - BEFORE)) requests, expected 2 (one pause + one resume)"; exit 1; }
 LINE2=$(ledger "SELECT prompt FROM self_wakes WHERE reason='deploy pending: resume after the node swap' ORDER BY created_at DESC LIMIT 1;")
 case "$LINE2" in
