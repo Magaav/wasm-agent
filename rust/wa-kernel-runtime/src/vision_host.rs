@@ -67,6 +67,21 @@ impl wa::kernel::vision::HostWithStore<State> for State {
                 return Err(KError::Refused("ocr not declared".into()));
             }
             gate(&name, "ocr.read")?;
+            // The switch is the `vision` FEATURE (wa-features): when the resolver says the component answers,
+            // it does; otherwise the kernel's own reader (below) is the fallback the brief keeps until the
+            // component is green through this caller. No environment is read here.
+            if crate::vision_component_host::enabled() {
+                let started = std::time::Instant::now();
+                let lines = crate::vision_component_host::read(&image).map_err(|refusal| {
+                    KError::Failed(format!("{refusal:?}").to_ascii_lowercase())
+                })?;
+                let text = lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>().join("\n");
+                return Ok(wa::kernel::vision::Reading {
+                    text,
+                    mime,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
             let slot = Slot::new();
             let done = slot.clone();
             let worker_mime = mime.clone();

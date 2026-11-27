@@ -143,6 +143,16 @@ fn flatten<T>(
     call.map_err(|error| format!("component_failed:{op}:{error}"))
 }
 
+/// Whether the resolver says the component answers this node's reads. The switch is the FEATURE - the same
+/// question `stt_node` asks (`wa_features::status`), never an environment this module reads itself - and the
+/// kernel's own reader stays the answer when it is not `Component`.
+pub fn enabled() -> bool {
+    matches!(
+        wa_features::status("vision").map(|status| status.active),
+        Some(wa_features::ActivePath::Component)
+    )
+}
+
 /// One image, as words. The lines carry their corners in the image's own pixels.
 pub fn read(image: &[u8]) -> Result<Vec<Line>, Refusal> {
     read_with(&Config::installed(), image)
