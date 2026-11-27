@@ -2342,6 +2342,10 @@ gate_run node tests/test-wa-fonts.mjs
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# A RESTART DRAWS THE SAME TRANSCRIPT A LIVE TURN DOES (Victor 27/11): one stored turn - text beside a
+# tool call, reasoning, and the model note - is drawn live and through every replay path (restart,
+# --continue, a node-run wake, a /sessions switch); no Commentary heading, no raw note tags, the same answer.
+WA_SCRIPT=scripts/test-restart-redraw.lua "$BIN" --db "$DB.view-redraw" | grep "restart redraw ok" || redraw=1
 # A STOP IS NOT A FAILURE TO REPLAY (change/esc-stops-now, item 4): a provider call that comes back
 # cancelled is asked exactly once, waits for nothing and writes no provider_retry row, while the
 # unclassified-provider bucket it used to fall into still replays its own kind of failure. Measured in

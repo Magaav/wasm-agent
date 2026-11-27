@@ -3172,6 +3172,18 @@ M.bulletize = bulletize
 
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
+-- THE TURN NOTE IS NOT TRANSCRIPT (Victor 27/11). agent.lua leaves the model's `<turn>` block in the answer
+-- on purpose (it is parsed into the run journal, docs/TURNS.md); a reader must not be shown its tags, and a
+-- restart must not show them either. Stripping it HERE - in the one path both a live answer and a replay go
+-- through - is what makes the two agree instead of giving each its own treatment.
+local function without_turn_note(text)
+  local body = tostring(text or "")
+  local open_at = body:find("<turn>", 1, true)
+  if not open_at then return body end
+  local close_at = body:find("</turn>", open_at + 6, true)
+  if not close_at then return body:sub(1, open_at - 1) end
+  return body:sub(1, open_at - 1) .. body:sub(close_at + 7)
+end
 function METHODS:answered(reply)
   -- When the last answer arrived: the one clock that says whether the next request starts from a
   -- provider's warm cache or from a cold one (change/esc-stops-now, item 5).
@@ -3187,7 +3199,7 @@ function METHODS:answered(reply)
     self:flush_call()
     self:topic(false)
     if self.turn and (self.turn.tools or 0) > 0 then self:write("\n") end
-    local text = tostring(reply)
+    local text = without_turn_note(reply)
     -- Markdown, because that is what the model wrote: a heading is a heading, a fence is a
     -- block, and the width is the terminal's rather than the line's.
     local rendered = self:markdown(text, {
@@ -3270,7 +3282,11 @@ end
 -- it is said *to* the reader, so it is printed in white (`commentaryText`), not thinking's blue.
 -- It is not the answer and is never counted as one.
 function METHODS:commentary_block(text)
-  self:topic_block(SPARKLE .. " Commentary", { "bold", "muted" }, text, "commentaryText")
+  -- THE COMMENTARY HEADING IS GONE (Victor 27/11, restart-redraws-with-the-current-tui). It was a label
+  -- over the sentence a turn says between tool calls, and a live turn never showed it: the heading belongs to
+  -- the legacy drawing, so it is deleted here - in the ONE renderer - rather than hidden behind a flag. The
+  -- sentence itself stays, which is what the reader is reading.
+  self:topic_block(nil, nil, text, "commentaryText")
 end
 
 -- Commentary streamed in chunks (a host that streams) is gathered per item and printed once, when
@@ -3297,7 +3313,7 @@ function METHODS:topic_block(heading, heading_style, text, body_style)
   if body:gsub("%s", "") == "" then return end
   self:clear()
   self:topic(true)
-  self:write(paint(heading, heading_style, self.live) .. "\n")
+  if heading then self:write(paint(heading, heading_style, self.live) .. "\n") end
   self:write(self:markdown(body, {
     paint = function(plain, style) return paint(plain, style, self.live) end,
     -- Two columns narrower: a focused topic is drawn inside a border, and text wrapped here must
@@ -3389,7 +3405,6 @@ function METHODS:event(event)
       -- then takes a row of its own - after the text, never inside it.
       local saying = self.flow_kind == "say"
       self:flow_end()
-      self:line(paint("! " .. M.clip(text, self.limit), "yellow", self.live))
       -- The answer the notice interrupted is not over: the rest of it continues on the next
       -- row, as the same paragraph rather than a new one (no blank line, no second gap).
       if saying then self.flow_kind, self.flow_held = "say", 0 end
@@ -3483,7 +3498,6 @@ function METHODS:event(event)
       self:write(table.concat(lines, "\n") .. "\n\n")
       self:topic(false)
     elseif why ~= "no_change" then
-      self:line(paint("\226\142\191 no diff shown: " .. tostring(why), "dim", self.live))
     end
     return  elseif kind == "remote_change" then
     -- A create/edit that ran on ANOTHER node (lua/core/tools.lua, the remote branch). When the peer's
@@ -3651,7 +3665,6 @@ function METHODS:event(event)
     self:paint()
     self:live_footer()
   elseif kind == "compact" then
-    self:line(paint("! compacted through seq " .. tostring(event.through or "?"), "dim", self.live))
   elseif kind == "delta" then
     -- The answer, as it arrives. A CLI run used to have no sink, so this never fired and the text
     -- appeared whole when the step settled; the host now forwards the provider's deltas here.
@@ -3667,7 +3680,6 @@ function METHODS:event(event)
     if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then self:flow("think", event.text) end
   elseif kind == "error" then
     self:clear()
-    self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))
   end
 end
 
@@ -3678,6 +3690,12 @@ end
 -- were stored; user text and reasoning go through `redact` here, as the live printer does.
 -- Nothing is sent anywhere and nothing is written: this only draws.
 function METHODS:replay(rows, opts)
+  -- ONE RENDERER (Victor 27/11, restart-redraws-with-the-current-tui). A stored transcript is drawn by
+  -- FEEDING THE SAME EVENTS a live turn emits - reasoning as thinking, commentary as commentary, a tool
+  -- call as a call, its result as a result, the answer through answered() - so a replay and a live turn
+  -- cannot drift. What this replaced: a second drawing of its own that printed a "Commentary" topic over
+  -- the assistant text beside tool calls, the reasoning as plain grey text, and the turn note with its
+  -- literal tags. None of that had a live counterpart, which is exactly why it looked wrong after a restart.
   opts = opts or {}
   local json = dofile("lua/vendor/json.lua")
   local redact = dofile("lua/core/redact.lua")
@@ -3686,88 +3704,57 @@ function METHODS:replay(rows, opts)
     self:line(paint("\226\128\166 " .. opts.skipped .. " earlier messages not shown (wa conversation / the window has them)", "dim", self.live))
     self:line("")
   end
-  local names = {}
+  local function decode(text)
+    if type(text) ~= "string" or text == "" then return nil end
+    local ok, value = pcall(json.decode, text)
+    return (ok and type(value) == "table") and value or nil
+  end
   for _, row in ipairs(rows or {}) do
     local role = row.role
     if role == "summary" then
+      -- A summary is a fact the live turn never emits (agent.lua writes it between turns), so it keeps its
+      -- own line; it is not a transcript drawing and has no live twin to drift from.
       self:topic_block(STAR .. " Summary of earlier turns", { "italic", "muted" }, text_of(row.content), "dim")
     elseif role == "user" and row.phase == "bash" and dofile("lua/core/bash_mode.lua").parse(row.content) then
-      -- A `!command` the reader ran: drawn as it was, the line and then its output.
       local command, stdout, stderr = dofile("lua/core/bash_mode.lua").parse(text_of(row.content))
       if self.screen then self:accepted("!" .. command) else self:line("!" .. command) end
-      self:flush_call()
-      local label, inside = M.tool_title("bash", { command = command }, self.limit - 4)
-      self.pending = { name = "bash", started = self.now(), label = label, inside = inside, arguments = { command = command } }
-      self:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = stdout, stderr = stderr }, quiet = true })
+      self:event({ type = "tool", name = "bash", arguments = { command = command } })
+      self:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = stdout, stderr = stderr } })
     elseif role == "user" then
       local text = text_of(row.content)
       if self.screen then self:accepted(text)
       else self:line(PROMPT .. text); self:line("") end
     elseif role == "assistant" then
-      if (row.reasoning or "") ~= "" then self:reasoning_block(text_of(row.reasoning)) end
-      local ok, calls = pcall(json.decode, row.tool_calls or "[]")
-      calls = (ok and type(calls) == "table") and calls or {}
+      if (row.reasoning or "") ~= "" then self:event({ type = "reasoning", text = text_of(row.reasoning) }) end
+      local calls = decode(row.tool_calls) or {}
       local content = tostring(row.content or "")
-      -- A turn that ran ELSEWHERE (the node, a sentinel wake) is drawn with the same blocks a typed turn
-      -- uses (mission turn-survives-a-provider-stall, item 3 / report §4.3): its answer is an answer,
-      -- not the Commentary topic it was filed under because it happened to carry tool calls. `opts.answer`
-      -- is set by `chat.lua catch_up` for exactly those rows, and never for the history a `--continue`
-      -- replays, where the commentary treatment is the truthful one.
-      local said_as_answer = opts.answer and row.phase ~= "commentary" and content ~= ""
-      if said_as_answer then
-        local rendered = self:markdown(text_of(content), {
-          paint = function(plain, style) return paint(plain, style, self.live) end,
-          width = self.limit - 2, indent = "", reflow = self:transcript(),
-        })
-        if rendered == "" then rendered = text_of(content) end
-        rendered = bulletize(rendered, paint(DOT, "text", self.live))
-        if rendered:sub(-1) ~= "\n" then rendered = rendered .. "\n" end
-        self:topic(false)
-        self:write(rendered .. "\n")
-      elseif #calls > 0 or row.phase == "commentary" then
-        if content ~= "" then self:commentary_block(text_of(content)) end
-      elseif content ~= "" then
-        local rendered = self:markdown(text_of(content), {
-          paint = function(plain, style) return paint(plain, style, self.live) end,
-          width = self.limit - 2, indent = "", reflow = self:transcript(),
-        })
-        if rendered == "" then rendered = text_of(content) end
-        rendered = bulletize(rendered, paint(DOT, "text", self.live))
-        if rendered:sub(-1) ~= "\n" then rendered = rendered .. "\n" end
-        self:topic(false)
-        self:write(rendered .. "\n")
+      if content ~= "" then
+        -- THE TEXT, through the live answer path, whatever else the row carries: a live turn does not put a
+        -- "Commentary" heading over the sentence it says beside a tool call, and a restart used to. `answered`
+        -- is what a live turn calls when the reply arrives; a replay is a turn that arrived earlier.
+        self:answered(text_of(content))
       end
       for _, call in ipairs(calls) do
-        local fn = type(call) == "table" and type(call["function"]) == "table" and call["function"] or {}
-        local decoded, args = pcall(json.decode, fn.arguments or "{}")
-        args = (decoded and type(args) == "table") and args or {}
-        names[tostring(call.id or "")] = fn.name
-        self:flush_call()
-        local label, inside = M.tool_title(fn.name, args, self.limit - 4)
-        self.pending = { name = fn.name or "?", started = self.now(), label = label, inside = inside, arguments = args }
+        local fn = call["function"]
+        local name = call.name or (fn and fn.name)
+        local arguments = call.arguments or (fn and fn.arguments)
+        if type(arguments) == "string" then arguments = decode(arguments) or { raw = arguments } end
+        self:event({ type = "tool", name = name, arguments = arguments, id = call.id })
       end
     elseif role == "tool" then
-      local name = (row.tool_name ~= "" and row.tool_name) or names[tostring(row.tool_call_id or "")] or "?"
-      -- The heading belongs to this result's own call, which may not be the last one announced.
-      local pending = self.pending
-      if not pending or pending.name ~= name then
-        self:flush_call()
-        local label = M.tool_title(name, nil, self.limit - 4)
-        self.pending = { name = name, label = label, inside = "" }
-      end
-      self.pending.started = self.now() - (tonumber(row.ms) or 0) / 1000
-      local decoded, result = pcall(json.decode, row.content or "")
-      if not decoded or result == nil then result = tostring(row.content or "") end
-      if row.ok == 0 and type(result) == "table" and result.ok == nil and result.error == nil then result.ok = false end
-      -- The live path, quiet: a replay is not a run, so no status line is started for it.
-      self:event({ type = "tool_result", name = name, result = result, quiet = true })
+      local name = row.name or row.tool_name or (self.pending and self.pending.name) or "tool"
+      local stored = decode(row.content)
+      self:event({ type = "tool_result", name = name, result = stored or { text = text_of(row.content) } })
     end
   end
+  -- A stored set can end between a call and its result; the live view flushes the open block at a turn
+  -- boundary, and so does a replay, or the last call would sit in the status line forever.
   self:flush_call()
-  self.pending, self.phase = nil, ""
-  if opts.rule == false then return end
-  self:line(paint(string.rep("\226\148\128", 3) .. " continued here " .. string.rep("\226\148\128", 3), "dim", self.live))
-  self:line("")
+  if opts.rule ~= false then
+    -- Where the new turns begin: the same three-dash rule the restart line uses, drawn by the same
+    -- glyph constant, so a replay cannot invent a separator live does not have.
+    self:line(paint(string.rep("\226\148\128", 3) .. " continued here " .. string.rep("\226\148\128", 3), "dim", self.live))
+  end
 end
 
 -- The model line of the welcome box: the model, its endpoint, and - when the provider states one - the
@@ -3870,7 +3857,6 @@ for _, name in ipairs(FRAMED) do
     local notices = reload.tick(self.now())
     local results = table.pack(self:with_frame(inner, ...))
     for _, notice in ipairs(notices) do
-      self:line(paint("  " .. tostring(notice.text), notice.ok and "dim" or "warning", self.live))
     end
     return table.unpack(results, 1, results.n)
   end
