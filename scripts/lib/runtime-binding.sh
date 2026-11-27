@@ -32,3 +32,21 @@ wa_runtime_binding_recheck() {
   printf 'canonical runtime binding changed during the build: the preflight chose %s, the install re-check chose %s; nothing was installed - re-run the deploy\n' "$preflight" "$install"
   return 1
 }
+
+# WHAT MOVED SINCE THE PREFLIGHT (Victor on work, 27/11). The install-time binding question is the same question
+# the preflight asked, so when it fails late the useful sentence is the DIFFERENCE, not the rule again: the ref, the
+# sha the build started from, and the sha the tree has now. Prints '' when nothing can be said, so it never invents.
+wa_runtime_binding_moved_note() { # <repo> <preflight-head> <preflight-main>
+  local repo="${1:-}" head="${2:-}" main="${3:-}" now_head now_main ref
+  [ -n "$repo" ] && [ -d "$repo" ] || return 0
+  ref="${WA_DEPLOY_MAIN_REF:-origin/main}"
+  now_head="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+  now_main="$(git -C "$repo" rev-parse "$ref" 2>/dev/null || true)"
+  [ -n "$now_head" ] || return 0
+  if [ -n "$head" ] && [ "$head" = "$now_head" ] && [ -n "$now_main" ] && [ "$main" != "$now_main" ]; then
+    printf ' (%s moved during the build: it was %s when the preflight read it, it is %s now; the tree is still on %s - the bytes that were built)' \
+      "$ref" "${main:0:12}" "${now_main:0:12}" "${now_head:0:12}"
+  elif [ -n "$head" ] && [ "$head" != "$now_head" ]; then
+    printf ' (the tree moved during the build: the preflight read HEAD %s, the tree is on %s now)' "${head:0:12}" "${now_head:0:12}"
+  fi
+}
