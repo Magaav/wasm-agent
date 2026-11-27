@@ -86,9 +86,62 @@ wa_main_binary_build() { # <sha> <root> <target>
   fi
   local cap=${WA_MAIN_BUILD_CAP_SECONDS:-900} nice_level=${WA_MAIN_BUILD_NICE:-10} rc=0
   CARGO_TARGET_DIR="$target" nice -n "$nice_level" timeout "$cap" \
-    "$cargo_bin" build --release --offline -p wa-host --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
+    "$cargo_bin" build --release --offline -p wa-host -p wa-operations-supervisor -p wa-term --manifest-path "$root/rust/Cargo.toml" >/dev/null 2>&1 || rc=$?
   if [ "$rc" = 0 ] && [ -x "$built" ]; then printf '%s\n' "$built"; return 0; fi
   echo "wa_main_binary: the build of ${sha:0:12} in $target failed (rc $rc, cap ${cap}s)" >&2
+  return 1
+}
+
+# THE BYTES A RUN MEASURES MUST NOT CHANGE UNDER IT, AND THE PAIR STAYS A PAIR (27/11, the storm's two causes).
+# MEASURED, cause 1: _orch/health-loop-run.out says the binary the fast path used was sha256 a8e2ae2b and was
+# 252a248 by the end of the same run - the build target is shared, so any later build (a landing, the next tick,
+# another process) rewrote release/wa while rows were still running against it. main-health then refused the speed
+# rows, correctly: a number measured against an unknown binary is not a number.
+# MEASURED, cause 2 - and this one the first version of this function CAUSED: a node needs wa-term BESIDE it.
+# Pinning wa alone into <target>/pinned/ made every row the node runs answer
+#   wa: term_program_missing: no wa-term beside this node (<target>/pinned/wa-term)
+# so each row's first command produced nothing and the row failed on its own fixture ('the scratch checkout has a
+# commit to read' with an empty sha). 135 rows in the run that measured it. A pin is therefore a DIRECTORY per tip
+# that holds the pair, never a lone file.
+wa_main_binary_pin() { # <binary> <sha> <target> -> prints the path of the pinned wa
+  local bin=$1 sha=$2 target=$3 dir stage tmp
+  [ -x "$bin" ] || { echo "wa_main_binary: $bin is not executable" >&2; return 1; }
+  dir=$target/pinned/${sha:0:12}
+  if [ -x "$dir/wa" ]; then printf '%s\n' "$dir/wa"; return 0; fi
+  mkdir -p "$target/pinned" 2>/dev/null || { printf '%s\n' "$bin"; return 0; }
+  # Copy into a fresh stage and rename: a reader never sees a half-written directory, and two runs pinning the
+  # same tip cannot interleave their copies.
+  stage=$dir.tmp.$$; rm -rf "$stage" 2>/dev/null || true
+  mkdir -p "$stage" 2>/dev/null || { printf '%s\n' "$bin"; return 0; }
+  if ! cp "$bin" "$stage/wa" 2>/dev/null || ! chmod +x "$stage/wa" 2>/dev/null; then
+    rm -rf "$stage" 2>/dev/null || true
+    echo "wa_main_binary: could not pin $bin for ${sha:0:12} in $dir" >&2; return 1
+  fi
+  # THE SET, NOT THE PAIR (27/11). MEASURED on the health target: a build there holds `wa` and `wa-term` and nothing
+  # else, so every host.exec answered
+  #   operations_supervisor_missing: wa-operations-supervisor is neither beside this binary nor on PATH
+  # and every row that runs a command failed on its own fixture - the 135 reds in that run, and the same shape as
+  # the ~130 in the storm. The supervisor's crate is `ln` and its INSTALLED name is wa-operations-supervisor, so a
+  # pinned directory must carry: wa, wa-term, and that program under the name the node looks for.
+  local sibling src
+  for sibling in wa-term; do
+    src=$(dirname "$bin")/$sibling
+    [ -x "$src" ] && { cp "$src" "$stage/$sibling" 2>/dev/null && chmod +x "$stage/$sibling" 2>/dev/null || true; }
+  done
+  src=$(dirname "$bin")/wa-operations-supervisor
+  [ -x "$src" ] || src=$(dirname "$bin")/ln
+  if [ -x "$src" ]; then
+    cp "$src" "$stage/wa-operations-supervisor" 2>/dev/null       && chmod +x "$stage/wa-operations-supervisor" 2>/dev/null || true
+  fi
+  # SAY WHAT IS MISSING, by name: a pin without these runs a node that refuses every command, and a reader must not
+  # have to learn that from a hundred red rows (the first version of this function sent a run that way).
+  for sibling in wa-term wa-operations-supervisor; do
+    [ -x "$stage/$sibling" ] || echo "wa_main_binary: ${sha:0:12} is pinned WITHOUT $sibling - the node will refuse to $([ "$sibling" = wa-term ] && echo 'run a program' || echo 'run a command')" >&2
+  done
+  rm -rf "$dir" 2>/dev/null || true
+  if mv -f "$stage" "$dir" 2>/dev/null; then printf '%s\n' "$dir/wa"; return 0; fi
+  rm -rf "$stage" 2>/dev/null || true
+  echo "wa_main_binary: could not pin $bin for ${sha:0:12} in $dir" >&2
   return 1
 }
 
@@ -102,9 +155,9 @@ wa_main_binary() { # <sha> [release-stage] [target-dir] [repo-root]
   # ONE call: the resolver is not free (it may look at the network), and asking twice could get two answers.
   local rerr; mkdir -p "$target" 2>/dev/null || true; rerr=$(mktemp -u "/tmp/wa-main-release.XXXXXX")
   local why_release
-  if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>"$rerr"); then rm -f "$rerr"; printf '%s\n' "$out"; return 0; fi
+  if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>"$rerr"); then rm -f "$rerr"; wa_main_binary_pin "$out" "$sha" "$target"; return $?; fi
   why_release=$(tail -1 "$rerr" 2>/dev/null); rm -f "$rerr"
-  if out=$(wa_main_binary_build "$sha" "$root" "$target"); then printf '%s\n' "$out"; return 0; fi
+  if out=$(wa_main_binary_build "$sha" "$root" "$target"); then wa_main_binary_pin "$out" "$sha" "$target"; return $?; fi
   echo "wa_main_binary: NO BINARY OF ${sha:0:12} - release: ${why_release:-none}; build: ${target}; the installed binary (~/.local/bin/wa) is NOT used" >&2
   return 1
 }
