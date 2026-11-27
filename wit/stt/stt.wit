@@ -1,0 +1,128 @@
+/// `wa:stt` — the speech queue's wire layer, as a component (`docs/QUEUE.md` phase 2,
+/// `docs/CORE-SPLIT.md`).
+///
+/// The queue has two halves and they fail in different ways. **What a call means** — is this envelope
+/// the protocol's, is the caller one of the owner's nodes, is it inside the skew window, was this
+/// `rid` already answered, what is the body, what bytes go back — is a rule over bytes and a set of
+/// seen ids: no socket, no clock of its own, no key, no queue. **What it touches** — the `stt.requests`
+/// queue over the node's kv, the audio store, the worker's own recogniser, the relay and the node's
+/// private key — is the node's, and a component must not own any of it.
+///
+/// This package is the first half, and it is deliberately small: the six operations the five
+/// `host.stt_*` calls apply before they reach the queue. Nothing here is a JSON document except where
+/// the value *is* the wire: `body-json` is the envelope's own body (opaque to this layer, as the
+/// protocol says), and the two reply builders take the body the node composed. Everything else is a
+/// record or a case of `refusal`, so a refusal never reads as a string the caller has to parse.
+package wa:stt@0.1.0;
+
+interface types {
+    /// The version this build speaks (`protocol::VERSION`); an envelope carrying another is refused
+    /// with it, not guessed at.
+    record envelope {
+        /// `take`, `audio`, `beat`, `seg`, `done` or `fail` — the op as the wire spells it.
+        op: string,
+        from-node: string,
+        to: string,
+        ts-ms: s64,
+        rid: string,
+        /// The op's own body, exactly as it crossed the wire.
+        body-json: string,
+    }
+
+    /// Every reason a call, an envelope or a reply is refused — the vocabulary
+    /// `wa-stt-remote::protocol::Refusal` has, so both paths print the same words for the same fault.
+    /// `failed` and `malformed-unprocessable` carry the producer's own short reason, which is
+    /// sanitized before it is ever rendered.
+    variant refusal {
+        /// A protocol generation this node does not speak.
+        version(u64),
+        /// `to` is not this node.
+        wrong-target,
+        /// The caller is not one of the owner's nodes.
+        unknown-caller,
+        /// The call's timestamp is outside the skew window.
+        stale,
+        /// The signature does not cover this call.
+        bad-signature,
+        /// This `rid` was already answered.
+        replayed,
+        /// The envelope or a body field is not what the protocol says, carrying the field's name.
+        malformed(string),
+        /// The caller does not hold this job's lease (it expired, or another worker has it).
+        lease-lost,
+        /// No such job or handle.
+        not-found,
+        /// The job went stale: it is not decoded and its result is not posted.
+        stale-job,
+        /// The audio is larger than the producer will move over the relay.
+        too-large,
+        /// The caller asked before it may (the local worker's grace has not elapsed).
+        not-yet,
+        /// The producing node's own store failed, carrying the sanitized reason. Never a success.
+        failed(string),
+    }
+
+    /// What one call turned into: the admitted envelope, or the reply bytes the wire carries.
+    ///
+    /// A refusal is rendered HERE rather than handed back as a case, because the bytes are what the
+    /// peer reads and this is the layer that owns them: `refused` is exactly the reply the native
+    /// path answers for the same fault, produced from the same `Refusal`, and the host hands it on
+    /// without composing a word of its own.
+    variant admitted {
+        call(envelope),
+        /// A refusal: its own word (`Refusal::as_str()` — `unknown_caller`, `replayed_request`, …,
+        /// which is what the node's counters are keyed by) and the reply bytes the peer reads.
+        refused(refusal-word),
+    }
+
+    /// One refusal as the wire and the counters spell it. The word is produced by the crate the node
+    /// also links, so the host never reconstructs a case to count it and never invents a spelling.
+    record refusal-word {
+        word: string,
+        bytes: list<u8>,
+    }
+}
+
+/// Every waiting call here is an `async func`: the guest's task suspends and the runtime keeps
+/// running other tasks, short calls included (the async rule, Victor 26/11). `sanitize` is the one
+/// export that is not, and says why under its own name.
+///
+/// **Cancellation and backpressure, declared.** A caller cancels an `admit` by dropping the future:
+/// this layer starts no task, holds no lock across an await and records nothing for a call that never
+/// came back, so dropping one is complete. Backpressure has nothing to declare on this side — every
+/// answer is a single document the protocol already bounds (`TooLarge` is a refusal, not a wait) — and
+/// this interface deliberately has **no output stream of its own**: the progress a speech job has is
+/// the queue's (`wa:queue` `progress`, a `stream<list<u8>>`), and duplicating it here would give the
+/// node two streams of one truth.
+interface stt {
+    use types.{admitted, envelope, refusal};
+
+    /// Decode one call and admit it: the envelope's own fields, the caller the transport verified,
+    /// the skew window, and the `rid` ledger this instance holds. The ledger is the seam's state and
+    /// it lives here — the host serialises its calls, so one instance is one ledger.
+    admit: async func(me: string, owner-nodes: list<string>, skew-ms: s64, bytes: list<u8>, caller: string, now-ms: s64) -> admitted;
+
+    /// One answer the node composed, as the wire carries it. The node composes the body; the reply's
+    /// envelope is the wire's, and that is the half this layer owns.
+    reply-ok: async func(body-json: string) -> list<u8>;
+
+    /// The one function every rendered refusal and every view line the node shows passes through: control
+    /// characters removed, length bounded.
+    ///
+    /// SYNC ON PURPOSE (the async rule's written reason): a pure map over a string — no I/O, no clock, no
+    /// key, nothing to await — called per refusal and per view line, sometimes in a loop. A future around it
+    /// would add a suspension point where there is nothing to suspend on and make every call site a task.
+    /// It has no output to stream and no backpressure to declare: the bound is the string it is given.
+    sanitize: func(text: string) -> string;
+}
+
+/// The component: the wire layer this node asks, and nothing to hold but the ids it has answered.
+///
+/// **What is deliberately NOT here**, so a reader does not look for it: the outbound envelope's
+/// composition and its signature message. A producing node does not compose them — the worker inside
+/// **wa-stt-remote** does, in the same process as the signer, and `host.sign` is the interpreter's. And
+/// the sanitizer every log line passes through is `wa-stt-remote`'s, called where the line is composed;
+/// crossing this boundary once per log line would buy nothing and cost a task suspension per line.
+world stt-component {
+    export stt;
+}

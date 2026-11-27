@@ -8,6 +8,7 @@
     "memory": true,
     "gateway": true,
     "mesh_component": true,
+    "stt": true,
     "agent_core": true,
     "telemetry_sink": true,
     "graph": false
