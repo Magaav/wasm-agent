@@ -1438,6 +1438,10 @@ check wit-async-selftest bash scripts/test-wit-async-lint.sh
 # ONE MODEL CALL IS ONE 'run' EVENT (27/11): the row counts the ledger for a single run call and refuses a second
 # nested row. It caught a real duplicate (two starts, same arguments_hash) that the structural reading had argued away.
 check run-logged-once env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-run-logged-once.lua" "$bin" --db "$work/run-logged-once.db"
+# ONE OWNER FOR HOW AN UPDATE IS SHOWN (law 17, 27/11): the four verdict sentences verbatim, both surfaces calling the
+# owner, and NO second author anywhere in lua/core. It caught a real defect on the way in - `gsub("^node-", "")` in Lua
+# strips only "nod" ( `-` is a lazy quantifier), so the last line said `updated to v0.1.2 (e-82f578)`.
+check update-one-owner env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-update-one-owner.lua" "$bin" --db "$work/update-one-owner.db"
 # SIGNED RELEASES ON THE FAST PATH (27/11): scripts/test-release-sign.lua shipped from 5185436b and was wired into no
 # runner, so nothing judged it and it rotted - by the time this line existed the fixture signed a set the publisher
 # then rewrote (release_signature_invalid ... signature_stale). It is wired here, and green, so the next drift is a
