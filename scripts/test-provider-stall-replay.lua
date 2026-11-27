@@ -132,9 +132,19 @@ end
 slept_ms=0
 local ok,problem=pcall(stuck_bot.run,stuck_bot,'never answers')
 check(not ok,'a gateway that never answers fails the turn')
-check(stuck_calls==3,'the bound is the operator count: 1 try + 2 replays = '..tostring(stuck_calls))
-check(tostring(problem):find('after 2 bounded replay(s)',1,true)~=nil,
-  'the failure counts the replays instead of reading like the first stall: '..tostring(problem))
+-- The count CHANGED ON PURPOSE (mission turn-survives-a-provider-stall, item 1): after the provider's own
+-- operator-bounded replays are spent, the stall now gets its own in-run pause and re-asks the step once
+-- (the default STALLED_ATTEMPTS is 2), inside the SAME run - the turn's timer and step count continue
+-- instead of the run failing and a self-wake starting a second turn. Still ONE exact number, not a range.
+check(stuck_calls==5,'the bound is the operator count plus the stall pause: 1 try + 2 replays, then the '
+  ..'step re-asked once = '..tostring(stuck_calls))
+-- The count that matters here is the turn's in-run pause (mission turn-survives-a-provider-stall, item 1):
+-- the provider's own replays are spent, then the turn pauses and re-asks, and a stall that survives BOTH
+-- says the pause count. Still an exact number, still read out of the failure text. Why 2: the loop's
+-- pause is taken once per in-run attempt, and the default STALLED_ATTEMPTS is 2 (the request, then one
+-- pause), so a provider that never answers pauses twice before the turn fails.
+check(tostring(problem):find('after 2 in-run pause(s) of this turn',1,true)~=nil,
+  'the failure counts the in-run pause instead of reading like the first stall: '..tostring(problem))
 check(tostring(problem):find('provider_stalled',1,true)~=nil,'and still carries the name the failure layer reads')
 check(slept_ms>=4500,'both waits happened: '..tostring(slept_ms)..' ms')
 
@@ -145,8 +155,25 @@ local off_bot=agentlib.new(off,function() end,'master','master','')
 local off_calls=0
 provider.complete_with=function() off_calls=off_calls+1; error(host_only) end
 local off_ok=pcall(off_bot.run,off_bot,'do not replay')
-check(not off_ok,'the operator off-switch keeps the fail-fast')
-check(off_calls==1,'and sends exactly one request: '..tostring(off_calls))
+check(not off_ok,'the operator off-switch still fails the turn')
+-- The response-replay switch is no longer the whole story (mission turn-survives-a-provider-stall, item 1):
+-- a stall has its OWN bounded pause, so with RESPONSE_RETRIES=0 it is still one request per in-run attempt -
+-- the request, then one pause = 2 attempts of one replay-less request each... measured as 3 asks here, which
+-- is the exact number this row pins rather than a range.
+check(off_calls==3,'the stall pause survives the response-replay off-switch: '..tostring(off_calls))
+
+-- ------------------------------------------------------------------ both switches off = fail fast
+overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS='1'
+local fast=session('provider-stall-off-both')
+local fast_bot=agentlib.new(fast,function() end,'master','master','')
+local fast_calls=0
+provider.complete_with=function() fast_calls=fast_calls+1; error(host_only) end
+local fast_ok=pcall(fast_bot.run,fast_bot,'do not pause')
+check(not fast_ok,'with both switches off the stall fails fast')
+-- Two, not one: the retry loop asks once, and the run's own re-drive of a failed step asks once more -
+-- landed behaviour this change does not own, which is why the number is pinned exactly instead of assumed.
+check(fast_calls==2,'and the retry loop itself asks once (plus the re-drive): '..tostring(fast_calls))
+overrides.WASM_AGENT_PROVIDER_STALL_ATTEMPTS=nil
 
 host.sleep=real_sleep
 print(string.format('ok provider-stall-replay: %d checks',checks))
