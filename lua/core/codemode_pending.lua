@@ -56,6 +56,8 @@ local M = {}
 -- script time" for a wait to outlive (the loop sets neither remaining_ms nor remaining). A caller
 -- that passes one still gets the old clamp (M.effective_ms); the only other stop is the CPU guard.
 M.DEFAULT_WAIT_S = 60
+-- An id-less await only looks: short enough that a stop never finds it waiting.
+M.LOOK_WAIT_S = 1
 -- THE ONE PAUSE BUDGET (Victor 27/11). “how long may this script pause” is ONE number, owned here: a
 -- single pause (the 5 s of one sleep(ms), and so of every timer built on it) and the total a script may
 -- pause across all of its pauses (the wait ceiling). sleep(ms), setTimeout/setInterval and wait(op) all
@@ -644,6 +646,12 @@ do
         if type(only) == "table" and type(only.op) == "string" then
           id = only.op
           params.id = id
+          -- AND IT LOOKS, IT DOES NOT WAIT (28/11): an await that had to be given an id names work the script
+          -- is not waiting for - the handle is the answer. Without this the default 60 s wait overran the
+          -- code-mode budget every time the reader stopped such a script (`TimeoutError: the script ran past
+          -- the budget`, measured in the detached scenario). A caller that wants to wait says the id and the
+          -- seconds it wants, which is unchanged.
+          if params.wait_s == nil then params.wait_s = M.LOOK_WAIT_S end
         else
           return { result = { error = "id_required" } }
         end
@@ -1411,6 +1419,14 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
         M.MAX_OPEN .. " pending calls per session; pending() lists them)" }
   end
   local started_at = now_seconds()
+  -- AN AWAIT THAT NAMES NO ID ONLY LOOKS (28/11): the id it attaches to is the one call this script started,
+  -- so the call is a look at a handle, not a wait for it. Without this the default 60 s wait spent the whole
+  -- code-mode budget and the reader's stop found a dead script (`TimeoutError: the script ran past the budget`,
+  -- measured twice in the detached scenario). A caller that wants to wait names the id and the seconds.
+  if name == "operation" and type(params) == "table" and tostring(params.action or "") == "await"
+      and (params.id == nil or params.id == "") and wait_s == nil then
+    wait_s = M.LOOK_WAIT_S
+  end
   local budget = M.effective_ms(wait_s, remaining_of(opts))
   -- The call starts at the node's own priority, whatever wait it named (18/11 round 3, item 5). The
   -- priority of work nobody waits for is applied at the ONE boundary where that becomes a fact - the end
@@ -1777,7 +1793,26 @@ function M.close_open_native(scope, dispatch, note, tool)
   local index = M.open(scope)
   local closed = 0
   local last_note, last_tool, last_id = nil, nil, nil
+  local left = nil
   for _, record in pairs(index.ops or {}) do
+    -- WORK LEFT RUNNING ON PURPOSE IS ANSWERED, NOT CLOSED (28/11). A call the turn started detached is not the
+    -- stop's to kill, and the sentence has to say so instead of claiming a stop: when the stop tears the script
+    -- down, the pending layer's own stop_work never runs, so this is the one place that can still write it.
+    -- The record keeps state=running and gains the stop's own words; nothing is signalled for it and the record
+    -- says that (`detached`, no signal).
+    local is_detached_left = record ~= nil and record.detached == true and record.state == "running"
+      and record.native ~= true
+    if is_detached_left then
+      local name = record.command or ("op " .. tostring(record.op))
+      record.stop = { command = record.command, after_s = now_seconds() - (record.started or now_seconds()),
+        detached = true, confirmed = nil, signal = nil, survivors = nil,
+        note = "still running: " .. tostring(name) .. " (op " .. tostring(record.op)
+          .. "), left alone because it was started detached" }
+      left = record.stop.note
+      last_tool = record.tool
+      last_id = record.op
+      M.save(scope, index)
+    end
     if record and record.native == true and record.state == "running" and (tool == nil or record.tool == tool) then
       local observed = nil
       if dispatch ~= nil and record.op ~= nil then observed = snapshot(dispatch, tostring(record.op)) end
@@ -1813,6 +1848,7 @@ function M.close_open_native(scope, dispatch, note, tool)
     return closed, ('stopped ' .. tostring(closed) .. ': ' .. tostring(last_tool or 'call')
       .. '; record ' .. tostring(last_id or '?'))
   end
+  if left ~= nil then return 0, left end
   return 0, nil
 end
 
