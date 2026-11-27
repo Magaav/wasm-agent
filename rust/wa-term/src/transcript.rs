@@ -1019,7 +1019,13 @@ impl Transcript {
     /// used to shift the whole conversation down a row for two seconds, twice per copy).
     pub fn view_at(&mut self, width: usize, height: usize, now: std::time::Instant) -> Vec<String> {
         let (width, height) = (width.max(1), height.max(1));
-        let notice_line = self.notice_line(width, now);
+        // THE NOTICE TAKES ITS OWN ROWS (Victor today): a balloon at the TOP of the region -
+        // title, dividers, the words - so the chat and the pinned request move DOWN while it
+        // shows, and the space comes back when it expires. Never more than half the region, so a
+        // short window still keeps a chat to look at.
+        let balloon = { let rows = self.notice_balloon(width, now);
+            if rows.len() <= height / 2 { rows } else { Vec::new() } };
+        let balloon_rows = balloon.len();
         // The chat is drawn first, with whatever the notice row takes; the pin is then decided from
         // the rows that pass ACTUALLY drew (`first_row`), not from this frame's height. A decision
         // that depended on the height would flip as soon as the row it reserves changed the height it
@@ -1028,7 +1034,7 @@ impl Transcript {
         // The rows the last frame gave the pin: the first pass is drawn with them, so a frame that
         // keeps its rows is painted once.
         let expected = self.pin_shown;
-        let mut reserved = usize::from(expected);
+        let mut reserved = balloon_rows + usize::from(expected);
         let mut shown = self.paint(width, height.saturating_sub(reserved).max(1), reserved);
         let rows = height.saturating_sub(reserved).max(1);
         let pin = if rows >= 2 {
@@ -1076,19 +1082,12 @@ impl Transcript {
                 self.pill_row = Some(span);
             }
         }
-        let mut view = top;
+        // THE BALLOON'S ROWS COME FIRST, above the pin and the chat: that is what pushes them down,
+        // and giving the rows back when it expires is what moves them up again.
+        self.notice_row = if balloon_rows > 0 { Some(0) } else { None };
+        let mut view = balloon;
+        view.extend(top);
         view.extend(shown);
-        // THE MESSAGE FLOATS OVER THE CHAT: row 1 of the region, or the row UNDER the pinned request
-        // while row 1 is the pin - so only the message moves for it, never the conversation
-        // (Victor, 26/11).
-        self.notice_row = None;
-        if let Some(line) = notice_line {
-            let at = self.reserved.min(view.len().saturating_sub(1));
-            if let Some(row) = view.get_mut(at) {
-                *row = over(row, 0, &line);
-                self.notice_row = Some(at);
-            }
-        }
         view
     }
 
@@ -3277,26 +3276,26 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_floats_under_the_pinned_request_and_never_moves_the_chat() {
+    fn the_notice_balloon_sits_above_the_pin_and_pushes_the_chat_down() {
         // Victor, 26/11: scrolled up out of the bottom, a copy shifted the WHOLE conversation down a
         // row for two seconds and back - twice per copy. The message is an overlay now: nothing on
         // the screen moves for it, before, during or after.
         let mut t = two_turns();
         t.page(4); // scrolled up: the second request is above the viewport and pins
-        let before = settled(&mut t, 40, 8);
+        let before = settled(&mut t, 40, 10);
         assert!(is_pin(&before[0]), "the request pins on the top row: {before:?}");
 
         let now = std::time::Instant::now();
         assert!(t.notice("Copied 12 characters", now, false), "a copy says so");
-        let during = t.view_at(40, 8, now);
+        let during = t.view_at(40, 10, now);
         assert_eq!(during.len(), before.len(), "the region keeps its rows: {during:?}");
-        assert!(is_pin(&during[0]) && during[0].contains("second question"),
-            "the pinned request does NOT move: it is still row 0: {during:?}");
-        assert_eq!(during[0], before[0], "and it is the same bytes: {during:?}");
-        assert!(during[1].contains("Copied 12 characters"),
-            "the message is the row just under the pin: {during:?}");
-        assert_eq!(moved(&before, &during), vec![1],
-            "every other row is byte-identical, and only the row the message is painted over changed: {during:?}");
+        assert!(during[0].contains("\u{2500}"), "a divider on top: {during:?}");
+        assert!(during[1].contains(BALLOON_TITLE), "the title under it: {during:?}");
+        assert!(during[2].contains("Copied 12 characters"), "the words: {during:?}");
+        assert!(during[3].contains("\u{2500}"), "and a divider under them: {during:?}");
+        assert!(is_pin(&during[4]), "the pinned request is PUSHED DOWN, not moved away: {during:?}");
+        assert_eq!(during[4], before[0], "and it is the same bytes: {during:?}");
+        assert_eq!(during[8], before[4], "the chat moved down by the balloon's rows: {during:?}");
 
         // Two seconds later: the message is gone and the frame is the one from before it, byte for byte.
         let later = now + std::time::Duration::from_millis(NOTICE_MS + 50);
@@ -3307,7 +3306,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_floats_at_the_bottom_of_the_chat_too() {
+    fn the_notice_balloon_sits_at_the_top_at_the_bottom_too() {
         // The case that looked right before (following the newest output): it still must not move,
         // and the newest line is still the last row.
         let mut t = plain(Transcript::default());
@@ -3318,8 +3317,8 @@ mod tests {
         let now = std::time::Instant::now();
         assert!(t.notice("Copied 4 characters", now, false));
         let during = t.view_at(40, 8, now);
-        assert_eq!(moved(&before, &during), vec![0], "only the top row changed: {during:?}");
-        assert!(during[0].contains("Copied 4 characters"), "{during:?}");
+        assert!(during[0].contains("\u{2500}"), "the balloon's divider: {during:?}");
+        assert!(during[2].contains("Copied 4 characters"), "its words: {during:?}");
         assert!(during.last().expect("rows").contains("answer 19"),
             "and the newest line is still the last row: {during:?}");
         let later = now + std::time::Duration::from_millis(NOTICE_MS + 50);
@@ -3334,28 +3333,30 @@ mod tests {
         let now = std::time::Instant::now();
         assert!(t.notice("Copied 12 characters", now, false));
         let view = t.view_at(40, 8, now);
-        let start = column_of(&view[0], "Copied 12 characters").expect("the message is on the top row");
+        let start = column_of(&view[2], "Copied 12 characters").expect("the words are the balloon's third row");
         let expected = (40 - visible("Copied 12 characters")) / 2;
         assert!((start as isize - expected as isize).abs() <= 1,
-            "left pad is (width - len) / 2 = {expected} cells, within one: {start} in {:?}", view[0]);
-        assert!(start > 1, "it is not against the left edge: {:?}", view[0]);
+            "left pad is (width - len) / 2 = {expected} cells, within one: {start} in {:?}", view[2]);
+        assert!(start > 1, "it is not against the left edge: {:?}", view[2]);
     }
 
     #[test]
     fn a_click_on_a_copy_icon_lands_on_the_same_row_during_the_notice() {
         let mut t = Transcript::default();
         fenced(&mut t);
-        let before = t.view(60, 10);
+        let before = t.view(60, 14);
         let row = before.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).expect("the icon's row") + 1;
         assert_eq!(t.copy_at(row, 1).as_deref(), Some("print('hi')\nreturn 1"), "the icon copies before");
         let now = std::time::Instant::now();
         assert!(t.notice("Copied 18 characters", now, false));
-        let during = t.view_at(60, 10, now);
-        assert!(during[0].contains("Copied 18 characters"), "{during:?}");
-        assert_eq!(t.copy_at(row, 1).as_deref(), Some("print('hi')\nreturn 1"),
-            "and the same cell of the same row copies during the message: {during:?}");
-        assert_eq!(during[row - 1], before[row - 1],
-            "the icon's row is byte-identical: a press cannot land on a row that moved");
+        let during = t.view_at(60, 14, now);
+        assert!(during[2].contains("Copied 18 characters"), "{during:?}");
+        // THE ICON'S ROW MOVED DOWN WITH THE CHAT - by the balloon's four rows - and THAT is the row a
+        // press lands on now. The question is the same as before: does a press copy what the row shows.
+        assert_eq!(during[row - 1 + 4], before[row - 1],
+            "the icon's row is byte-identical, four rows lower: {during:?}");
+        assert_eq!(t.copy_at(row + 4, 1).as_deref(), Some("print('hi')\nreturn 1"),
+            "a press on its new row copies the same text: {during:?}");
     }
 
     #[test]
@@ -3368,8 +3369,8 @@ mod tests {
             "an error does not time out: it waits for a key");
         assert!(!t.expire_notice(long_after), "nothing takes it away on its own");
         let view = t.view_at(40, 8, long_after);
-        assert!(view[1].contains("no clipboard tool answered"),
-            "a sticky message floats under the pinned request, like any other: {view:?}");
+        assert!(view[2].contains("no clipboard tool answered"),
+            "a sticky message is the same balloon, and it stays: {view:?}");
         assert!(t.clear_notice(), "the next key clears it");
         assert!(!view.is_empty() && t.notice_text(long_after).is_none());
     }
