@@ -85,6 +85,20 @@ wa_release_tag_state() { # <slug> <tag>
     200) printf 'published\n'; return 0 ;;
     404) printf 'missing\n'; return 1 ;;
     ''|000) printf 'unknown (the release API did not answer)\n'; return 2 ;;
+    403|429)
+      # A TOKENLESS NODE IS RATE-LIMITED, NOT TOLD THERE IS NO RELEASE (work retry #3, 27/11: `HTTP 403` became
+      # `components_unknown: ... unknown is not published`, which turned "I could not ask" into a verdict). The node
+      # already keeps a release list it fetched for its own updates; ask that before giving up, and say which source
+      # answered so the log cannot be misread later.
+      if command -v wa_node_release_list >/dev/null 2>&1 || [ -n "${NODE_BINARIES_LIB:-}" ]; then
+        local listed
+        listed="$(wa_node_release_list "$slug" 200 2>/dev/null || true)"
+        if [ -n "$listed" ]; then
+          if printf '%s\n' "$listed" | grep -qx "$tag"; then printf 'published (from the release list the node already holds)\n'; return 0; fi
+          printf 'missing (not in the release list the node already holds)\n'; return 1
+        fi
+      fi
+      printf 'unknown (the release API answered HTTP %s, which is rate limiting, not an answer; the node holds no release list to ask)\n' "$code"; return 2 ;;
     *) printf 'unknown (the release API answered HTTP %s)\n' "$code"; return 2 ;;
   esac
 }
