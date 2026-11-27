@@ -1173,3 +1173,29 @@ RESOLVED
   fi
   return 0
 }
+
+# THE SHELF NOTE (Victor on work, 27/11): "no published binary for this commit" is true and useless alone - it does not
+# say whether the shelf holds anything, or how stale it is. Given a published tag (node-<sha12>) and the tree's HEAD,
+# this answers one of three sentences, and NEVER invents a distance: when the tagged commit is not in this tree (a cloned
+# node that never fetched it) it says so instead of guessing a number nobody can check.
+wa_node_shelf_note() { # <tag-or-empty> <head-sha>
+  local tag="${1:-}" head="${2:-}" sha
+  if [ -z "$tag" ]; then
+    printf 'no published build could be listed here: the release list is empty or unreadable'
+    return 0
+  fi
+  sha="$(printf '%s' "$tag" | sed -n 's/^node-\([0-9a-f]\{12\}\)$/\1/p')"
+  if [ -z "$sha" ]; then
+    printf 'the newest published build is %s' "$tag"
+    return 0
+  fi
+  if [ -n "$head" ] && git cat-file -e "$sha^{commit}" 2>/dev/null; then
+    local behind
+    behind="$(git rev-list --count "$sha..$head" 2>/dev/null || true)"
+    if [ -n "$behind" ]; then
+      printf 'the newest published build is %s, %s commit(s) behind this tree' "$tag" "$behind"
+      return 0
+    fi
+  fi
+  printf 'the newest published build is %s (its commit is not in this tree, so how far behind it is cannot be measured here)' "$tag"
+}
