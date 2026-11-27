@@ -301,6 +301,59 @@ function M.validate(schema,text,extra)
  if failure then return nil,failure end
  return node
 end
+-- THE WORDS A MODEL USES FOR A FIELD IT NEVER SAW DECLARED (refusals-that-help (b), measured: notes 8, 128,
+-- 141, 165, 220). Textual distance cannot find these - `new_str` is not near `edits`, and `name` is not near
+-- `id` - so the suggestion came back empty and the model learned the real name only by another failed call.
+-- One table, one owner (law 17/18): the schema validator, the argument validator and the peer-bash refusal all
+-- ask here for "the name the caller probably meant".
+M.INTENT = {
+  edit = { old_str = 'edits', new_str = 'edits', old_string = 'edits', new_string = 'edits',
+    old_text = 'edits', new_text = 'edits', search = 'edits', replace = 'edits', replacement = 'edits',
+    contents = 'edits', text = 'edits', edits_list = 'edits' },
+  operation = { name = 'id', label = 'id', description = 'id', operation = 'id', operation_id = 'id',
+    op = 'id', timeout = 'wait_ms', await = 'wait_for', background = 'wait_for' },
+}
+
+-- The shape of one declared field, in the words a caller can act on: `array of {new_text, old_text}`, `string`,
+-- `object`. Short on purpose - it is read inside a refusal, and the schema itself is one call away.
+function M.shape_of(property)
+  if type(property) ~= 'table' then return nil end
+  local kind = tostring(property.type or '')
+  if kind == 'array' then
+    local items = type(property.items) == 'table' and property.items or {}
+    local properties = type(items.properties) == 'table' and items.properties or nil
+    if properties then
+      local keys = {}
+      for key in pairs(properties) do keys[#keys + 1] = tostring(key) end
+      table.sort(keys)
+      return 'array of {' .. table.concat(keys, ', ') .. '}'
+    end
+    return 'array of ' .. tostring(items.type or 'items')
+  end
+  if kind == 'object' then
+    local properties = type(property.properties) == 'table' and property.properties or nil
+    if properties then
+      local keys = {}
+      for key in pairs(properties) do keys[#keys + 1] = tostring(key) end
+      table.sort(keys)
+      return 'object of {' .. table.concat(keys, ', ') .. '}'
+    end
+    return 'object'
+  end
+  return kind ~= '' and kind or nil
+end
+
+-- `nearest_name` first (a word close to a declared one), then the intent table (a word a model uses for a
+-- field it has never seen). Returns the name AND how it was found, so a refusal can say which.
+function M.field_intent(tool, sent, declared)
+  local did = nearest(sent, declared)
+  if did then return did, 'near' end
+  local table_for_tool = type(M.INTENT) == 'table' and M.INTENT[tostring(tool or '')] or nil
+  local wanted = type(table_for_tool) == 'table' and table_for_tool[tostring(sent or '')] or nil
+  if wanted and type(declared) == 'table' and declared[wanted] ~= nil then return wanted, 'intent' end
+  return nil, nil
+end
+
 -- ONE OWNER FOR "THE NAME THE CALLER PROBABLY MEANT" (law 18): the schema validator above and the peer bash
 -- refusal in lua/core/server.lua both have to say it, and a second edit-distance implementation would drift
 -- from this one's prefix rule (which is why `q` suggests `query`).
