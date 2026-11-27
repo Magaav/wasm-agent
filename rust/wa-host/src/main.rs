@@ -774,7 +774,7 @@ fn main() {
         }
         let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8792);
         let root = flag(&lua_args, "--root").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("ui"));
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let home = wa_host_support::paths::resolve_home();
         let rendezvous = flag(&lua_args, "--rendezvous").map(PathBuf::from).unwrap_or_else(|| {
             PathBuf::from(home).join(".wasm-agent/serve-static.json")
         });
