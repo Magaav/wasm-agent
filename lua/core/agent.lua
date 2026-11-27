@@ -4167,7 +4167,13 @@ function M:run_body(text, images)
       -- (measured 28/11: handled=true, type=table, error=run_cancelled), so gating on `not handled` skipped
       -- exactly the case this is for. The result is inspected on its own.
       if dispatched and type(output) == 'table' then
-        if tostring(output.error or ''):find('cancel', 1, true) ~= nil then
+        -- ANY non-success answer from a native call closes the record: the shapes a stop arrives in are the
+        -- runner's own (error=run_cancelled, or state=cancelled with ok=false), and matching one spelling
+        -- exactly is what left the bash record open. A call that SUCCEEDED is settled by its own row.
+        local stopped_answer = tostring(output.error or ''):find('cancel', 1, true) ~= nil
+          or output.cancelled == true or tostring(output.state or '') == 'cancelled'
+          or (output.ok == false and output.error ~= nil)
+        if stopped_answer then
           pcall(function()
             local pending_calls = dofile('lua/core/codemode_pending.lua')
             pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil,
