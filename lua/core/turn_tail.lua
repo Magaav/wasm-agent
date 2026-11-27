@@ -9,6 +9,10 @@
 -- process running the turn, and inventing them here would draw a second run box for one turn. It draws
 -- the two things a reader watching a node-run turn needs and cannot otherwise see: that the provider has
 -- paused (with the wait and the attempt), and that a model call is under way again.
+local json = dofile("lua/vendor/json.lua")
+local json_encode = json.encode
+local decode_json = json.decode
+
 local M = {}
 
 -- The one line a pause becomes, in the words the live loop uses for it (agent.lua's waiting row):
@@ -44,6 +48,41 @@ function M.poll(view, session_id, state)
     end
   end
   return state
+end
+
+
+-- STOPPING A TURN THE NODE OWNS (item 3 / C2b). `host.run_cancelled` is process-local and the scheduler's
+-- cancel is in-process memory, so the only door to a run owned by a SERVED node is that node's own route:
+-- `POST /runs` with an `action` body (`serve.rs:2931`, dispatched at `:2453`), authenticated with the
+-- session credential the window already sends (`X-WA-Session`, `ui/app.js:230-233`). The base is the
+-- node's documented port: `WASM_AGENT_PORT`, 8799 by default (`docs/INSTANCES.md:18`, `--port`).
+-- Literal loopback only - `docs/BINDING.md:24` permits HTTP exactly there.
+local DEFAULT_PORT = 8799
+
+-- The URL the request goes to, so a row can pin it and a reader can see the contract in one line.
+function M.cancel_url(port)
+  local chosen = tonumber(port) or tonumber(host.getenv("WASM_AGENT_PORT") or "") or DEFAULT_PORT
+  return string.format("http://127.0.0.1:%d/runs", chosen)
+end
+
+-- Ask the node that owns `run_id` to stop it. The answer is `{ok=true, ...}` when the request was
+-- accepted, and a refusal by name otherwise: nothing here guesses that a cancel landed.
+function M.cancel(session_id, run_id, opts)
+  opts = opts or {}
+  local request = {
+    action = "cancel",
+    owner = opts.owner or "master",
+    conversation = opts.conversation or session_id,
+  }
+  if run_id ~= nil then request.run_id = run_id end
+  local headers = { ["X-WA-Session"] = tostring(session_id or "") }
+  local ok, answer = pcall(host.http, "POST", M.cancel_url(opts.port), headers, json_encode(request))
+  if not ok then return { ok = false, error = "cancel_unreachable", detail = tostring(answer) } end
+  local decoded_ok, decoded = pcall(decode_json, tostring(answer))
+  if not decoded_ok or type(decoded) ~= "table" then
+    return { ok = false, error = "cancel_answer_unreadable" }
+  end
+  return decoded
 end
 
 return M
