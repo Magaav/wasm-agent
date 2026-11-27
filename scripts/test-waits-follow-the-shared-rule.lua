@@ -56,9 +56,14 @@ local judged = {
 -- Every `const NAME: u64 = N;` whose name ends in WAIT_MS, with its number.
 local function private_waits(text)
   local found = {}
-  for name, number in text:gmatch("const%s+([A-Z][A-Z0-9_]*WAIT_MS)%s*:%s*u64%s*=%s*([%d_]+)") do
-    local value = tonumber((number:gsub("_", "")))
-    if value then found[#found + 1] = { name = name, ms = value } end
+  -- The name is captured whole and then tested for the suffix: `[A-Z][A-Z0-9_]*WAIT_MS` cannot match a
+  -- bare `WAIT_MS` (the first class eats the W and the literal can never find a second one), which is a
+  -- way for a scan like this to see only the prefixed constants and call the tree clean.
+  for name, number in text:gmatch("const%s+([A-Z][A-Z0-9_]*)%s*:%s*u64%s*=%s*([%d_]+)") do
+    if name:sub(-7) == "WAIT_MS" then
+      local value = tonumber((number:gsub("_", "")))
+      if value then found[#found + 1] = { name = name, ms = value } end
+    end
   end
   return found
 end
