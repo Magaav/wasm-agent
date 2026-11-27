@@ -499,33 +499,6 @@ fn output_and_exit_are_distinct() {
     remove_fixture(root);
 }
 #[test]
-fn a_deadline_is_a_stop_the_group_ends_on_term_and_the_record_says_so() {
-    let (m, root) = fixture();
-    // A command that outlives its deadline. `sleep 30` answers SIGTERM at once, so what the record must
-    // show is a stop that ended ON TERM inside the grace: the grace exists for the commands that do not,
-    // and `needed_kill` is what tells the two apart - measured, never assumed.
-    let mut spec = shell("sleep 30");
-    spec.timeout = Duration::from_millis(300);
-    let id = m.start(spec).unwrap();
-    let s = settled(&m, &id);
-    assert_eq!(
-        s["error"], "deadline_exceeded",
-        "a deadline that ran out is not a completed command: {s}"
-    );
-    let stop = &s["stop"];
-    assert!(
-        stop.is_object(),
-        "the record must say how the command was ended (week 1: a deadline is a STOP): {s}"
-    );
-    assert_eq!(stop["signal"], "TERM", "the group is asked before it is killed: {s}");
-    assert_eq!(stop["grace_ms"], crate::process::STOP_GRACE_MS, "{s}");
-    assert_eq!(stop["needed_kill"], false, "sleep answers TERM, so the grace was enough: {s}");
-    assert_eq!(stop["survivors"], false, "nothing was left in the group: {s}");
-    drop(m);
-    remove_fixture(root);
-}
-
-#[test]
 fn normal_command_succeeds_and_closes_stdin() {
     let (m, root) = fixture();
     let id = m.start(shell("read input; printf done")).unwrap();

@@ -1679,31 +1679,11 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             let budget = Duration::from_millis(args["wait_ms"].as_u64().unwrap_or(1000).min(10000));
             let started = std::time::Instant::now();
             loop {
-                // THE WAIT WAKES ON THE STOP (week 1, item 2), not at the end of the slice it was
-                // asked for. A caller asks for up to a second here (lua/core/codemode_pending.lua,
-                // M.SLICE_MS), and this loop used to sit in one condvar timeout for that whole second:
-                // Esc -> usable prompt was 395-907 ms depending on WHERE in the slice the key landed.
-                // 25 ms is the same step the foreground loop above uses, and it is a timeout on a
-                // condvar, not a spin. The wait wakes EARLY and answers what the operation IS; it does
-                // not cancel anything itself - whether a stop ends this work is the caller's decision
-                // (a call the turn was waiting on: yes; an operation it started detached: no).
-                let left = budget.saturating_sub(started.elapsed());
                 let state = manager()
-                    .wait(id, left.min(Duration::from_millis(25)))
+                    .wait(id, budget.min(Duration::from_millis(250)))
                     .map_err(|e| e.to_string())?;
                 progress_tick(&state, args["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("operation"));
                 if state["settled"] == true { crate::tool_progress::finish(id); return Ok(state); }
-                // ... and ONLY for a wait this node's own interpreter is making. A RELAYED wait (a peer's
-                // `operation await`, rust/wa-capabilities/src/serve.rs install_relay_context) answers at
-                // its own wait_ms and touches nothing: its caller is another machine's clock, and
-                // ending it here would report an interruption for work nobody asked to stop.
-                if crate::host::run_cancel_requested() && !crate::serve::current_call_is_relayed() {
-                    let mut state = state;
-                    if let Some(fields) = state.as_object_mut() {
-                        fields.insert("interrupted".into(), json!(true));
-                    }
-                    return Ok(state);
-                }
                 if started.elapsed() >= budget { return Ok(state); }
             }
         }

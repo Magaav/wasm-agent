@@ -234,12 +234,8 @@ never told "still running" with nothing it can do about it.
   asked about, finished or not. That is the pool: `const open = (await pending()).ops.map(o => o.op)`,
   wait `{until:"any"}`, drop the finished ones, start new calls, wait again - a batch that grows and
   shrinks across steps, with every outcome arriving exactly once.
-* Handles outlive the script. `cancel(op)` is the stop a script ASKS for; where the effect cannot be
-  stopped it answers `not_cancellable` with the reason, because a sent message stays sent. The other
-  stop is the run's own: Esc, `/stop`, a steering cancel and a turn's deadline end the call the run is
-  blocked on, with its whole process group (TERM, then KILL after the node's stated grace), and the
-  answer says `stopped: <command>, after <n> s (...)`. A call the script left at `wait_s: 0`, and
-  anything the `operation` tool started, is NOT ended that way - it is named as still running instead. At most 16 pending calls
+* Handles outlive the script. `cancel(op)` is the one stop; where the effect cannot be stopped it
+  answers `not_cancellable` with the reason, because a sent message stays sent. At most 16 pending calls
   per session, refused by name past that; a settled result stays in `results`, so `results.get(op)`
   re-reads it without re-running anything.
 * Nothing holds a lock: every wait is a bounded slice of its executor's own wait (<= 1 s) plus a status
