@@ -1,0 +1,14 @@
+[package]
+# TEST FIXTURE - never a product component: not in components.lock, not published.
+name = "test-process-child"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"

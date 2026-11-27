@@ -1,0 +1,18 @@
+package wa:test-process-child@0.1.0;
+
+/// A TEST FIXTURE, never shipped: it imports the process world this node serves and exports an interface the
+/// host-side test drives, so the exit and the output streams cross a real component boundary.
+interface driver {
+  record report {
+    exit: s32,
+    stdout-bytes: u32,
+    stderr-bytes: u32,
+  }
+
+  run: async func(program: string, arguments: list<string>) -> result<report, string>;
+}
+
+world fixture {
+  import wa:process/child@0.1.0;
+  export driver;
+}
