@@ -137,10 +137,15 @@ mkelf() { # FILE MACHINE_HEX [EXTRA]
 }
 mkelf "$FIX/wa-$TRIPLE-$SHORT" 3e
 mkelf "$FIX/wa-sentinel-$TRIPLE-$SHORT" 3e
+# THE PROGRAM IS PART OF THE PAYLOAD (wa-term-own-program): a release set without it is refused by the
+# publisher, because it would install a node that starts and cannot draw a prompt.
+mkelf "$FIX/wa-term-$TRIPLE-$SHORT" 3e
 wa_sha="$(sha256sum "$FIX/wa-$TRIPLE-$SHORT" | awk '{print $1}')"
 wa_bytes="$(wc -c < "$FIX/wa-$TRIPLE-$SHORT" | tr -d '[:space:]')"
 sen_sha="$(sha256sum "$FIX/wa-sentinel-$TRIPLE-$SHORT" | awk '{print $1}')"
 sen_bytes="$(wc -c < "$FIX/wa-sentinel-$TRIPLE-$SHORT" | tr -d '[:space:]')"
+term_sha="$(sha256sum "$FIX/wa-term-$TRIPLE-$SHORT" | awk '{print $1}')"
+term_bytes="$(wc -c < "$FIX/wa-term-$TRIPLE-$SHORT" | tr -d '[:space:]')"
 cat > "$FIX/node-$SHORT.manifest" <<MANIFEST
 schema=wasm-agent-node-binaries/1
 source_commit=$COMMIT
@@ -150,8 +155,8 @@ zig_version=fixture
 glibc_floor=2.31
 codemode=embedded
 built_utc=2026-11-11T00:00:00Z
-# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes
-$TRIPLE $wa_sha $wa_bytes $sen_sha $sen_bytes
+# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes
+$TRIPLE $wa_sha $wa_bytes $sen_sha $sen_bytes $term_sha $term_bytes
 MANIFEST
 git init -q --bare "$WORK/dropbox.git"
 STAGE="$WORK/stage"; mkdir -p "$STAGE"
@@ -209,15 +214,16 @@ files="$(git --git-dir="$WORK/dropbox.git" ls-tree -r --name-only "$readback" | 
 # The release carries ONE more file since item 7 (Victor 23/11): the icon font a drawing machine needs,
 # because `/icons` prints a curl of it (lua/core/icons.lua M.fetch_line). It is a signed asset like the
 # payloads - it is in SHA256SUMS - so it travels in the same commit and is listed here exactly.
-want="PUBLISH.sh SHA256SUMS SHA256SUMS.sig node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT waIcons-Regular.ttf "
+want="PUBLISH.sh SHA256SUMS SHA256SUMS.sig node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-term-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT waIcons-Regular.ttf "
 [ "$files" = "$want" ] || fail "the commit holds '$files', expected exactly '$want'"
 ok
 contains "$(cat "$P")" "SHA256SUMS" "PUBLISH.sh names SHA256SUMS (which is why the commit must carry it)"
 sums="$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS")"
 contains "$sums" "$wa_sha  wa-$TRIPLE-$SHORT" "SHA256SUMS pins the payload the manifest pins"
 contains "$sums" "$sen_sha  wa-sentinel-$TRIPLE-$SHORT" "SHA256SUMS pins the supervisor too"
-contains "$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS" | grep -c .)" "4" \
-  "SHA256SUMS holds one row per payload, the manifest, and the icon font (item 7)"
+contains "$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS" | grep -c .)" "5" \
+  "SHA256SUMS holds one row per payload (node, supervisor, program), the manifest, and the icon font (item 7)"
+contains "$sums" "$term_sha  wa-term-$TRIPLE-$SHORT" "and the program that draws the terminal is pinned too"
 # ...and the shipped signature is about the shipped SHA256SUMS, by the key the vault made in this run:
 # signed sums that nobody can verify are decoration, and a node verifies them before it installs
 # (scripts/lib/release-signing.sh, rust/wa-host/src/release.rs).

@@ -246,3 +246,11 @@ test result: ok. 41 passed; 0 failed
         assert_eq!(INTERVAL_MS, 250);
     }
 }
+
+/// The store lives in `wa-tool-progress` now (the renderer reads it there); these keep the node
+/// 's own names for the two calls it already made.
+fn publish_shared(owner: &str, facts: &serde_json::Value) -> std::io::Result<()> {
+    wa_tool_progress::publish(owner, facts)
+}
+
+fn finish_shared(owner: &str) { wa_tool_progress::finish(owner) }

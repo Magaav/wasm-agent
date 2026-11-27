@@ -228,6 +228,15 @@ impl Editor {
     fn replace(&mut self, text: &str) { self.chars = text.chars().collect(); self.cursor = self.chars.len(); }
     fn insert(&mut self, ch: char) { self.delete_selection(); self.chars.insert(self.cursor, ch); self.cursor += 1; }
     /// The selected range `[start, end)`, when there is one.
+    /// The draft as it stands (its text, without bash mode's `!`): what the node shows and what the
+    /// wire reads (`editor_state`).
+    pub fn draft(&self) -> String { self.text() }
+    /// The history the node recalls with Up/Down, newest last: the node keeps it in Lua's config and
+    /// hands it over with the rest of the state.
+    pub fn set_history(&mut self, history: Vec<String>) {
+        self.history = history;
+        self.history_at = None;
+    }
     pub fn selection(&self) -> Option<(usize, usize)> {
         let anchor = self.anchor?;
         let cursor = self.cursor.min(self.chars.len());

@@ -93,7 +93,7 @@ OTHER_TRIPLE=aarch64-unknown-linux-gnu
 # ---- a git fixture: a clean repo on "main", and one behind main --------------------------------------
 fixture="$WORK/fixture"
 mkdir -p "$fixture/scripts/lib"
-cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh" "$ROOT/scripts/lib/glibc-floor.sh" "$ROOT/scripts/lib/lua-tree.sh" "$fixture/scripts/lib/"
+cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh" "$ROOT/scripts/lib/build-target.sh" "$ROOT/scripts/lib/glibc-floor.sh" "$ROOT/scripts/lib/lua-tree.sh" "$fixture/scripts/lib/"
 # The signature gate lives beside it, and the fixture stands in for a checkout: both files, or a release
 # could not be verified at all (which the lib refuses by name, correctly).
 cp "$ROOT/scripts/lib/release-signing.sh" "$fixture/scripts/lib/"
