@@ -280,62 +280,62 @@ A part that changes at its own pace, or that a node may need to replace, is a mo
 
 **No flip-flopping.** Split by shape before size: fix dependency direction (stable code at the bottom, volatile on top) before adding a module. Splitting and merging use different thresholds (split: ≥30% less rebuild for the files that change often, or a swap without restart; merge: co-change in >70% of the last 50 commits and no recorded win), every split or merge records its measurement in the module's manifest, and reversing one needs a new measurement showing that win is gone, never sooner than 30 days or 100 commits unless something is broken.
 
-## What we learned (26/11)
+## The laws we learned (26/11)
 
-One rule per line, each with the incident or number behind it. A rule either names the row that enforces it or the
+One law per line, each with the incident or number behind it. A law either names the row that enforces it or the
 brief that will (the table at the end of this section says which).
 
-- **Nothing may break the prompt cache.** A healthy call's request bytes are identical before and after any change;
+- **Law 1. Nothing may break the prompt cache.** A healthy call's request bytes are identical before and after any change;
   a fix that moves them is a regression even if it reads better (`scripts/probe-prompt-bytes.lua` measures the bytes).
-- **run(code=...) is the one execution door.** 30,119 of 30,119 executions since 22/11 went through it.
-- **A release is a lock of pinned, signed parts** (host, lua-core, components), and a node downloads only the parts
+- **Law 2. run(code=...) is the one execution door.** 30,119 of 30,119 executions since 22/11 went through it.
+- **Law 3. A release is a lock of pinned, signed parts** (host, lua-core, components), and a node downloads only the parts
   whose digest changed: 1.6 MB for a Lua-only landing against 55.6 MB for the host artifact.
-- **Version folders: stage, seal, move the pointer, restart.** Rollback is the same pointer move (1663 us measured);
+- **Law 4. Version folders: stage, seal, move the pointer, restart.** Rollback is the same pointer move (1663 us measured);
   blue-green is the same shape for one component and for a whole version.
-- **Fixes are logic for any model, measured before and after** (bytes, tokens, rounds, time). Prompt text grows only
+- **Law 5. Fixes are logic for any model, measured before and after** (bytes, tokens, rounds, time). Prompt text grows only
   on Victor's word.
-- **Tools tell the truth.** An undeclared argument is refused by name, a refusal is never an empty answer, and a
+- **Law 6. Tools tell the truth.** An undeclared argument is refused by name, a refusal is never an empty answer, and a
   freshness field says what it covers (26/11: four endpoints described freshness they did not have).
-- **Waiting costs the model no turns; transport timeouts are the harness's.** A model waiting on an operation spends
+- **Law 7. Waiting costs the model no turns; transport timeouts are the harness's.** A model waiting on an operation spends
   no turn; a relay that times out reports its own deadline, never the node's state.
-- **An installer acts only on the target it was given, and installer rows run only through the runner**, on scratch
+- **Law 8. An installer acts only on the target it was given, and installer rows run only through the runner**, on scratch
   nodes - after 25/11, when a scratch run rewrote the LIVE unit and the live record.
-- **A release is rehearsed against the real fleet before a cut.** A canary that cannot see what a node serves is not a
+- **Law 9. A release is rehearsed against the real fleet before a cut.** A canary that cannot see what a node serves is not a
   gate (26/11: the CLI said `not_running` while the node said running).
-- **A new tool is born as a component; an old one moves when it is touched; registration is data.**
-- **"Same program" includes the embedded Lua:** the tree a binary carries is the tree it ships with
+- **Law 10. A new tool is born as a component; an old one moves when it is touched; registration is data.**
+- **Law 11. "Same program" includes the embedded Lua:** the tree a binary carries is the tree it ships with
   (`scripts/check-embedded-lua-closure.mjs`).
-- **Every new or moved component interface is async in WIT** (futures, streams, cancellation, backpressure); a sync
+- **Law 12. Every new or moved component interface is async in WIT** (futures, streams, cancellation, backpressure); a sync
   export needs a reason line (Victor 26/11).
-- **A new gate runs advisory until a rehearsal is green on the real fleet; only then does it block** (26/11: the
+- **Law 13. A new gate runs advisory until a rehearsal is green on the real fleet; only then does it block** (26/11: the
   canary step stopped the v0.1.2 cut six times on its own defects - a gate that has never passed on the fleet is a
   source of outages, not a guard).
 
-### What enforces each rule
+### What enforces each law
 
-A row that exists but does not test the rule is not enforcement. So each CLAUSE states either the row that tests it
+A row that exists but does not test the law is not enforcement. So each CLAUSE states either the row that tests it
 or the brief that will.
 
-| rule / clause | enforced by |
+| law / clause | enforced by |
 |---|---|
-| 1. prompt-cache bytes unchanged | `scripts/test-prompt-cache.lua`, `scripts/test-prompt-golden.lua` (measurement: `probe-prompt-bytes.lua`) |
-| 2. run(code) exists as a door (parity) | `test-codemode-parity.lua`, `test-codemode-blocks.lua`, `test-codemode-boundary.lua` |
-| 2b. the catalogue DECLARES only that door | NOT ENFORCED YET - `run-is-the-only-declared-door` |
-| 3a. release = pinned parts, download only what changed: host + components | `test-installable-by-download.sh`, `test-node-binaries.sh`, `check-release-complete.sh` |
-| 3b. the same for the lua-core part | NOT ENFORCED YET - `lua-core-is-a-signed-part` (branch not landed) |
-| 4. version folders, pointer, rollback | NOT ENFORCED YET - `change/version-folders` (rows exist there, not on main) |
-| 5. fixes measured before and after | NOT ENFORCED YET - a review rule; no row can enforce it |
-| 6a. tools tell the truth: an undeclared argument is refused by name | `test-tool-arguments.lua`, `test-tool-args-parity.lua` (landed 032f4dd4) |
-| 6b. freshness says what it covers; a failed call keeps what finished | NOT ENFORCED YET - `whatsapp-index-heals-itself` / `tools-tell-the-truth` part 2 |
-| 7. waiting costs no turns | NOT ENFORCED YET - `waiting-costs-no-turns` (the wait-bound/shape rows test today's POLL shape, not the rule) |
-| 8. installer acts on its target only; installer rows only via the runner | `test-installer-data-isolation.sh`, `test-install-isolation.mjs` |
-| 9. release rehearsed against the fleet; a blind canary is not a gate | NOT ENFORCED YET - `release-rehearsal` (the canary rows test canary STATES; no rehearsal exists) |
-| 10. new tool born as a component; registration is data | NOT ENFORCED YET - `capability-registration-is-data` |
-| 11. "same program" includes the embedded Lua | `check-embedded-lua-closure.mjs`, `check-embedded-runtime.lua` |
-| 12. async WIT for new or moved interfaces | `scripts/lint-wit-async.mjs` + `scripts/test-wit-async-lint.sh` (879891bf, on `change/async-born-interfaces`, NOT landed) |
-| 13. a new gate runs advisory until a rehearsal is green | NOT ENFORCED YET - `release-rehearsal` |
+| law 1. prompt-cache bytes unchanged | `scripts/test-prompt-cache.lua`, `scripts/test-prompt-golden.lua` (measurement: `probe-prompt-bytes.lua`) |
+| law 2. run(code) exists as a door (parity) | `test-codemode-parity.lua`, `test-codemode-blocks.lua`, `test-codemode-boundary.lua` |
+| law 2b. the catalogue DECLARES only that door | NOT ENFORCED YET - `run-is-the-only-declared-door` |
+| law 3a. release = pinned parts, download only what changed: host + components | `test-installable-by-download.sh`, `test-node-binaries.sh`, `check-release-complete.sh` |
+| law 3b. the same for the lua-core part | NOT ENFORCED YET - `lua-core-is-a-signed-part` (branch not landed) |
+| law 4. version folders, pointer, rollback | NOT ENFORCED YET - `change/version-folders` (rows exist there, not on main) |
+| law 5. fixes measured before and after | NOT ENFORCED YET - a review law; no row can enforce it |
+| law 6a. tools tell the truth: an undeclared argument is refused by name | `test-tool-arguments.lua`, `test-tool-args-parity.lua` (landed 032f4dd4) |
+| law 6b. freshness says what it covers; a failed call keeps what finished | NOT ENFORCED YET - `whatsapp-index-heals-itself` / `tools-tell-the-truth` part 2 |
+| law 7. waiting costs no turns | NOT ENFORCED YET - `waiting-costs-no-turns` (the wait-bound/shape rows test today's POLL shape, not the law) |
+| law 8. installer acts on its target only; installer rows only via the runner | `test-installer-data-isolation.sh`, `test-install-isolation.mjs` |
+| law 9. release rehearsed against the fleet; a blind canary is not a gate | NOT ENFORCED YET - `release-rehearsal` (the canary rows test canary STATES; no rehearsal exists) |
+| law 10. new tool born as a component; registration is data | NOT ENFORCED YET - `capability-registration-is-data` |
+| law 11. "same program" includes the embedded Lua | `check-embedded-lua-closure.mjs`, `check-embedded-runtime.lua` |
+| law 12. async WIT for new or moved interfaces | `scripts/lint-wit-async.mjs` + `scripts/test-wit-async-lint.sh` (879891bf, on `change/async-born-interfaces`, NOT landed) |
+| law 13. a new gate runs advisory until a rehearsal is green | NOT ENFORCED YET - `release-rehearsal` |
 
-**The honest count: 16 clauses. 3 are enforced by a row that tests the rule itself** (1, 8, 11; the async lint, 12,
+**The honest count, in laws: 16 clauses. 3 are enforced by a row that tests the law itself** (1, 8, 11; the async lint, 12,
 is enforced on a branch that has not landed). **3 are enforced in part** (2, 3a, 6a: a landed row covers one clause and
-rest is named). **9 are NOT ENFORCED YET**, each with the brief that will. The rule that is checked everywhere today
+rest is named). **9 are NOT ENFORCED YET**, each with the brief that will. The law that is checked everywhere today
 is the one about the INSTALLER and the artifact, not the ones about the model's own interface.

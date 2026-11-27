@@ -3,6 +3,7 @@
 Rules for any agent (or human) changing this repo. This file is injected into every request
 made from this checkout, so it stays short; detail lives in `docs/` and loads on demand.
 
+Architecture laws: ARCHITECTURE.md (your brief names the ones that apply).
 ## How work lands
 
 Answer with the verified artifact or a measured impossibility — a plan, an obstacle or a question is not an answer.
