@@ -291,7 +291,17 @@ for crate in rust/components/*/; do
   [ -f "$crate/Cargo.toml" ] || continue
   name="$(basename "$crate")"
   if [ "$#" -gt 0 ] && ! printf '%s\n' "$@" | grep -qx "$name"; then continue; fi
-  [ -f "$crate/manifest.json" ] || { echo "skip $name: no manifest.json" >&2; continue; }
+  if [ ! -f "$crate/manifest.json" ]; then
+    # A crate the caller NAMED must build or say why. Before 27/11 this skipped, and the `vision` pin
+    # landed with no manifest.json: the publish build then produced no vision.wasm and the bundle was
+    # red (q#119) while every local row stayed green. A skip is not a build.
+    if [ "$#" -gt 0 ]; then
+      echo "error: $name has no manifest.json, so scripts/build-components.sh can never produce it (the publish build reads the manifest for kind, target and limits); add rust/components/$name/manifest.json" >&2
+      exit 2
+    fi
+    echo "skip $name: no manifest.json" >&2
+    continue
+  fi
   TARGET="$(sed -n 's/.*"target"[[:space:]]*:[[:space:]]*"\([a-z0-9_-]*\)".*/\1/p' "$crate/manifest.json" | head -1)"
   TARGET="${TARGET:-wasm32-wasip2}"
   ensure_target "$TARGET"

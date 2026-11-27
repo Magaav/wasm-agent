@@ -738,5 +738,20 @@ SEAM
 
 if [ "$self_test" = 1 ]; then self_test; exit $?; fi
 [ "$bytes_only" = 1 ] || judge_source "$repo" "$base_ref" || exit $?
+
+# Every name components.lock pins must be buildable by the publish build. The 27/11 miss: `vision` was
+# pinned while its crate had no manifest.json, so `scripts/build-components.sh` skipped it, the publish
+# bundle carried no vision.wasm and publishing went red (q#119) with every local row green.
+unbuildable=""
+for name in $(awk '/^[[:space:]]*(#|$)/ {next} $1 != "" && $2 ~ /^[0-9a-f]+$/ {print $1}' "$repo/components.lock"); do
+  [ -d "$repo/rust/components/$name" ] || continue
+  [ -f "$repo/rust/components/$name/manifest.json" ] || unbuildable="$unbuildable $name"
+done
+if [ -n "$unbuildable" ]; then
+  echo "component-pins: FAIL unbuildable:$unbuildable - pinned in components.lock but skipped by scripts/build-components.sh (no rust/components/<name>/manifest.json), so the publish bundle cannot carry it" >&2
+  exit 1
+fi
+say "component-pins: every pinned name is one the publish build produces"
+
 [ "$source_only" = 1 ] && exit 0
 judge_bytes "$repo"
