@@ -675,21 +675,25 @@ fn set(shared: &Shared, state: &str) {
 /// An entry that is already an object is left exactly as it is: `graph`'s two grants are built by its own
 /// capability (`rust/wa-capabilities/src/graph.rs`), and re-mapping them here would move a directory the
 /// node promised.
-fn resolved_dirs(request: &Value, name: &str) -> Value {
+fn resolved_dirs(request: &Value, name: &str, manifest: &Value) -> Value {
     let mut out = request.clone();
-    let Some(list) = request.get("dirs").and_then(Value::as_array) else { return out };
-    let mut mapped = Vec::with_capacity(list.len());
-    for entry in list {
-        let Some(guest) = entry.as_str() else {
-            mapped.push(entry.clone());
-            continue;
-        };
-        if !guest.starts_with('/') || guest.contains("..") {
-            // An unusable guest is passed through untouched: `Grant::from_request` refuses it by name,
-            // which is the error an operator should see, not one invented here.
-            mapped.push(entry.clone());
-            continue;
+    // The manifest IS the declaration of what the component needs (`capabilities.dirs`, an allow-list of
+    // guests); a definition may name more, never more than the manifest allows. Both are granted, because
+    // a component that imports `wasi:filesystem` and is given no preopen does not start at all
+    // (`wasi_import_import_not_granted`) - so a node that installs this component grants what it declares.
+    let mut guests: Vec<String> = Vec::new();
+    for source in [request.get("dirs"), manifest.get("capabilities").and_then(|c| c.get("dirs"))] {
+        for entry in source.and_then(Value::as_array).into_iter().flatten() {
+            if let Some(guest) = entry.as_str() {
+                if !guests.iter().any(|known| known == guest) { guests.push(guest.to_string()); }
+            }
         }
+    }
+    let empty = Vec::new();
+    let named = request.get("dirs").and_then(Value::as_array).unwrap_or(&empty);
+    if guests.is_empty() && named.is_empty() { return out; }
+    let mut mapped = Vec::with_capacity(guests.len() + named.len());
+    for guest in &guests {
         let leaf: String = guest.trim_matches('/').chars()
             .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') { ch } else { '.' })
             .take(64).collect();
@@ -698,6 +702,9 @@ fn resolved_dirs(request: &Value, name: &str) -> Value {
         let _ = std::fs::create_dir_all(&host);
         mapped.push(json!({"host": host.to_string_lossy(), "guest": guest, "write": true}));
     }
+    // An entry the node did not write is passed through exactly as it came: `graph`'s two grants are built
+    // by its own capability, and a guest this function cannot use must be refused by `Grant`, not here.
+    for entry in named { if entry.is_object() { mapped.push(entry.clone()); } }
     out["dirs"] = Value::Array(mapped);
     out
 }
@@ -712,7 +719,7 @@ pub fn start(request: &Value) -> Value {
         return json!({"ok": false, "error": "component_is_not_a_service"});
     }
     // A definition names WHERE a component may write, never a host path (see `resolved_dirs`).
-    let request = &resolved_dirs(request, &name);
+    let request = &resolved_dirs(request, &name, &installed.manifest);
     let grant = match Grant::from_request(request).and_then(|g| g.check(&installed.manifest).map(|_| g)) {
         Ok(grant) => grant,
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
@@ -1779,7 +1786,8 @@ mod tests {
     #[test]
     fn a_guest_directory_becomes_a_directory_this_node_owns() {
         let request = json!({"name": "wa-whatsapp", "dirs": ["/downloads"]});
-        let mapped = super::resolved_dirs(&request, "wa-whatsapp");
+        let manifest = json!({"capabilities": {"dirs": ["/downloads"]}});
+        let mapped = super::resolved_dirs(&request, "wa-whatsapp", &manifest);
         let dirs = mapped["dirs"].as_array().expect("a list");
         assert_eq!(dirs.len(), 1, "{mapped}");
         assert_eq!(dirs[0]["guest"], "/downloads");
@@ -1789,9 +1797,9 @@ mod tests {
         assert!(std::path::Path::new(host).is_absolute(), "{host}");
         // An entry the node did not write is left alone: graph's two grants are built by its own capability.
         let already = json!({"dirs": [{"host": "/srv/graph", "guest": "/graph/root", "write": false}]});
-        assert_eq!(super::resolved_dirs(&already, "graph"), already);
+        assert_eq!(super::resolved_dirs(&already, "graph", &json!({})), already);
         // No `dirs` at all stays no `dirs`: nothing is granted by omission.
-        assert!(super::resolved_dirs(&json!({"name": "x"}), "x").get("dirs").is_none());
+        assert!(super::resolved_dirs(&json!({"name": "x"}), "x", &json!({})).get("dirs").is_none());
     }
 
 }

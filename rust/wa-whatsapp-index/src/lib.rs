@@ -818,8 +818,15 @@ pub struct Download {
     pub filename: String,
     pub sha256: String,
     pub bytes: u64,
-    /// How many progress chunks the job carries, in order, starting at sequence 0.
+    /// How many progress chunks the job carries, in order, starting at sequence 0. ZERO when the
+    /// component wrote the file itself (`path`): no bytes ride the queue, so there are no chunks.
     pub chunks: u32,
+    /// Where the decrypted file IS, when the node granted the component a directory to write in (the
+    /// `/downloads` preopen, `rust/wa-kernel-runtime/src/services.rs`). Its absence is not an error: a
+    /// node that granted nothing gets the chunks, bounded by [`MAX_DOWNLOAD_BYTES`]. A 4.3 MB video is
+    /// only possible through this field - the progress stream is capped at 1 MiB by `wa:queue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl Download {
