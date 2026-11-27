@@ -19,7 +19,16 @@ import {tmuxSession} from './lib/tmux-session.mjs';
 import {fileURLToPath} from 'node:url';
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const WA = process.env.WA_BIN || 'wa';
+// THE BINARY UNDER TEST IS THIS TREE'S, NEVER 'WHATEVER IS INSTALLED'. Measured twice: run against
+// the installed node (older than the change) this row found a notice with no frame and looked like a
+// failure of the balloon; run with WA_BIN unset it silently tested somebody else's build. The default
+// is this tree's release build, and when there is none the row REFUSES by name.
+const WA = process.env.WA_BIN || [path.join(REPO, '.local-target', 'release', 'wa'),
+  path.join(REPO, 'rust', 'target', 'release', 'wa')].find(candidate => fs.existsSync(candidate)) || '';
+if (!WA) {
+  console.error('refused(no_binary_under_test): build this tree first (cargo build --release --manifest-path rust/Cargo.toml), or set WA_BIN to the binary to test');
+  process.exit(2);
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const TICK = '`';
 const FENCE = TICK + TICK + TICK;
