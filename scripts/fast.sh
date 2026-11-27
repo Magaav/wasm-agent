@@ -1381,7 +1381,7 @@ check wit-lint-selftest bash scripts/test-wit-lint.sh
 # file. Existing worlds are grandfathered by an explicit list (wit/async-grandfather.txt), never by a pattern.
 # The land path needs no separate hook: scripts/landing-queue.mjs defaults to `bash scripts/fast.sh` (its line 227),
 # so these two are what the landing gate runs. Proved by running them with the same argv fast.sh uses.
-check wit-async bash scripts/lint-wit-async.mjs
+check wit-async node scripts/lint-wit-async.mjs
 check wit-async-selftest bash scripts/test-wit-async-lint.sh
 # The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
 # manifest not at all), a win line and the flag for the modules without one, a ledger's seconds, a

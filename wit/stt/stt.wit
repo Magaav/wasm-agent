@@ -100,10 +100,12 @@ interface stt {
     /// Decode one call and admit it: the envelope's own fields, the caller the transport verified,
     /// the skew window, and the `rid` ledger this instance holds. The ledger is the seam's state and
     /// it lives here — the host serialises its calls, so one instance is one ledger.
+    // async-abi: the caller awaits the answer; the ledger has no progress to stream and no handle to hold.
     admit: async func(me: string, owner-nodes: list<string>, skew-ms: s64, bytes: list<u8>, caller: string, now-ms: s64) -> admitted;
 
     /// One answer the node composed, as the wire carries it. The node composes the body; the reply's
     /// envelope is the wire's, and that is the half this layer owns.
+    // async-abi: one composed body in, the wire bytes out; nothing to stream and nothing to cancel mid-way.
     reply-ok: async func(body-json: string) -> list<u8>;
 
     /// The one function every rendered refusal and every view line the node shows passes through: control
@@ -113,6 +115,7 @@ interface stt {
     /// key, nothing to await — called per refusal and per view line, sometimes in a loop. A future around it
     /// would add a suspension point where there is nothing to suspend on and make every call site a task.
     /// It has no output to stream and no backpressure to declare: the bound is the string it is given.
+    // sync-export: a pure map over a string - no I/O, no clock, no key, nothing to await (see the note above).
     sanitize: func(text: string) -> string;
 }
 
