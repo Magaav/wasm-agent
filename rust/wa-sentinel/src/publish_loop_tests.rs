@@ -375,13 +375,32 @@ fn queue_times_are_utc_stamps() {
 /// past four kilobytes of JSON to find `0 waiting`; the test that can fail without a live node is the line.
 #[test]
 fn the_node_line_is_up_down_port_and_pid_without_the_health_document() {
-    let up = node_line(8799, true, Some(4242));
+    let up = node_line(8799, true, Some(4242), None, None);
     assert_eq!(up, "node:      up    port 8799  pid 4242");
-    let down = node_line(8799, false, None);
+    let down = node_line(8799, false, None, None, None);
     assert_eq!(down, "node:      down  port 8799  no process on the port");
     // A node that answers but whose listener pid cannot be read says that rather than inventing one.
-    let unreadable = node_line(8799, true, None);
+    let unreadable = node_line(8799, true, None, None, None);
     assert!(unreadable.contains("pid unknown"), "{unreadable}");
+
+    // WHO ANSWERS (Fable 26/11, work: `node: down ... no process on the port` while `wa call work` was answered).
+    let named = node_line(8799, true, Some(4242), Some("wa serve".to_string()), None);
+    assert_eq!(named, "node:      up    port 8799  pid 4242 (wa serve)");
+    let interactive = node_line(8799, true, Some(4242),
+        Some("wa chat - an interactive wa, not a watcher".to_string()), None);
+    assert!(interactive.contains("pid 4242 (wa chat - an interactive wa, not a watcher)"), "{interactive}");
+    let mesh = node_line(8799, false, None, None, Some("pid 77 (wa chat - an interactive wa, not a watcher)".to_string()));
+    assert_eq!(
+        mesh,
+        "node:      down  port 8799  no process on the port; the mesh is answered by pid 77 \
+         (wa chat - an interactive wa, not a watcher), which is not this node"
+    );
+    // WHO is read from a pid's own argv, never guessed: `serve` is a node, every other door is interactive, and a
+    // process that is neither says its own name.
+    assert_eq!(describe_argv("/usr/local/bin/wa serve --port 8799"), "wa serve");
+    assert_eq!(describe_argv("/home/u/.local/bin/wa chat --once"), "wa chat - an interactive wa, not a watcher");
+    assert_eq!(describe_argv("wa-sentinel watch"), "wa-sentinel watch");
+    assert_eq!(describe_argv("/usr/bin/python3 script.py"), "python3");
     for line in [&up, &down, &unreadable] {
         assert!(line.starts_with("node:"), "{line}");
         assert!(!line.contains('{') && !line.contains("capabilities"), "no JSON in a status line: {line}");

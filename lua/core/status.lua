@@ -127,12 +127,51 @@ function M.tools()
   return dofile("lua/core/toolchain.lua").line()
 end
 
+-- THE WATCHER IS ONE LINE, AND ITS ABSENCE NAMES THE FIX (Fable 26/11, work).
+--
+-- MEASURED on work (a Docker container with no systemd), twice on 26/11: `wa-sentinel start` failed, its reason went to
+-- the container's stdout, and `wa status` - the page a person reads - said nothing about the watcher at all, running or
+-- not. The only surface that refused was `wa update`, and its sentence began by sending the reader somewhere else. So the
+-- fact gets a line here, ALWAYS: running with its pid, or not running with the one command that starts it.
+--
+-- `opts` is a test's seam (read_file, alive, sentinel, config): production calls it with nothing.
+function M.watcher_line(opts)
+  opts = opts or {}
+  local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
+  local config = opts.config or M.config_path()
+  local raw = ""
+  if type(reader) == "function" then raw = tostring(reader(config .. "/sentinel/sentinel.pid") or "") end
+  local pid = raw:match("^%s*(%d+)")
+  local alive = false
+  if pid then
+    if type(opts.alive) == "function" then alive = opts.alive(tonumber(pid)) == true
+    else
+      -- The same probe every other "is that process there" in this tree uses: `kill -0` reads without signalling.
+      local ok, answer = pcall(host.exec, "kill -0 " .. pid .. " 2>/dev/null", "", 20)
+      alive = ok and type(answer) == "table" and tonumber(answer.code) == 0
+    end
+  end
+  if alive then return "watcher   running (pid " .. pid .. ")" end
+  local sentinel = opts.sentinel
+  if sentinel == nil then
+    local ok, update = pcall(dofile, "lua/core/update.lua")
+    if ok and type(update) == "table" and type(update.install_dir) == "function" then
+      local named_ok, dir = pcall(update.install_dir)
+      if named_ok and type(dir) == "string" and dir ~= "" then sentinel = dir .. "/wa-sentinel" end
+    end
+    sentinel = sentinel or "wa-sentinel"
+  end
+  return "watcher   not running - start it: " .. sentinel .. " start"
+end
+
 -- Ordered: identity first, then what would break a turn, then the paths.
 function M.lines()
   local lines = {
     "node      " .. M.node_id(),
     "model     " .. M.model(),
     "session   " .. M.session(),
+    -- The watcher's fact, always: a page that says nothing about it is how two failed starts went unseen on work.
+    M.watcher_line(),
   }
   local unfinished = M.unfinished()
   if unfinished then lines[#lines + 1] = "unfinished " .. unfinished end

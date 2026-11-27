@@ -348,7 +348,17 @@ function M.preconditions(facts)
                  ((facts.pending_deploys and #facts.pending_deploys > 0)
                    and ("; a deploy is already waiting there: " .. table.concat(facts.pending_deploys, ", "))
                    or ""),
-      next = "inspect the watcher/service outside this node if identity or preflight is unverified; install the current sentinel through the deployment gate if needed, then start it and ask again: " .. M.start_command(facts),
+      -- THE FIX COMES FIRST, AND IT IS ONE COMMAND (Fable 26/11, work). MEASURED there: `wa update` answered "no
+      -- sentinel watcher ownership was verified ... inspect the watcher/service outside this node", and the operator's
+      -- next move was a guess - while the whole fix was one command that the line named LAST, after a sentence that sent
+      -- them looking somewhere else. The INSTALLER is named only where it is the fact: a node whose install directory
+      -- has no sentinel has nothing to start, and that shape is `facts.sentinel_present`. For every other node the
+      -- installer would be an unnecessary instruction, so it is not there.
+      next = (facts.sentinel_present
+        and (M.start_command(facts)
+          .. " - that is the one command that fixes this: it starts the watcher this node expects, so ask again once it answers. If the watcher is meant to be supervised, inspect the service outside this node.")
+        or ("this node's install has no sentinel to start (" .. tostring(facts.sentinel)
+          .. "): install the current sentinel through the deployment gate, then start it with its absolute path and ask again.")),
     }
   end
   if facts.inventory_verified == false then
