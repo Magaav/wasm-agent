@@ -150,7 +150,11 @@ ok(fs.readFileSync(seen, "utf8").includes("noinstall=1"), "the default run tells
 const asksInstall = submit(db, {branch: "change/install-me", sha: read, mission: "pin", kind: "install"});
 const installStep = landQuick({missionsDir: missions, repo: clone, landerRepo: repo, dryRun: true});
 await installStep({request: db.prepare("SELECT * FROM requests WHERE id = ?").get(asksInstall.id)});
-ok(fs.readFileSync(seen, "utf8").includes("noinstall=unset"), "a request that names an install does not suppress it");
+// Empty, not absent: the child is spawned with the decision, and `empty` is what the lander reads as "install"
+// (`${LQ_NO_INSTALL:-}` = 1 is the suppression). The assertion is therefore "not 1", which is also what it
+// must say when this row runs inside a landing that exported LQ_NO_INSTALL=1 for its own reasons.
+const noinstallLine = (fs.readFileSync(seen, "utf8").match(/noinstall=(.*)/) || [])[1] ?? "missing";
+ok(noinstallLine !== "1", `a request that names an install is not told to suppress it (noinstall=${JSON.stringify(noinstallLine)})`);
 
 // Pushed, then the lander fails after the push: main moved, so the verdict is LANDED with the install pending.
 const afterPush = submit(db, {branch: "change/after-push", sha: read, mission: "pin", kind: "install"});

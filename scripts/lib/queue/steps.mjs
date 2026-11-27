@@ -86,7 +86,11 @@ export function landQuick({missionsDir, repo, landerRepo = null, dryRun = false}
     // NO LAPTOP INSTALL BY DEFAULT (Victor 27/11): the queue pushes and publishes; an install runs only when
     // the request itself asks for one. LQ_NO_INSTALL=1 is the lander s own switch for that (22/11).
     const asksInstall = request.kind === "install" || Number(request.install || 0) === 1;
-    const env = asksInstall ? {} : { LQ_NO_INSTALL: "1" };
+    // SPAWNED WITH THE DECISION, never inheriting it: the v0 runner exports LQ_NO_INSTALL=1 for EVERY
+    // landing, so an empty env here would let that leak in and a request that NAMES an install would still
+    // be told not to install (this is what made the queue-pin row red inside the queue and green by hand,
+    // q#48 and q#50). Empty means allowed for the lander, which tests `${LQ_NO_INSTALL:-}` = 1.
+    const env = asksInstall ? { LQ_NO_INSTALL: '' } : { LQ_NO_INSTALL: '1' };
     const out = await run('bash', [script, pin.ref, ...(dryRun ? ['--dry-run'] : [])], {timeoutMs: CAPS.rows, env});
     const text = `${out.stdout}${out.stderr}`;
     const base = {seconds: Math.round((Date.now() - started) / 1000), tail: text.trim().split('\n').slice(-6).join('\n')};
