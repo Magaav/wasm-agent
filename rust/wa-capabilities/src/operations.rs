@@ -109,6 +109,9 @@ fn target() -> Result<Target, String> {
     // A free port every time: a supervisor started by an earlier node may still be alive (it owns the children
     // that outlived it), and a fixed default would make the new one fail to bind and exit silently.
     command.arg("--port").arg("0");
+    // Who owns it. The supervisor exits when THIS process is gone, so a node that dies without a chance to clean
+    // up (kill -9, a crashed worker) does not leave its supervisor behind to adopt orphans of its own.
+    command.arg("--owner-pid").arg(std::process::id().to_string());
     command.arg("--rendezvous").arg(&path);
     // Nothing to scrub any more: there is no environment variable, so the child cannot think it is a client
     // of itself. Its rendezvous is the `--rendezvous` argument above, which is the same file both sides read.
