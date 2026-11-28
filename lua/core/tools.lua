@@ -93,6 +93,9 @@ local REMOTE_OWN = { node = true, capability = true, args = true }
 -- one of them would ignore it (mission tool-args-honest-and-same-on-peers, mixed-fleet follow-up). Only
 -- what this node learned to send in that mission is named; a capability absent from this table sends
 -- everything, exactly as before.
+-- ONE LOAD, NOT ONE PER CALL: dofile re-executes the file, and asking it inside the bash branch (a 2 000-line
+-- module) is a cost paid on every command - including the one a stop is interrupting.
+local pending_native = dofile('lua/core/codemode_pending.lua')
 local PEER_FIELD_SUPPORT = { bash = { 'stdin' }, operation = { 'stdin' }, grep = { 'context' } }
 local REMOTE_EXAMPLE = '{"node":"<name>","capability":"bash","command":"ls -la"}'
 
@@ -2327,6 +2330,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     return result
   elseif name == "bash" then
+    -- ESC STOPS WHAT THE TURN STARTED, WHATEVER DOOR STARTED IT (decision (a), 27/11). The record is opened HERE,
+    -- at the top of the branch, before anything can return early: the reader's own bash is the same command in the
+    -- same process group as a script's, so it belongs in the same pending store. It is pcall'd - a record that
+    -- cannot be written must never cost the command.
+    local native_handle = nil
+    if ctx.native_tool_call == true and pending_native then
+      local ok_open, opened = pcall(pending_native.native_open,
+        'native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
+      native_handle = ok_open and opened or nil
+    end
     if not args.command or args.command == "" then return { error = "command_required" } end
     local timeout = args.timeout_seconds
     if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
@@ -2401,7 +2414,59 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       watched = bash_changes.before(cwd,
         ctx.read_only_command and ctx.read_only_command(args.command) or nil)
     end
-    local result = run(args.command, timeout, cwd, provenance, stdin)
+    -- ESC STOPS WHAT THE TURN STARTED, WHATEVER DOOR STARTED IT (decision (a), 27/11). The reader's own `bash`
+    -- is the same command, in the same process group, as a script's - but only the script's was registered in
+    -- the pending store, so its stop wrote no record and the line "stopped: <command>" had nowhere to come
+    -- from. The call is opened in the SAME index here, and settled with the stop facts the operations layer
+    -- reports for it (never a value invented in Lua). A script's nested bash is already inside that index, so
+    -- it is not opened twice.
+    local native_handle = nil
+    if ctx.native_tool_call == true then
+      -- A failure here must never cost the command: the record is best effort, the work is not.
+      local ok_open, opened = pcall(pending_native.native_open, 'native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
+      native_handle = ok_open and opened or nil
+      -- AND WHERE THE RUNNER PUTS WHAT IT SAW (28/11): the operations layer is the one owner that observes
+      -- the stop, so the call names the file it writes its facts to. The caller's answer never waits for it.
+      if native_handle ~= nil then
+        provenance.stop_record = pending_native.stop_record_path('native:' .. tostring(ctx.session_id or 'session'))
+      end
+
+    end
+    local started_at = host.now()
+    -- A STOP ABORTS run() ITSELF, so a plain call never comes back and the record was left saying "running" for
+    -- ever (measured 27/11: every scenario's record was state=running, stop=null). The call is caught here so the
+    -- record is closed on BOTH paths - the command's own answer, and the stop that ends it early - and then the
+    -- raise goes on exactly as before.
+    local ok_run, result = pcall(run, args.command, timeout, cwd, provenance, stdin)
+    if native_handle then
+      local cancelled = type(result) == 'table'
+        and (result.cancelled == true or result.stopped == true or result.stop ~= nil
+          or tostring(result.error or ''):find('cancel', 1, true) ~= nil)
+      local note = pending_native.native_settle(native_handle,
+        function(n, a) return M.dispatch(memory, n, a, role, ctx) end,
+        { operation_id = type(result) == 'table' and result.operation_id or nil,
+          cancelled = cancelled or (not ok_run and tostring(result):find('cancel', 1, true) ~= nil),
+          stop = type(result) == 'table' and result.stop or nil,
+          signal = type(result) == 'table' and result.signal or nil,
+          survivors = type(result) == 'table' and result.survivors or nil,
+          after_s = 0 })
+      if note ~= nil then ctx.stop_notice = note end
+    end
+    if not ok_run then error(result, 0) end
+    if native_handle then
+      local cancelled = type(result) == 'table'
+        and (result.cancelled == true or result.stopped == true or result.stop ~= nil
+          or tostring(result.error or ''):find('cancel', 1, true) ~= nil)
+      local note = pending_native.native_settle(native_handle,
+        function(n, a) return M.dispatch(memory, n, a, role, ctx) end,
+        { operation_id = type(result) == 'table' and result.operation_id or nil,
+          cancelled = cancelled,
+          stop = type(result) == 'table' and result.stop or nil,
+          signal = type(result) == 'table' and result.signal or nil,
+          survivors = type(result) == 'table' and result.survivors or nil,
+          after_s = host.now() - started_at })
+      if note ~= nil then ctx.stop_notice = note end
+    end
     -- The phase breakdown is AGGREGATE EVIDENCE, not context: it leaves the answer a caller receives
     -- (lua/core/bash_result.lua) and the agent records it on this call's tool span from here
     -- (lua/core/agent.lua, tool_output.execution_timing), so the numbers are neither lost nor spent on

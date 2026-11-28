@@ -1090,6 +1090,12 @@ fn launch_context(mut spec: Spec, context: &Value) -> Spec {
     if spec.session.is_empty() {
         spec.session = context["session"].as_str().unwrap_or("").to_string();
     }
+    // WHERE THE STOP FACTS GO (28/11): the caller's own record, named in the same context that already carries
+    // the tool and the session. The supervision thread is the one owner that sees the signal, so it writes
+    // them; the caller's answer never waits for this.
+    spec.stop_record = context["stop_record"].as_str()
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
     spec
 }
 /// One tick of a long call's row (`docs/TOOL-PROGRESS.md`): the tail of the operation's two output

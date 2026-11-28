@@ -56,6 +56,8 @@ local M = {}
 -- script time" for a wait to outlive (the loop sets neither remaining_ms nor remaining). A caller
 -- that passes one still gets the old clamp (M.effective_ms); the only other stop is the CPU guard.
 M.DEFAULT_WAIT_S = 60
+-- An id-less await only looks: short enough that a stop never finds it waiting.
+M.LOOK_WAIT_S = 1
 -- THE ONE PAUSE BUDGET (Victor 27/11). “how long may this script pause” is ONE number, owned here: a
 -- single pause (the 5 s of one sleep(ms), and so of every timer built on it) and the total a script may
 -- pause across all of its pauses (the wait ceiling). sleep(ms), setTimeout/setInterval and wait(op) all
@@ -155,6 +157,14 @@ end
 -- scope is the same hash the guest store and the results journal use (session x user x role x
 -- workspace x profile), so "the same scope" is one meaning in this node.
 function M.dir() return paths.data() .. "/codemode-pending" end
+
+-- WHERE THE RUNNER WRITES WHAT IT SAW (28/11, the orchestrator's decision): the signal and the survivors are
+-- observed only by the one owner of the process, so they are written beside this scope's index by that owner,
+-- while the answer the reader got carries a count and a record id and never waits for them. A reader of the
+-- record finds them next to it; nothing here invents them.
+function M.stop_record_path(scope)
+  return M.dir() .. "/" .. tostring(scope) .. ".stop.json"
+end
 local function index_path(scope) return M.dir() .. "/" .. tostring(scope) .. ".json" end
 
 local function now_seconds()
@@ -444,6 +454,9 @@ end
 
 -- Wait for one operation up to `ms`, in bounded slices. Answers the state and, when the wait ended
 -- without settlement, the reason (`still_running`, `run_cancelled`, or the supervisor's own words).
+-- THE STOP (defined below, after the executors: it needs their own cancel/relay paths).
+local stop_work
+
 local function operation_poll(dispatch, opts, record, ms)
   local op = record.op
   local left = math.max(0, math.floor(tonumber(ms) or 0))
@@ -451,7 +464,7 @@ local function operation_poll(dispatch, opts, record, ms)
   if not state then return nil, reason end
   if state.settled == true then return state, nil end
   while left > 0 do
-    if cancelled() then return state, "run_cancelled" end
+    if cancelled() then return stop_work(dispatch, opts, record, state) end
     local slice = math.min(left, M.SLICE_MS)
     local waited, wait_reason = operation_call(dispatch, "wait",
       { action = "wait", id = op, wait_ms = slice, tool = "operation" })
@@ -459,6 +472,9 @@ local function operation_poll(dispatch, opts, record, ms)
     state = waited
     left = left - slice
     if state.settled == true then return state, nil end
+    -- THE STOP LANDS HERE (week 1, items 1-2): the wait woke because the run was cancelled - not
+    -- because its slice ran out - and the node's answer says so with `interrupted`.
+    if state.interrupted == true then return stop_work(dispatch, opts, record, state) end
     if state.overdue == true then return state, "operation_supervisor_overdue" end
   end
   return state, "still_running"
@@ -610,7 +626,36 @@ do
         return { result = result }
       end
       local id = tostring(params.id or "")
-      if id == "" then return { result = { error = "id_required" } } end
+      if id == "" then
+        -- AN AWAIT WITH NO ID, IN A SCRIPT THAT STARTED EXACTLY ONE THING (28/11). A model that starts an
+        -- operation and then awaits it wrote the id once and forgot it once, and the refusal cost the whole
+        -- turn (`operation needs an id`, measured in the detached scenario). The store already knows which
+        -- calls this script started, so the unambiguous case is answered instead of refused: one open
+        -- operation started in this scope, and nothing else. Two candidates stay a refusal - guessing between
+        -- someone else's work is exactly the ambiguity the id exists for.
+        local scope = type(opts) == "table" and opts.scope or nil
+        local only = nil
+        local index = M.open(scope)
+        for _, record in pairs(index.ops or {}) do
+          if type(record) == "table" and record.state == "running"
+              and (record.tool == "operation" or record.kind == "operation") then
+            if only ~= nil then only = false break end
+            only = record
+          end
+        end
+        if type(only) == "table" and type(only.op) == "string" then
+          id = only.op
+          params.id = id
+          -- AND IT LOOKS, IT DOES NOT WAIT (28/11): an await that had to be given an id names work the script
+          -- is not waiting for - the handle is the answer. Without this the default 60 s wait overran the
+          -- code-mode budget every time the reader stopped such a script (`TimeoutError: the script ran past
+          -- the budget`, measured in the detached scenario). A caller that wants to wait says the id and the
+          -- seconds it wants, which is unchanged.
+          if params.wait_s == nil then params.wait_s = M.LOOK_WAIT_S end
+        else
+          return { result = { error = "id_required" } }
+        end
+      end
       -- `wait_for=settled` and the adoption rules are the operation tool's; the wait here only
       -- decides how long this call watches before it hands back a handle.
       return { op = id, attach = true }
@@ -886,7 +931,7 @@ do
       local calls = 0
       while left > 0 and calls < REMOTE_MAX_CALLS do
         calls = calls + 1
-        if cancelled() then return last, "run_cancelled" end
+        if cancelled() then return stop_work(dispatch, opts, record, last) end
         local slice = math.min(left, REMOTE_SLICE_MS)
         local before = elapsed_ms()
         local answer, why = remote_operation(dispatch, record,
@@ -900,6 +945,7 @@ do
           -- one slice says nothing about the operation: it may still be running there, and marking the
           -- local record final would hide work nobody stopped. Report it as PENDING with the reason; the
           -- next wait(op) - or the caller's own next step - asks the peer again.
+          if cancelled() then return stop_work(dispatch, opts, record, last) end
           if last ~= nil and last.settled == true then return last, nil end
           return last, tostring(why)
         end
@@ -1021,6 +1067,151 @@ do
           .. "may still be running - check status on that node, then cancel again" }
     end,
   }
+  -- The stop path (below) relays through the same one call this family already uses.
+  M.EXECUTORS["remote"].relay = remote_operation
+end
+
+-- ---------------------------------------------------------------------------- the stop
+-- A STOP STOPS WHAT THE RUN STARTED (week 1, "Esc stops what it started"). Esc, /stop, a steer that
+-- cancels and a turn's deadline all cancel the run; that cancellation reaches this file as `cancelled()`
+-- turning true while a call is in flight - and until this existed, the call's work was LEFT RUNNING: the
+-- reader got the prompt back and the shell behind it went on to its own end. Now:
+--
+--   * the work IS stopped: the operation's own cancel is dispatched, which is what makes the node's
+--     supervisor send TERM to the command's whole process group and KILL what is left after its stated
+--     grace (rust/wa-operation, STOP_GRACE_MS). This then READS the answer back for a moment, so what it
+--     says is what the node observed, not what it hoped;
+--   * the answer says it: `stopped: <command>, after <n> s`, and whether the grace was enough, whether
+--     the kill was needed, or whether a process was still listed after it;
+--   * WORK THE CALLER STARTED DETACHED ON PURPOSE IS NOT STOPPED. The two are told apart by WHEN THE
+--     CALL STARTED, never by how it is being waited on now: a call left with `wait_s: 0`, and anything
+--     the `operation` tool started or attached to (record.detached), belongs to no turn any more - a
+--     background server the person asked for outlives Esc - and the answer says it is still running,
+--     with its command and the node it lives on.
+M.STOP_CONFIRM_MS = 120
+M.STOP_COMMAND_MAX = 80
+local function stop_clock()
+  return tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0
+end
+local function stop_command(record)
+  local text = type(record.command) == "string" and record.command or nil
+  if text == nil and type(record.watch) == "table" then text = record.watch.command end
+  if type(text) ~= "string" or text == "" then return nil end
+  text = text:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  if #text > M.STOP_COMMAND_MAX then text = text:sub(1, M.STOP_COMMAND_MAX - 1) .. "…" end
+  return text
+end
+local function stop_seconds(state, record)
+  local ms = tonumber(type(state) == "table" and state.elapsed_ms or nil)
+  if ms == nil and type(record.progress) == "table" then ms = tonumber(record.progress.elapsed_ms) end
+  if ms == nil then return nil end
+  return math.floor(ms / 100) / 10
+end
+-- One entry per family whose work a stop can end. `request` sends the stop and `read` answers the
+-- operation's state as it stands; neither waits for anything, so the stop's own bound stays the caller's.
+local STOPPERS = {
+  operation = {
+    request = function(dispatch, record)
+      return operation_call(dispatch, "cancel", { action = "cancel", id = record.op })
+    end,
+    read = function(dispatch, record) return snapshot(dispatch, record.op) end,
+  },
+  remote = {
+    -- The peer's own operation tool, relayed exactly as every other remote call is: the stop is the
+    -- peer's supervisor's to carry out, on the machine the work is actually running on.
+    request = function(dispatch, record)
+      return M.EXECUTORS["remote"].relay(dispatch, record, { action = "cancel", id = record.op })
+    end,
+    read = function(dispatch, record)
+      return M.EXECUTORS["remote"].relay(dispatch, record, { action = "status", id = record.op })
+    end,
+  },
+}
+
+-- What the stop did, said in one sentence, and the facts beside it in the record.
+stop_work = function(dispatch, opts, record, state)
+  if type(record) ~= "table" then return state, "run_cancelled" end
+  local command = stop_command(record)
+  if command == nil then
+    -- An await names the operation, not the command: the record of the call that STARTED it does, and it
+    -- is in the same scope's index (the handle the caller is holding came from there).
+    local index = M.open(record.scope or (type(opts) == "table" and opts.scope) or nil)
+    local source = type(index.ops) == "table" and index.ops[record.op] or nil
+    if type(source) == "table" then command = stop_command(source) end
+  end
+  local after = stop_seconds(state, record)
+  local where = record.node ~= nil and (" on " .. tostring(record.node)) or ""
+  -- NOT "op op-..." (28/11): a record whose command could not be looked up is named by its op id ONCE.
+  local name = command or tostring(record.op)
+  local span = after ~= nil and (", after " .. tostring(after) .. " s") or ""
+  local note, observed, confirmed = nil, state, false
+  if record.detached == true then
+    -- NOTHING IS STOPPED: this call was left running on purpose when it was started, so it is not the
+    -- turn's to end. The answer names it instead of pretending it went with the run.
+    -- THE WORK ITSELF IS NAMED (28/11): the command this record carries, or its op id if it never had one -
+    -- never a sentence that says `op` twice (`still running: op op-...`), which is what the reader got.
+    -- THE RECORD'S OWN COMMAND, never the watch's (28/11): `watch.command` is a display string, and using it here
+    -- produced `still running: op op-<id>`. When the record has none, its op id names it once.
+    local named = type(record.command) == "string" and record.command ~= "" and record.command or nil
+    note = "still running: " .. tostring(named or record.op) .. span
+      .. " (op " .. tostring(record.op) .. where
+      .. "), left alone because it was started detached (wait_s:0, or the operation tool)"
+  else
+    -- A record names its FAMILY in `kind`: a `bash` record IS the operation family (M.EXECUTORS["bash"]
+    -- is registered below with kind="operation"), so the stopper is looked up by kind, and by name for
+    -- a family that carries no kind of its own.
+    local head = "stopped: " .. name .. span
+    local stopper = STOPPERS[record.kind or record.tool] or STOPPERS[record.tool]
+    local _, why = nil, nil
+    if stopper ~= nil then _, why = stopper.request(dispatch, record) end
+    local deadline = stop_clock() + M.STOP_CONFIRM_MS
+    while stop_clock() < deadline do
+      local read = stopper ~= nil and stopper.read and stopper.read(dispatch, record) or nil
+      if type(read) == "table" then
+        observed = read
+        if read.settled == true or tostring(read.state or "") == "cancelled" then
+          confirmed = true
+          break
+        end
+      end
+      if host.sleep then host.sleep(10) end
+    end
+    local stop = type(observed) == "table" and type(observed.stop) == "table" and observed.stop or nil
+    if stopper == nil then
+      note = head .. " (this build has no stop for a " .. tostring(record.kind or record.tool) .. " call)"
+    elseif why ~= nil and stop == nil and not confirmed then
+      note = head .. " (the stop could not be asked for: " .. tostring(why) .. ")"
+    elseif not confirmed then
+      note = head .. " (the stop was requested" .. where .. " and the node had not confirmed it gone within "
+        .. tostring(M.STOP_CONFIRM_MS) .. " ms)"
+    elseif stop == nil then
+      note = head .. " (the node reports it ended; the record of how was already gone)"
+    elseif stop.signal == "TERM" then
+      note = head .. " (nothing survived the " .. tostring(stop.grace_ms) .. " ms grace)"
+    elseif stop.signal == "KILL" then
+      note = head .. " (it did not end on the stop, so its group was killed after the "
+        .. tostring(stop.grace_ms) .. " ms grace"
+        .. (stop.survivors and "; a process was still listed after the kill" or "") .. ")"
+    elseif stop.signal == "JOB" then
+      note = head .. (stop.survivors and " (the job object was ended; a process was still listed after it)"
+        or " (the job object ends every process at once; nothing was left)")
+    else
+      note = head .. " (its group was already gone when the stop arrived)"
+    end
+    record.state = "cancelled"
+    record.reported = true
+  end
+  record.stop = {
+    command = command, after_s = after, detached = record.detached == true, note = note,
+    confirmed = confirmed or nil,
+    signal = type(observed) == "table" and type(observed.stop) == "table" and observed.stop.signal or nil,
+    needed_kill = type(observed) == "table" and type(observed.stop) == "table" and observed.stop.needed_kill or nil,
+    survivors = type(observed) == "table" and type(observed.stop) == "table" and observed.stop.survivors or nil,
+  }
+  -- The state answered is the one from BEFORE the stop: an operation this call stopped is a cancelled
+  -- call, never a done one (a settled state would be read as the command's own result and the reason
+  -- would be lost). The facts of the stop travel in record.stop.
+  return state, "run_cancelled"
 end
 
 local function executor_of(record)
@@ -1168,6 +1359,11 @@ local function handle(record, waited_s, state)
   if record.kind == "whatsapp_query" then
     out.waited_ms = math.floor((tonumber(waited_s) or 0) * 1000)
   end
+  -- A stopped call says what was stopped, in one sentence the reader (and the model) can act on.
+  if type(record.stop) == "table" then
+    out.stop = record.stop
+    out.stop_note = record.stop.note
+  end
   local source = type(state) == "table" and state or (type(record.progress) == "table" and record.progress or nil)
   if source then
     out.stdout_path = source.stdout_path
@@ -1230,6 +1426,14 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
         M.MAX_OPEN .. " pending calls per session; pending() lists them)" }
   end
   local started_at = now_seconds()
+  -- AN AWAIT THAT NAMES NO ID ONLY LOOKS (28/11): the id it attaches to is the one call this script started,
+  -- so the call is a look at a handle, not a wait for it. Without this the default 60 s wait spent the whole
+  -- code-mode budget and the reader's stop found a dead script (`TimeoutError: the script ran past the budget`,
+  -- measured twice in the detached scenario). A caller that wants to wait names the id and the seconds.
+  if name == "operation" and type(params) == "table" and tostring(params.action or "") == "await"
+      and (params.id == nil or params.id == "") and wait_s == nil then
+    wait_s = M.LOOK_WAIT_S
+  end
   local budget = M.effective_ms(wait_s, remaining_of(opts))
   -- The call starts at the node's own priority, whatever wait it named (18/11 round 3, item 5). The
   -- priority of work nobody waits for is applied at the ONE boundary where that becomes a fact - the end
@@ -1242,7 +1446,20 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     -- The call finished as it always did: a refusal, a guarded command, an immediate answer.
     if started.op and started.register then
       index.ops[started.op] = { op = started.op, tool = name, kind = executor.kind, scope = scope,
-        started_at = started_at, state = "running", reported = false, node = started.node }
+        started_at = started_at, state = "running", reported = false, node = started.node,
+        -- THE WORK ITS OWN NAME (28/11): a stop that leaves this running says `still running: sleep 30 (op ...)`, and
+        -- the command was never carried onto the record, so the answer could only say `op op-...`. The name is the
+        -- caller's own, taken at the moment it was given.
+        -- THE COMMAND THE RECEIPT CARRIES (28/11): a `start` answers the node's own record of the work, which
+        -- names its command even when the call did not. Reading it here makes `still running: <command> (op <id>)`
+        -- the same sentence on every run instead of depending on how the caller spelled the call.
+        command = (type(started.result) == "table" and type(started.result.command) == "string"
+          and started.result.command ~= "" and started.result.command)
+          or (type(params) == "table" and type(params.command) == "string" and params.command ~= ""
+            and params.command) or nil,
+        -- Started by the `operation` tool: the caller asked for work that outlives the call, so a
+        -- stop leaves it running and says so.
+        detached = true }
       M.save(scope, index)
     end
     return started.result
@@ -1253,6 +1470,13 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     -- that handle settles (watch_settle). It is this call's own evidence: a map of path -> porcelain
     -- status, never a file's text, and it is dropped at the moment it is compared.
     watch = started.watch,
+    -- What a STOP needs, taken at the moment the call STARTED (never at the moment of the stop): the
+    -- command it can name, and whether this call was left running on purpose. A call left with
+    -- wait_s:0, and anything the `operation` tool started or attached to, is work no turn owns any
+    -- more - a background server the person asked for - and a stop must not kill it.
+    command = (name == "bash" or name == "remote") and type(params) == "table"
+      and type(params.command) == "string" and params.command ~= "" and params.command or nil,
+    detached = (type(wait_s) == "number" and wait_s <= 0) or name == "operation" or nil,
     session = tostring(opts.session or ""), args = tostring(host.sha256(raw or "{}")),
     node = started.node,
     -- An outbox handle can be a DRAFT, and a draft is the one outbox handle a cancel can stop
@@ -1535,6 +1759,190 @@ end
 -- Handles outlive the script, so something has to notice work that finished while nobody was waiting
 -- on it. `begin` settles them (one poll per open handle, no waiting) and `announce` reports each one
 -- exactly once, on the next script in that scope. Nothing is ever replayed.
+
+-- ===================================================================== native calls are pending work too
+-- ESC STOPS WHAT THE TURN STARTED, whatever door started it (decision (a), 27/11). Until this, the pending
+-- registry was opened only by the code-mode path, so a script's `bash` had a record and the reader's own
+-- `bash` - the same command, the same process group, the same stop - had none: no `stopped: <command>` line,
+-- and nothing in the store to say how the group ended. The row that caught it drives the NATIVE loop, which
+-- calls lua/core/tools.lua directly, so its record was `null` where a script's was complete.
+--
+-- Two functions are the whole seam: `native_open` puts the call in the SAME index (one owner of "what this turn
+-- started"), `native_settle` closes it - with the stop facts read from the operations layer, the same answer the
+-- managed executor reads, never a value invented here.
+
+local native_dir_ready = false
+
+function M.native_open(scope, tool, params, detached)
+  -- THE DIRECTORY FIRST. M.save writes one file per scope and a write into a directory that does not exist
+  -- fails silently (measured 27/11: the row's homes had no codemode-pending/ at all, so every native stop wrote
+  -- nothing and the store answered `null`). The empty prefix is how lua/core/approve.lua creates its own dir -
+  -- one call, no new host function.
+  -- THE DIRECTORY FIRST, by this tree's own way of making one: host.write_file does NOT create parents
+  -- (measured 27/11: nothing ever appeared under ~/.wasm-agent/codemode-pending/), and mission.lua,
+  -- font_setup.lua and feature_canary.lua all shell out to mkdir -p for exactly this. Once per process.
+  if not native_dir_ready then
+    native_dir_ready = true
+    if host.exec then pcall(host.exec, 'mkdir -p ' .. string.format('%q', M.dir()), '', 20) end
+  end
+  local index = M.open(scope)
+  local n = 0
+  for _ in pairs(index.ops) do n = n + 1 end
+  local id = tostring(params and params.id or (tostring(tool) .. "-native-" .. tostring(now_seconds()) .. "-" .. tostring(n + 1)))
+  local record = {
+    op = id, kind = tool, tool = tool, state = "running", started = now_seconds(), native = true,
+    detached = detached == true,
+    command = params and (params.command or params.code) or nil,
+    node = params and params.node or nil, scope = scope,
+  }
+  index.ops[id] = record
+  index.count = open_count(index)
+  M.save(scope, index)
+  return { scope = scope, id = id, started = record.started, command = record.command, detached = record.detached }
+end
+
+-- CLOSED FROM THE UNWIND, not from the tool call (measured 27/11: a stop tears the tool call down and neither the
+-- return nor an error handler inside it ever runs, so every record was left state=running with no stop). The one
+-- place a live interpreter still exists after a stop is lua/core/agent.lua's run_body, where `run_cancelled` is
+-- caught; it calls this with the sentence it also prints. Facts are asked of the operations layer here, off the
+-- tool's path, so nothing the reader waits for pays for them.
+function M.close_open_native(scope, dispatch, note, tool)
+  local index = M.open(scope)
+  local closed = 0
+  local last_note, last_tool, last_id = nil, nil, nil
+  local left = nil
+  for _, record in pairs(index.ops or {}) do
+    -- WORK LEFT RUNNING ON PURPOSE IS ANSWERED, NOT CLOSED (28/11). A call the turn started detached is not the
+    -- stop's to kill, and the sentence has to say so instead of claiming a stop: when the stop tears the script
+    -- down, the pending layer's own stop_work never runs, so this is the one place that can still write it.
+    -- The record keeps state=running and gains the stop's own words; nothing is signalled for it and the record
+    -- says that (`detached`, no signal).
+    local is_detached_left = record ~= nil and record.detached == true and record.state == "running"
+      and record.native ~= true
+    if is_detached_left then
+      -- THE WORK IS NAMED ONCE: `still running: sleep 30 (op <id>)`, and the op id only when the record never
+      -- carried a command - never `still running: op op-<id>` (measured 28/11: that is what the reader got).
+      -- AND THE COMMAND FROM THE NODE WHEN THE RECORD HAS NONE (28/11): the operations layer holds the command
+      -- this call actually runs, so the sentence can name the work (`still running: sleep 30 (op ...)`) even
+      -- when the record was registered without one. A failed read changes nothing: the op id still names it.
+      local named = nil
+      if type(record.command) == "string" and record.command ~= "" then named = record.command
+      elseif dispatch ~= nil and type(record.op) == "string" then
+        local ok_read, observed = pcall(snapshot, dispatch, record.op)
+        if ok_read and type(observed) == "table" and type(observed.command) == "string"
+            and observed.command ~= "" then named = observed.command end
+      end
+      local name = named or tostring(record.op)
+      record.stop = { command = record.command, after_s = now_seconds() - (record.started or now_seconds()),
+        detached = true, confirmed = nil, signal = nil, survivors = nil,
+        note = "still running: " .. tostring(name) .. " (op " .. tostring(record.op)
+          .. "), left alone because it was started detached" }
+      left = record.stop.note
+      last_tool = record.tool
+      last_id = record.op
+      M.save(scope, index)
+    end
+    if record and record.native == true and record.state == "running" and (tool == nil or record.tool == tool) then
+      -- NO ASKING INSIDE THE STOP (28/11). This called the operations layer once per open record to read the
+      -- signal, and that is a socket round trip in the one path the reader is waiting on - the same wait the
+      -- orchestrator's decision removed from the answer. The facts have their owner: the runner writes them beside
+      -- the record at the kill (spec.stop_record), and a reader merges them on demand. The stop line needs the
+      -- count and the id, and nothing else here may cost the reader a millisecond.
+      local signal, facts = nil, nil
+      record.stop = { command = record.command, after_s = now_seconds() - (record.started or now_seconds()),
+        detached = record.detached == true, note = note,
+        confirmed = (record.detached == true) and nil or true,
+        signal = (record.detached == true) and nil or signal,
+        survivors = facts and facts.survivors or nil }
+      record.state = (record.detached == true) and "running" or "cancelled"
+      record.closed_by = "the stop closer"
+      -- EACH CALL NAMED FOR ITSELF (28/11). One shared sentence for every record closed in this pass named the
+      -- wrong work twice: a settled-looking `echo warm` record carried the `sleep 30` sentence, and the count said
+      -- "stopped 2" for one command. Each closed record now says its own tool and its own id.
+      if record.detached == true then
+        record.stop.note = 'still running: ' .. tostring(record.command) .. ' (op ' .. tostring(record.op) .. ')'
+      else
+        record.stop.note = 'stopped: ' .. tostring(record.command)
+      end
+      closed = closed + 1
+      last_note = record.stop.note
+      last_tool = record.tool
+      last_id = record.op
+    end
+  end
+  if closed > 0 then M.save(scope, index) end
+  -- THE SENTENCE GOES BACK WITH THE COUNT: the caller (the tool loop, which still holds dispatch_ctx) puts it on the
+  -- run so the reader's line can say what the stop stopped. Format decided 27/11: a count and the record's id -
+  -- "stopped 1: bash; record <id>" - never the facts, which are read from the record on demand.
+  -- WHAT IS STILL RUNNING COMES FIRST (28/11): work the turn started detached did not go with the stop, and a
+  -- reader told only "stopped 1: bash" would look for it. Both facts fit one line, the stopped count with its
+  -- record id and the detached work with its op.
+  local stopped_said = closed > 0
+    and ('stopped ' .. tostring(closed) .. ': ' .. tostring(last_tool or 'call')
+      .. '; record ' .. tostring(last_id or '?')) or nil
+  if left ~= nil and stopped_said ~= nil then return closed, left .. '; ' .. stopped_said end
+  if stopped_said ~= nil then return closed, stopped_said end
+  if left ~= nil then return 0, left end
+  return 0, nil
+end
+
+function M.native_settle(handle, dispatch, outcome)
+  if type(handle) ~= "table" or handle.id == nil then return nil end
+  local index = M.open(handle.scope)
+  local record = index.ops[handle.id]
+  if type(record) ~= "table" then return nil end
+  outcome = type(outcome) == "table" and outcome or {}
+  local after = tonumber(outcome.after_s) or (now_seconds() - (record.started or now_seconds()))
+  local stopped = outcome.stopped == true or outcome.cancelled == true or outcome.stop ~= nil
+  local id = outcome.operation_id or outcome.op or (outcome.timing and outcome.timing.operation_id) or nil
+  if id ~= nil then record.op = tostring(id) end
+  record.detached = outcome.detached == true or record.detached == true
+  if stopped then
+    -- WHAT THE NODE SAW, not what we hoped: snapshot() is the operations layer's own answer for this op.
+    -- NEVER WAIT FOR FACTS INSIDE THE ANSWER (orchestrator decision, 27/11). The supervisor finishes the kill
+    -- after the runner has answered, so the signal and the survivors are not knowable here without spending the
+    -- reader's prompt budget: asking and waiting inside the stop made the prompt late (measured: 20/9 with the
+    -- wait, against 22/7 without). The record is written at once with what IS known, and the facts are read on
+    -- demand from the record - which is what `snapshot` below fills the moment the node reports them.
+    local observed = (id ~= nil and dispatch ~= nil) and snapshot(dispatch, tostring(id)) or nil
+    local facts = type(observed) == "table" and type(observed.stop) == "table" and observed.stop or nil
+    local survivors = facts and facts.survivors or outcome.survivors
+    local signal = facts and facts.signal or outcome.signal
+    local grace = facts and facts.grace_ms or outcome.grace_ms
+    -- THE ANSWER NAMES THE WORK AND POINTS AT THE RECORD, it does not carry the record: "stopped 1: bash;
+    -- record <id>". One line that fits any budget, and the facts (signal, survivors, how long the group
+    -- survived) are read from the store by whoever wants them.
+    local head
+    if record.detached then
+      head = "still running: " .. tostring(record.command) .. " (op " .. tostring(record.op)
+        .. "), left alone because it was started detached"
+      signal = nil   -- nothing was signalled for it; saying otherwise is the lie the row checks for
+    else
+      head = "stopped 1: " .. tostring(record.tool or record.kind or "call") .. "; record " .. tostring(handle.id)
+    end
+    local note = head
+    if not record.detached and signal == "TERM" then
+      note = head .. " (nothing survived the " .. tostring(grace or M.STOP_CONFIRM_MS) .. " ms grace)"
+    elseif not record.detached and signal == "KILL" then
+      note = head .. " (it did not end on the stop, so its group was killed after the "
+        .. tostring(grace or M.STOP_CONFIRM_MS) .. " ms grace)"
+    end
+    record.stop = { command = record.command, after_s = after, detached = record.detached == true,
+      note = note, confirmed = (record.detached and nil) or true, signal = signal, survivors = survivors }
+    record.state = record.detached and "running" or "cancelled"
+    M.save(handle.scope, index)
+    return note
+  end
+  record.state = outcome.error ~= nil and "failed" or "settled"
+  -- WHO WROTE THIS (28/11, one instrumented run): the record now says which path closed it, so "did the call settle
+  -- itself or did the stop close it" is read off the disk instead of guessed from the source. `settled_at` is set
+  -- here and nowhere else.
+  record.settled_at = now_seconds()
+  record.closed_by = "the call itself"
+  M.save(handle.scope, index)
+  return nil
+end
+
 function M.begin(dispatch, opts)
   local scope = opts.scope
   local index = M.open(scope)
