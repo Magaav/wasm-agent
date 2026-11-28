@@ -1843,10 +1843,12 @@ function M.close_open_native(scope, dispatch, note, tool)
       M.save(scope, index)
     end
     if record and record.native == true and record.state == "running" and (tool == nil or record.tool == tool) then
-      local observed = nil
-      if dispatch ~= nil and record.op ~= nil then observed = snapshot(dispatch, tostring(record.op)) end
-      local facts = type(observed) == "table" and type(observed.stop) == "table" and observed.stop or nil
-      local signal = facts and facts.signal or nil
+      -- NO ASKING INSIDE THE STOP (28/11). This called the operations layer once per open record to read the
+      -- signal, and that is a socket round trip in the one path the reader is waiting on - the same wait the
+      -- orchestrator's decision removed from the answer. The facts have their owner: the runner writes them beside
+      -- the record at the kill (spec.stop_record), and a reader merges them on demand. The stop line needs the
+      -- count and the id, and nothing else here may cost the reader a millisecond.
+      local signal, facts = nil, nil
       record.stop = { command = record.command, after_s = now_seconds() - (record.started or now_seconds()),
         detached = record.detached == true, note = note,
         confirmed = (record.detached == true) and nil or true,
