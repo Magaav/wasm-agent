@@ -2789,6 +2789,13 @@ dependencies = [
 [[package]]
 name = "wa-queue"
 version = "0.1.0"
+dependencies = [
+ "wa-queue-contract",
+]
+
+[[package]]
+name = "wa-queue-contract"
+version = "0.1.0"
 
 [[package]]
 name = "wa-remap-rustc"
