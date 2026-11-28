@@ -280,6 +280,10 @@ stub_release() { # <base> <sign: yes|no|flip|other-key>
   dir="$base"; mkdir -p "$dir"
   elf 62 "$dir/wa-$TRIPLE-$SHORT"            # 0x3e = EM_X86_64
   elf 62 "$dir/wa-sentinel-$TRIPLE-$SHORT"
+  # THE OTHER TWO MEMBERS, for the same reason: publish-node-binaries.sh:487-493 refuses a set without
+  # wa-term (the program) or wa-operations-supervisor, and reads them from the manifest's own columns.
+  elf 62 "$dir/wa-term-$TRIPLE-$SHORT"
+  elf 62 "$dir/wa-operations-supervisor-$TRIPLE-$SHORT"
   # AND THE ICON FONT, because a real set from this tree carries it (item 7, Victor 23/11):
   # scripts/publish-node-binaries.sh:412-413 copies assets/fonts/waIcons-Regular.ttf beside the binaries and
   # refuses a set without it (font_missing), and :713 puts it in $assets, so the release's SHA256SUMS names
@@ -296,10 +300,11 @@ stub_release() { # <base> <sign: yes|no|flip|other-key>
     printf 'codemode=embedded\n'
     # A '#'-prefixed header: every non-comment non-KEY=VALUE line is read as a target row, so a bare
     # header would be one more (unpinned) triple.
-    printf '#target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes\n'
-    printf '%s %s %s %s %s\n' "$TRIPLE" \
+    printf '#target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes\n'
+    printf '%s %s %s %s %s %s %s\n' "$TRIPLE" \
       "$(wa_release_sha256 "$dir/wa-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-$TRIPLE-$SHORT" | tr -d '[:space:]')" \
-      "$(wa_release_sha256 "$dir/wa-sentinel-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-sentinel-$TRIPLE-$SHORT" | tr -d '[:space:]')"
+      "$(wa_release_sha256 "$dir/wa-sentinel-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-sentinel-$TRIPLE-$SHORT" | tr -d '[:space:]')" \
+      "$(wa_release_sha256 "$dir/wa-term-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-term-$TRIPLE-$SHORT" | tr -d '[:space:]')"
   } > "$dir/node-$SHORT.manifest"
   case "$mode" in
     yes) python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$dir" --key A >/dev/null 2>&1 ;;
