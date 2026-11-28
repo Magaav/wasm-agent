@@ -311,10 +311,18 @@ pub fn parse(html: &str) -> Result<Page, Refusal> {
             Tok::Open { name, attrs, self_closing } => {
                 if stack.len() >= MAX_DEPTH { return Err(Refusal::TooDeep); }
                 let role = role_of(&name, &attrs);
+                // THE NAME, by the rule that cost a test its meaning: an input is named by `aria-label`, `alt`,
+                // `placeholder` or `title` - and by `value` ONLY when it is a button-ish input, because that is
+                // the text a person reads on it. A text field's `value` is its CONTENT, not its name: naming it
+                // by value made `resolve` answer a field when a caller asked for a button.
+                let button_ish = matches!(name.as_str(), "button")
+                    || (name == "input"
+                        && matches!(attr(&attrs, "type").unwrap_or("text"), "submit" | "button" | "reset"));
                 let hint = attr(&attrs, "aria-label")
                     .or_else(|| attr(&attrs, "alt"))
                     .or_else(|| attr(&attrs, "placeholder"))
                     .or_else(|| attr(&attrs, "title"))
+                    .or_else(|| if button_ish { attr(&attrs, "value") } else { None })
                     .unwrap_or_default()
                     .to_string();
                 let name_from_text = !matches!(name.as_str(), "input" | "img" | "br" | "hr" | "select");
@@ -524,6 +532,21 @@ mod tests {
         assert!(found.iter().any(|(r, n)| *r == "textbox" && n == "Usuario"), "a placeholder names a field: {found:?}");
         assert!(found.iter().any(|(r, n)| *r == "button" && n.contains("Entrar")), "{found:?}");
         assert!(found.iter().any(|(r, _)| *r == "cell"), "{found:?}");
+    }
+
+
+    #[test]
+    fn a_submit_input_is_named_by_its_value_and_a_text_field_is_not() {
+        let page = r#"<form action="/f"><input type="submit" value="Entrar"><input name="q" value="conteudo"></form>"#;
+        let tree = tree(page).unwrap();
+        let mut roles: Vec<(String, String)> = Vec::new();
+        fn walk(node: &Node, out: &mut Vec<(String, String)>) {
+            if let Some(role) = node.role { out.push((role.to_string(), node.name.clone())); }
+            for c in &node.children { walk(c, out); }
+        }
+        walk(&tree, &mut roles);
+        assert!(roles.iter().any(|(r, n)| r == "button" && n == "Entrar"), "a submit is named by value: {roles:?}");
+        assert!(roles.iter().any(|(r, n)| r == "textbox" && n.is_empty()), "a text field value is content, not a name: {roles:?}");
     }
 
     #[test]
