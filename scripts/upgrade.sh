@@ -1157,14 +1157,14 @@ if [ "$TARGET_DIR" != "$INSTALL_DIR" ]; then
     || { rm -f "$TARGET_DIR/$TERM_NAME.new"; say "cannot stage $TERM_NAME in $TARGET_DIR"; exit 1; }
   chmod 0755 "$TARGET_DIR/$TERM_NAME" 2>/dev/null || true
   # THE SUPERVISOR IS SEALED WITH IT (P0, 27/11): `wa` runs it for every bash/operations call, so a sealed tree without
-  # it installs a node that answers nothing. Same place, same chmod, same reason as wa-term above.
+  # it installs a node that answers nothing - the pair rule of line 185, applied to the staging tree.
+  # IT IS COPIED FROM BESIDE THE CANDIDATE, never demanded of the tree: a staging directory starts EMPTY, so a check for
+  # a file nothing writes could only refuse. Measured 2026-11-27: staging exited 1 with wa/wa-term/scripts already
+  # written, so a version could be staged only to never be sealed. One block, one copy, then the check is a verification.
   SUPERVISOR_NAME="wa-operations-supervisor"; case "$EXE" in *.exe) SUPERVISOR_NAME="wa-operations-supervisor.exe" ;; esac
-  [ -f "$TARGET_DIR/$SUPERVISOR_NAME" ] || { say "refused(operations_supervisor_missing): $TARGET_DIR has no $SUPERVISOR_NAME, so a node sealed from it would answer no bash/operations call; nothing was installed"; exit 1; }
-  chmod 0755 "$TARGET_DIR/$SUPERVISOR_NAME" 2>/dev/null || true
-  # THE SUPERVISOR IS SEALED WITH IT (P0, 27/11): `wa` runs it for every bash/operations call, so a sealed tree without
-  # it installs a node that answers nothing. Same place, same chmod, same reason as wa-term above.
-  SUPERVISOR_NAME="wa-operations-supervisor"; case "$EXE" in *.exe) SUPERVISOR_NAME="wa-operations-supervisor.exe" ;; esac
-  [ -f "$TARGET_DIR/$SUPERVISOR_NAME" ] || { say "refused(operations_supervisor_missing): $TARGET_DIR has no $SUPERVISOR_NAME, so a node sealed from it would answer no bash/operations call; nothing was installed"; exit 1; }
+  CANDIDATE_SUPERVISOR="$(dirname "$NEW")/$SUPERVISOR_NAME"
+  [ -f "$CANDIDATE_SUPERVISOR" ] || { say "refused(operations_supervisor_missing): $CANDIDATE_SUPERVISOR is not beside $NEW, so nothing was staged"; exit 1; }
+  { cp -f "$CANDIDATE_SUPERVISOR" "$TARGET_DIR/$SUPERVISOR_NAME.new"       && mv -f "$TARGET_DIR/$SUPERVISOR_NAME.new" "$TARGET_DIR/$SUPERVISOR_NAME"; }     || { rm -f "$TARGET_DIR/$SUPERVISOR_NAME.new"; say "cannot stage $SUPERVISOR_NAME in $TARGET_DIR"; exit 1; }
   chmod 0755 "$TARGET_DIR/$SUPERVISOR_NAME" 2>/dev/null || true
   { cp -f "$0" "$TARGET_DIR/scripts/upgrade.sh.new.$$" \
       && mv -f "$TARGET_DIR/scripts/upgrade.sh.new.$$" "$TARGET_DIR/scripts/upgrade.sh"; } 2>/dev/null || true
