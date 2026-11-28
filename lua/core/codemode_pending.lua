@@ -1150,7 +1150,10 @@ stop_work = function(dispatch, opts, record, state)
     -- turn's to end. The answer names it instead of pretending it went with the run.
     -- THE WORK ITSELF IS NAMED (28/11): the command this record carries, or its op id if it never had one -
     -- never a sentence that says `op` twice (`still running: op op-...`), which is what the reader got.
-    note = "still running: " .. tostring(record.command or record.op) .. span
+    -- THE RECORD'S OWN COMMAND, never the watch's (28/11): `watch.command` is a display string, and using it here
+    -- produced `still running: op op-<id>`. When the record has none, its op id names it once.
+    local named = type(record.command) == "string" and record.command ~= "" and record.command or nil
+    note = "still running: " .. tostring(named or record.op) .. span
       .. " (op " .. tostring(record.op) .. where
       .. "), left alone because it was started detached (wait_s:0, or the operation tool)"
   else
@@ -1447,8 +1450,13 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
         -- THE WORK ITS OWN NAME (28/11): a stop that leaves this running says `still running: sleep 30 (op ...)`, and
         -- the command was never carried onto the record, so the answer could only say `op op-...`. The name is the
         -- caller's own, taken at the moment it was given.
-        command = type(params) == "table" and type(params.command) == "string" and params.command ~= ""
-          and params.command or nil,
+        -- THE COMMAND THE RECEIPT CARRIES (28/11): a `start` answers the node's own record of the work, which
+        -- names its command even when the call did not. Reading it here makes `still running: <command> (op <id>)`
+        -- the same sentence on every run instead of depending on how the caller spelled the call.
+        command = (type(started.result) == "table" and type(started.result.command) == "string"
+          and started.result.command ~= "" and started.result.command)
+          or (type(params) == "table" and type(params.command) == "string" and params.command ~= ""
+            and params.command) or nil,
         -- Started by the `operation` tool: the caller asked for work that outlives the call, so a
         -- stop leaves it running and says so.
         detached = true }
@@ -1812,7 +1820,19 @@ function M.close_open_native(scope, dispatch, note, tool)
     local is_detached_left = record ~= nil and record.detached == true and record.state == "running"
       and record.native ~= true
     if is_detached_left then
-      local name = record.command or ("op " .. tostring(record.op))
+      -- THE WORK IS NAMED ONCE: `still running: sleep 30 (op <id>)`, and the op id only when the record never
+      -- carried a command - never `still running: op op-<id>` (measured 28/11: that is what the reader got).
+      -- AND THE COMMAND FROM THE NODE WHEN THE RECORD HAS NONE (28/11): the operations layer holds the command
+      -- this call actually runs, so the sentence can name the work (`still running: sleep 30 (op ...)`) even
+      -- when the record was registered without one. A failed read changes nothing: the op id still names it.
+      local named = nil
+      if type(record.command) == "string" and record.command ~= "" then named = record.command
+      elseif dispatch ~= nil and type(record.op) == "string" then
+        local ok_read, observed = pcall(snapshot, dispatch, record.op)
+        if ok_read and type(observed) == "table" and type(observed.command) == "string"
+            and observed.command ~= "" then named = observed.command end
+      end
+      local name = named or tostring(record.op)
       record.stop = { command = record.command, after_s = now_seconds() - (record.started or now_seconds()),
         detached = true, confirmed = nil, signal = nil, survivors = nil,
         note = "still running: " .. tostring(name) .. " (op " .. tostring(record.op)

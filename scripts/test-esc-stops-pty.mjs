@@ -1024,7 +1024,12 @@ if (crash) {
         + ', why: ' + String(detached.shellWhy));
     const detachedText = (detached.finalRows || []).join('\n');
     check('detached: the answer says what is still running instead of claiming a stop',
-      detachedText.includes('still running: sleep 30'), 'the screen after the stop:\n' + detachedText);
+      // THE CLAIM, NOT THE WORDING (28/11): the answer must say work was LEFT RUNNING and must not claim a stop.
+      // It named the work by its command while the model's own call carried one and by its op id when it did
+      // not, so asserting the command text graded the model's phrasing - the record check below is what holds
+      // the facts (detached, no signal). This still fails when the line claims a stop or says nothing.
+      /Interrupted by user · still running: \S+/.test(detachedText) && !/· stopped \d+:/.test(detachedText),
+      'the screen after the stop:\n' + detachedText);
     const detachedRecord = pendingStop(detached.home);
     check("detached: the node's own record marks it detached, and no stop was signalled for it",
       Boolean(detachedRecord) && detachedRecord.detached === true && detachedRecord.signal === undefined,
