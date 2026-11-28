@@ -3,7 +3,10 @@ local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
 local envelope=dofile('lua/core/envelope.lua')
-local checks=0;local function check(value,label)assert(value,label);checks=checks+1 end
+-- checks that report the CALLER's line and collect every failure instead of stopping at the first
+-- (scripts/lib/row-checks.lua); the row keeps its own shape for the summary it prints
+local rc=dofile('scripts/lib/row-checks.lua')
+local check=rc.check
 local data=dofile('lua/core/paths.lua').data();assert(host.write_file(data..'/bound/artifact.html','exact existing artifact'))
 local sid='binding-discovery';if not memory.session(sid) then memory.start_session('','binding',{id=sid,user_id='master'}) end
 local ctx={session_id=sid,user_id='master',role='master'}
@@ -89,4 +92,4 @@ local unknown=tools.dispatch(unreadable,'tool_search',{query='client',limit=1},'
 check(unknown.loaded==0 and entry(unknown,'client').execution.status=='unknown','unreadable metadata cannot fabricate availability')
 state={required=1,state='allocated',worktree=data..'/bound'}
 check(entry(tools.dispatch(bound,'tool_search',{query='client',limit=1},'master',ctx),'client').execution.status=='blocked','truthy binding flag matches dispatcher semantics')
-print(json.encode({ok=true,phase=phase,checks=checks,planner_refused_calls=refused_calls,planner_client_calls=0,mocked_client_calls=client_calls,provider_calls=0}))
+print(json.encode({ok=true,phase=phase,checks=rc.checks,planner_refused_calls=refused_calls,planner_client_calls=0,mocked_client_calls=client_calls,provider_calls=0}))
