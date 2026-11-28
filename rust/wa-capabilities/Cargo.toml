@@ -54,7 +54,6 @@ wa-grant-policy = { path = "../wa-grant-policy" }
 # builds for wasm32-wasip2 inside `rust/components/wa-whatsapp`.
 # The email send's seam (`email_send`): the request shape, its bounds and its audit digest, shared with
 # the `wa-email` component that consumes the job.
-wa-email-outbox = { path = "../wa-email-outbox" }
 # The query seam (`whatsapp.query`): the request/answer shape, its bounds and the download manifest,
 # shared with the WA component that answers it (docs/SERVICE-COMPONENTS.md).
 wa-whatsapp-index = { path = "../wa-whatsapp-index" }
@@ -90,6 +89,9 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p
 tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
+# The email-send contract answers through its component now (`email_outbox_component`); the crate stays a
+# dev-dependency because the tests assert the contract's own rules beside the seam.
+wa-email-outbox = { path = "../wa-email-outbox" }
 wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 wat = "1"
 # `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and no configuration
