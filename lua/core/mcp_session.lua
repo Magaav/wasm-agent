@@ -227,8 +227,13 @@ function M.invoke(input,ctx,directory)
   result.outcome=result.ok and 'settled' or 'error'
  end
  if result.outcome~='unknown' then
-  local released=decode(host.sql_exec('DELETE FROM meta WHERE key=? AND value=?',json.encode({uncertain_key,request})))
-  if not released or released.error or released.ok~=true or released.changes~=1 then error('mcp_uncertainty_release_unverified: '..request) end
+  -- THE RESERVATION IS TWO ROWS (28/11): the hold writes `uncertain_key` AND `uncertain_key..':at'`, and a
+  -- release that deleted only the first left the timestamp behind for the life of the database - the gate row
+  -- `test-mcp-recovery` caught it as `verified result releases durable reservation` (1 !== 0), and an expired()
+  -- check would then read a stamp that belongs to no reservation at all. One statement, both rows, same value
+  -- match on the reservation itself.
+  local released=decode(host.sql_exec('DELETE FROM meta WHERE (key=? AND value=?) OR key=?',json.encode({uncertain_key,request,uncertain_key..':at'})))
+  if not released or released.error or released.ok~=true or released.changes~=2 then error('mcp_uncertainty_release_unverified: '..request) end
   slot.unknown=nil
  end
  -- A settled marker is named in the answer that follows it: the reader learns that an earlier reservation was
