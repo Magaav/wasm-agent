@@ -1269,6 +1269,10 @@ check release-channel bash scripts/test-release-channel-e2e.sh
 # scan ran at the 20 s default on a cold stage, and the bundle it would have used carries no wa-term and no
 # wa-operations-supervisor. This row is the guard on the bound, the named step and the built sidecars.
 check health-graded bash scripts/test-health-graded.sh
+# A TIP YOUNGER THAN ITS OWN PUBLISH MUST BE GRADED (28/11): the loop waits for the publish and names the bundle.
+check health-settles bash scripts/test-health-settles.sh
+# EVERY TIP ENDS IN ONE LINE (28/11): green, red, or NO VERDICT with SIGTERM, budget or LOCK HOLDER named.
+check health-verdict bash scripts/test-health-verdict.sh
 # A FORGOTTEN SWAP IS A LINE, NOT AN AFTERNOON (28/11): the loop runs a copy under _orch that a human swaps, and a
 # stale lib made every tip print NOT GRADED while the fix sat landed in main. This row exercises the self-check.
 check health-swap-visible bash scripts/test-health-swap-visible.sh
