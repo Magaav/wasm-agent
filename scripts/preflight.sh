@@ -111,6 +111,7 @@ started=$(date +%s)
 {
   echo "--- preflight $RUN $(date -u +%FT%TZ)"
   echo "    branch $BRANCH"
+  echo "    tree $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "    wa $WA"
   echo "    lock $LOCK (flock -o)"
   echo "    land root $LAND_ROOT"
