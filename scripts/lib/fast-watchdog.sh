@@ -86,7 +86,17 @@ wa_fast_watchdog() { # <seconds> <label> -- <command...>
   leftovers=$(pgrep -g "$pid" 2>/dev/null | wc -l | tr -d "[:space:]")
   if [ "$leftovers" -gt 0 ] 2>/dev/null; then
     kill -TERM -- "-$pid" 2>/dev/null
-    sleep "${WA_FAST_WATCHDOG_REAP_GRACE:-1}"
+    # THE GRACE IS A CEILING, NOT A WAIT. A flat `sleep 1` here costs one whole second on EVERY row that
+    # leaves a child, and that is not a rare case: in the run of 20261128T092117Z, 163 of 431 rows left a
+    # process in their group and 139 of those still PASSED - so ~163 s of a 2491 s suite was this sleep,
+    # not any test. Children almost always die on TERM at once, so ask every 50 ms and stop as soon as the
+    # group is empty, keeping WA_FAST_WATCHDOG_REAP_GRACE as the longest we will wait.
+    local reap_limit reap_waited=0 reap_step=50
+    reap_limit=$(( ${WA_FAST_WATCHDOG_REAP_GRACE:-1} * 1000 ))
+    while [ "$reap_waited" -lt "$reap_limit" ] && [ "$(pgrep -g "$pid" 2>/dev/null | wc -l | tr -d '[:space:]')" -gt 0 ] 2>/dev/null; do
+      sleep 0.05
+      reap_waited=$((reap_waited + reap_step))
+    done
     # ASK AGAIN (review SHOULD): the grace may have emptied the group and freed the pgid for reuse. A KILL
     # to a reused group signals an innocent process; membership is re-checked before every signal.
     if [ "$(pgrep -g "$pid" 2>/dev/null | wc -l | tr -d '[:space:]')" -gt 0 ] 2>/dev/null; then
