@@ -11,7 +11,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use wa_whatsapp_index::keys;
+use wa_whatsapp_wire::keys;
 
 /// Which component build and schema the data belongs to, as the installed artifact states it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

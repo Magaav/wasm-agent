@@ -14,7 +14,7 @@
 //! The index it cuts is the component's kv namespace, which the host owns and already administers
 //! (`wa_kernel_runtime::state_host`: export, import, verify, snapshots) - so the cut reads and removes
 //! the very keys the component wrote, using the layout and the tokenizer both ends share
-//! (`wa_whatsapp_index::keys`, `wa_whatsapp_index::text`) instead of a second copy of them.
+//! (`wa_whatsapp_wire::keys`, `wa_whatsapp_wire::text`) instead of a second copy of them.
 //!
 //! What the component does with this, and why the two halves are not one: a restored month is marked
 //! (`restored: true` on the record, `ix/arc/<month>` in the kv), retention walks past its range instead
@@ -151,7 +151,7 @@ fn now_ms() -> i64 {
 
 fn month_arg(request: &Value) -> Result<String, String> {
     let month = request.get("month").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-    wa_whatsapp_index::month::is_month(&month).then_some(month).ok_or_else(|| "archive_month_required".to_string())
+    wa_whatsapp_wire::month::is_month(&month).then_some(month).ok_or_else(|| "archive_month_required".to_string())
 }
 
 // ---- one request ---------------------------------------------------------------------------------

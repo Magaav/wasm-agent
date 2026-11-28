@@ -535,7 +535,7 @@ export -f record_row first_error_of
 # reason, which crosses the seam in `done-event.error` - a host-side record field. A node whose binary
 # predates it answers the suite with one named SKIP and returns in full once that node is installed;
 # nothing about the comparison is narrowed while it waits (scripts/test-codemode-component.lua).
-FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode svc-echo tz outbox email-outbox email-index}
+FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode svc-echo tz outbox whatsapp-index email-outbox email-index}
 # `tz` and `outbox` (28/11, everything-is-a-component) are the two components whose ROWS fail when the
 # artifact is absent - scripts/test-tz-component.sh and scripts/test-outbox-component.sh assert that a node
 # with no such component answers "absent" rather than answering in-process, which is the whole point of the

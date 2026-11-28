@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wa_queue::{EnqueueRequest, JobId};
-use wa_whatsapp_index as seam;
+use crate::whatsapp_index_component as seam;
 
 /// The component whose queue namespace this is (its manifest grants `queue.consume` on
 /// `whatsapp.query`; `rust/components/wa-whatsapp/manifest.json`).
@@ -277,7 +277,7 @@ fn answer_class(l: *mut wa_host_support::lua::LuaState, door: &str, want: seam::
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(args) => match index_op(&args) {
-            Some(op) if op == seam::REGISTRY_OP => {
+            Some(op) if op == seam::registry_op() => {
                 if want != seam::Effect::ReadOnly {
                     seam::refusal_text(
                         op,
@@ -318,10 +318,10 @@ fn index_op(args: &Value) -> Option<&str> {
 /// answer, `count` for `whatsapp_backfill` (which asks the phone how many messages per chat, it does
 /// not page anything). Either name is accepted for either op, so a caller that says `count` to a
 /// search or `limit` to a backfill is understood instead of silently getting the default.
-fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusal> {
+fn request_of(op: seam::Op, args: &Value, build: &str) -> Result<seam::Verified, seam::Refusal> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
     // A time is passed through in the form the caller wrote it: the FORMS are the shared seam's
-    // (`seam::TIME_FORMS`, `seam::parse_time`), so the host neither repeats the rule nor lets a date
+    // (`seam::time_forms()`, `seam::parse_time`), so the host neither repeats the rule nor lets a date
     // string fall on the floor of an `as_i64` that answers `None`.
     let time = |key: &str| -> Result<Option<i64>, seam::Refusal> {
         let code = if key == "since" { "bad_since" } else { "bad_until" };
@@ -329,9 +329,9 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
             None | Some(Value::Null) => Ok(None),
             Some(Value::Number(number)) => Ok(number.as_i64()),
             Some(Value::String(text)) => {
-                seam::parse_time(text).map(Some).ok_or_else(|| seam::Refusal::new(code, seam::TIME_FORMS))
+                seam::parse_time(text).map(Some).ok_or_else(|| seam::Refusal::new(code, seam::time_forms()))
             }
-            Some(_) => Err(seam::Refusal::new(code, seam::TIME_FORMS)),
+            Some(_) => Err(seam::Refusal::new(code, seam::time_forms())),
         }
     };
     let limit = match op {
@@ -362,23 +362,25 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
             other => Ok(other),
         }
     };
-    let request = seam::Request {
-        op: op.as_str().to_string(),
-        q: text("q"),
-        chat: judged(text("chat"))?,
-        id: text("id"),
-        kind: text("kind"),
-        from: judged(text("from"))?,
-        since: time("since")?,
-        until: time("until")?,
-        before: text("before"),
-        limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
-        max_bytes: args.get("max_bytes").and_then(Value::as_u64),
-        // `search` only (`seam::Order`); the seam refuses it on any other op rather than ignoring it.
-        order: args.get("order").and_then(Value::as_str).map(str::to_string),
-        text: text("text"),
-    };
-    request.validate()
+    // The request is described, not decided: the component says whether it is valid, what bytes the queue
+    // must carry and what its dedupe key is for this build (`seam::validate`).
+    let request = serde_json::json!({
+        "op": op.as_str(),
+        "q": text("q"),
+        "chat": judged(text("chat"))?,
+        "id": text("id"),
+        "kind": text("kind"),
+        "from": judged(text("from"))?,
+        "since": time("since")?,
+        "until": time("until")?,
+        "before": text("before"),
+        "limit": limit.map(|value| value.min(u32::MAX as u64)),
+        "max_bytes": args.get("max_bytes").and_then(Value::as_u64),
+        // `search` only; the contract refuses it on any other op rather than ignoring it.
+        "order": args.get("order").and_then(Value::as_str),
+        "text": text("text"),
+    });
+    seam::validate(request, build)
 }
 
 /// Validate, enqueue and wait for the component's answer.
@@ -413,9 +415,9 @@ fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: 
     if let Some(job) = args.get("__job").and_then(Value::as_u64) {
         return settle(q, op, job, wait_ms);
     }
-    let verified = match request_of(op, args) {
+    let verified = match request_of(op, args, build) {
         Ok(verified) => verified,
-        Err(refusal) => return seam::refusal(op, refusal.code, refusal.detail),
+        Err(refusal) => return seam::refusal(op, &refusal.code, &refusal.detail),
     };
     let id = match enqueue(q, &verified, build) {
         Ok(id) => id,
@@ -434,21 +436,21 @@ fn ask_text(op: &str, args: &Value, wait_ms: u64) -> Value {
 /// It is not an index question (`Request::validate` would refuse it `bad_op`), so it is forwarded as it
 /// arrives and settled by its own wait - the same bound, the same poll, the same beat.
 fn answer_registry(args: &Value) -> Value {
-    component_absent_text(seam::REGISTRY_OP)
+    component_absent_text(seam::registry_op())
         .unwrap_or_else(|| ask_registry_in(&queue(), args, &component_build()))
 }
 
 fn ask_registry_in(q: &wa_queue::Queue, args: &Value, build: &str) -> Value {
     let payload = serde_json::to_vec(args).unwrap_or_else(|_| br#"{"op":"ops"}"#.to_vec());
     let id = match q.enqueue(
-        EnqueueRequest::new(seam::QUEUE, payload)
-            .fresh_for(seam::FRESH_MS)
-            .max_attempts(seam::MAX_ATTEMPTS)
-            .dedupe(format!("{}|{build}", seam::REGISTRY_OP))
+        EnqueueRequest::new(seam::queue(), payload)
+            .fresh_for(seam::fresh_ms())
+            .max_attempts(seam::max_attempts())
+            .dedupe(format!("{}|{build}", seam::registry_op()))
             .dedupe_in_flight(),
     ) {
         Ok(enqueued) => enqueued.id.0,
-        Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
+        Err(error) => return seam::refusal_text(seam::registry_op(), "queue_failed", one_line(&error.to_string())),
     };
     let deadline = Instant::now() + Duration::from_millis(crate::serve::wait_ms(args).max(1));
     loop {
@@ -456,25 +458,25 @@ fn ask_registry_in(q: &wa_queue::Queue, args: &Value, build: &str) -> Value {
             Ok(Some(job)) => match job.state.as_str() {
                 "done" => {
                     let Some(result) = job.result.as_deref() else {
-                        return seam::refusal_text(seam::REGISTRY_OP, "answer_missing", "the registry settled without a document");
+                        return seam::refusal_text(seam::registry_op(), "answer_missing", "the registry settled without a document");
                     };
                     return match serde_json::from_slice::<Value>(result) {
                         Ok(document) => document,
-                        Err(_) => seam::refusal_text(seam::REGISTRY_OP, "answer_unreadable", "the stored registry is not readable"),
+                        Err(_) => seam::refusal_text(seam::registry_op(), "answer_unreadable", "the stored registry is not readable"),
                     };
                 }
                 "dead" | "expired" => {
                     let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
-                    return seam::refusal_text(seam::REGISTRY_OP, "failed", reason.chars().take(160).collect::<String>());
+                    return seam::refusal_text(seam::registry_op(), "failed", reason.chars().take(160).collect::<String>());
                 }
                 state => {
                     if Instant::now() >= deadline {
-                        return seam::slow_text(seam::REGISTRY_OP, id, state);
+                        return seam::slow_text(seam::registry_op(), id, state);
                     }
                 }
             },
-            Ok(None) => return seam::refusal_text(seam::REGISTRY_OP, "job_lost", "the registry job is not in the queue any more"),
-            Err(error) => return seam::refusal_text(seam::REGISTRY_OP, "queue_failed", one_line(&error.to_string())),
+            Ok(None) => return seam::refusal_text(seam::registry_op(), "job_lost", "the registry job is not in the queue any more"),
+            Err(error) => return seam::refusal_text(seam::registry_op(), "queue_failed", one_line(&error.to_string())),
         }
         crate::serve::beat();
         std::thread::sleep(POLL);
@@ -489,7 +491,7 @@ fn ask_index_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) ->
 /// [`ask_index_in`] against any generic door: the same three steps, gated by the door's effect class.
 fn ask_class_in(q: &wa_queue::Queue, args: &Value, door: &str, want: seam::Effect, wait_ms: u64, build: &str) -> Value {
     match index_op(args) {
-        Some(op) if op == seam::REGISTRY_OP => {
+        Some(op) if op == seam::registry_op() => {
             if want != seam::Effect::ReadOnly {
                 seam::refusal_text(
                     op,
@@ -521,9 +523,9 @@ fn ask_text_in(q: &wa_queue::Queue, op: &str, args: &Value, wait_ms: u64, build:
         Some(typed) => typed,
         None => return seam::refusal_text(op, "bad_op", format!("`{op}` is not a whatsapp op")),
     };
-    let verified = match request_of(typed, args) {
+    let verified = match request_of(typed, args, build) {
         Ok(verified) => verified,
-        Err(refusal) => return seam::refusal_text(op, refusal.code, refusal.detail),
+        Err(refusal) => return seam::refusal_text(op, &refusal.code, &refusal.detail),
     };
     let id = match enqueue(q, &verified, build) {
         Ok(id) => id,
@@ -534,13 +536,13 @@ fn ask_text_in(q: &wa_queue::Queue, op: &str, args: &Value, wait_ms: u64, build:
 
 fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified, build: &str) -> Result<u64, Value> {
     let op = verified.op;
-    let request = verified.to_request();
+    let request = verified.request.clone();
     match q.enqueue(
-        EnqueueRequest::new(seam::QUEUE, request.encode())
-            .fresh_for(seam::FRESH_MS)
-            .max_attempts(seam::MAX_ATTEMPTS)
+        EnqueueRequest::new(seam::queue(), request)
+            .fresh_for(seam::fresh_ms())
+            .max_attempts(seam::max_attempts())
             // The build is part of the key (`seam::Verified::dedupe_key_in`), never the request alone.
-            .dedupe(verified.dedupe_key_in(build))
+            .dedupe(verified.dedupe.clone())
             // ...and the key stops answering the moment the job settles (dedupe_in_flight): a query
             // answers the state of the index now, so a settled answer handed to a later caller is a
             // silent cache. That is what three reads of one chat in a row did on 23/11: 15:40, 16:15,
@@ -575,7 +577,7 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
             "dead" | "expired" => {
                 let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
                 if let Some(code) = seam::permanent_code(&reason) {
-                    let mut answer = refused(op, code, &reason, None);
+                    let mut answer = refused(op, &code, &reason, None);
                     answer["state"] = Value::String(seam::state_word(job.state.as_str()).to_string());
                     return with_job(answer, id);
                 }
@@ -658,9 +660,9 @@ fn ask_download(args: &Value) -> Value {
 }
 
 fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
-    let verified = match request_of(seam::Op::Download, args) {
+    let verified = match request_of(seam::Op::Download, args, build) {
         Ok(verified) => verified,
-        Err(refusal) => return seam::refusal(seam::Op::Download, refusal.code, refusal.detail),
+        Err(refusal) => return seam::refusal(seam::Op::Download, &refusal.code, &refusal.detail),
     };
     let id = match enqueue(q, &verified, build) {
         Ok(id) => id,

@@ -282,7 +282,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use wa_whatsapp_outbox::{self as outbox, Decision, Request as OutboxRequest};
-
     /// The capability the rule is written under (`node_policy::check_whatsapp_send` names it; the
     /// tests here write a policy file with it, so a rename has to be made in one place).
     const CAPABILITY: &str = "whatsapp.send";
@@ -418,7 +417,7 @@ mod tests {
     fn a_queued_request_takes_the_dedupe_key_and_the_briefs_limits() {
         let host = host("enqueue");
         let queue = host.queue(COMPONENT);
-        let request = OutboxRequest {
+        let request = outbox::Request {
             chat: "5511999999999@lid".into(),
             text: "oi".into(),
             reply_to: None,
@@ -459,7 +458,7 @@ mod tests {
     fn status_answers_the_states_and_refuses_a_foreign_id() {
         let host = host("status");
         let queue = host.queue(COMPONENT);
-        let request = OutboxRequest { chat: "5511999999999@lid".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
+        let request = outbox::Request { chat: "5511999999999@lid".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
         let enqueued = queue
             .enqueue(EnqueueRequest::new(outbox::QUEUE, request.encode()).fresh_for(outbox::FRESH_MS).max_attempts(outbox::MAX_ATTEMPTS))
             .unwrap();
@@ -489,7 +488,7 @@ mod tests {
     fn cancel_stops_a_queued_send_and_refuses_one_already_taken() {
         let host = host("cancel");
         let queue = host.queue(COMPONENT);
-        let request = OutboxRequest { chat: "5511999999999@lid".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
+        let request = outbox::Request { chat: "5511999999999@lid".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
         let queued = queue.enqueue(EnqueueRequest::new(outbox::QUEUE, request.encode()).fresh_for(outbox::FRESH_MS).max_attempts(outbox::MAX_ATTEMPTS)).unwrap();
         let job = queue.cancel(queued.id, "wrong chat").unwrap();
         let answer = outbox_seam::status(job.id.0, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
@@ -508,7 +507,7 @@ mod tests {
         // `bad_chat`. Everything this producer does with a chat before the queue is checked here: the
         // exact-JID rule and the policy target (an audit keeps only its digest).
         let chat = "9999999999999-9999999999@g.us";
-        let request = OutboxRequest { chat: chat.into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
+        let request = outbox::Request { chat: chat.into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
         let verified = request.validate().expect("a legacy group id is a chat");
         assert_eq!(verified.chat.jid(), chat, "the id travels exactly as the hit spelled it");
         assert!(verified.chat.is_group());
@@ -519,7 +518,7 @@ mod tests {
             Decision::Refuse(refusal) => panic!("a legacy group id must be sendable: {}", refusal.code),
         }
         // A hyphen is still a group's: the same user part on a person's server stays a bad chat.
-        let bad = OutboxRequest { chat: "9999999999999-9999999999@s.whatsapp.net".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
+        let bad = outbox::Request { chat: "9999999999999-9999999999@s.whatsapp.net".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
         assert_eq!(bad.validate().unwrap_err().error(), "whatsapp_send_bad_chat");
     }
 

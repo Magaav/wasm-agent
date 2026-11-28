@@ -20,6 +20,29 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use wa_whatsapp_index as contract;
 
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let pair = std::str::from_utf8(&bytes[i..i + 2]).ok()?;
+        out.push(u8::from_str_radix(pair, 16).ok()?);
+        i += 2;
+    }
+    Some(out)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 /// The contract's `Verified` has no serde derive on purpose (it is a checked value, not a wire shape),
 /// so the component states the fields it hands over. A new field added to `Verified` without a line here
 /// is a field the host cannot read - and that shows up in the tests, not in production.
@@ -82,6 +105,35 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}
         },
         {
+            "name": "is_month",
+            "description": "Whether a string is a calendar month (YYYY-MM), the form an archive read is addressed by.",
+            "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}
+        },
+        {
+            "name": "permanent_code",
+            "description": "The code a job failure is remembered by when it will never succeed on a retry, or nothing when it will.",
+            "inputSchema": {"type": "object", "required": ["reason"], "properties": {"reason": {"type": "string"}}}
+        },
+        {
+            "name": "download_header_job",
+            "description": "The job id a download progress chunk names, or nothing when the chunk is not one.",
+            "inputSchema": {"type": "object", "required": ["chunk_hex"], "properties": {"chunk_hex": {"type": "string"}}}
+        },
+        {
+            "name": "slow",
+            "description": "The answer a caller gets while one typed op's job is still running.",
+            "inputSchema": {"type": "object", "required": ["op", "id"], "properties": {
+                "op": {"type": "string"}, "id": {"type": "integer"}, "state": {"type": "string"}
+            }}
+        },
+        {
+            "name": "slow_text",
+            "description": "The answer a caller gets while a job is still running: what state it is in, worded by the contract rather than by the door.",
+            "inputSchema": {"type": "object", "required": ["op", "id"], "properties": {
+                "op": {"type": "string"}, "id": {"type": "integer"}, "state": {"type": "string"}
+            }}
+        },
+        {
             "name": "registry",
             "description": "What the ops are: the door that answers \"what can I ask\" reads this, not a copy of it.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -100,8 +152,20 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
             let raw = args.get("request").cloned().unwrap_or_else(|| json!({}));
             let request: contract::Request = serde_json::from_value(raw)
                 .map_err(|error| format!("not_a_request: {error}"))?;
+            // The build is part of the dedupe key (`Verified::dedupe_key_in`): a job enqueued by an
+            // older build must not answer a caller of this one, so the key is computed HERE with the
+            // build the caller passes, and the host never holds that rule.
+            let build = args.get("build").and_then(Value::as_str).unwrap_or("");
             Ok(match request.validate() {
-                Ok(verified) => json!({"ok": true, "verified": verified_json(&verified)}),
+                Ok(verified) => json!({
+                    "ok": true,
+                    "verified": verified_json(&verified),
+                    "op": verified.op.as_str(),
+                    // The bytes the queue carries, exactly as the crate encodes them, so the host
+                    // enqueues what the contract verified instead of re-encoding it itself.
+                    "request_hex": hex(&verified.to_request().encode()),
+                    "dedupe": verified.dedupe_key_in(build),
+                }),
                 Err(refusal) => json!({"ok": false, "code": refusal.code, "detail": refusal.detail}),
             })
         }
@@ -132,6 +196,34 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
             let state = args.get("state").and_then(Value::as_str).unwrap_or("");
             Ok(json!({"state": contract::state_word(state)}))
         }
+        "slow" => {
+            let op = args.get("op").and_then(Value::as_str).unwrap_or("");
+            let id = args.get("id").and_then(Value::as_u64).unwrap_or_default();
+            let state = args.get("state").and_then(Value::as_str).unwrap_or("");
+            Ok(contract::slow_text(op, id, state))
+        }
+        "is_month" => {
+            // Whether a string is a calendar month (`YYYY-MM`), the rule an archive read depends on.
+            let text = args.get("text").and_then(Value::as_str).unwrap_or("");
+            Ok(json!({"month": wa_whatsapp_index::month::is_month(text)}))
+        }
+        "permanent_code" => {
+            // Which job failures will never succeed on a retry. The rule, not a list the door keeps.
+            let reason = args.get("reason").and_then(Value::as_str).unwrap_or("");
+            Ok(json!({"code": contract::permanent_code(reason)}))
+        }
+        "download_header_job" => {
+            // The job id a download progress chunk names, or nothing when the chunk is not one.
+            let hexed = args.get("chunk_hex").and_then(Value::as_str).unwrap_or("");
+            let job = unhex(hexed).and_then(|bytes| contract::download_header_job(&bytes));
+            Ok(json!({"job": job}))
+        }
+        "slow_text" => {
+            let op = args.get("op").and_then(Value::as_str).unwrap_or("");
+            let id = args.get("id").and_then(Value::as_u64).unwrap_or_default();
+            let state = args.get("state").and_then(Value::as_str).unwrap_or("");
+            Ok(contract::slow_text(op, id, state))
+        }
         "parse_time" => {
             let text = args.get("text").and_then(Value::as_str).unwrap_or("");
             Ok(json!({"millis": contract::parse_time(text)}))
@@ -143,6 +235,16 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
             "max_attempts": contract::MAX_ATTEMPTS,
             "time_forms": contract::TIME_FORMS,
             "ops": contract::Op::ALL.iter().map(|op| op.as_str()).collect::<Vec<&str>>(),
+            // The op -> effect table, so the host's own enum can be checked against it instead of drifting
+            // (28/11: the host called `backfill` read-only and the call went to the wrong door).
+            "effects": Value::Object(contract::Op::ALL.iter().map(|op| {
+                let name = match op.effect() {
+                    contract::Effect::ReadOnly => "read_only",
+                    contract::Effect::WritesFiles => "writes_files",
+                    contract::Effect::Network => "network",
+                };
+                (op.as_str().to_string(), Value::String(name.to_string()))
+            }).collect()),
             "max_text_chars": contract::MAX_TEXT_CHARS,
         })),
         other => Err(format!("unknown_tool:{other}")),

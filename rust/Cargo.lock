@@ -2448,6 +2448,7 @@ dependencies = [
  "wa-whatsapp-archive",
  "wa-whatsapp-index",
  "wa-whatsapp-outbox",
+ "wa-whatsapp-wire",
  "wasmtime",
  "wasmtime-wasi",
  "wat",
@@ -2918,7 +2919,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "wa-whatsapp-index",
+ "wa-whatsapp-wire",
  "zstd",
 ]
 
@@ -2941,6 +2942,14 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "wa-queue",
+]
+
+[[package]]
+name = "wa-whatsapp-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
