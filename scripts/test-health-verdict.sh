@@ -18,6 +18,12 @@ loop=factory/health-loop.sh
 grep -q 'health-verdict.sh' "$loop" || fail 'the loop does not source the verdict module'
 grep -q 'trap wa_health_on_term TERM' "$loop" || fail 'the loop does not trap TERM, so a unit restart is invisible'
 grep -q 'WA_HEALTH_SUITE_SECONDS' "$loop" || fail 'the suite has no budget, so a hang is indistinguishable from slow'
+# AND THE BUDGET MUST BE BIGGER THAN ONE RUN: MEASURED, the last full suite reported seconds=1491 (24.9 min) and the
+# run for d6b73496 was killed at 2936 s under the old 2400 s default. A default below ~2x a normal run turns every
+# ordinary tip into "NO VERDICT: the suite hit its budget".
+budget_default=$(sed -n 's/.*WA_HEALTH_SUITE_SECONDS:-\([0-9][0-9]*\).*/\1/p' "$loop" | head -1)
+[ -n "$budget_default" ] || fail 'the suite budget default is not a plain number the row can read'
+[ "$budget_default" -ge 3000 ] || fail "the suite budget default ($budget_default s) is not 2x the measured 1491 s run" 
 grep -q 'timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh' "$loop" || fail 'the suite is not run under the budget'
 grep -q 'wa_health_verdict_line "$N" "$RC" "$TOOK"' "$loop" || fail 'the loop has a path that runs the suite without printing a verdict'
 # A LOCK WAIT MUST NAME ITS HOLDER: measured 02:14Z, a tip sat "resolving" for 39 minutes because .suite.lock was held
