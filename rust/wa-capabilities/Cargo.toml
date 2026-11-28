@@ -52,7 +52,6 @@ wa-grant-policy = { path = "../wa-grant-policy" }
 # The send request's shape, JID rules and dedupe key, shared with the component that performs the send
 # (docs/SERVICE-COMPONENTS.md, "Sending an ordinary message"): pure Rust, so the same source still
 # builds for wasm32-wasip2 inside `rust/components/wa-whatsapp`.
-wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 # The email send's seam (`email_send`): the request shape, its bounds and its audit digest, shared with
 # the `wa-email` component that consumes the job.
 wa-email-outbox = { path = "../wa-email-outbox" }
@@ -91,6 +90,7 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p
 tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
+wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 wat = "1"
 # `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and no configuration
 # declared it, so `cargo test -p wa-capabilities` did not compile on main itself. A path

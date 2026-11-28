@@ -1,0 +1,24 @@
+[package]
+name = "outbox"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The explicit-send contract as a WASI component (everything-is-a-component, move 2).
+#
+# `rust/wa-whatsapp-outbox` is the part both ends of the queue must agree on: the exact-JID rule, the
+# request payload, the dedupe key, the decision a worker makes and the outcome it reports. The HOST used
+# it to validate a send before enqueueing (`wa-capabilities/src/whatsapp_send.rs`) and the `wa-whatsapp`
+# COMPONENT uses it to decide what to send - so a change to either end rebuilt the node. It is pure (no
+# fs, no net, no clock beyond a value passed in), which is what makes it a component: the host asks this
+# for the answer in the same call, and the library is built only for this target afterwards.
+[workspace]
+
+[dependencies]
+wa-whatsapp-outbox = { path = "../../wa-whatsapp-outbox" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

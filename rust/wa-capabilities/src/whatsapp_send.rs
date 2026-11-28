@@ -33,8 +33,7 @@
 //! nobody can cancel is an inert artifact rather than a send (#99).
 use serde_json::{json, Value};
 use wa_queue::{EnqueueRequest, JobId, Queue};
-use wa_whatsapp_outbox as outbox;
-use wa_whatsapp_outbox::Request as OutboxRequest;
+use crate::outbox_component as outbox_seam;
 
 /// The component name the queue namespace belongs to. The *component* is the worker (its manifest
 /// carries `queue: {interfaces: ["worker"], namespaces: ["whatsapp.outbox"]}`), and the node produces
@@ -79,19 +78,18 @@ fn send(request: &Value) -> Value {
     let mentions = request
         .get("mentions")
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<String>>())
         .unwrap_or_default();
-    let outbox_request = OutboxRequest {
-        chat: text("chat").unwrap_or_default(),
-        text: text("text").unwrap_or_default(),
-        reply_to: text("reply_to").filter(|id| !id.is_empty()),
-        mentions,
-    };
-    let verified = match outbox_request.validate() {
+    // THE CONTRACT IS ASKED, NOT LINKED (28/11): the exact-JID rule, the payload and the limits come
+    // from the `outbox` component, so a change to either end of the queue no longer rebuilds the node.
+    let verified = match outbox_seam::validate(
+        &text("chat").unwrap_or_default(),
+        &text("text").unwrap_or_default(),
+        text("reply_to").filter(|id| !id.is_empty()).as_deref(),
+        &mentions,
+    ) {
         Ok(verified) => verified,
-        Err(refusal) => {
-            return json!({"ok": false, "error": refusal.error(), "detail": refusal.detail, "effect": "none"})
-        }
+        Err(refused) => return refused,
     };
 
     // A node that runs no `wa-whatsapp` component sends nothing, and must not queue anything either:
@@ -126,10 +124,10 @@ fn send(request: &Value) -> Value {
     // draft's handle, and the caller's wait follows that handle instead of a job id. Nothing below
     // this line runs for it - no policy token is spent on a message that is not being sent.
     if let Some(answer) = crate::whatsapp_approve::gate(
-        &verified.chat.jid(),
+        &verified.chat,
         &verified.text,
         verified.reply_to.as_deref(),
-        &verified.mentions.iter().map(|chat| chat.jid()).collect::<Vec<_>>(),
+        &verified.mentions,
     ) {
         return answer;
     }
@@ -141,10 +139,10 @@ fn send(request: &Value) -> Value {
 /// needed approval (`send`) and a draft the operator approved (`whatsapp_approve::decide`). A draft
 /// the operator sends is therefore charged, audited and queued exactly like any other message - the
 /// approval gate is a detour on the way, not a second path to the account.
-pub(crate) fn commit(verified: &outbox::Verified) -> Value {
+pub(crate) fn commit(verified: &outbox_seam::Verified) -> Value {
     // Governance first: nothing is written to the queue for a request the node refuses, so a spent
     // budget does not leave a job behind for the component to discover.
-    let target = target_of(&verified.chat.jid());
+    let target = target_of(&verified.chat);
     let decision = wa_governance::node_policy::check_whatsapp_send(COMPONENT, Some(&target));
     if !decision.is_allow() {
         let mut answer = json!({
@@ -163,25 +161,19 @@ pub(crate) fn commit(verified: &outbox::Verified) -> Value {
         return answer;
     }
 
-    let request = OutboxRequest {
-        chat: verified.chat.jid(),
-        text: verified.text.clone(),
-        reply_to: verified.reply_to.clone(),
-        mentions: verified.mentions.iter().map(|chat| chat.jid()).collect(),
-    };
     match queue().enqueue(
-        EnqueueRequest::new(outbox::QUEUE, request.encode())
-            .fresh_for(outbox::FRESH_MS)
-            .max_attempts(outbox::MAX_ATTEMPTS)
-            .dedupe(request.dedupe_key()),
+        EnqueueRequest::new(verified.queue.clone(), verified.payload.clone())
+            .fresh_for(verified.fresh_ms)
+            .max_attempts(verified.max_attempts)
+            .dedupe(verified.dedupe.clone()),
     ) {
         Ok(enqueued) => json!({
             "ok": true,
             "id": enqueued.id.0,
             "state": "queued",
-            "queue": outbox::QUEUE,
+            "queue": verified.queue.clone(),
             "deduped": enqueued.dedupe_hit,
-            "fresh_for_ms": outbox::FRESH_MS,
+            "fresh_for_ms": verified.fresh_ms,
             // The two things a caller must not have to guess: the job is not the message, and the
             // component reports the message id later (`whatsapp_send_status`).
             "note": "queued: the wa-whatsapp component sends it; read the outcome with whatsapp_send_status",
@@ -204,17 +196,9 @@ pub(crate) fn commit(verified: &outbox::Verified) -> Value {
 /// The chat is an exact JID the draft already held, and the text is re-validated here because an edit
 /// is a new body: nothing reaches the queue that has not passed the same checks as any other send.
 pub(crate) fn enqueue(text: &str, chat: &str, reply_to: Option<&str>, mentions: &[String]) -> Value {
-    let request = OutboxRequest {
-        chat: chat.to_string(),
-        text: text.to_string(),
-        reply_to: reply_to.map(str::to_string).filter(|id| !id.is_empty()),
-        mentions: mentions.to_vec(),
-    };
-    match request.validate() {
+    match outbox_seam::validate(chat, text, reply_to.filter(|id| !id.is_empty()), mentions) {
         Ok(verified) => commit(&verified),
-        Err(refusal) => {
-            json!({"ok": false, "error": refusal.error(), "detail": refusal.detail, "effect": "none"})
-        }
+        Err(refused) => refused,
     }
 }
 
@@ -222,6 +206,12 @@ pub(crate) fn enqueue(text: &str, chat: &str, reply_to: Option<&str>, mentions: 
 /// so a settled send fills the draft's message id without a second call from the agent.
 pub(crate) fn job_state(id: u64) -> Value {
     status(&json!({"id": id}))
+}
+
+/// The queue this contract uses, as the component answers it. A node with no `outbox` component has no
+/// queue to name, and says so rather than inventing the constant the host used to carry.
+fn verified_queue() -> String {
+    outbox_seam::queue_name().unwrap_or_else(|| "outbox_component_absent".to_string())
 }
 
 /// One status read. A job id from another queue, or one this node never allocated, is refused rather
@@ -237,7 +227,7 @@ fn status(request: &Value) -> Value {
             return json!({"ok": false, "error": "whatsapp_send_status_failed", "detail": error.to_string().chars().take(160).collect::<String>()})
         }
     };
-    if job.queue != outbox::QUEUE {
+    if job.queue != verified_queue() {
         return json!({"ok": false, "error": "whatsapp_send_unknown_id", "id": id, "effect": "none"});
     }
     // `{id, cancel: true}`: take a send out of the queue before the sender picks it up (14/11). Only a
@@ -247,13 +237,13 @@ fn status(request: &Value) -> Value {
         let why = request.get("reason").and_then(Value::as_str).unwrap_or("cancelled by the caller");
         return match queue().cancel(JobId(id), why) {
             Ok(job) => {
-                let mut answer = outbox::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
+                let mut answer = outbox_seam::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
                 answer["cancelled"] = Value::Bool(true);
                 answer["effect"] = Value::String("none: the message will not be sent".into());
                 answer
             }
             Err(_) => {
-                let mut answer = outbox::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
+                let mut answer = outbox_seam::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
                 answer["ok"] = Value::Bool(false);
                 answer["cancelled"] = Value::Bool(false);
                 answer["error"] = Value::String("whatsapp_send_not_cancellable".into());
@@ -262,16 +252,16 @@ fn status(request: &Value) -> Value {
             }
         };
     }
-    outbox::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref())
+    outbox_seam::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref())
 }
 
 /// One maintenance read for the tests and for a future status tool: how many jobs of each state the
 /// outbox holds, in this node's namespace. Counts only.
 #[allow(dead_code)] // exercised by the tests; nothing in the UI reads it yet
 pub fn counts() -> Value {
-    match queue().stats(outbox::QUEUE) {
+    match queue().stats(&verified_queue()) {
         Ok(stats) => json!({
-            "queue": outbox::QUEUE,
+            "queue": verified_queue(),
             "ready": stats.ready,
             "leased": stats.leased,
             "done": stats.done,
@@ -477,7 +467,7 @@ mod tests {
         let wa_queue::TakeOutcome::Job(job) = taken else { panic!("the job must be takeable") };
         queue.done_by(job.id, WORKER, &outbox::Outcome::sent("3EB0TEST").encode()).unwrap();
         let settled = queue.job(enqueued.id).unwrap().unwrap();
-        let answer = outbox::status(settled.id.0, settled.state.as_str(), settled.attempts, settled.result.as_deref(), settled.last_error.as_deref());
+        let answer = outbox_seam::status(settled.id.0, settled.state.as_str(), settled.attempts, settled.result.as_deref(), settled.last_error.as_deref());
         assert_eq!(answer["state"], "done");
         assert_eq!(answer["message_id"], "3EB0TEST");
         // A job of another queue in the same namespace is not an outbox id.
@@ -502,7 +492,7 @@ mod tests {
         let request = OutboxRequest { chat: "5511999999999@lid".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
         let queued = queue.enqueue(EnqueueRequest::new(outbox::QUEUE, request.encode()).fresh_for(outbox::FRESH_MS).max_attempts(outbox::MAX_ATTEMPTS)).unwrap();
         let job = queue.cancel(queued.id, "wrong chat").unwrap();
-        let answer = outbox::status(job.id.0, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
+        let answer = outbox_seam::status(job.id.0, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
         assert_eq!(answer["state"], "dead", "a cancelled send is dead (lua/core/whatsapp.lua reads dead as failed), never pending");
         assert!(answer["reason"].as_str().unwrap().starts_with("cancelled: wrong chat"));
         assert!(matches!(queue.take(outbox::QUEUE, WORKER, None).unwrap(), wa_queue::TakeOutcome::Empty), "the sender never takes it");
