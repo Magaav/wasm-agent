@@ -105,6 +105,29 @@ pub struct Recognition {
     started: Instant,
 }
 
+
+/// A `State` for the rows of the worlds served from this crate (`terminal_host`, `process_world`): everything a call
+/// touches, and nothing that needs an engine. It lives HERE because `State`'s fields are private to this module.
+#[cfg(test)]
+pub(crate) fn state_for_tests(name: &str) -> State {
+    State {
+        wasi: WasiCtxBuilder::new().build(),
+        table: ResourceTable::new(),
+        limits: StoreLimitsBuilder::new().build(),
+        net: Vec::new(),
+        shared: Arc::new(Shared::default()),
+        kv: GuestKv::new(KvStore::new(None)),
+        log: None,
+        secrets: Default::default(),
+        stt: false,
+        ocr: false,
+        config: None,
+        dirs: Vec::new(),
+        name: name.into(),
+        instance: format!("{name}#1"),
+    }
+}
+
 pub struct State {
     wasi: WasiCtx,
     pub(crate) table: ResourceTable,

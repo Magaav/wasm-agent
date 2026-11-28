@@ -8,6 +8,7 @@
 
 use std::sync::OnceLock;
 
+
 use crate::service_components_v2::State;
 
 
@@ -400,6 +401,38 @@ mod rows {
                 .output()
                 .expect("sh must run");
             assert_eq!(String::from_utf8_lossy(&output.stdout), argument, "quoting {argument:?}");
+        }
+    }
+
+
+    /// ROW: `wait` returns the exit once the operation settled - `Pending` while the child runs, then `Code(7)`, and
+    /// the record is not consulted twice. This row was lost when the world moved here (it needs a store);
+    /// `service_components_v2::state_for_tests` brings it back beside the world it tests.
+    #[test]
+    fn wait_returns_the_exit_it_was_given() {
+        let engine = wasmtime::Engine::default();
+        let mut store = wasmtime::Store::new(
+            &engine,
+            crate::service_components_v2::state_for_tests("wa-process-row"),
+        );
+
+        let outcome: Arc<Mutex<Option<Exit>>> = Arc::new(Mutex::new(None));
+        let mut future = ExitFuture { outcome: outcome.clone() };
+
+        struct Noop;
+        impl std::task::Wake for Noop {
+            fn wake(self: Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(Arc::new(Noop));
+        let mut cx = std::task::Context::from_waker(&waker);
+
+        let pending = std::pin::Pin::new(&mut future).poll_produce(&mut cx, store.as_context_mut(), false);
+        assert!(matches!(pending, std::task::Poll::Pending), "a running child must not settle");
+
+        *outcome.lock().unwrap() = Some(Exit::Code(7));
+        match std::pin::Pin::new(&mut future).poll_produce(&mut cx, store.as_context_mut(), false) {
+            std::task::Poll::Ready(Ok(Some(Exit::Code(code)))) => assert_eq!(code, 7),
+            other => panic!("the exit must be delivered once: {other:?}"),
         }
     }
 
