@@ -21,6 +21,15 @@ grep -q 'wa_main_binary_settle' "$lib" || fail 'the lib has no wait: a tip young
 grep -q 'WA_MAIN_PUBLISH_WAIT_SECONDS' "$lib" || fail 'the wait is unbounded or has no knob'
 grep -q 'wa_main_binary_step_for' "$lib" || fail 'the step does not name WHICH bundle graded the tip'
 
+# THE LOOP MUST NOT CAPTURE THE LIB IN A SUBSHELL. wa_main_binary names its step by EXPORTING WA_MAIN_BINARY_STEP, and
+# `WA_BIN=$(wa_main_binary ...)` loses it: measured 00:53Z, a tip that WAS graded printed "with unknown" because the
+# lib was current and the export died with the subshell. This is the third time that trap has bitten this file.
+loop=factory/health-loop.sh
+[ -r "$loop" ] || fail "$loop is missing"
+grep -Eq '^[[:space:]]*(if[[:space:]]+!?[[:space:]]*)?WA_BIN=\$\(wa_main_binary' "$loop" && fail 'the loop captures wa_main_binary in a subshell, so WA_MAIN_BINARY_STEP dies and the line says unknown'
+grep -q 'health-binary.out' "$loop" || fail 'the loop does not read the binary back from a file, so it cannot name the step'
+grep -q 'READ BACK HERE' "$loop" || fail 'the loop does not say why the read-back exists; the next editor will put the substitution back' 
+
 work=$(mktemp -d "${TMPDIR:-/tmp}/settle.XXXXXX") || fail 'no temp dir'
 trap 'rm -rf "$work"' EXIT
 SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
