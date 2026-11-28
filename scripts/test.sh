@@ -1822,6 +1822,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-dormant.lua" "$BIN" --db "$DB
 # a node uses it, which is the coverage that left the deploy with the steer.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-component-proof.lua" "$BIN" --db "$DB.deploy-component-proof" | grep 'deploy component proof ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
+# TWO ROOTS NEVER SHARE ONE GRAPH STORE (_queue/graph-one-store-per-root.md, closed 28/11): the property
+# is two library tests, and this row fails if either is renamed, deleted or goes red - the cargo gate
+# alone would stay green through a deletion, which is the hole this names.
+gate_run bash scripts/test-graph-one-store-per-root.sh 2>&1 | grep 'graph one-store-per-root ok'
+
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-workspace.lua" "$BIN" --db "$DB.graph-workspace" | grep 'graph workspace ok'
 # Focused automatic indexing / explicit projection contracts; no inference or Engine jobs.
