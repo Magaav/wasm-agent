@@ -180,4 +180,23 @@ out=$(wa_lua_part_fill "$signed_part" "$LOCK" "$fresh/lua-core" "$pin_iface" "$W
 [ -f "$fresh/lua-core/lua/core/init.lua" ] || fail 'the filled tree has no lua/core/init.lua'
 checks=$((checks+1)); echo "ok 14: a first install goes decision -> verify -> fill and lands the pinned tree"
 
+# 15. THE PUBLISHER PRODUCES WHAT THE PIN NAMES, and signs it (slice 2, the publish half, dark).
+# scripts/lua-part-publish.sh is the producer a release would call: it stages the tree, builds the part, writes
+# SHA256SUMS, signs it and prints the lock line. This check is the CONTRACT between publishing and the lock - the line
+# the publisher prints must be the line the lock carries, or an operator would have to retype a digest (which is how a
+# pin comes to disagree with the bytes beside it).
+pub=$WORK/published
+mkdir -p "$pub"
+pub_out=$(bash scripts/lua-part-publish.sh --tree "$ROOT" --interface "$pin_iface" --commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" --out "$pub" 2>&1) || fail "the publisher failed: $pub_out"
+pub_line=$(printf '%s\n' "$pub_out" | grep -m1 '^lua-core ')
+[ "$pub_line" = "lua-core $pin_sha $pin_bytes interface=$pin_iface" ] || fail "the publisher printed a different line than the lock carries: got '$pub_line', lock has 'lua-core $pin_sha $pin_bytes interface=$pin_iface'"
+[ -f "$pub/SHA256SUMS" ] && [ -f "$pub/SHA256SUMS.sig" ] || fail 'the publisher wrote no SHA256SUMS/.sig beside the part'
+if [ -n "${WA_BIN:-}" ] && [ -x "${WA_BIN:-}" ]; then
+  pub_part=$(ls "$pub"/lua-core-*.tar.gz | head -1)
+  out=$(wa_lua_part_verify_signed "$pub_part" "$WA_BIN" 2>&1) || fail "what the publisher produced is not signed by a trusted key: $out"
+  checks=$((checks+1)); echo "ok 15: the publisher prints the pinned line and signs what it produced"
+else
+  checks=$((checks+1)); echo "ok 15: the publisher prints the pinned line (signature not judged: no WA_BIN)"
+fi
+
 printf 'release lock pin ok (%s checks)\n' "$checks"
