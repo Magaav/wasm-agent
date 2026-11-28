@@ -273,7 +273,15 @@ selfloop 949c657d3dcd365095425133d755e6023ddc3fe7bd5735d87064872346cff0a8 247835
 # sanitize) after the first pin carried encode and signature-message, which the producer composes and
 # signs inside wa-stt-remote and which therefore had no caller here. reply-ok is now routed, so every
 # export in the world is one the node actually asks. Two builds, same sha256, 146,696 bytes.
-stt bc7db7b0f63f3187edb02490ba73dca0d655ce70991eda791e14841a10f63d73 146696
+# REPINNED 28/11 (P0: publishing was red twice, rc=5 `artifact_not_pinned: stt wa-whatsapp whatsapp-archive`).
+# Three landed source changes moved these components and none of them moved the pin: stt at 140397417, wa-whatsapp at
+# 232a2f441, whatsapp-archive at 8deef26a0, all after the lock line each one still carried. The three were rebuilt on
+# this node with the pinned toolchain (rustc 1.99.1, wasi-sdk 34, build root /tmp/wa-component-build/src) TWICE into two
+# different directories and the sha256 agreed both times: stt 156f7e21 (146,696 B, same size, new bytes - the source moved,
+# the shape did not), wa-whatsapp 301b929c (8,967,645 B), whatsapp-archive 11e2fe93 (794,575 B). The other 34 components
+# built here matched their pins byte for byte, which is what says this node builds the pinned environment rather than one
+# that merely resembles it.
+stt 156f7e21ffa6be405876ec1965b1c445544ab0ea6721f06fa045c55c4503e1fb 146696
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 # WHY THESE TWO WERE REPINNED (27/11, mission fix-components-lock-email-whatsapp). One commit moved both
 # components and repinned neither, and nothing checked, so every publish since e6bddc6f refused
@@ -312,7 +320,7 @@ wa-email 44c73d1b1df0f3d62362b5f99d56b183f5793f7f6ec2343aac5180d7e9890db8 565827
 # downloaded file into the directory the node grants it (`/downloads`, capabilities.dirs) instead of
 # pushing the bytes through the job's progress stream, so media is bounded by what the node KEEPS
 # (64 MB) and not by the queue (1 MiB). Built at the pinned root with the tree's OWN toolchain.
-wa-whatsapp b92137035ff30b79e654047e450b335283fd22e2c9f5922796c65a7ccfcf44b6 8957816
+wa-whatsapp 301b929c3e2395a38db963cfcc0adcc7b2a5a42e722eecbef0a65f1f67e29310 8967645
 # SOURCES agent-core 7e841b7234b00801ecee490bc07f5c702b596d68228a5bf8c5298040d7f5fd4a
 # SOURCES codemode a88a41d057f15ead5266aec40cbce9cd6079a96b9c697af8bf65fe60c0aa0544
 # SOURCES graph 963d98538e92d3d7b12b7df989369636f8b2a4a7308b0791c19c6aae0de8beb5
@@ -354,7 +362,7 @@ outbox 3674c717e9c9ec2d64e2723b66aed603acbc5d1855f6aa343a3f943bf87bca44 232613
 # not touch (whatsapp-leaves-the-host's ground). The component is built and pinned so that seam is all that is
 # left: `archive_host` in the kernel answers the two imports, and the path-bound ops (`list`, `cut`, `restore`,
 # `expire`) work in a directory the host preopens.
-whatsapp-archive 5b97f67a357b67ec05a5eefcb3ba9af70ab1f897b619b246cbea3c221e9e01b6 792016
+whatsapp-archive 11e2fe9302011b3ba6c79a0e76ccf24808e705476d080ba4dc02e2adca993b40 794575
 # 28/11 first pin of email-outbox (change/everything-is-a-component, row 14): the email-send contract - what a
 # `cargo tree -p wa-host` no longer lists `wa-email-outbox`; the host asks this for
 email-outbox 1aeed47e2e035f5b9fd0f3aaaa71f25a40f732cad0f003589d104575197d5a05 220091
