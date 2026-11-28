@@ -13,6 +13,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 . scripts/lib/scratch-env.sh
 . scripts/lib/lua-part.sh
+. scripts/lib/sentinel-move.sh
 
 n=0
 ok()  { n=$((n+1)); printf '  ok   %s\n' "$*"; }
@@ -85,15 +86,36 @@ ok 'the part is signed (scratch vault)'
 export WA_SHARE_ROOT="$S/share" WA_SENTINEL_SUPERVISOR=none WA_PORT="${WA_PORT:-8919}"
 timeout 30 "$INSTALL/wa-sentinel" start >"$S/sentinel.log" 2>&1 || true
 echo "  diag: sentinel start exit=$? log=[$(head -2 "$S/sentinel.log" | tr "\n" " ")]" || fail "the sentinel did not start: $(tail -2 "$S/sentinel.log")"
-# IT COMES UP A MOMENT AFTER start RETURNS: an immediate status read says down (measured), so the row waits.
-for _ in $(seq 1 20); do
-  timeout 10 "$INSTALL/wa-sentinel" status 2>&1 | grep -qE '^ *sentinel: *up' && break
-  sleep 0.5
-done
-# THE STATUS IS PRINTED, NOT SWALLOWED: `grep -q` hid the one line that explains a failure six hypotheses deep.
-SENT_STATE="$(timeout 10 "$INSTALL/wa-sentinel" status 2>&1)"
-printf '  sentinel status: %s\n' "$(printf '%s' "$SENT_STATE" | tr '\n' ' ' | cut -c1-170)"
-printf '%s\n' "$SENT_STATE" | grep -qE '^ *sentinel: *up' || fail 'the sentinel is not up'
+# READINESS IS THE PRODUCT'S OWN WAIT, NOT MY LOOP (law 17). scripts/lib/sentinel-move.sh already knows how to wait for a
+# sentinel to be ready - bounded, 0.1 s ticks, 15 s by default - and version-install.sh uses that same function. The row
+# uses it too, with the unit layer stubbed, so the readiness rule has ONE implementation and a start's exit code proves
+# nothing.
+cat > "$S/systemctl-stub" <<'STUB'
+#!/bin/sh
+# answers only the question the product's wait asks, from the sentinel's own status answer
+check() {
+  for a in "$@"; do
+    case "$a" in
+      is-active)
+        if "$ROW_SENTINEL" status 2>/dev/null | grep -qE '^ *sentinel: *up'; then echo active; else echo inactive; fi
+        exit 0 ;;
+    esac
+  done
+  echo inactive
+  exit 0
+}
+check "$@"
+STUB
+chmod +x "$S/systemctl-stub"
+export WA_SENTINEL_UNIT_SYSTEMCTL="$S/systemctl-stub" WA_SENTINEL_UNIT_DIR="$S/units"
+ROW_SENTINEL="$INSTALL/wa-sentinel"; export ROW_SENTINEL
+if wa_sentinel_move_active 15; then
+  ok "the product's own readiness wait (wa_sentinel_move_active) sees the sentinel up"
+else
+  SENT_STATE="$(timeout 10 "$INSTALL/wa-sentinel" status 2>&1)"
+  printf '  sentinel status: %s\n' "$(printf '%s' "$SENT_STATE" | tr '\n' ' ' | cut -c1-170)"
+  fail 'the product readiness wait never saw the sentinel up within 15s'
+fi
 ok 'the real sentinel supervises the scratch node'
 
 OUT="$S/seq.log"
