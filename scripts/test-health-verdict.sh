@@ -26,6 +26,14 @@ grep -q 'waiting for the suite lock' "$loop" || fail 'the loop waits for the sui
 # AND THE TERM MESSAGE MUST READ AS A WHOLE SENTENCE, whatever was running: the first live firing printed
 # "<sha>  NO VERDICT after 0s: this loop was TERMINATED (SIGTERM) while - a unit restart ..." with an empty sha.
 grep -q 'between tips - no tip was being graded' "$loop" || fail 'a SIGTERM between tips leaves the trap message half-written'
+# AND NO TIP MAY BE LEFT OPEN: measured 03:11Z, d6b73496 was graded-then-abandoned with NO line at all, and the suite
+# log was 0 bytes with an hours-old mtime. The loop records the tip it opens and reports any left open on the next pass.
+grep -q 'wa_health_open_note' "$loop" || fail 'the loop has no open-tip ledger, so a tip can be abandoned in silence'
+grep -q 'health-open' "$loop" || fail 'nothing records which tip is open'
+# WRITTEN, not merely mentioned: the record must be created when work on a tip begins, or nothing can be reported later.
+grep -q '> "$M/_orch/health-open"' "$loop" || fail 'the loop never WRITES the open-tip record, so an abandoned tip stays silent'
+grep -q 'rm -f "$M/_orch/health-open"' "$loop" || fail 'the loop never CLEARS the open-tip record, so every later tip would be reported as superseded' 
+
 # AND THE TIP MUST BE CLAIMED BEFORE ANY RESOLUTION: measured 02:48Z, a restart during a 15-minute resolution was
 # reported as "between tips", because TIP_SHA was only set once the binary existed. Resolution is grading.
 awk '/rev-parse origin\/main/ { seen=1; next } seen && /TIP_SHA="\$N"/ { claimed=1 } END { exit !claimed }' "$loop"   || fail 'the tip is not claimed right after main is read, so a restart during resolution reads as "between tips"' 
@@ -35,6 +43,22 @@ grep -q 'fuser' "$loop" || fail 'the lock-wait line does not name the holder'
 work=$(mktemp -d "${TMPDIR:-/tmp}/verdict.XXXXXX") || fail 'no temp dir'
 trap 'rm -rf "$work"' EXIT
 SHORT=deadbeef
+
+# The helper itself, lifted out and run against a throwaway missions dir.
+open_fn=$(awk '/^wa_health_open_note\(\)/,/^}/' "$loop")
+[ -n "$open_fn" ] || fail 'could not lift wa_health_open_note out of the loop'
+mkdir -p "$work/missions/_orch"
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$work/missions/_orch/health-open"
+note=$(M="$work/missions" bash -c "$open_fn"$'\nwa_health_open_note bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
+case "$note" in *'aaaaaaaa NO VERDICT: superseded by bbbbbbbb before a verdict'*) ;; *) fail "an abandoned tip is not reported: [$note]" ;; esac
+[ -e "$work/missions/_orch/health-open" ] && fail 'the open-tip record was not cleared after reporting it'
+
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$work/missions/_orch/health-open"
+quiet=$(M="$work/missions" bash -c "$open_fn"$'\nwa_health_open_note aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+[ -z "$quiet" ] || fail "a tip that is still current produced a note: [$quiet]"
+
+quiet=$(M="$work/missions" bash -c "$open_fn"$'\nwa_health_open_note cccccccccccccccccccccccccccccccccccccccc')
+[ -z "$quiet" ] || fail "no open tip but a note appeared: [$quiet]" 
 
 line() { # <rc> <took> <run.out> <json> [budget] -> the verdict line
   . "$PWD/$lib"
