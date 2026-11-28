@@ -40,6 +40,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --repo) [ $# -ge 2 ] || { echo "main-health: refused(value_missing): --repo needs a directory" >&2; exit 2; }; repo=$2; shift 2 ;;
     --out) [ $# -ge 2 ] || { echo "main-health: refused(value_missing): --out needs a file" >&2; exit 2; }; out=$2; shift 2 ;;
+    --sha) [ $# -ge 2 ] || { echo "main-health: refused(value_missing): --sha needs a commit" >&2; exit 2; }; want_sha=$2; shift 2 ;;
     --keep) keep=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "main-health: refused(unknown_argument): $1" >&2; usage >&2; exit 2 ;;
@@ -73,8 +74,21 @@ for tool in git flock nice; do
 done
 command -v jq >/dev/null 2>&1 || { echo "main-health: refused(jq_missing): jq is not on PATH, so the result file cannot be read" >&2; exit 2; }
 [ -d "$repo/.git" ] || [ -f "$repo/.git" ] || { echo "main-health: refused(no_repo): $repo is not a git checkout" >&2; exit 2; }
-sha=$(git -C "$repo" rev-parse --verify -q main 2>/dev/null) || {
-  echo "main-health: refused(no_main): $repo has no main to measure" >&2; exit 2; }
+# WHICH TIP IS GRADED, AND BY WHOM (28/11, operator). MEASURED: the loop announced "grading 12379703" and this script
+# graded 9eaa1dbc - the CHECKOUT's local `main` branch, which lags origin/main by however long nobody pulled, while the
+# loop claims origin/main. So a green page could be about a commit from hours ago and the line blamed a tip nobody
+# measured. Two fixes: the caller may pass the tip it claimed (--sha), and the default is origin/main AFTER a fetch,
+# never a local branch that only moves when a human pulls.
+want_sha=${want_sha:-}
+if [ -n "$want_sha" ]; then
+  sha=$(git -C "$repo" rev-parse --verify -q "$want_sha^{commit}" 2>/dev/null) || {
+    echo "main-health: refused(bad_sha): $repo does not have $want_sha" >&2; exit 2; }
+else
+  git -C "$repo" fetch -q origin 2>/dev/null || true
+  sha=$(git -C "$repo" rev-parse --verify -q origin/main 2>/dev/null) || \
+  sha=$(git -C "$repo" rev-parse --verify -q main 2>/dev/null) || {
+    echo "main-health: refused(no_main): $repo has no main to measure" >&2; exit 2; }
+fi
 short=${sha:0:12}
 
 mkdir -p "$root" "$(dirname "$out")" || { echo "main-health: refused(root_unwritable): $root or $out" >&2; exit 2; }
