@@ -1,8 +1,10 @@
 #!/bin/bash
 # paused-watchdog.sh: every 5 min, a mission whose 'paused' marker is older than 15 min, with no deploy waiting and its
 # session quiet 10 min with a pause notice as its last word, is resumed by hand (the node's own resume did not come).
+. "$(cd "$(dirname "$0")" && pwd)/lib/refresh-self.sh"   # refresh the clone between iterations (factory/lib/refresh-self.sh)
 M=$HOME/Work/missions
 while :; do
+  wa_factory_refresh_self "$0" "$@"
   if ! wa-sentinel status 2>&1 | grep -qE 'requests: +[1-9][0-9]* waiting'; then
     for p in $M/*/paused; do [ -f "$p" ] || continue
       d=$(dirname $p); n=$(basename $d)

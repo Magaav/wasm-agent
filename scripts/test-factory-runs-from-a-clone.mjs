@@ -75,6 +75,26 @@ if (fs.existsSync(orch)) {
   twins = fs.readdirSync(orch).filter((f) => scripts.has(f));
 }
 
+// A FACTORY SERVICE THAT LOOPS MUST REFRESH BETWEEN ITERATIONS (27/11): ExecStartPre runs once, so a loop kept running the
+// code it started with and q#178 sat unused for 45 minutes. WHICH services are loops is not a list typed here: it is the
+// `shape` column of factory/units.sh, so the two cannot drift.
+const unitsScript = fs.readFileSync(path.join(factoryDir, 'units.sh'), 'utf8');
+const loopScripts = [];
+for (const line of unitsScript.split('\n')) {
+  const m = line.match(/^([a-z0-9-]+)\|([a-z0-9-]+\.sh)\|(loop|timer)\|/);
+  if (m && m[3] === 'loop') loopScripts.push(m[2]);
+}
+if (loopScripts.length === 0) {
+  fail.push('factory/units.sh names no loop-shaped service, so the refresh rule would check nothing');
+}
+for (const script of loopScripts) {
+  if (!scripts.has(script)) continue;
+  const body = fs.readFileSync(path.join(factoryDir, script), 'utf8');
+  if (!body.includes('wa_factory_refresh_self')) {
+    fail.push(`factory/${script} is a loop-shaped service with no wa_factory_refresh_self: with only ExecStartPre it runs the code it started with (factory/lib/refresh-self.sh)`);
+  }
+}
+
 if (fail.length) {
   console.error('factory runs from a clone: FAIL');
   for (const line of fail) console.error('  ' + line);

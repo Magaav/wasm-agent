@@ -10,6 +10,7 @@
 # directory's lib/) names the published bundle for the tip, or the tree's own build of it, or builds one in
 # its own target dir; it never returns the installed binary, and when it can name none the loop SAYS SO and
 # does not grade.
+. "$(cd "$(dirname "$0")" && pwd)/lib/refresh-self.sh"   # refresh the clone between iterations (factory/lib/refresh-self.sh)
 set -uo pipefail
 M=$HOME/Work/missions; H=$M/HANDOVER.md; C=$HOME/wasm-agent/checkout
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -98,6 +99,7 @@ wa_health_on_term() {
 trap wa_health_on_term TERM INT
 
 while true; do
+  wa_factory_refresh_self "$0" "$@"
   $G fetch -q origin; N=$($G rev-parse origin/main)
   # THE TIP IS CLAIMED HERE, NOT AFTER RESOLUTION (28/11). Measured 02:48Z: a restart caught the loop while it was
   # resolving 4bc7b430 - fifteen minutes of legitimate work - and the trap said "between tips - no tip was being
