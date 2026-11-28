@@ -113,3 +113,17 @@ pub(crate) fn queue_name() -> Option<String> {
     let answer = call("constants", json!({}))?;
     answer["queue"].as_str().map(str::to_string)
 }
+
+/// Accept or refuse one chat address alone, by the contract's exact-JID rule. `Err` carries the contract's
+/// own `code` and `detail`; each caller prefixes them with its own tool's word, because a query and a send
+/// refuse the same address in their own vocabulary.
+pub(crate) fn chat(text: &str) -> Result<String, Value> {
+    let answer = call("chat", json!({"chat": text})).ok_or_else(|| {
+        json!({"code": "component_absent", "detail": "this node runs no outbox component, so it cannot accept a chat"})
+    })?;
+    if answer["ok"] == json!(true) {
+        return Ok(answer["chat"].as_str().unwrap_or_default().to_string());
+    }
+    Err(json!({"code": answer["code"].as_str().unwrap_or("bad_chat"),
+        "detail": answer["detail"].as_str().unwrap_or("the chat is not an exact JID")}))
+}

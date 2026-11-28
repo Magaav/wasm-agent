@@ -52,6 +52,11 @@ fn tools() -> Value {
             }}
         },
         {
+            "name": "chat",
+            "description": "Accept or refuse one chat address by the exact-JID rule, alone: a query names a chat as well as a send does.",
+            "inputSchema": {"type": "object", "required": ["chat"], "properties": {"chat": {"type": "string"}}}
+        },
+        {
             "name": "constants",
             "description": "The queue name and the two limits every enqueue of this contract uses.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -106,6 +111,15 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
                 Some(outcome) => Ok(json!({"ok": true, "message_id": outcome.message_id,
                     "note": outcome.note, "in_history": outcome.in_history})),
                 None => Ok(json!({"ok": false, "code": "not_an_outcome"})),
+            }
+        }
+        "chat" => {
+            // The chat half of the contract alone: a query names a chat too, and it must be refused in
+            // the same words a send is (the callers prefix them per tool).
+            let text = args.get("chat").and_then(Value::as_str).unwrap_or("");
+            match wa_whatsapp_outbox::Chat::parse(text) {
+                Ok(chat) => Ok(json!({"ok": true, "chat": chat.jid()})),
+                Err(refusal) => Ok(json!({"ok": false, "code": refusal.code, "detail": refusal.detail})),
             }
         }
         "constants" => Ok(json!({
