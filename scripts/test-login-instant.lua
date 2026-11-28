@@ -60,4 +60,13 @@ if type(host.setenv) == 'function' then
   if previous then host.setenv('WA_LOGIN_STATUS_TTL_MS', previous) else host.setenv('WA_LOGIN_STATUS_TTL_MS', '') end
 end
 
+-- 4. THE DEFAULT TTL COVERS A SESSION, so the entry written when the chat starts is still good when the reader
+--    types /login (slice 4b): the warming call in chat.lua is only useful if the cache outlives the typing.
+local ttl_before = os.getenv('WA_LOGIN_STATUS_TTL_MS')
+if type(host.setenv) == 'function' then host.setenv('WA_LOGIN_STATUS_TTL_MS', '') end
+pm.status_cache_clear()
+local first = ms(function() pm.state('local-operator') end)
+local second = ms(function() pm.state('local-operator') end)
+check(second * 3 < first, string.format('the default TTL keeps the entry warm across a session (first %.1f ms, second %.1f ms)', first, second))
+
 print(string.format('login instant ok (%d checks; cold %.1f ms, cached %.1f ms, %.1fx)', checks, cold, warm, cold / math.max(warm, 0.1)))

@@ -24,7 +24,10 @@ local status_cache = {at = nil, generation = nil, by_id = {}}
 local function status_ttl_ms()
   local set = tonumber(host.getenv('WA_LOGIN_STATUS_TTL_MS') or '')
   if set and set >= 0 then return set end
-  return 2000
+  -- 30 s, not 2: the point of the cache is that the FIRST /login of a session is cheap, and it is cheap only if
+  -- the entry written at STARTUP is still good when the reader types it (the warming call below). A provider
+  -- changed by anyone else is a vault edit that the next action clears.
+  return 30000
 end
 
 -- A cached status per provider, refilled when the generation moves or the TTL lapses.
