@@ -1,0 +1,8 @@
+/// The provider component's world: the kernel service obligations every 0.2 service has, plus the provider
+/// contract it exports (wit/provider/provider.wit, vendored into wit/deps/provider/ by scripts/gen-wit-deps.lua).
+package wa:provider-component@0.1.0;
+
+world provider {
+    include wa:kernel/service-component@0.2.0;
+    export wa:provider/provider-module@0.1.0;
+}

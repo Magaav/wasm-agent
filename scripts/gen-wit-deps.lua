@@ -45,6 +45,19 @@ local TARGETS = {
     keep = { 'types', 'websocket', 'http', 'speech', 'kv', 'lifecycle', 'drain', 'log', 'credentials',
              'service', 'service-component' } },
 
+  -- THE PROVIDER COMPONENT (claude-inside-wa) exports a contract of its own and composes the kernel service
+  -- world, so it vendors the same set svc-drain does: the world it includes needs every interface that world
+  -- names. Listed here so scripts/gen-wit-deps.lua --check covers these copies - an unlisted copy is exactly
+  -- the drift that script exists to catch.
+  { out = 'rust/components/provider/wit/deps/kernel.wit', from = 'wit/kernel-v2/kernel.wit',
+    keep = { 'types', 'websocket', 'http', 'speech', 'kv', 'lifecycle', 'drain', 'log', 'credentials',
+             'service', 'service-component' } },
+  { out = 'rust/components/provider/wit/deps/clocks.wit', from = 'wit/kernel-v2/deps/clocks.wit', keep = '*' },
+  { out = 'rust/components/provider/wit/deps/filesystem.wit', from = 'wit/kernel-v2/deps/filesystem.wit', keep = '*' },
+  { out = 'rust/components/provider/wit/deps/random.wit', from = 'wit/kernel-v2/deps/random.wit', keep = '*' },
+  { out = 'rust/components/provider/wit/deps/sockets.wit', from = 'wit/kernel-v2/deps/sockets.wit', keep = '*' },
+  { out = 'rust/components/provider/wit/deps/provider.wit', from = 'wit/provider/provider.wit', keep = '*' },
+
   -- model-gateway imports `credentials`, `http`, `kv` and `log`; it does not read images, hold a key or
   -- speak the wasi:keyvalue shape, so `vision`, `keystore` and `service-vision` are not vendored.
   { out = 'rust/components/model-gateway/wit/deps/kernel.wit', from = 'wit/kernel-v2/kernel.wit',

@@ -1133,6 +1133,17 @@ function M.run(argv)
   end
 
 
+  -- /LOGIN IS CHEAP BECAUSE THIS ALREADY ASKED ONCE (claude-inside-wa, slice 4b).
+  -- Measured on this node: the vault status that /login paints costs 51.6 ms per provider, and a paint pays it
+  -- before drawing anything - so the first /login of a session waited ~56 ms for information the session could
+  -- have gathered while the reader was reading the banner. This is that gather: one call, once, after the
+  -- session is drawn (not before it, so the first frame is unaffected), and the cache serves /login from it.
+  -- Wrapped: a provider store that cannot answer must not stop a chat from starting.
+  pcall(function()
+    local management = reload.require('lua/core/provider_management.lua')
+    if management and management.state then management.state('local-operator') end
+  end)
+
   while true do
     -- Whatever the last command wrote (a turn, a `!` line, /new) is this CLI's own: already shown.
     mark_seen()

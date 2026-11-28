@@ -10,6 +10,51 @@ local function operator_url(id)
   if url:match('^https://[%w%.%-]+:?%d*/?$') or url:match('^http://127%.0%.0%.1:%d+/?$') or url:match('^http://localhost:%d+/?$') then return url end
   return nil
 end
+-- THE VAULT STATUS IS THE WHOLE COST OF /login, AND IT WAS PAID ON EVERY PAINT (claude-inside-wa, slice 4).
+--
+-- Measured on this node (28/11, scratch home, one provider): provider_management.state() 53.0 / 52.8 / 52.7 ms,
+-- of which vault.status() alone is 51.6 ms and the balloon's own pages cost 0.01 ms. So Enter->list paint is a
+-- wait on a vault round trip per provider, spent before anything is drawn.
+--
+-- A SHORT CACHE, and why the TTL is short: /login must show what the vault says, but two paints a second apart
+-- cannot disagree about a key that a human is about to paste - the next action that CHANGES a provider clears
+-- this cache by bumping the generation below. WA_LOGIN_STATUS_TTL_MS=0 restores the old always-ask behaviour.
+local status_cache = {at = nil, generation = nil, by_id = {}}
+
+local function status_ttl_ms()
+  local set = tonumber(host.getenv('WA_LOGIN_STATUS_TTL_MS') or '')
+  if set and set >= 0 then return set end
+  -- 30 s, not 2: the point of the cache is that the FIRST /login of a session is cheap, and it is cheap only if
+  -- the entry written at STARTUP is still good when the reader types it (the warming call below). A provider
+  -- changed by anyone else is a vault edit that the next action clears.
+  return 30000
+end
+
+-- A cached status per provider, refilled when the generation moves or the TTL lapses.
+local function vault_status(id)
+  local ttl = status_ttl_ms()
+  local now = host.monotonic_ms()
+  local generation = tostring(M.quota_generation or '')
+  if ttl > 0 and status_cache.at and status_cache.generation == generation and (now - status_cache.at) < ttl then
+    local hit = status_cache.by_id[id]
+    if hit then return hit.status, hit.problem end
+  end
+  if not status_cache.at or status_cache.generation ~= generation or (now - status_cache.at) >= ttl then
+    status_cache.by_id = {}
+    status_cache.at = now
+    status_cache.generation = generation
+  end
+  local status, problem = vault.status(id)
+  status_cache.by_id[id] = { status = status, problem = problem }
+  return status, problem
+end
+
+-- Any action that changes a provider (a key pasted, a switch) must not be served from the cache.
+function M.status_cache_clear()
+  status_cache.at = nil
+  status_cache.by_id = {}
+end
+
 function M.state(owner)
   local state=dofile('lua/core/state.lua')
   local result={providers={},selected=state.read('provider') or host.getenv('WASM_AGENT_PROVIDER') or 'opencode-go',quota=M.quota,revision=state.revision()}
@@ -22,7 +67,7 @@ function M.state(owner)
   for _,item in ipairs(M.routes) do
     local row={id=item.id,label=item.label,source=vault.base(item.id) and 'vault' or 'native',entitlement='unknown',operator_url=operator_url(item.id)}
     if row.source=='vault' then
-      local status,problem=vault.status(item.id)
+      local status,problem=vault_status(item.id)
       local entry=status and status.providers[item.id]
       row.vault_url=vault.url(item.id);row.vault_id=status and status.vault_id
       if row.operator_url and type(row.vault_id)=='string' and row.vault_id:match('^[%x%-]+$') and #row.vault_id==36 then
@@ -105,6 +150,8 @@ local function key_page(row, io, lines, placeholder)
       local key = trim(text)
       if key == '' then return key_page(row, io, { CROSS .. ' Nothing typed. Paste the key, or Esc to go back.' }) end
       local stored, problem = vault.set_key(row.id, key)
+      -- The key just changed, so the cached status is stale by definition: the next paint must ask.
+      M.status_cache_clear()
       key = nil
       if not stored then
         return key_page(row, io, { CROSS .. ' Not saved: ' .. tostring(problem), 'Paste the key again, or Esc to go back.' })
