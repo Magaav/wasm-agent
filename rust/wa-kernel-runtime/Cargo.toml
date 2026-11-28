@@ -57,6 +57,7 @@ ureq = { version = "3", features = ["json"] }
 # drives them with `store.run_concurrent` (service_components_v2.rs).
 # pooling-allocator: `components::pooled_engine` is the engine the agent-core instance pool uses
 # (docs/KERNEL.md, "A2.3"); without the feature `InstanceAllocationStrategy` has no `Pooling` variant.
+libc = "0.2"
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow", "pooling-allocator"] }
 # p3: `wasi:clocks@0.3.0`, the suspending timer a 0.2 guest awaits; it is built on tokio's timer,
 # so the 0.2 runner owns a current-thread tokio runtime. `net` (and the IO driver it brings) is only

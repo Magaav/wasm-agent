@@ -53,6 +53,7 @@ pub mod service_components;
 // The mesh seam served to the core: the `mesh` component (the roster, the hierarchy, the grants, the
 // audit line, the attestation), which imports nothing at all (`docs/MESH.md`, `docs/CORE-SPLIT.md`).
 pub mod mesh_host;
+pub mod sandbox_host;
 
 // The self-loop seam served to the core: the `selfloop` component over its own scoped
 // `wa:kernel/sql` grant (docs/CORE-SPLIT.md).
