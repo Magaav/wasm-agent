@@ -704,7 +704,19 @@ if [ -n "$envrows" ]; then
 fi
 lua_total=$(wc -l < "$work/lua.list"); lua_fail=$(awk -F'\t' '$1!=0' "$work/lua.tsv" | wc -l)
 envleft=$(awk -F'\t' '$1!=0 && $5=="environment"' "$work/lua.tsv" | wc -l)
+# (gate-stays-fast 1) The per-row cost table needs yesterday's rows too: the git-path file above is
+# OVERWRITTEN by every run, and main-health keeps only the latest record, so the trend over twenty runs
+# existed nowhere. Each run also archives its own lua.tsv, named by commit and time, and every fifth run
+# is kept: cheap, bounded, and enough for a 20-run trend (scripts/rows-cost.sh reads it).
 [ -n "$timings" ] && cp "$work/lua.tsv" "$timings" 2>/dev/null || true
+if [ -s "$work/lua.tsv" ]; then
+  rows_dir=${WA_ROWS_ARCHIVE:-$HOME/.wasm-agent/main-health/rows}
+  mkdir -p "$rows_dir" 2>/dev/null && {
+    keep="$rows_dir/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD 2>/dev/null || echo nosha).tsv"
+    cp "$work/lua.tsv" "$keep" 2>/dev/null || true
+    ls -1t "$rows_dir"/*.tsv 2>/dev/null | tail -n +41 | xargs -r rm -f
+  }
+fi
 ran=$((ran + lua_total)); fails=$((fails + lua_fail));
 awk -F'\t' '$1!=0{ if ($5=="hung") printf "FAIL lua %s (hung): %s\n",$3,$4; else if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
 # refusals-that-help (e): the one line above names the row and its first error. A mission then re-runs the
