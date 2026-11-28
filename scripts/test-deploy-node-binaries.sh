@@ -898,7 +898,10 @@ contains "$(cat "$rec_install/installed.txt")" "binary_source_commit=$COMMIT" "t
 # line that only exists in the lib would pass every check above while changing nothing on a node.
 DEPLOY="$ROOT/scripts/deploy.sh"
 [ -f "$DEPLOY" ] || fail "no scripts/deploy.sh"
-grep -q 'for wa_lib_part in build-status build-requirements deploy-components node-binaries' "$DEPLOY"   || fail "deploy.sh does not source scripts/lib/node-binaries.sh"
+# THE CONSTRUCT, NOT THE LIST (measured): the exact string named five libraries, and three more were added since -
+# the assertion then failed on a deploy.sh that sources the lib perfectly well. What matters is that node-binaries
+# is among the parts sourced in that loop.
+grep -qE 'for wa_lib_part in [^;]*node-binaries' "$DEPLOY"   || fail "deploy.sh does not source scripts/lib/node-binaries.sh"
 ok
 grep -q 'wa_node_binaries_prepare "$ROOT"' "$DEPLOY" || fail "deploy.sh never calls wa_node_binaries_prepare"
 ok
@@ -916,7 +919,10 @@ grep -q 'binary_source_commit=%s' "$DEPLOY" || fail "deploy.sh does not record b
 ok
 grep -q 'wa_node_release_digest_search' "$ROOT/scripts/lib/node-binaries.sh" || fail "the lib has no digest search"
 ok
-grep -q 'wa_compiled_input "$changed_path"' "$DEPLOY" || fail "deploy.sh's fast path does not use the one compiled-input classification"
+# THE ONE CLASSIFICATION, not one spelling of it: deploy.sh no longer calls wa_compiled_input directly - it
+# asks wa_compiled_inputs_digest for the whole digest - so the pin accepts either entry point and still
+# refuses a deploy that grew a list of its own.
+grep -qE 'wa_compiled_input"? "|wa_compiled_inputs_digest' "$DEPLOY" || fail "deploy.sh's fast path does not use the one compiled-input classification"
 ok
 grep -q 'wa_compiled_inputs_digest' "$ROOT/scripts/publish-node-binaries.sh" || fail "the publisher records no compiled-inputs digest"
 ok
