@@ -79,6 +79,10 @@ trap wa_health_on_term TERM INT
 
 while true; do
   $G fetch -q origin; N=$($G rev-parse origin/main)
+  # THE TIP IS CLAIMED HERE, NOT AFTER RESOLUTION (28/11). Measured 02:48Z: a restart caught the loop while it was
+  # resolving 4bc7b430 - fifteen minutes of legitimate work - and the trap said "between tips - no tip was being
+  # graded", because TIP_SHA was only set after resolution. Resolution IS grading; a reader must not be told otherwise.
+  TIP_SHA="$N"; TIP_STARTED=$(date +%s)
   if [ "$N" = "$(cat $M/_orch/health-last 2>/dev/null)" ]; then sleep 300; continue; fi
   # A COLD STAGE NEEDS MORE THAN THE DEFAULT BOUND (28/11: every tip NOT GRADED while c1fcda27 WAS published).
   # MEASURED: the release resolver, asked for a tip whose bundle is on GitHub, stops its digest scan at
@@ -125,7 +129,6 @@ while true; do
       echo "$(date -u +%H:%MZ) orch(health): ${N:0:8} waiting for the suite lock ($SUITE_LOCK held by pid $HOLDERS) before the rows can start" >> $H
     fi
   fi
-  TIP_SHA="$N"; TIP_STARTED=$(date +%s)
   SUITE_BUDGET=${WA_HEALTH_SUITE_SECONDS:-2400}
   timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1; RC=$?
   TOOK=$(( $(date +%s) - TIP_STARTED ))
