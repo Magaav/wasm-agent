@@ -77,6 +77,8 @@ git rev-parse --git-dir >/dev/null 2>&1 || refuse "not a git repository: $REPO"
 BASE_SHA=$(git rev-parse --verify --quiet "$BASE^{commit}") || refuse "not a commit: $BASE"
 HEAD_SHA=$(git rev-parse --verify --quiet 'HEAD^{commit}') || refuse "HEAD is not a commit"
 MERGE_BASE=$(git merge-base "$HEAD_SHA" "$BASE_SHA") || refuse "no merge base between HEAD and $BASE"
+BASE_TREE=$(git rev-parse --verify --quiet "$BASE_SHA^{tree}") || refuse "no tree for $BASE_SHA"
+HEAD_TREE=$(git rev-parse --verify --quiet "$HEAD_SHA^{tree}") || refuse "no tree for $HEAD_SHA"
 
 # A TEST is a path a RUNNER can execute: test-* with a runner's extension, or anything under a tests/
 # directory with one. A report or a snapshot whose name starts with test- (docs/.../test-x.md,
@@ -234,7 +236,15 @@ runner_for() {
   esac
 }
 
-record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROWS"; }
+# The scratch tree is removed on exit, so a log named inside it is a path no reader can open. A row that
+# FAILED gets its log copied here, outside the scratch tree, and the copy is what the report names.
+KEEPDIR=${WA_DISCRIMINATE_LOGS:-$OPERATOR_HOME/.wasm-agent/tmp/discriminate-logs}
+keep_log() { # <log> <row path> -> prints the kept path (or the original when it could not be copied)
+  if ! mkdir -p "$KEEPDIR" 2>/dev/null; then printf '%s' "$1"; return; fi
+  dest=$KEEPDIR/$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$2" | tr '/.' '__').log
+  if cp "$1" "$dest" 2>/dev/null; then printf '%s' "$dest"; else printf '%s' "$1"; fi
+}
+record() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" "${5:-}" >> "$ROWS"; }
 in_list() { grep -qxF "$1" "$2" 2>/dev/null; }
 
 run_one() { # <path> <added|modified>
@@ -345,8 +355,14 @@ run_one() { # <path> <added|modified>
     return
   fi
   # ASSERTIONS FIRST (the review's order): "the new value is missing" is an assertion that fired.
-  if printf '%s' "$last" | grep -Eqi "$ASSERT_RE"; then
-    record asserted "$path" "$(printf '%s' "$last" | grep -E "$ASSERT_RE" | tail -1 | cut -c1-160 | tr '\t' ' ')"
+  # EVERY failed assertion, not the first (the tail above only feeds the marker tests): the whole log is
+  # scanned, each line keeps the `file:line:` prefix its runner printed so the report names where it fired,
+  # duplicates are folded, and the log that holds them is named so a reader can open it. This runner never
+  # retries a row, so the attempt is stated instead of being left to be guessed.
+  if grep -Eqi "$ASSERT_RE" "$out" 2>/dev/null; then
+    mapfile -t alines < <(grep -Ei "$ASSERT_RE" "$out" | tr '\t' ' ' | cut -c1-200 | awk '!seen[$0]++' | head -5)
+    all_asserts=$(printf '%s | ' "${alines[@]}"); all_asserts=${all_asserts% | }
+    record asserted "$path" "${alines[0]}" "$all_asserts" "$(keep_log "$out" "$path") (attempt 1 of 1: this runner does not retry)"
     return
   fi
   if printf '%s' "$last" | grep -Eqi "$LOAD_RE"; then
@@ -357,11 +373,13 @@ run_one() { # <path> <added|modified>
     record unclassified-allowed "$path" "exit $code, no marker (allowed): $(printf '%s' "$last" | tail -1 | cut -c1-140 | tr '\t' ' ')"
     return
   fi
-  record unclassified "$path" "exit $code and no marker matched; name the failure or its marker: $(printf '%s' "$last" | tail -1 | cut -c1-140 | tr '\t' ' ')"
+  record unclassified "$path" "exit $code and no marker matched; name the failure or its marker: $(printf '%s' "$last" | tail -1 | cut -c1-140 | tr '\t' ' ')" "" "$(keep_log "$out" "$path")"
 }
 
 # --- the driver ---------------------------------------------------------------------------------------
 say "HEAD $HEAD_SHA vs base $BASE ($MERGE_BASE); scratch worktree $WORKTREE"
+say "trees: base $BASE_TREE\n     branch $HEAD_TREE"
+say "binary: ${LUA_BIN:-none (this tree has no wa binary)}"
 if [ -s "$TOUCHED_RUST" ]; then
   say "this branch changes rust/: its Lua rows cannot be judged against the base binary and are named unrevertable"
 fi
@@ -396,35 +414,43 @@ VERDICTS=$WORKROOT/verdicts.tsv
 if [ -n "$REFACTOR_REASON" ]; then
   awk -F'\t' 'BEGIN{OFS="\t"} {
     if ($1=="passed-added"||$1=="passed-modified") {print "green",$2,"it stays green on the base code"}
-    else if ($1=="asserted") {print "does-not",$2,("a refactor must keep every test green, and this one failed an assertion: " $3)}
+    else if ($1=="asserted") {print "does-not",$2,("a refactor must keep every test green, and this one failed an assertion: " $3),$4,$5}
     else if ($1=="unchanged-verdict") {print "green",$2,"it stays green on the base code"}
     else if ($1=="new-symbol") {print "new-symbol",$2,$3}
     else if ($1=="deleted"||$1=="subject") {print "not-applicable",$2,$3}
-    else {print $1,$2,$3}
+    else {print $1,$2,$3,"",""}
   }' "$ROWS" > "$VERDICTS"
 else
   awk -F'\t' 'BEGIN{OFS="\t"} {
     if ($1=="passed-added") {print "does-not",$2,$3}
     else if ($1=="passed-modified") {print "unchanged-verdict",$2,("a modified test that still passes proves nothing about the fix, and does not block: " $3)}
-    else if ($1=="asserted") {print "discriminates",$2,$3}
+    else if ($1=="asserted") {print "discriminates",$2,$3,$4,$5}
     else if ($1=="unclassified-allowed") {print "unclassified",$2,$3}
     else if ($1=="deleted"||$1=="subject") {print "not-applicable",$2,$3}
-    else {print $1,$2,$3}
+    else {print $1,$2,$3,"",""}
   }' "$ROWS" > "$VERDICTS"
 fi
 
 if [ "$JSON" = 1 ]; then
+  esc_json() { printf '%s' "$1" | tr '\t' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf '{"rows":['
   first=1
-  while IFS=$(printf '\t') read -r verdict path reason; do
+  while IFS=$(printf '\t') read -r verdict path reason assertions log; do
     [ -n "$verdict" ] || continue
     esc_path=$(printf '%s' "$path" | sed 's/\\/\\\\/g; s/"/\\"/g')
     esc_reason=$(printf '%s' "$reason" | tr '\t' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_asserts=$(printf '%s' "${assertions:-}" | tr '\t' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_log=$(printf '%s' "${log:-}" | tr '\t' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
     [ "$first" = 1 ] || printf ','
     first=0
-    printf '{"verdict":"%s","test":"%s","reason":"%s"}' "$verdict" "$esc_path" "$esc_reason"
+    printf '{"verdict":"%s","test":"%s","reason":"%s","assertions":"%s","log":"%s"}' \
+      "$verdict" "$esc_path" "$esc_reason" "$esc_asserts" "$esc_log"
   done < "$VERDICTS"
-  printf ']}\n'
+  # The sides come AFTER the rows so a consumer that reads the line for {"rows" and .rows keeps
+  # working; a report that cannot say which tree and binary ran each side is not a report.
+  printf '],"base":{"ref":"%s","sha":"%s","tree":"%s"},"branch":{"sha":"%s","tree":"%s"},"binary":"%s"}' \
+    "$(esc_json "$BASE")" "$BASE_SHA" "$BASE_TREE" "$HEAD_SHA" "$HEAD_TREE" "$(esc_json "${LUA_BIN:-none}")"
+  printf '\n'
 else
   while IFS=$(printf '\t') read -r verdict path reason; do
     printf '%s\t%s\t%s\n' "$verdict" "$path" "$reason"
