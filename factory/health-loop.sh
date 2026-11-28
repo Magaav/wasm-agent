@@ -152,7 +152,13 @@ while true; do
       echo "$(date -u +%H:%MZ) orch(health): ${N:0:8} waiting for the suite lock ($SUITE_LOCK held by pid $HOLDERS) before the rows can start" >> $H
     fi
   fi
-  SUITE_BUDGET=${WA_HEALTH_SUITE_SECONDS:-2400}
+    # THE BUDGET MUST BE BIGGER THAN ONE RUN (28/11). MEASURED: the last full suite on this node (553 checks,
+  # 407 passed) reported seconds=1491 in main-health.json - 24.9 minutes - and the run for d6b73496 passed the old
+  # 2400 s default and was killed at 2936 s (HANDOVER 03:52Z: "NO VERDICT after 2936s: the suite hit its 2400s
+  # budget"). A budget 1.6x a normal run is not a watchdog, it is a coin flip: the tip gets an honest "hit its
+  # budget" line and no verdict. 3600 s is 2.4x the measured run, which leaves room for a loaded node without letting a
+  # truly hung suite sit for an hour and a half.
+  SUITE_BUDGET=${WA_HEALTH_SUITE_SECONDS:-3600}
   timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1; RC=$?
   TOOK=$(( $(date +%s) - TIP_STARTED ))
   # ONE LINE, ALWAYS. When the suite did not produce a readable verdict - killed, out of space, lock, budget - the reason
