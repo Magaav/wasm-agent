@@ -38,6 +38,12 @@ pub struct Health {
     pub notices_unmatched: u64,
     pub last_notice_ms: Option<i64>,
     pub last_unmatched_ms: Option<i64>,
+    /// THE DAY'S COUNT, which is the one the bound is about (`crate::notices::UNMATCHED_PER_DAY`). The total
+    /// above answers "has this ever happened"; the owner's rule is about a DAY (7 notices on the busiest day,
+    /// bound 5), and a feature row cannot go red on a number that never resets. `notices_day` is the day these
+    /// two fields belong to (epoch day), so a reader can tell a fresh count from a stale one.
+    pub unmatched_today: u64,
+    pub notices_day: i64,
 }
 
 impl Health {
@@ -50,7 +56,7 @@ impl Health {
         }
         let reason = if self.last_failure_reason.is_empty() { "-" } else { self.last_failure_reason.as_str() };
         format!(
-            "health: v=1 transcripts ok={} last={} chars={} failed={} last_failure={} reason={reason} posting={posting} posted={} last_post={} index written={} last={} notices matched={} unmatched={} last_notice={} last_unmatched={}",
+            "health: v=1 transcripts ok={} last={} chars={} failed={} last_failure={} reason={reason} posting={posting} posted={} last_post={} index written={} last={} notices matched={} unmatched={} last_notice={} last_unmatched={} unmatched_today={} day={}",
             self.transcripts_ok,
             at(self.last_transcript_ms),
             self.last_transcript_chars,
@@ -64,6 +70,8 @@ impl Health {
             self.notices_unmatched,
             at(self.last_notice_ms),
             at(self.last_unmatched_ms),
+            self.unmatched_today,
+            self.notices_day,
         )
     }
 }
@@ -131,6 +139,14 @@ pub fn notice_unmatched(at_ms: i64) {
         health.notices_unmatched += 1;
         health.last_notice_ms = Some(at_ms);
         health.last_unmatched_ms = Some(at_ms);
+        // The same roll-over the ledger keeps, so the line and the ledger cannot disagree about today.
+        let day = at_ms / 86_400_000;
+        if health.notices_day == day {
+            health.unmatched_today += 1;
+        } else {
+            health.notices_day = day;
+            health.unmatched_today = 1;
+        }
     });
 }
 
@@ -143,6 +159,8 @@ pub fn notices_restored(ledger: crate::notices::Ledger) {
         health.notices_unmatched = ledger.unmatched;
         health.last_notice_ms = (ledger.last_ms > 0).then_some(ledger.last_ms);
         health.last_unmatched_ms = (ledger.last_unmatched_ms > 0).then_some(ledger.last_unmatched_ms);
+        health.unmatched_today = ledger.unmatched_today;
+        health.notices_day = ledger.day;
     });
 }
 

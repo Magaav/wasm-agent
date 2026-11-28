@@ -1075,6 +1075,7 @@ function M.settle(id, wait_s, read, options)
     if answer.error == nil and state == 'done' then
       -- status 200 + message_id is the whole proof (operator 14/11: "success + message_id is enough";
       -- a model that had `done` and a message id still spent eight calls looking for its own message).
+      pcall(function() dofile('lua/core/feature_record.lua').real('whatsapp-send', { detail = 'transport_accepted' }) end)
       local done = { ok = true, status = 200, state = 'done', id = id, message_id = answer.message_id,
         waited_s = waited_since(started), reads = reads }
       if answer.attempts ~= nil then done.attempts = answer.attempts end

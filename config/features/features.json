@@ -100,6 +100,14 @@
       "canary": "release-update",
       "last_success": "canary: lua/core/canaries/release-update.lua (no real-traffic recorder yet: the canary is the only proof of this feature on this node)",
       "stale_after_s": 2592000
+    },
+    {
+      "name": "whatsapp-deletion-notices",
+      "role": "component:wa-whatsapp",
+      "canary": "whatsapp-deletion-notices",
+      "last_success": "canary: lua/core/canaries/whatsapp-deletion-notices.lua (it reads the component's own notices counters: a real recorder would need the component to write one, and the counters ARE the real traffic - every deletion WhatsApp sends this node)",
+      "stale_after_s": 21600,
+      "why": "A deletion WhatsApp sends and this node cannot attach to the message it holds is a defect, not a pause: the owner's rule is that a notice never holds a chat, so the only signal is this counter. Red when unmatched_today passes 5 (rust/components/wa-whatsapp/src/notices.rs UNMATCHED_PER_DAY, measured against the busiest day)."
     }
   ]
 }
