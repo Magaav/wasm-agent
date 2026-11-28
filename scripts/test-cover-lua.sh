@@ -288,8 +288,13 @@ ok "$(says "$out" '--cover-commit' && echo 1 || echo 0)" 'and it names the fact 
 # stops refusing up front and hands the child the manifest's own value. What must NOT appear is a Lua-gate
 # refusal - the child may still refuse for its own reasons (the fixture binary cannot answer its identity),
 # and that is exactly the point: the gate that used to fire first is gone.
-out="$(door "$EMPTY_CHANNEL" "$C_LUA" --cover-commit "$C_BASE")"; rc=$?
-ok "$(says "$out" 'release_cover_lua_unknown' && echo 0 || echo 1)" "a cover with no flag is no longer refused by the Lua gate (rc $rc)" "$(printf '%s' "$out" | tail -2)"
+# A COVER FROM A PUBLISHED RELEASE NEEDS NO FLAG (decision 28/11): the release the node verified names the Lua it
+# embeds, so the door fetches it and hands the child that value. What must NOT appear is a Lua-gate refusal; the
+# child then stops at its own identity gate, which a fixture ELF cannot answer - so "succeeds" is proved as far as
+# a row can prove it, and the gate that used to fire first is shown to be gone.
+out="$(door "$CHANNEL" "$C_LUA" --cover-commit "$C_BASE")"; rc=$?
+ok "$(says "$out" 'taking the cover node-' && echo 1 || echo 0)" "a cover with no flag is fetched and handed to the child (rc $rc)" "$(printf '%s' "$out" | tail -2)"
+ok "$(says "$out" 'release_cover_lua_' && echo 0 || echo 1)" 'and no release_cover_lua_* refusal fired - the manifest decided'
 
 out="$(door "$EMPTY_CHANNEL" "$C_BASE" --cover-commit "$C_BASE" --lua-inputs "$BASE_DIGEST")"; rc=$?
 ok "$(says "$out" 'cover_commit_pointless' && echo 1 || echo 0)" 'a cover that names the commit itself is refused instead of silently used' "$(printf '%s' "$out" | tail -2)"
@@ -299,7 +304,7 @@ ok "$(says "$out" 'cover_commit_pointless' && echo 1 || echo 0)" 'a cover that n
 out="$(door "$CHANNEL" "$C_LUA" --cover-commit "$C_BASE" --lua-inputs "$LUA_DIGEST")"; rc=$?
 ok "$([ "$rc" != 0 ] && echo 1 || echo 0)" "a cover whose embedded Lua differs from the target's is refused through the door too (rc $rc)" "$(printf '%s' "$out" | tail -2)"
 ok "$(says "$out" 'taking the cover node-' && echo 1 || echo 0)" 'the door fetched the cover it was told to fetch'
-ok "$(says "$out" 'release_cover_lua_mismatch' && echo 1 || echo 0)" 'and upgrade.sh, as its child process, refused it by name - the two facts crossed the boundary'
+ok "$(says "$out" 'release_cover_lua_mismatch' && echo 1 || echo 0)" 'and the disagreement is refused by name - the release and the stated override crossed the boundary'
 ok "$(says "$out" "$BASE_DIGEST" && echo 1 || echo 0)" 'with the Lua tree those bytes embed'
 ok "$(says "$out" "$LUA_DIGEST" && echo 1 || echo 0)" 'and the Lua tree the target commit has'
 
