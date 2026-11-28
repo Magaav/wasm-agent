@@ -208,7 +208,7 @@ fn a_legacy_group_id_from_a_search_hit_is_a_chat_every_question_accepts() {
         let job = queue.job(wa_queue::JobId(id)).unwrap().unwrap();
         assert_eq!(job.queue, seam::QUEUE);
         let verified = seam::Request::decode(&job.payload).unwrap().validate().unwrap();
-        let named = verified.chat.as_ref().or(verified.from.as_ref()).map(|chat| chat.jid());
+        let named = verified.chat.as_ref().or(verified.from.as_ref()).map(|chat| chat.to_string());
         assert_eq!(named.as_deref(), Some(chat), "{} {args}", op.tool());
     }
 }
