@@ -36,8 +36,15 @@ while IFS= read -r f; do
     silent_count=$((silent_count+1)); silent_list="$silent_list  $f (the row no longer exists; prune it, do not annotate it)"$'\n'; continue
   fi
   if ! head -12 "$ROOT/$f" | grep -qiE 'seconds|slow|takes [0-9]|cost|budget'; then
-    secs=$(awk -F'\t' -v r="$f" '$3==r {printf "%.1f", $2/1000}' "$newest")
-    silent_count=$((silent_count+1)); silent_list="$silent_list  $f (${secs} s)"$'\n'
+    # A row that FAILED in that run has the seconds of its failure, not of its work: test-remote-pending
+    # reads 7.5 s under the watchdog and 249.9 s when it passes. Say which, so nobody annotates a row with
+    # the cost of its crash.
+    read -r code secs <<<"$(awk -F'\t' -v r="$f" '$3==r {printf "%s %.1f", $1, $2/1000; exit}' "$newest")"
+    if [ "${code:-0}" != 0 ]; then
+      silent_count=$((silent_count+1)); silent_list="$silent_list  $f (${secs} s in a run where it FAILED - its cost is not known until it passes)"$'\n'
+    else
+      silent_count=$((silent_count+1)); silent_list="$silent_list  $f (${secs} s)"$'\n'
+    fi
   fi
 done <<< "$slow"
 
