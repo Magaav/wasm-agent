@@ -100,54 +100,34 @@ TRIPLES="$(awk '!/^#/ && !/^[a-z_]+=/ { print $1 }' "$MANIFEST")"
 ASSETS=""
 ROWS=""
 for triple in $TRIPLES; do
-  pin="$(wa_node_manifest_pin "$MANIFEST" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
-  set -- $pin
-  [ "$#" = 4 ] || fail "manifest_incomplete: row for $triple is '$pin'" 2
-  # THE PROGRAM SHIPS WITH THE NODE (wa-term-own-program): a set whose manifest pins the node and not
-  # `wa-term` would install a node that starts and cannot draw a prompt, so a set without it is refused here.
-  if ! term_pin="$(wa_node_manifest_program "$MANIFEST" "$triple")"; then
-    fail "manifest_incomplete: the row for $triple does not pin wa-term; this set is refused rather than shipped" 2
-  fi
-  set -- "$1" "$2" "$3" "$4" "${term_pin% *}" "${term_pin#* }"
-  for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4" "wa-term-$triple-$SHORT:$5:$6"; do
-    name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
+  # THE MEMBERS COME FROM THE ONE LIST (law 17) and each one is pinned by the manifest COLUMN THAT NAMES IT
+  # (<member>_sha256 / <member>_bytes). One loop for every member - wa, wa-sentinel, wa-term, the supervisor - so a
+  # member added to WA_BUNDLE_MEMBERS needs no edit here, and a release whose row predates it returns neither from
+  # wa_node_bundle_members nor as a column: opt-in by artifact, the rule the fetch loops already use.
+  header="$(awk '/^#/{sub(/^#[[:space:]]*/,""); print; exit}' "$MANIFEST")"
+  for name in $(wa_node_bundle_members "$(dirname "$MANIFEST")" "$triple" "$SHORT"); do
+    member="${name%-$triple-$SHORT}"
+    sha_col="$(printf '%s\n' "$header" | awk -v w="${member}_sha256" '{for(i=1;i<=NF;i++) if($i==w){print i; exit}}')"
+    bytes_col="$(printf '%s\n' "$header" | awk -v w="${member}_bytes" '{for(i=1;i<=NF;i++) if($i==w){print i; exit}}')"
+    [ -n "$sha_col" ] && [ -n "$bytes_col" ] \
+      || fail "manifest_incomplete: the row for $triple names no ${member}_sha256/_bytes column" 2
+    want_sha="$(awk -v t="$triple" -v c="$sha_col" '$1==t{print $c; exit}' "$MANIFEST")"
+    want_bytes="$(awk -v t="$triple" -v c="$bytes_col" '$1==t{print $c; exit}' "$MANIFEST")"
+    [ -n "$want_sha" ] && [ -n "$want_bytes" ] \
+      || fail "manifest_incomplete: the row for $triple does not pin $member" 2
     file="$OUT/$name"
     [ -f "$file" ] || fail "binary_missing: $file" 2
     actual="$(wa_node_sha256 "$file")" || fail 'sha256_tool_missing' 7
     [ "$actual" = "$want_sha" ] || fail "artifact_not_pinned: $name is $actual, the manifest pins $want_sha" 5
-    [ "$(wc -c < "$file" | tr -d '[:space:]')" = "$want_bytes" ] || fail "artifact_not_pinned: $name is not $want_bytes bytes" 5
+    [ "$(wc -c < "$file" | tr -d '[:space:]')" = "$want_bytes" ] \
+      || fail "artifact_not_pinned: $name is not $want_bytes bytes" 5
     ASSETS="$ASSETS $name"
     ROWS="$ROWS$want_sha  $want_bytes  $name"$'\n'
   done
-  # THE SUPERVISOR IS A PAYLOAD TOO when the manifest pins it (nine columns): it was the one member this loop did
-
-  # not know about, so the transport shipped three payloads while the publisher summed four and the row that reads
-
-  # the commit counted six rows for five files (measured). Law 17: the pin decides, not a spelling here.
-
-  if sup_pin="$(wa_node_manifest_supervisor "$MANIFEST" "$triple")"; then
-
-    for pair in "wa-operations-supervisor-$triple-$SHORT:${sup_pin% *}:${sup_pin#* }"; do
-
-      name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
-
-      file="$OUT/$name"
-
-      [ -f "$file" ] || fail "binary_missing: $file" 2
-
-      actual="$(wa_node_sha256 "$file")" || fail 'sha256_tool_missing' 7
-
-      [ "$actual" = "$want_sha" ] || fail "artifact_not_pinned: $name is $actual, the manifest pins $want_sha" 5
-
-      [ "$(wc -c < "$file" | tr -d '[:space:]')" = "$want_bytes" ] || fail "artifact_not_pinned: $name is not $want_bytes bytes" 5
-
-      ASSETS="$ASSETS $name"
-
-      ROWS="$ROWS$want_sha  $want_bytes  $name"$'\n'
-
-    done
-
-  fi
+  # THE PROGRAM IS NOT OPTIONAL (wa-term-own-program): a set whose row does not pin wa-term would install a node
+  # that starts and cannot draw a prompt, so it is refused here rather than shipped.
+  wa_node_manifest_program "$MANIFEST" "$triple" >/dev/null \
+    || fail "manifest_incomplete: the row for $triple does not pin wa-term; this set is refused rather than shipped" 2
 
 done
 ASSETS="$ASSETS node-$SHORT.manifest"
