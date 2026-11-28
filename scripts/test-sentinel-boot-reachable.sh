@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# TURNING THE NODE INSTANCE ON MUST MAKE IT REACHABLE (Victor, 29/11).
+#
+# MEASURED on work (a docker container): it restarted at 10:31Z and NOTHING ran - no watcher, no node - until a person
+# typed `wa` at 11:54Z. The lifetime lock was free; sentinel.pid still said `16` from the container before; and in the NEW
+# pid namespace pid 16 was alive again, almost certainly the entrypoint's own `wa-sentinel start` (its third child). A bare
+# liveness probe called that "a watcher" and refused:
+#   "unverified live pid 16; refusing a second watcher; inspect service/task outside the node"
+# A pid file outlives a pid namespace; its NUMBER does not. The fallback now needs the pid to be (a) not our own process
+# and (b) really a `wa-sentinel ... watch` process, read from /proc/<pid>/exe and cmdline.
+#
+# WA_SENTINEL_SUPERVISOR=none keeps every case inside this fixture: without it `start` may hand the verb to the unit
+# manager, and a row must never touch the watcher the operator is running. WASM_AGENT_IN_TURN is dropped for the same
+# reason `start` refuses inside a node turn: the verb belongs to the process OUTSIDE the node.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+bin=${WA_SENTINEL_BIN:-$root/rust/wa-sentinel/target/debug/wa-sentinel}
+[ -x "$bin" ] || { echo "sentinel-boot-reachable: SKIP (no sentinel binary at $bin)"; exit 0; }
+# /tmp DELIBERATELY, not ${TMPDIR:-/tmp}: this machine TMPDIR points INSIDE the operator store
+# (~/.wasm-agent/tmp), which the guard below must refuse as a node home.
+work=$(mktemp -d /tmp/wa-sentinel-boot-XXXXXX)
+# BOTH HOMES, ALWAYS (canary 12:06Z, and the 28/11 sentinel-home P0 before it). The sentinel takes its state from
+# WASM_AGENT_HOME, but it also has a HOME, and a child that reads HOME (the node it starts, the reserve file, a
+# platform path) would write into the operator's ~/.wasm-agent - a sentinel test with the live HOME can rewrite the
+# live sentinel.pid, which is the very bug this file is about. Measured on 12:06Z: a debug `wa-sentinel watch` from a
+# scratch WASM_AGENT_HOME still carried HOME=/home/victor. Both are scratch here, and the guard refuses the rest.
+. "$root/scripts/lib/scratch-home.sh"
+# THE GUARD READS $HOME AS THE OPERATOR HOME, SO IT RUNS FIRST: ground the scratch home against the real one, and
+# only then hand it over. (Measured 12:1xZ: called after `export HOME=scratch`, it refused its own scratch dir as
+# "the operator home".)
+wa_scratch_home_guard "$work/user-home" || exit 2
+export HOME="$work/user-home"
+export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share"
+mkdir -p "$HOME" "$HOME/.config" "$HOME/.local/share"
+
+home=$work/home
+wa_scratch_home_guard "$home" || exit 2
+mkdir -p "$home/.wasm-agent/sentinel"
+pidfile=$home/.wasm-agent/sentinel/sentinel.pid
+sleeper=
+# NOTHING OF OURS OUTLIVES THE ROW (canary 29/11): a stop is a request, and a watcher that is still draining keeps a
+# process alive with a scratch home - harmless to the node but exactly what a canary finds and kills. So the pids this
+# row's own pid files named are waited for, then killed if they are still there, and only if they are not the shape a
+# real watcher has (no row here may kill the unit's watcher).
+kill_watchers() {
+  # EVERY watcher this row started is one whose HOME or WASM_AGENT_HOME points INSIDE $work - the os level fact that
+  # identifies our own, whatever pid file it wrote. A pid file is not enough: the watcher that outlived the last run had
+  # HOME=$work/user-home and a per-case WASM_AGENT_HOME, so neither glob below named it. Nothing outside $work is
+  # eligible, so the unit's own watcher can never be touched by this function.
+  local p pid env_line home agent pid_file waited
+  for p in $(pgrep -f 'wa-sentinel' 2>/dev/null); do
+    env_line=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null)
+    home=$(printf '%s\n' "$env_line" | sed -n 's/^HOME=//p' | head -1)
+    agent=$(printf '%s\n' "$env_line" | sed -n 's/^WASM_AGENT_HOME=//p' | head -1)
+    case "$home$agent" in
+      *"$work"*) ;;
+      *) continue ;;
+    esac
+    waited=0
+    while [ $waited -lt 5 ] && kill -0 "$p" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
+    if kill -0 "$p" 2>/dev/null; then
+      kill "$p" 2>/dev/null && echo "sentinel row: killed its own leftover watcher $p" >&2
+    fi
+  done
+  return 0
+}
+fail() { echo "sentinel-boot-reachable: $1" >&2; echo "--- start said: ${out:-}" >&2; exit 1; }
+ask() { env -u WASM_AGENT_IN_TURN WASM_AGENT_HOME=$home WA_SENTINEL_SUPERVISOR=none timeout 30 "$bin" "$@" 2>&1; }
+cleanup() {
+  ask stop >/dev/null 2>&1
+  kill_watchers
+  [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null
+  rm -rf "$work"
+}
+trap cleanup EXIT
+# A stop is a request: the watcher exits on its own schedule, and a start before that is refused by name
+# ("watcher is stopping; wait for exit before explicit start"). Waiting is part of the case, not a sleep.
+wait_stopped() {
+  local waited=0
+  while [ $waited -lt 15 ]; do
+    case "$(ask status)" in
+      *"sentinel:"*"up"*) sleep 1; waited=$((waited + 1)) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 0
+}
+
+# 1. THE STALE NUMBER, ALIVE, BUT NOT A WATCHER: a live process that is not wa-sentinel holds the number the stale file
+#    names - the container case in miniature.
+sleep 300 & sleeper=$!
+printf '%s\n' "$sleeper" > "$pidfile"
+out=$(ask start); rc=$?
+[ $rc -eq 0 ] || fail "a stale pid file naming a live process that is not a watcher refused the start (rc=$rc)"
+case $out in *"unverified live pid"*) fail "the start was refused for a pid that is not a watcher" ;; esac
+status=$(ask status)
+case $status in
+  *"sentinel:"*"up"*) ;;
+  *) fail "the start returned but nothing is watching this home: $status" ;;
+esac
+now=$(cat "$pidfile" 2>/dev/null || true)
+[ -n "$now" ] && [ "$now" != "$sleeper" ] || fail "the pid file still names the stale pid ($sleeper), so the watcher never claimed it"
+ask stop >/dev/null 2>&1
+wait_stopped
+
+# 2. OUR OWN PID: in a fresh namespace the number the stale file carries IS the new process's own number, and a process
+#    cannot be a second copy of itself.
+printf '%s\n' "$$" > "$pidfile"
+out=$(ask start); rc=$?
+[ $rc -eq 0 ] || fail "a pid file naming this very process refused the start (rc=$rc)"
+case $out in *"unverified live pid"*) fail "the start was refused for a pid that is ours" ;; esac
+ask stop >/dev/null 2>&1
+
+# A real watcher is still respected by the lifetime lock itself, which this row does not re-test: a spawned `watch` in a
+# fixture home exits at once because there is no node to serve, so the case would measure the fixture, not the rule.
+kill "$sleeper" 2>/dev/null; sleeper=
+echo "sentinel-boot-reachable ok (a stale pid naming a live process that is not a watcher, or our own pid, no longer refuses the start - the watcher comes up and claims the pid file)"

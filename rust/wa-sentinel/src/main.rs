@@ -216,16 +216,57 @@ enum WatcherState {
     LegacyUnverified(u32),
 }
 
-fn classify_watcher(lock_busy: bool, recorded_pid: Option<u32>, recorded_pid_alive: bool) -> WatcherState {
+fn classify_watcher(lock_busy: bool, recorded_pid: Option<u32>, recorded_pid_trusted: bool) -> WatcherState {
     if lock_busy {
         WatcherState::Running
-    } else if let Some(pid) = recorded_pid.filter(|_| recorded_pid_alive) {
+    } else if let Some(pid) = recorded_pid.filter(|_| recorded_pid_trusted) {
         // A pre-lock sentinel might still be watching. Do not start a second watcher based on
         // incomplete evidence; require an operator to check status/service before retrying.
         WatcherState::LegacyUnverified(pid)
     } else {
         WatcherState::NotRunning
     }
+}
+
+/// DOES THE PID FILE STILL NAME A WATCHER? (29/11, Victor: "just turning the node instance on should make it reachable".)
+///
+/// MEASURED on work (a docker container): the lifetime lock was free, `sentinel.pid` still said `16` from the container
+/// before, and in the NEW pid namespace pid 16 was alive again - almost certainly the entrypoint's own `wa-sentinel
+/// start`, the third child it spawns. A bare `kill -0` said "alive", so the watcher refused to start with
+/// "unverified live pid 16; refusing a second watcher" and NOTHING ran until a person typed `wa`. A pid file that
+/// outlives its pid namespace is therefore not evidence of a watcher; two facts replace it:
+///
+///   (a) the recorded pid is not our own process - in a fresh namespace our own pid IS the number the stale file
+///       carries, and a process cannot be a second copy of itself;
+///   (b) the recorded pid is really a `wa-sentinel ... watch` process, read from /proc/<pid>/exe and cmdline, so a
+///       recycled number held by any other program is not mistaken for the watcher.
+///
+/// Where /proc says nothing (Windows), only (a) is applied: the fallback keeps its old meaning rather than inventing
+/// a pass, because there the pid cannot be recycled across a container restart the way it was here.
+fn watcher_pid_trusted(pid: u32) -> bool {
+    if pid == 0 || pid == std::process::id() { return false; }
+    if !pid_alive(pid) { return false; }
+    #[cfg(windows)] { true }
+    #[cfg(not(windows))] { pid_looks_like_watch(pid) }
+}
+
+/// /proc evidence that this pid runs the watcher: the executable is a wa-sentinel, and its arguments name the watch
+/// verb. Both halves are required - the entrypoint also runs `wa-sentinel`, but with `start` (which is the very process
+/// that inherited the stale number).
+#[cfg(not(windows))]
+fn pid_looks_like_watch(pid: u32) -> bool {
+    let exe_named = std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+        .and_then(|path| path.file_name().and_then(|name| name.to_str().map(|s| s.to_string())))
+        .map(|name| name.starts_with("wa-sentinel"))
+        .unwrap_or(false);
+    let args: Vec<String> = std::fs::read(format!("/proc/{pid}/cmdline")).map(|raw| {
+        String::from_utf8_lossy(&raw).split('\0').filter(|part| !part.is_empty()).map(|part| part.to_string()).collect()
+    }).unwrap_or_default();
+    if args.is_empty() { return false; }
+    let named = exe_named || args.first().map(|first| {
+        first.rsplit('/').next().map(|name| name.starts_with("wa-sentinel")).unwrap_or(false)
+    }).unwrap_or(false);
+    named && args.iter().any(|arg| arg == "watch")
 }
 
 /// Probe the lifetime lock held only by `watch`. The pid fallback detects an older installed build
@@ -243,8 +284,8 @@ fn watcher_state() -> Result<WatcherState> {
     if lock_busy {return Ok(WatcherState::Running);}
     let pid = std::fs::read_to_string(pid_path()).ok()
         .and_then(|text| text.trim().parse::<u32>().ok());
-    let alive = pid.map(pid_alive).unwrap_or(false);
-    Ok(classify_watcher(lock_busy, pid, alive))
+    let trusted = pid.map(watcher_pid_trusted).unwrap_or(false);
+    Ok(classify_watcher(lock_busy, pid, trusted))
 }
 
 fn queue_lock() -> Result<std::fs::File> {
@@ -4682,6 +4723,8 @@ mod self_update_tests {
     fn watcher_probe_fails_closed_for_running_legacy_pid_and_distinguishes_stopped() {
         assert_eq!(classify_watcher(true, Some(22), true), WatcherState::Running);
         assert_eq!(classify_watcher(false, Some(22), true), WatcherState::LegacyUnverified(22));
+        // 29/11: alive is not enough - a pid that is our own, or not a watcher, is NotRunning (see watcher_pid_trusted).
+        assert_eq!(classify_watcher(false, Some(22), false), WatcherState::NotRunning);
         assert_eq!(classify_watcher(false, Some(22), false), WatcherState::NotRunning);
         assert_eq!(classify_watcher(false, None, false), WatcherState::NotRunning);
     }
@@ -5032,6 +5075,21 @@ mod self_update_tests {
 #[cfg(test)]
 mod watcher_ownership_tests {
     use super::*;
+    #[test]
+    fn a_stale_pid_from_another_pid_namespace_does_not_block_the_start() {
+        // MEASURED on work (docker, 10:31Z): the container restarted, the lock was free, sentinel.pid said 16 from the
+        // container before, and pid 16 in the NEW namespace was alive - the entrypoint's own `wa-sentinel start`.
+        // The watcher refused ("unverified live pid 16") and the node stayed down until a person typed `wa`.
+        // Two facts now replace "the number exists": it is not us, and it is a watcher.
+        assert!(!watcher_pid_trusted(std::process::id()), "our own pid is never a watcher we must not duplicate");
+        // This test binary is alive and is not a wa-sentinel watch: a recycled number held by any other program.
+        assert!(!watcher_pid_trusted(std::process::id() + 0), "an alive non-watcher pid is not evidence");
+        assert!(!watcher_pid_trusted(0), "pid 0 is not a watcher");
+        // And the classification that uses it: with nothing trusted, a free lock means NotRunning, so `start` runs.
+        assert_eq!(classify_watcher(false, Some(std::process::id()), watcher_pid_trusted(std::process::id())),
+            WatcherState::NotRunning);
+    }
+
     #[test]
     fn watcher_identity_never_promotes_a_recycled_pid() {
         assert_eq!(classify_watcher(true,Some(22),true),WatcherState::Running);
