@@ -338,13 +338,37 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
         seam::Op::Backfill => args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64)),
         _ => args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64)),
     };
+    // THE EXACT-JID RULE IS THE CONTRACT'S (28/11). An address-shaped chat is accepted or refused by the
+    // `outbox` component before the index sees it, so a malformed one keeps the same refusal word it
+    // always had while the rule lives in one place. A string with no `@` is a NAME - `read` and
+    // `contacts` resolve those, and that path is untouched.
+    let judged = |value: Option<String>| -> Result<Option<String>, seam::Refusal> {
+        match value {
+            Some(raw) if raw.contains('@') => match crate::outbox_component::chat(&raw) {
+                Ok(accepted) => Ok(Some(accepted)),
+                Err(refusal) => {
+                    // `Refusal::new` takes a `&'static str` code, and the contract's codes are the same
+                    // two words this path has always answered: `bad_chat` and `unsupported_chat`.
+                    let code = match refusal["code"].as_str().unwrap_or("bad_chat") {
+                        "unsupported_chat" => "unsupported_chat",
+                        _ => "bad_chat",
+                    };
+                    Err(seam::Refusal::new(
+                        code,
+                        refusal["detail"].as_str().unwrap_or("the chat is not an exact JID").to_string(),
+                    ))
+                }
+            },
+            other => Ok(other),
+        }
+    };
     let request = seam::Request {
         op: op.as_str().to_string(),
         q: text("q"),
-        chat: text("chat"),
+        chat: judged(text("chat"))?,
         id: text("id"),
         kind: text("kind"),
-        from: text("from"),
+        from: judged(text("from"))?,
         since: time("since")?,
         until: time("until")?,
         before: text("before"),

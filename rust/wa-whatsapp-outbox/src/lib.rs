@@ -551,6 +551,9 @@ mod tests {
             "9999999999999--9999999999@g.us",
             "-9999999999@g.us",
             "9999999999999-@g.us",
+            // Three runs, not two: the shape a live finding named (28/11), moved here from the index
+            // when the index stopped applying the fine rule and kept only the JID shape.
+            "1-2-3@g.us",
             "9999999999999-999a999999@g.us",
             "a999999999999-9999999999@g.us",
             "9999999999999 - 9999999999@g.us",

@@ -41,7 +41,6 @@
 //! produced when the messages arrived.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use wa_whatsapp_outbox::Chat;
 
 /// The index's key layout (`ix/m/…`, `ix/all/…`, `ix/w/…`) and the facts one record's keys follow from.
 ///
@@ -419,7 +418,7 @@ impl Request {
         let (chat, chat_name) = match self.chat.as_deref().map(str::trim) {
             None | Some("") => (None, None),
             Some(text) => match parse_chat(text) {
-                Ok(chat) => (Some(chat.jid()), None),
+                Ok(chat) => (Some(chat), None),
                 // An address-shaped string keeps the exact-JID rule's own word - `bad_chat` for a
                 // malformed one, `unsupported_chat` for a server this component cannot address - and
                 // is never re-read as a name. Only a string a human wrote ("Laura", a number) is.
@@ -427,8 +426,9 @@ impl Request {
                 Err(_) => (None, Some(parse_name(text)?)),
             },
         };
-        let from = match self.from.as_deref().map(str::trim) {            None | Some("") => None,
-            Some(text) => Some(parse_chat(text)?.jid()),
+        let from = match self.from.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(text) => Some(parse_chat(text)?),
         };
         let id = match self.id.as_deref().map(str::trim) {
             None | Some("") => None,
@@ -689,9 +689,21 @@ pub fn backfill_answer(chats: Vec<BackfillChat>, note: &str) -> serde_json::Valu
     body
 }
 
-/// The exact-JID rule, with the outbox's refusal turned into this crate's: one code, one shape.
-fn parse_chat(text: &str) -> Result<Chat, Refusal> {
-    Chat::parse(text).map_err(|refusal| Refusal::new(refusal.code, refusal.detail))
+/// THE INDEX'S OWN CHECK IS A SHAPE, NOT THE RULE (28/11). The exact-JID rule - which servers exist,
+/// which legacy group ids are real - belongs to the send contract (`wa-whatsapp-outbox`), and naming that
+/// crate here is what kept it linked into the node. What the index needs is a stable KEY: an address-shaped
+/// string with no spaces. The callers ask the contract first (`wa-capabilities/src/outbox_component.rs`)
+/// and its refusals (`bad_chat`, `unsupported_chat`) reach the caller unchanged, so the words a person
+/// sees are the same as before - they are decided one layer up, where the rule lives.
+fn parse_chat(text: &str) -> Result<String, Refusal> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(Refusal::new("bad_chat", "empty chat: pass an exact JID or a name"));
+    }
+    if !trimmed.contains('@') || trimmed.chars().any(char::is_whitespace) {
+        return Err(Refusal::new("bad_chat", "chat is not an address: pass an exact JID"));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Does this op accept a chat *name* where a chat is expected?
@@ -1245,11 +1257,21 @@ mod tests {
 
     #[test]
     fn chats_ids_kinds_and_windows_are_bounded_with_stable_codes() {
-        // An address-shaped chat is judged by the exact-JID rule, in every op.
+        // THE INDEX OWNS THE SHAPE, the contract owns the rule (28/11). An address-shaped string with
+        // no spaces keys the index; the fine rules - which servers, which legacy group ids - are the
+        // send contract's, asserted in `wa-whatsapp-outbox`'s own tests (`1-2-3@g.us` is one of them)
+        // and applied by every caller through `wa-capabilities/src/outbox_component.rs`.
         for op in ["read", "search", "message", "contacts", "backfill", "media"] {
-            let bad_chat = Request { chat: Some("1-2-3@g.us".into()), ..request(op) };
-            assert_eq!(bad_chat.validate().unwrap_err().code, "bad_chat", "{op}");
+            // A space inside an address is not a JID the index can key, whatever the op.
+            let spaced = Request { chat: Some("a chat with spaces@g.us".into()), ..request(op) };
+            assert_eq!(spaced.validate().unwrap_err().code, "bad_chat", "{op}: an address with spaces");
         }
+        // A string with no `@` is a NAME for the two ops that resolve one, and refused as an address by
+        // every op that addresses a single chat: the split is the index's own and is asserted here.
+        let name = Request { chat: Some("5511999999999".into()), ..request("read") };
+        assert_eq!(name.validate().expect("a name read resolves").chat_name.as_deref(), Some("5511999999999"));
+        let addressed = Request { chat: Some("5511999999999".into()), ..request("message") };
+        assert_eq!(addressed.validate().unwrap_err().code, "bad_chat", "message addresses a chat");
         // A bare number has no `@`: it is a *name* `read` resolves, and the same string is refused as
         // an address by every op that addresses one chat (and by the send path's own JID rule).
         let numeric = Request { chat: Some("5511999999999".into()), ..request("read") };

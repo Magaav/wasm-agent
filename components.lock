@@ -339,3 +339,9 @@ vision 5577e2ca25ab72c52c7317628b3e9218ce0ce869a1c1b13d0c6f63f08233ce56 3642503
 # answering {id, source}; the seam is rust/wa-capabilities/src/tz_component.rs and the library is built only
 # for this target now, as wa-graph is for graph.
 tz 6bcbe3543793625d0da9de931d636e5c38c85c1a884f16a4b7b85227aa6ecaa0 160247
+# 28/11 first pin of outbox (change/everything-is-a-component, move 2): the explicit-send contract becomes a
+# component. rust/wa-whatsapp-outbox held the exact-JID rule, the payload, the dedupe key, the limits and the
+# outcome - the part BOTH ends of the queue must agree on - and both ends were in the host, so a change to
+# either rebuilt the node. The host now asks this for validate/chat/status/constants
+# (rust/wa-capabilities/src/outbox_component.rs) and `cargo tree -p wa-host` no longer lists the crate.
+outbox 3674c717e9c9ec2d64e2723b66aed603acbc5d1855f6aa343a3f943bf87bca44 232613
