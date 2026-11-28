@@ -29,6 +29,7 @@
 // those `unsafe fn` would only move the `unsafe` to every registration site without making them safer,
 // so the lint is allowed once here, with the reason.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
+pub mod archive_host;
 pub mod bus_host;
 pub mod components;
 pub mod dev;
