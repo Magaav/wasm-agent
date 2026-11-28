@@ -124,10 +124,20 @@ function M.complete(bin, prompt, model)
   local quoted = { string.format('%q', bin) }
   for _, part in ipairs(argv) do quoted[#quoted + 1] = string.format('%q', part) end
   local cmd = table.concat(quoted, " ")
-  local handle, perr = io.popen(cmd, "r")
-  if not handle then
-    return nil, "claude_cli_unspawnable: " .. tostring(perr)
+  -- THE CREDENTIAL STORE IS THE OPERATOR'S, NOT THE NODE'S. Measured (28/11): wa hands a child HOME=<node home>, so
+  -- the CLI looked for <node home>/.claude, found nothing, and answered "Not logged in - Please run /login" while the
+  -- same binary from a shell answered normally. The child is therefore given the REAL user home, resolved from the
+  -- passwd entry of the current uid - not from HOME (which is exactly the variable that is wrong here) and not from
+  -- an environment variable a caller could point somewhere else.
+  local passwd = io.popen("getent passwd $(id -u) 2>/dev/null | cut -d: -f6")
+  local real_home = passwd and (passwd:read("*l") or "") or ""
+  if passwd then passwd:close() end
+  if real_home ~= "" then
+    cmd = string.format("HOME=%q %s", real_home, cmd)
   end
+  -- ONE spawn, with its stdin already redirected. An earlier version spawned the CLI twice (once to test it, then
+  -- again with the prompt) and the first child printed "Input must be provided" - noise from a process nobody asked
+  -- for. There is one child now.
   -- The prompt goes to the child as a file descriptor, not through a shell variable: a prompt containing quotes,
   -- newlines or `;` must not be able to change the command.
   local tmp = os.tmpname()
@@ -138,7 +148,6 @@ function M.complete(bin, prompt, model)
   -- `popen(..., "r")` gives stdout only, so the prompt is fed through a redirection the SHELL performs on the file
   -- we just wrote - still no interpolation of its contents.
   local redirected, rerr = io.popen(cmd .. " < " .. string.format('%q', tmp), "r")
-  handle:close()
   if not redirected then os.remove(tmp); return nil, "claude_cli_unspawnable: " .. tostring(rerr) end
   local lines = {}
   for line in redirected:lines() do lines[#lines + 1] = line end
