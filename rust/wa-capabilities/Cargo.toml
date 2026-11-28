@@ -65,7 +65,6 @@ wa-keystore = { path = "../wa-keystore" }
 wa-kv = { path = "../wa-kv" }
 # The email index's seam (`email_query`): the request, the key layout and the bounded answer, shared with
 # the `wa-email` component that answers from its own kv.
-wa-email-index = { path = "../wa-email-index" }
 # Direct peer-to-peer calls by hierarchy (`host.mesh_call`, docs/MESH.md): the roster, the grants and
 # the transport. The node mounts its listener from `serve::run` behind `WA_MESH=1`, so this crate is
 # the only edge that names it.
@@ -89,6 +88,9 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p
 tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
+# The email-query contract answers through its component now (`email_index_component`); the crate stays a
+# dev-dependency for the tests that assert the contract beside the seam.
+wa-email-index = { path = "../wa-email-index" }
 # The email-send contract answers through its component now (`email_outbox_component`); the crate stays a
 # dev-dependency because the tests assert the contract's own rules beside the seam.
 wa-email-outbox = { path = "../wa-email-outbox" }
