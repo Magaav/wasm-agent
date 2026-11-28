@@ -186,5 +186,27 @@ KEPT=$(ls "$S/share/versions" 2>/dev/null | tr '\n' ' ')
 case "$KEPT" in *aaaaaaaaaaaa*) ok 'the previous version is still on disk' ;; *) fail "the previous version is gone: $KEPT" ;; esac
 case "$KEPT" in *bbbbbbbbbbbb*) ok 'and the new version is sealed and kept' ;; *) fail "the new version is gone: $KEPT" ;; esac
 
+# THE SWITCH-BACK ON RED: a SECOND upgrade, so a previous version EXISTS to return to. The sequence's own rule is that a
+# failed restart moves `current` back by one rename and keeps the new version sealed - the property the whole design rests on
+# and the first-install run above cannot show (it says "no previous version to move back to").
+OUT2="$S/seq2.log"
+# THE SECOND SEQUENCE IS THE SLOW ONE: step 2 health-checks the candidate and step 4 waits 90 s for a node it will not get,
+# so 250 s killed it (measured: "the second upgrade exited 124").
+timeout 700 bash scripts/version-sequence.sh --install "$INSTALL" --candidate "$S/cand/wa" \
+  --commit cccccccccccccccccccccccccccccccccccccccc --root "$(pwd)" --upgrade "$(pwd)/scripts/upgrade.sh" \
+  --lua-part "$S/lua-core.tar.gz" --lua-lock "$S/lua.lock" --sentinel-fail-expected > "$OUT2" 2>&1
+rc2=$?
+grep -q 'SEQSTEP 4 restart through the pointer' "$OUT2" && ok 'second upgrade reached the restart through the pointer' \
+  || fail "the second upgrade never reached the restart: $(tail -3 "$OUT2" | tr '\n' ' ')"
+[ "$rc2" = 3 ] && ok 'and it exits 3, the code for a restart it could not make' \
+  || fail "the second upgrade exited $rc2, not 3"
+grep -q 'current is back on bbbbbbbbbbbb' "$OUT2" && ok 'THE POINTER WENT BACK to the previous version by one rename' \
+  || fail "the pointer did not move back; the sequence said: $(grep -c version_folders_restart_failed "$OUT2") refusals, $(tail -2 "$OUT2" | tr '\n' ' ')"
+KEPT2=$(ls "$S/share/versions" 2>/dev/null | tr '\n' ' ')
+case "$KEPT2" in *cccccccccccc*) ok 'and the failed version is sealed and kept, not deleted' ;; *) fail "the failed version is gone: $KEPT2" ;; esac
+case "$KEPT2" in *aaaaaaaaaaaa*|*bbbbbbbbbbbb*) ok 'with the versions before it still on disk' ;; *) fail "earlier versions vanished: $KEPT2" ;; esac
+CURRENT_NOW="$(readlink "$S/share/versions/current" 2>/dev/null || readlink "$S/share/current" 2>/dev/null)"
+case "$CURRENT_NOW" in *bbbbbbbbbbbb*) ok "and current names the previous version ($CURRENT_NOW)" ;; *) fail "current is not the previous version: '${CURRENT_NOW:-<none>}'" ;; esac
+
 printf 'version folders, real restart: %d checks\n' "$n"
 echo 'version folders, real restart ok'
