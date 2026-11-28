@@ -69,7 +69,7 @@ pub struct Config {
 }
 
 /// The sandbox backend the `wa:kernel/quickjs` import is answered by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Sandbox {
     /// The checksum-pinned QuickJS guest (`crate::quickjs`).
     Kernel,
@@ -78,7 +78,10 @@ pub enum Sandbox {
     /// (`scripts/bench-codemode.sh` says so in its output): it makes the *seam* measurable on a machine
     /// that cannot run a script, and it is refused by anything but that benchmark. `WA_CODEMODE_SANDBOX_STUB=1`
     /// is the only way to select it.
-    Stub,
+    ///
+    /// The scripted peer keeps its own state here: it is a benchmark's protocol state, and a node
+    /// that runs the real guest must not carry it in its `Host` at all.
+    Stub(Box<StubState>),
 }
 
 impl Config {
@@ -90,7 +93,7 @@ impl Config {
             wasm: env_path("WA_CODEMODE_COMPONENT_WASM"),
             manifest: env_path("WA_CODEMODE_COMPONENT_MANIFEST"),
             timeout_ms: wa_component_wait::DEFAULT_WAIT_MS,
-            sandbox: if stub { Sandbox::Stub } else { Sandbox::Kernel },
+            sandbox: if stub { Sandbox::Stub(Box::default()) } else { Sandbox::Kernel },
         }
     }
 
@@ -253,7 +256,6 @@ struct Host {
     limits: StoreLimits,
     table: ResourceTable,
     sandbox: Sandbox,
-    stub: StubState,
 }
 
 impl WasiView for Host {
@@ -345,8 +347,8 @@ fn parse(input: &str) -> Value {
 
 impl sandbox::Host for Host {
     fn start(&mut self, spec: sandbox::Spec) -> sandbox::Started {
-        if self.sandbox == Sandbox::Stub {
-            let (events, session, failure) = self.stub.start(&spec);
+        if let Sandbox::Stub(stub) = &mut self.sandbox {
+            let (events, session, failure) = stub.start(&spec);
             return sandbox::Started { id: session, events, backend: "stub".to_string(), failure };
         }
         let args = json!({
@@ -380,8 +382,8 @@ impl sandbox::Host for Host {
     }
 
     fn admit(&mut self, id: String, owner: String) -> Result<(), sandbox::Failure> {
-        if self.sandbox == Sandbox::Stub {
-            return self.stub.admit(&id, &owner);
+        if let Sandbox::Stub(stub) = &mut self.sandbox {
+            return stub.admit(&id, &owner);
         }
         let answer = kernel("admit", &json!({"id": id, "owner": owner}));
         match answer.get("ok").and_then(Value::as_bool) {
@@ -391,8 +393,8 @@ impl sandbox::Host for Host {
     }
 
     fn deliver(&mut self, id: String, owner: String, call_id: u64, ok: bool, payload_json: String) -> sandbox::Delivered {
-        if self.sandbox == Sandbox::Stub {
-            let events = self.stub.deliver(&id, &owner, call_id, ok, &payload_json);
+        if let Sandbox::Stub(stub) = &mut self.sandbox {
+            let events = stub.deliver(&id, &owner, call_id, ok, &payload_json);
             return sandbox::Delivered { events, failure: None };
         }
         let answer = kernel("deliver", &json!({"id": id, "owner": owner, "call_id": call_id, "ok": ok, "payload": payload_json}));
@@ -405,8 +407,8 @@ impl sandbox::Host for Host {
     }
 
     fn close(&mut self, id: String, owner: String) -> Result<(), sandbox::Failure> {
-        if self.sandbox == Sandbox::Stub {
-            return self.stub.close(&id);
+        if let Sandbox::Stub(stub) = &mut self.sandbox {
+            return stub.close(&id);
         }
         let answer = kernel("close", &json!({"id": id, "owner": owner}));
         match answer.get("ok").and_then(Value::as_bool) {
@@ -422,13 +424,14 @@ impl sandbox::Host for Host {
 /// the real guest emits, and nothing else. It exists so the *seam* can be measured where the pinned
 /// assets are not provisioned (see [`Sandbox::Stub`]); it never parses JavaScript, and any script it
 /// does not recognise is a visible `codemode_sandbox: stub does not know this script`.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct StubState {
     scripts: HashMap<String, StubScript>,
     /// How many scripts this process has started: the bench reports the first one as the cold start.
     started: u64,
 }
 
+#[derive(Clone, Debug)]
 struct StubScript {
     owner: String,
     calls: Vec<(u64, String, String, String)>,
@@ -649,8 +652,7 @@ fn open(config: &Config, session: &str, request: &str) -> Result<String, String>
             },
             limits: StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).build(),
             table: ResourceTable::new(),
-            sandbox: config.sandbox,
-            stub: StubState::default(),
+            sandbox: config.sandbox.clone(),
         },
     );
     store.limiter(|host| &mut host.limits);

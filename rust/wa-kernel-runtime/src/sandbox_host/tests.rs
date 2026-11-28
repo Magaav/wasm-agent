@@ -45,7 +45,7 @@ fn artifact() -> Option<PathBuf> {
 /// The seam's configuration for these tests: this checkout's artifact, the scripted sandbox peer, and a
 /// components directory that does not exist (nothing pinned is involved).
 fn config() -> Option<Config> {
-    let mut config = Config::from_env().with_components(temp_dir("components")).with_sandbox(Sandbox::Stub).with_timeout(5_000);
+    let mut config = Config::from_env().with_components(temp_dir("components")).with_sandbox(Sandbox::Stub(Box::default())).with_timeout(5_000);
     config.wasm = Some(artifact()?);
     Some(config)
 }
@@ -345,7 +345,7 @@ fn an_unknown_session_is_a_named_failure_never_a_silent_success() {
 
 #[test]
 fn a_missing_component_is_a_reason_the_router_can_report() {
-    let mut config = Config::from_env().with_components(temp_dir("missing")).with_sandbox(Sandbox::Stub).with_timeout(5_000);
+    let mut config = Config::from_env().with_components(temp_dir("missing")).with_sandbox(Sandbox::Stub(Box::default())).with_timeout(5_000);
     config.wasm = None;
     let answer = call_with(&config, &json!({"op": "open", "session": "s9", "owner": "0".repeat(64), "code": "return 1"}));
     assert_eq!(answer["ok"], false);
