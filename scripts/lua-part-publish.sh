@@ -56,7 +56,11 @@ part=$(ls "$OUT"/lua-core-*.tar.gz 2>/dev/null | head -1)
 ( cd "$OUT" && sha256sum "$(basename "$part")" > SHA256SUMS ) || die 'lua_part_sums_unwritable'
 say "sums $(cat "$OUT/SHA256SUMS")"
 
-WA_RELEASE_KEYS="${WA_RELEASE_KEYS:-$PWD/tests/fixtures/release-sign/keys.txt}" \
-  python3 scripts/lib/release-fixture-sign.py "$OUT" >/dev/null 2>&1 || die 'lua_part_sign_failed: no signer (set WA_RELEASE_KEYS to the vault keys file)'
+# NO DEFAULT KEY, deliberately. A publisher that quietly signs with whatever key happens to sit in the tree
+# signs a release with a WORKER'S test key - a signature that exists and means nothing, which is worse than a
+# refusal because every downstream check passes. The key comes from the caller or the part is not published.
+[ -n "${WA_RELEASE_KEYS:-}" ] || die 'lua_part_no_signing_key: set WA_RELEASE_KEYS to the keys file this node trusts (the vault keys in a release build, tests/fixtures/release-sign/keys.txt only in a row)'
+[ -f "$WA_RELEASE_KEYS" ] || die "lua_part_no_signing_key: WA_RELEASE_KEYS=$WA_RELEASE_KEYS is not a file"
+python3 scripts/lib/release-fixture-sign.py "$OUT" >/dev/null 2>&1 || die "lua_part_sign_failed: the signer refused ($OUT)"
 [ -f "$OUT/SHA256SUMS.sig" ] || die 'lua_part_unsigned: the signer wrote no SHA256SUMS.sig'
 say "signed $(basename "$part"): SHA256SUMS + SHA256SUMS.sig beside it"
