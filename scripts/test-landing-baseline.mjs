@@ -174,6 +174,13 @@ function fixture() {
     'echo "publish-node-binaries ok: node-fixture"', '',
   ].join('\n'));
   fs.chmodSync(path.join(CANONICAL, 'scripts/publish-node-binaries.sh'), 0o755);
+  // The component-pin gate a landing runs from the tree it judges (added 27/11): without it the spawn exits 127,
+  // which is neither 0 nor 2, so the queue reads it as "does not rebuild to its pin" and refuses every landing
+  // component_not_reproducible (measured 28/11 in this row and in test-landing-queue). This row judges the known-
+  // failures baseline, not component pins, so the fixture answers the way a tree with nothing pinned would.
+  fs.writeFileSync(path.join(CANONICAL, "scripts/landing-component-gate.sh"),
+    "#!/usr/bin/env bash\necho \"landing-component-gate: no pinned component alive in this fixture\"\nexit 0\n");
+  fs.chmodSync(path.join(CANONICAL, "scripts/landing-component-gate.sh"), 0o755);
   git(CANONICAL, 'add', '-A');
   git(CANONICAL, 'commit', '-q', '-m', 'base');
   git(CANONICAL, 'remote', 'add', 'origin', ORIGIN);
