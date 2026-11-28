@@ -150,7 +150,7 @@ pub fn verify_file(
 
 /// How many engine ticks a call may take before it is interrupted. The ticker's period is TICK (components.rs),
 /// so this is a wall-clock budget for one operation, not an unbounded run.
-const EPOCH_TICKS: u64 = 4;
+const EPOCH_TICKS: u64 = 3_000;
 
 /// Build the store the component runs in, from the grant: the directories it may touch, and nothing else.
 fn store(engine: &Engine, dirs: &[DirGrant]) -> Result<Store<Host>, String> {
@@ -164,8 +164,11 @@ fn store(engine: &Engine, dirs: &[DirGrant]) -> Result<Store<Host>, String> {
     builder.inherit_stderr();
     let mut store = Store::new(engine, Host { ctx: builder.build(), table: ResourceTable::new() });
     // The node's engine is built with `epoch_interruption(true)` (components.rs:73) and a ticker bumps the
-    // epoch; a store that never arms a deadline traps with "wasm trap: interrupt" on its first instantiate.
-    // Same budget as the 0.2 runner's one-shot run: four ticks, which is generous for a probe and finite.
+    // epoch every TICK (10 ms, components.rs:44). A store that never arms a deadline traps on its first
+    // instantiate; a store armed too tightly traps DURING the work and the trap surfaces wherever the wasm
+    // happened to be - for a four-tick budget (40 ms) that was inside `__wasilibc_read` while decoding audio,
+    // which reads like a media bug and is a budget bug. 3000 ticks is 30 s: finite, and far above the 5-136 ms
+    // these calls measured.
     store.set_epoch_deadline(EPOCH_TICKS);
     Ok(store)
 }
@@ -462,13 +465,18 @@ impl kernel_media::wa::kernel::media::HostWithStore<State> for State {
     }
 }
 
-/// NOT CALLED YET, and the reason is measured, not stylistic.
+/// A WARNING ABOUT HOW THIS WAS ONCE BLAMED, because the mistake is worth more than the fix.
 ///
-/// Adding this to the 0.2 runner's linker broke seven `service_io::tls_anchor_tests` - they failed with a missing
-/// fixture (`server.pem`) while `origin/main` runs the same nine green. Unlinking restored them (190 passed, the
-/// same 3 pre-existing selfloop failures). So linking an interface no guest imports yet is not a no-op here, and
-/// the cause is not understood; it gets linked when a `service-media` guest exists to exercise it and the cause
-/// has been found, not before.
+/// Adding this to the 0.2 runner's linker appeared to break seven `service_io::tls_anchor_tests`:
+/// `the fixture certificate server.pem: No such file`. It was not this link. Those tests had been compiled
+/// minutes earlier in a throwaway `origin/main` worktree under /tmp, and that worktree was deleted while the
+/// build cache kept the artifact: `wa-tls` embeds `CARGO_MANIFEST_DIR`, which by then named a directory that no
+/// longer existed. Touching `wa-tls/src/scratch.rs` forced a recompile and all nine passed WITH this link in
+/// place - the capability was blamed for a stale binary.
+///
+/// The rule that comes out of it: a comparison run in a temporary worktree contaminates the shared target
+/// directory, so either build it with its own CARGO_TARGET_DIR or recompile the crate before believing a
+/// regression it seems to show.
 ///
 /// Link `wa:kernel/media` into a service linker. Called by the 0.2 runner only; a component whose world does
 /// not import the interface simply never calls it, and one that does gets the capability in its own type -
@@ -543,9 +551,21 @@ mod tests {
         ];
         let engine = crate::service_components_v2::engine().expect("engine");
         // The installed component, pin verified - the same bytes the node would run, not a path from the shell.
+        // The REAL installation, addressed explicitly. `load` would read `WA_COMPONENTS_DIR`, and a sibling test
+        // rewrites that process-wide (services.rs says so in its own comment); in the full suite this test then
+        // failed with `component_not_installed:media` while passing alone. `load_in` is the seam that exists for
+        // exactly this, so the test names the directory it means.
         let component = match std::env::var("WA_MEDIA_TEST_COMPONENT") {
             Ok(path) => Component::from_file(&engine, &path).expect("component"),
-            Err(_) => load(&engine, "media").expect("media installed"),
+            Err(_) => {
+                let dir = std::path::PathBuf::from(
+                    std::env::var("HOME").expect("home") + "/.wasm-agent/components",
+                );
+                let installed = crate::components::load_in(&dir, "media")
+                    .unwrap_or_else(|error| panic!("media installed in {}: {error}", dir.display()));
+                crate::service_components_v2::compiled(&engine, &installed.sha256, &installed.bytes)
+                    .expect("compile")
+            }
         };
         let guest_source = format!("/media/{}", source.file_name().expect("name").to_string_lossy());
 
