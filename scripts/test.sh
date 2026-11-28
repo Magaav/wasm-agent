@@ -1660,7 +1660,7 @@ gate_run bash scripts/test-lua-part-signature.sh
 # fresh build of this tree must BE those bytes - a pin nobody can reproduce is worse than none. Also judges that
 # one changed byte is refused by name (lua_part_digest_mismatch) and a foreign interface is refused by name
 # (lua_part_interface_mismatch). Seconds; no node, no cargo, nothing published.
-gate_run bash scripts/test-release-lock-pin.sh
+WA_BIN="$BIN" gate_run bash scripts/test-release-lock-pin.sh
 # THE HOST DECLARES ITS LUA INTERFACE (wa --interface) and names the tree in force with its digest
 # (wa --build-info lua_tree/lua_tree_digest). A binary older than the verbs SKIPS by name.
 WA_BIN="$BIN" gate_run bash scripts/test-lua-interface.sh
