@@ -106,4 +106,52 @@ function M.consume(lines)
   return out
 end
 
+-- ONE CALL, end to end: spawn the CLI, hand the prompt on stdin, read the JSONL stream back.
+--
+-- The prompt is written to the child's stdin and nowhere else. `bin` is passed in (never looked up on PATH by this
+-- module) for the same reason the release verifier is: whoever controls the environment must not choose the program
+-- that answers a model call. A non-zero exit is a NAMED refusal carrying the child's own first line of error, not an
+-- empty answer that looks like "the model said nothing".
+--
+-- Returns the `consume` table plus { argv, exit_ok, stderr_first_line }.
+function M.complete(bin, prompt, model)
+  if not bin or bin == "" then
+    -- binary() answers (binary, refusal); returning it directly would hand the caller nil as its reason.
+    local _, why = M.binary(nil)
+    return nil, why
+  end
+  local argv = M.command(model)
+  local quoted = { string.format('%q', bin) }
+  for _, part in ipairs(argv) do quoted[#quoted + 1] = string.format('%q', part) end
+  local cmd = table.concat(quoted, " ")
+  local handle, perr = io.popen(cmd, "r")
+  if not handle then
+    return nil, "claude_cli_unspawnable: " .. tostring(perr)
+  end
+  -- The prompt goes to the child as a file descriptor, not through a shell variable: a prompt containing quotes,
+  -- newlines or `;` must not be able to change the command.
+  local tmp = os.tmpname()
+  local fh = io.open(tmp, "w")
+  if not fh then handle:close(); os.remove(tmp); return nil, "claude_cli_prompt_unwritable: " .. tmp end
+  fh:write(prompt)
+  fh:close()
+  -- `popen(..., "r")` gives stdout only, so the prompt is fed through a redirection the SHELL performs on the file
+  -- we just wrote - still no interpolation of its contents.
+  local redirected, rerr = io.popen(cmd .. " < " .. string.format('%q', tmp), "r")
+  handle:close()
+  if not redirected then os.remove(tmp); return nil, "claude_cli_unspawnable: " .. tostring(rerr) end
+  local lines = {}
+  for line in redirected:lines() do lines[#lines + 1] = line end
+  local ok, how, code = redirected:close()
+  os.remove(tmp)
+  local out = M.consume(lines)
+  out.argv = cmd
+  out.exit_ok = (ok == true) or (ok == nil and how == "exit" and code == 0)
+  if not out.exit_ok and not out.text:match("%S") then
+    local first = lines[1] or ""
+    return nil, string.format("claude_cli_failed: exit %s: %s", tostring(code), first:sub(1, 200))
+  end
+  return out
+end
+
 return M

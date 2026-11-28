@@ -59,5 +59,28 @@ eq(none, nil, 'no binary -> no provider')
 eq(why:match('^claude_cli_missing: ') ~= nil, true, 'the refusal is named')
 eq(claude.binary('/usr/bin/claude'), '/usr/bin/claude', 'a binary is used as given')
 
+-- 6. THE SPAWN LOOP, end to end, against a STUB that answers in the CLI's own shape (the same lines a real run
+-- produced). This is the check that would catch a prompt never reaching the child, or an exit code ignored.
+local stub = os.tmpname()
+local fh = assert(io.open(stub, "w"))
+fh:write[[#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"stub-session"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"oi do stub"}]}}'
+printf '%s\n' '{"type":"result","stop_reason":"end_turn","cost_usd":0,"usage":{"input_tokens":3,"output_tokens":4},"session_id":"stub-session"}'
+exit 0
+]]
+fh:close()
+os.execute("chmod +x " .. string.format('%q', stub))
+local out = claude.complete(stub, "um prompt", nil)
+eq(out ~= nil, true, 'the stub answered')
+eq(out.text, 'oi do stub', 'the text came back through consume')
+eq(out.exit_ok, true, 'the exit status was read')
+eq(out.session_id, 'stub-session', 'the session id travels')
+local none, why2 = claude.complete(nil, 'x', nil)
+eq(none, nil, 'no binary is refused')
+eq(type(why2) == 'string' and why2:match('^claude_cli_missing: ') ~= nil, true, 'named refusal')
+os.remove(stub)
+
 if failed > 0 then print(('claude cli FAILED (%d of %d)'):format(failed, checks + failed)); os.exit(1) end
 print(('claude cli ok (%d checks)'):format(checks))
