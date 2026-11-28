@@ -1,0 +1,25 @@
+[package]
+name = "tz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The node's own time-zone identifier as a WASI component (everything-is-a-component, first move).
+#
+# `rust/wa-local-tz` used to be linked into `wa` itself, so a change to how the OS's zone is read
+# rebuilt the whole node - 443 lines that never needed the binary. It is a pure read of three host
+# facts (`TZ`, `/etc/localtime`, `/etc/timezone`) and a decision over them, which is exactly the
+# shape a component serves: the kernel mounts `/etc` read-only, asks once per call, and the answer is
+# the zone plus the word saying which of the places it came from.
+#
+# The library stays a workspace member and is built only for this target: the host no longer links
+# it (the same arrangement `graph` has with `wa-graph`).
+[workspace]
+
+[dependencies]
+wa-local-tz = { path = "../../wa-local-tz" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true
