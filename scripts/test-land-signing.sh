@@ -145,6 +145,23 @@ built="$WORK/built"
 mkdir -p "$built"
 mkelf "$built/wa-$TRIPLE-$SHORT" 3e
 mkelf "$built/wa-sentinel-$TRIPLE-$SHORT" 3e
+mkelf "$built/wa-term-$TRIPLE-$SHORT" 3e
+# The program and the supervisor are members too (publish-node-binaries.sh:487-493 refuses a set without them:
+# a node that installs without wa-operations-supervisor loses every bash). A fixture with only wa- and
+# wa-sentinel- modelled a set this publisher can no longer produce.
+mkelf "$built/wa-operations-supervisor-$TRIPLE-$SHORT" 3e
+
+# <dir> -> that directory's manifest row, ALL the columns the publisher requires. Every case below that moves
+# the bytes of a member rewrites the row with this, so a member cannot be added to the format by the publisher
+# and silently missing from a fixture that still spells four fields by hand (measured: the row did).
+row_of() {
+  local d="$1"
+  printf '%s %s %s %s %s %s %s %s %s\n' "$TRIPLE" \
+    "$(sha "$d/wa-$TRIPLE-$SHORT")" "$(bytes "$d/wa-$TRIPLE-$SHORT")" \
+    "$(sha "$d/wa-sentinel-$TRIPLE-$SHORT")" "$(bytes "$d/wa-sentinel-$TRIPLE-$SHORT")" \
+    "$(sha "$d/wa-term-$TRIPLE-$SHORT")" "$(bytes "$d/wa-term-$TRIPLE-$SHORT")" \
+    "$(sha "$d/wa-operations-supervisor-$TRIPLE-$SHORT")" "$(bytes "$d/wa-operations-supervisor-$TRIPLE-$SHORT")"
+}
 # The compiled AND Lua rows, computed here (cover-r, 27/11). A manifest that already records both is the one
 # a re-run has nothing to add to, which is what step 3 below is about: without lua_inputs the publisher
 # legitimately REWRITES the manifest to gain that row - the script being right and this fixture being an
@@ -163,8 +180,8 @@ zig_version=fixture
 glibc_floor=2.31
 codemode=embedded
 built_utc=2026-11-13T00:00:00Z
-# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes
-$TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $(sha "$built/wa-sentinel-$TRIPLE-$SHORT") $(bytes "$built/wa-sentinel-$TRIPLE-$SHORT")
+# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes
+$TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $(sha "$built/wa-sentinel-$TRIPLE-$SHORT") $(bytes "$built/wa-sentinel-$TRIPLE-$SHORT") $(sha "$built/wa-term-$TRIPLE-$SHORT") $(bytes "$built/wa-term-$TRIPLE-$SHORT") $(sha "$built/wa-operations-supervisor-$TRIPLE-$SHORT") $(bytes "$built/wa-operations-supervisor-$TRIPLE-$SHORT")
 MANIFEST
 
 out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
@@ -221,9 +238,7 @@ cp -f "$built/wa-$TRIPLE-$SHORT" "$WORK/wa-$TRIPLE-$SHORT.before"
 # The signature the refusal must leave alone, recorded before the set it is over is changed.
 sig_before="$(sha "$WORK/release/SHA256SUMS.sig")"
 printf 'rebuilt\n' >> "$built/wa-$TRIPLE-$SHORT"
-sentinel_sha="$(sha "$built/wa-sentinel-$TRIPLE-$SHORT")"
-sentinel_bytes="$(bytes "$built/wa-sentinel-$TRIPLE-$SHORT")"
-sed -i "s|^$TRIPLE .*|$TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $sentinel_sha $sentinel_bytes|" \
+sed -i "s|^$TRIPLE .*|$(row_of "$built")|" \
   "$built/node-$SHORT.manifest" || fail "could not rebuild the fixture manifest"
 out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --publish 2>&1)"
 status=$?
@@ -244,7 +259,7 @@ absent "$out" "release_not_signed" "the refusal names the cause, not the hole a 
 ok
 # Back to the set that was signed - only the payload and the manifest this case changed are put back.
 cp -f "$WORK/wa-$TRIPLE-$SHORT.before" "$built/wa-$TRIPLE-$SHORT"
-sed -i "s|^$TRIPLE .*|$TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $sentinel_sha $sentinel_bytes|" \
+sed -i "s|^$TRIPLE .*|$(row_of "$built")|" \
   "$built/node-$SHORT.manifest" || fail "could not restore the fixture manifest"
 out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
 expect_status 0 "$?" "the untouched set is accepted again"

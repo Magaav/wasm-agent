@@ -565,12 +565,16 @@ if [ -n "$FROM" ]; then
       && mv -f "$OUT/.node-$SHORT.manifest.$$.tmp" "$OUT/node-$SHORT.manifest" \
       || fail "manifest_unwritable: $OUT/node-$SHORT.manifest" 2
   fi
-  for triple in $MANIFEST_TRIPLES; do
-    for name in "wa-$triple-$SHORT" "wa-sentinel-$triple-$SHORT" "wa-term-$triple-$SHORT"; do
+  # THE ONE MEMBER LIST (law 17), not a hand-written trio: this loop named wa-, wa-sentinel- and wa-term- and
+  # left the supervisor behind, so a --from publish of a COMPLETE set could never succeed - the bundle step
+  # below requires wa-operations-supervisor and refused the copy this loop had just skipped (measured: a set
+  # with all four members in --from gave binary_missing for the supervisor in the bundle, exit 2).
+  while read -r line; do
+    for name in $line; do
       [ -f "$FROM/$name" ] || fail "binary_missing: $FROM/$name" 2
       cp -f "$FROM/$name" "$OUT/.$name.$$" && mv -f "$OUT/.$name.$$" "$OUT/$name" || fail "bundle_unwritable: $OUT/$name" 2
     done
-  done
+  done <<< "$(asset_list)"
   # The manifest travels with the binaries, so the pin checked below is the pin that ships.
   for triple in $MANIFEST_TRIPLES; do
     pin="$(wa_node_manifest_pin "$OUT/node-$SHORT.manifest" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
