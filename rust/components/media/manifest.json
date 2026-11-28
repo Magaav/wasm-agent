@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "target": "wasm32-wasip2",
   "description": "ffmpeg as a component (wa:media): probe a container, take stills, extract the audio track. Reads the file it is pointed at and, for the two operations that produce one, writes into the out-dir the caller grants - it never reports a path or a digest it has not read back from disk.",
-  "capabilities": {},
+  "capabilities": {"dirs": ["/in", "/media-out"]},
   "limits": {"memory_mb": 64}
 }
