@@ -1,0 +1,19 @@
+[package]
+name = "browser-html"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# HTML -> TEXT and an accessibility-style tree, with no layout, no rendering and no browser
+# (mission agent-browser-from-scratch, stage 1). A pure function of bytes: no sockets, no clock, no
+# filesystem, no JavaScript. The component (rust/components/browser) and the node both call it, so what
+# the rows judge is what a caller runs.
+#
+# NO NEW DEPENDENCY, deliberately: this node builds components offline (the factory fetches nothing at
+# build time), so the tokenizer and the tree are written here rather than pulled in. It handles what
+# stage 1 must handle - tags, attributes, text, comments, raw-text elements, entities, void elements,
+# implicit paragraph/li closing - and it REFUSES by name what it does not implement instead of guessing.
+
+[dependencies]
+
+[workspace]
