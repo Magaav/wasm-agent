@@ -118,4 +118,45 @@ else
   esac
 fi
 
+# 11-13. THE PIN AND THE SIGNATURE ARE ONE GATE (slice 2, dark). The pin says WHICH bytes; the signature says WHO.
+# A lock that names an artifact nobody signed is a lock a node would install blind, so the pinned part is signed
+# here with the repository's own test signer (scripts/lib/release-fixture-sign.py, the same signer and the same keys
+# scripts/test-lua-part-signature.sh uses) and the gate is judged in both directions. Skipped BY NAME when there is
+# no host binary to verify with - a skip is not a pass, and the row says so.
+if [ -n "${WA_BIN:-}" ] && [ -x "${WA_BIN}" ]; then
+  export WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt"
+  sig_dir=$WORK/signed
+  mkdir -p "$sig_dir"
+  cp "$part" "$sig_dir/lua-core-part.tar.gz"
+  sign_out=$(python3 scripts/lib/release-fixture-sign.py "$sig_dir" 2>&1) || fail "could not sign the pinned part: $sign_out"
+  if out=$(wa_lua_part_verify_signed "$sig_dir/lua-core-part.tar.gz" "$WA_BIN" 2>&1); then
+    checks=$((checks+1)); echo "ok 11: the pinned part, signed by a trusted key, passes the signature gate"
+  else
+    fail "the_signed_pinned_part_was_refused: $out"
+  fi
+  plain=$WORK/plain
+  mkdir -p "$plain" && cp "$part" "$plain/lua-core-part.tar.gz"
+  if out=$(wa_lua_part_verify_signed "$plain/lua-core-part.tar.gz" "$WA_BIN" 2>&1); then
+    fail 'an_unsigned_pinned_part_was_accepted'
+  else
+    case "$out" in
+      *lua_part_unsigned*) checks=$((checks+1)); echo "ok 12: an unsigned part beside the pin is refused by name" ;;
+      *) fail "an_unsigned_part_was_refused_without_a_name: $out" ;;
+    esac
+  fi
+  untrusted=$WORK/untrusted
+  mkdir -p "$untrusted" && cp "$part" "$untrusted/lua-core-part.tar.gz"
+  python3 scripts/lib/release-fixture-sign.py "$untrusted" --key B >/dev/null 2>&1 || fail 'could not sign with the untrusted key'
+  if out=$(wa_lua_part_verify_signed "$untrusted/lua-core-part.tar.gz" "$WA_BIN" 2>&1); then
+    fail 'a_part_signed_by_an_untrusted_key_was_accepted'
+  else
+    case "$out" in
+      *lua_part_signed_by_untrusted_key*) checks=$((checks+1)); echo "ok 13: a part signed by a key this node does not carry is refused by name" ;;
+      *) fail "an_untrusted_part_was_refused_without_a_name: $out" ;;
+    esac
+  fi
+else
+  printf 'skipped 11-13: no WA_BIN (a host binary) - the signature gate is judged by scripts/test-lua-part-signature.sh in the gate\n'
+fi
+
 printf 'release lock pin ok (%s checks)\n' "$checks"
