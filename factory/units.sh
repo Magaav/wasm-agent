@@ -38,6 +38,7 @@ canary|canary.sh|timer|OnBootSec=2min\nOnUnitActiveSec=60s\nAccuracySec=5s|wa fa
 daily|daily-line.sh|timer|OnCalendar=*-*-* 08:00:00 America/Sao_Paulo|wa factory: the daily line (08:00)
 disk|disk-watch.sh|timer|OnUnitActiveSec=5min|wa factory: disk watch (every 5 min)
 health-loop|health-loop.sh|loop||wa factory: the health loop
+nightly-suite|nightly-suite.sh|timer|OnCalendar=*-*-* 03:00:00 America/Sao_Paulo\nPersistent=true\nAccuracySec=5min|wa factory: the nightly full suite (03:00 BRT, no parallel width, advisory)
 paused-watchdog|paused-watchdog.sh|loop||wa factory: the paused watchdog
 quarantine-watch|quarantine-watch.sh|loop||wa factory: the quarantine watch
 snapshot|reboot-snapshot.sh|timer|OnUnitActiveSec=10min|wa factory: the reboot snapshot (every 10 min)
