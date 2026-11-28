@@ -345,10 +345,13 @@ mod tests {
         assert_eq!(age_text(250), "as of 4 min ago");
         assert_eq!(age_text(7200), "as of 2 h ago");
         assert_eq!(age_text(200000), "as of 2 d ago");
+        // `resets` was replaced by `countdown` in aba4ff6b8 (Victor, 28/11: a live countdown instead of
+        // a raw timestamp). The assertions follow the function that exists, in its own words.
+        assert_eq!(countdown(8640), "02h 24m 00s");
+        assert_eq!(countdown(600), "10m 00s");
+        assert_eq!(countdown(0), "00s", "a window that already reset counts down from zero");
         let now = 1_795_000_000u64;
-        assert_eq!(resets(Some(&json!(now + 8640)), now), " resets in 2.4h");
-        assert_eq!(resets(Some(&json!(now + 600)), now), " resets in 10m");
-        assert_eq!(resets(Some(&json!(now - 5)), now), " resets now");
+        assert_eq!(reset_at(Some(&json!(now + 8640))), Some((now + 8640) as f64));
         assert!(iso_seconds("2026-11-26T12:00:00Z").is_some(), "an ISO reset is read as a time");
     }
 
