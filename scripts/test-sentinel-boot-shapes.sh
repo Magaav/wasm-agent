@@ -11,7 +11,23 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 bin=${WA_SENTINEL_BIN:-$root/rust/wa-sentinel/target/debug/wa-sentinel}
 [ -x "$bin" ] || { echo "sentinel-boot-shapes: SKIP (no sentinel binary at $bin)"; exit 0; }
 [ -f "$root/docs/BOOT-REACHABLE.md" ] || { echo 'sentinel-boot-shapes: docs/BOOT-REACHABLE.md is missing, so the shapes are not written down anywhere' >&2; exit 1; }
-work=$(mktemp -d)
+# /tmp DELIBERATELY, not ${TMPDIR:-/tmp}: this machine TMPDIR points INSIDE the operator store
+# (~/.wasm-agent/tmp), which the guard below must refuse as a node home.
+work=$(mktemp -d /tmp/wa-sentinel-boot-XXXXXX)
+# BOTH HOMES, ALWAYS (canary 12:06Z, and the 28/11 sentinel-home P0 before it). The sentinel takes its state from
+# WASM_AGENT_HOME, but it also has a HOME, and a child that reads HOME (the node it starts, the reserve file, a
+# platform path) would write into the operator's ~/.wasm-agent - a sentinel test with the live HOME can rewrite the
+# live sentinel.pid, which is the very bug this file is about. Measured on 12:06Z: a debug `wa-sentinel watch` from a
+# scratch WASM_AGENT_HOME still carried HOME=/home/victor. Both are scratch here, and the guard refuses the rest.
+. "$root/scripts/lib/scratch-home.sh"
+# THE GUARD READS $HOME AS THE OPERATOR HOME, SO IT RUNS FIRST: ground the scratch home against the real one, and
+# only then hand it over. (Measured 12:1xZ: called after `export HOME=scratch`, it refused its own scratch dir as
+# "the operator home".)
+wa_scratch_home_guard "$work/user-home" || exit 2
+export HOME="$work/user-home"
+export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share"
+mkdir -p "$HOME" "$HOME/.config" "$HOME/.local/share"
+
 checks=0
 sleeper=
 cleanup() { [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null; rm -rf "$work"; }
@@ -23,6 +39,7 @@ fail() { echo "sentinel-boot-shapes: $1" >&2; exit 1; }
 # (the container incident), one start, and the watcher must answer for that home.
 bring_up() {
   local name="$1" home="$work/home-$1" pidfile out status now
+  wa_scratch_home_guard "$home" || exit 2
   mkdir -p "$home/.wasm-agent/sentinel"
   pidfile=$home/.wasm-agent/sentinel/sentinel.pid
   printf '%s\n' "$sleeper" > "$pidfile"
@@ -50,6 +67,7 @@ bring_up linux-user-unit
 #    restart), then start, then nothing else forever. The image is not in this repository, so the SEQUENCE is what this
 #    section can judge, and it is the sequence that was broken on work.
 home2=$work/home-container
+wa_scratch_home_guard "$home2" || exit 2
 mkdir -p "$home2/.wasm-agent/sentinel"
 printf '%s\n' "$sleeper" > "$home2/.wasm-agent/sentinel/sentinel.pid"
 env -u WASM_AGENT_IN_TURN WASM_AGENT_HOME=$home2 WA_SENTINEL_SUPERVISOR=none timeout 20 "$bin" autostart on >/dev/null 2>&1 \
