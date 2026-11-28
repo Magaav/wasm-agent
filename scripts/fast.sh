@@ -1372,6 +1372,14 @@ check status-resets env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-
   # self-contained and test live code run here, and scripts/test-orphans.json carries the reason for every
   # one that cannot. The ledger check fails on a new orphan, a stale entry or a declared one gone wired.
   check orphan-tests node scripts/test-orphan-tests.mjs
+# THE NODE-BINARIES LIB HANDS A CALLER ITS WHOLE API (21/11): a stray double quote turned six function definitions into
+# plain words; `bash -n` still passed and sourcing was silent with rc=0, so it surfaced only at the first call site as
+# "wa_node_binary_download: command not found". The row existed and nothing ran it (orphan ledger, 28/11).
+  check node-binaries-lib-api bash scripts/test-node-binaries-lib-api.sh
+# A SLOW ROW STATES WHY (gate-stays-fast item 2): a row over 20 s needs a one-line reason in its header; the first real
+# table showed ten such rows, six silent about their cost. Reported, not failed, unless WA_SLOW_ROWS_STRICT=1. The row
+# existed and nothing ran it (orphan ledger, 28/11).
+  check slow-rows-state-a-reason bash scripts/test-slow-rows-state-a-reason.sh
   check run-key-ui node scripts/test-run-key-ui.mjs
   check wave-current-user-record node scripts/test-wave-current-user-record.mjs
   check whatsapp-lifecycle node scripts/test-whatsapp-lifecycle.mjs
