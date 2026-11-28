@@ -1024,18 +1024,15 @@ pub fn boot_native_state(home: &str, db: &str, args: &[String], embedded: &[(&st
     lua.set_global("EMBEDDED");
     // The native bootstrap, byte for byte (`wa-host/src/main.rs`): a test run must resolve modules the
     // same way, root first and the embedded copy second.
-    const BOOTSTRAP: &str = "LOADED_SOURCES = {}; function dofile(path) \
-         local root = host.getenv('WASM_AGENT_LUA_ROOT'); \
-         if root and root ~= '' then \
-           local text = host.read_file(root .. '/' .. path); \
-           if not text then error('lua_root_unreadable: ' .. root .. '/' .. path) end; \
-           LOADED_SOURCES[path] = host.sha256(text); \
-             return assert(load(text, '@' .. root .. '/' .. path))() \
-         end; \
-         local source = EMBEDDED[path]; \
-         if not source then error('embedded module missing: ' .. tostring(path)) end; \
-         LOADED_SOURCES[path] = host.sha256(source); \
-         return assert(load(source, '@' .. path))() end";
+    // ONE COMPILE PER MODULE PER PROCESS (Fable 28/11, idle-costs-nothing). It used to `load` - parse and
+    // compile - the same file on every call, and the placement tick calls `dofile` for three modules every
+    // two seconds: measured `wa-placement` at 3.73 % of a core on an idle node, ~75 ms of CPU per tick.
+    // The cache is keyed by the module's own TEXT, which is the strongest possible check and the reason hot
+    // reload is untouched: an embedded source cannot change inside a process, and a root-mode file that
+    // changed differs in its text, so it recompiles. The chunk is still CALLED every time, so a module body
+    // that runs per call behaves exactly as before; only the parse and the compile are skipped.
+    // `DOFILE_COMPILES` is the counter a test reads to prove an idle tick compiles nothing.
+    const BOOTSTRAP: &str = r#"LOADED_SOURCES = {}; DOFILE_CHUNKS = {}; DOFILE_COMPILES = 0; DOFILE_HASHES = 0; function dofile(path) local root = host.getenv('WASM_AGENT_LUA_ROOT'); local key, text, name; if root and root ~= '' then key = root .. '/' .. path; text = host.read_file(key); if not text then error('lua_root_unreadable: ' .. key) end; name = '@' .. key else key = path; text = EMBEDDED[path]; if not text then error('embedded module missing: ' .. tostring(path)) end; name = '@' .. path end; local cached = DOFILE_CHUNKS[key]; if cached and cached.text == text then return cached.chunk() end; LOADED_SOURCES[path] = host.sha256(text); DOFILE_HASHES = DOFILE_HASHES + 1; DOFILE_COMPILES = DOFILE_COMPILES + 1; local chunk = assert(load(text, name)); DOFILE_CHUNKS[key] = { text = text, chunk = chunk }; return chunk() end"#;
     lua.do_string(BOOTSTRAP, "bootstrap").map_err(|e| wasmtime::Error::msg(format!("boot_state: {e}")))?;
     lua.own(host as Box<dyn std::any::Any + Send>);
     Ok(lua)
@@ -2118,6 +2115,40 @@ mod tests {
 
     /// The pool a test uses: the real component, a native interpreter per instance (the shipping
     /// boot's shape: registry + own connection + `EMBEDDED`), one slot unless a test says otherwise.
+    /// An idle node's tick must not pay to parse and compile what it already holds (idle-costs-nothing,
+    /// Fable 28/11). The placement thread calls `dofile` for three modules every two seconds: measured
+    /// `wa-placement` at 3.73 % of a core on an idle node, ~75 ms of CPU per tick, most of it `load`.
+    ///
+    /// The body still runs on every call - that is what a caller depends on - and only the parse, the
+    /// compile and the hash are skipped. The second half proves the cache cannot freeze an edit: the
+    /// module's TEXT is the key, so different text compiles again. That is the hot-reload guarantee.
+    #[test]
+    fn a_dofile_compiles_once_until_the_module_changes() {
+        let home = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+        let home = format!("{home}/wa-dofile-cache-home");
+        let _ = std::fs::create_dir_all(&home);
+        let embedded = [("lua/probe.lua", "PROBE_RUNS = (PROBE_RUNS or 0) + 1; return PROBE_RUNS")];
+        let lua = boot_native_state(&home, ":memory:", &[], &embedded).expect("boot the native state");
+        lua.do_string(
+            "PROBE_RUNS = 0; \
+             local a = dofile('lua/probe.lua'); \
+             local b = dofile('lua/probe.lua'); \
+             local c = dofile('lua/probe.lua'); \
+             assert(a == 1 and b == 2 and c == 3, 'the body must run on every call, got ' .. tostring(a) .. ',' .. tostring(b) .. ',' .. tostring(c)); \
+             assert(DOFILE_COMPILES == 1, 'compiled ' .. tostring(DOFILE_COMPILES) .. ' times for three calls'); \
+             assert(DOFILE_HASHES == 1, 'hashed ' .. tostring(DOFILE_HASHES) .. ' times for three calls')",
+            "three calls, one compile",
+        ).expect("three dofile calls compile once, hash once and run the body three times");
+        // The invalidation: different text is a different key, so the next call compiles again.
+        lua.do_string(
+            "EMBEDDED['lua/probe.lua'] = 'PROBE_RUNS = (PROBE_RUNS or 0) + 100; return PROBE_RUNS'; \
+             local d = dofile('lua/probe.lua'); \
+             assert(d == 103, 'an edited module must run its new body, got ' .. tostring(d)); \
+             assert(DOFILE_COMPILES == 2, 'an edited module must compile again, got ' .. tostring(DOFILE_COMPILES))",
+            "an edited module compiles again",
+        ).expect("edited text recompiles and runs");
+    }
+
     fn pool(max_instances: usize, warm: usize, acquire_timeout: Duration) -> Option<CoreComponentPool> {
         let wasm = std::fs::read(agent_core_wasm()?).expect("read agent-core");
         // A scratch home, not the operator's: the boot reads `~/.wasm-agent/env`, and a test must not
