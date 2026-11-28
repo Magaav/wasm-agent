@@ -25,8 +25,34 @@ if type(host.quickjs)=='function' then
 end
 assert(ready,'this node has no embedded code-mode assets, so no script ran and nothing here was measured')
 local data=dofile('lua/core/paths.lua').data()
-assert(not data:match('/%.wasm%-agent$') or data:find('scratch',1,true) or data:find('/tmp/',1,true),
- 'this row needs a scratch HOME (it writes counters); it refused to run in '..tostring(data))
+-- A SCRATCH HOME IS ANY HOME THAT IS NOT THE OPERATOR'S (29/11). The old rule accepted only a data directory ending
+-- in /tmp or containing the word "scratch", so a genuine scratch home elsewhere (a worktree fixture, a CI temp dir, a
+-- sibling of the repository) was refused and the row went red for a reason that was not about counters.
+--
+-- The rule is the one scripts/lib/scratch-home.sh applies in bash, and it needs the OPERATOR'S home rather than $HOME:
+-- a row is usually started with HOME already replaced, so $HOME is the scratch home and comparing against it refused
+-- the very home the row was given. The login home is read from the password database instead, and only if the operator
+-- store itself is what paths.data() resolved to is the row refused.
+local function operator_home()
+  local user = tostring(env('USER') or '')
+  if user ~= '' and type(host.read_file) == 'function' then
+    local passwd = host.read_file('/etc/passwd')
+    if type(passwd) == 'string' then
+      for line in passwd:gmatch('[^\n]+') do
+        local name, home = line:match('^([^:]+):[^:]*:[^:]*:[^:]*:[^:]*:([^:]+):')
+        if name == user and home and home ~= '' then return home end
+      end
+    end
+  end
+  return tostring(env('HOME') or '')
+end
+local home_of_operator = operator_home()
+local operator_store = home_of_operator ~= '' and (home_of_operator .. '/.wasm-agent') or ''
+local in_operator_store = operator_store ~= ''
+  and (data == operator_store or data:sub(1, #operator_store + 1) == operator_store .. '/')
+assert(operator_store ~= '' and not in_operator_store,
+ 'this row needs a scratch HOME (it writes counters); it refused to run in ' .. tostring(data)
+ .. ' because that is the operator store of ' .. home_of_operator)
 local sid=memory.start_session('','the three counters',{user_id='master'})
 local ctx={session_id=sid,user_id='master'}
 local catalog=tools.all('master',ctx,memory)
