@@ -103,7 +103,18 @@ step "        tree: $ROOT at $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null
 step "        sha256 $(sha256sum "$SENTINEL" 2>/dev/null | cut -c1-16 || echo unknown)"
 
 # The scratch home. Nothing here may be the operator's own store (scripts/lib/scratch-home.sh).
+#
+# HOME AS WELL, NOT ONLY WASM_AGENT_HOME (28/11, P0 from the canary). MEASURED: a sentinel started by this row with only
+# WASM_AGENT_HOME set was reported as "a non-live sentinel with the live HOME/DB" - so SOMETHING in that process tree read
+# HOME, and the operator's real home was the answer it got. WASM_AGENT_HOME is the node's own override (paths.rs:12
+# prefers it), and HOME is what every other program - a shell, node, a spawned helper - falls back to. A scratch row must
+# hand over BOTH, and prove the pair with the guard that exists for it.
 mkdir -p "$HOME_DIR/.wasm-agent" || skip "cannot create a scratch home"
+[ -r "$ROOT/scripts/lib/scratch-home.sh" ] && . "$ROOT/scripts/lib/scratch-home.sh"
+if command -v wa_scratch_home_guard >/dev/null 2>&1; then
+  wa_scratch_home_guard "$HOME_DIR" || skip "$HOME_DIR is not a scratch home (it is, or contains, the operator's store)"
+fi
+export HOME="$HOME_DIR"
 export WASM_AGENT_HOME="$HOME_DIR"
 unset WASM_AGENT_RENDEZVOUS WASM_AGENT_RELAY WASM_AGENT_DB
 
