@@ -17,7 +17,7 @@
 //! stable words only, and a refusal is `{ok:false, error:"email_<word>", detail}`.
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
-use wa_email_index as seam;
+use crate::email_index_component as seam;
 use wa_queue::{EnqueueRequest, JobId, Queue};
 
 /// The component name the queue namespace belongs to.
@@ -45,7 +45,14 @@ pub extern "C-unwind" fn media(l: *mut wa_host_support::lua::LuaState) -> std::o
 fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => ask(op, &args, seam::WAIT_MS),
+        // The wait is the CALLER's, never a constant of this crate's: 0 queues the job and answers at
+        // once with its id (the handle), and a later call names that id to read its outcome. The shared
+        // bound - 60 s, 300 s at most - lives in `lua/core/codemode_pending.lua`, one number for every
+        // tool that can outlive its wait (Victor, 27/11: a slow answer is not a failure).
+        Ok(args) => match args.get("__job").and_then(Value::as_u64) {
+            Some(id) => settle(&queue(), id, crate::serve::wait_ms(&args)),
+            None => ask(op, &args, crate::serve::wait_ms(&args)),
+        },
         Err(_) => json!({"ok": false, "error": "email_invalid_request", "detail": "the arguments are not a JSON object"}),
     };
     wa_host_support::json::push_json(l, &answer);
@@ -54,24 +61,24 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
 
 /// Build the request from the tool's arguments, in the one shape the component reads back. `count` is
 /// accepted as a synonym of `limit`, so a caller that says either is understood.
-fn request_of(op: seam::Op, args: &Value) -> seam::Request {
+fn request_of(op: seam::Op, args: &Value) -> Value {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
     let number = |key: &str| args.get(key).and_then(Value::as_i64);
     let limit = args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64));
-    seam::Request {
-        op,
-        q: text("q"),
-        mailbox: text("mailbox"),
-        from: text("from"),
-        subject: text("subject"),
+    json!({
+        "op": op.as_str(),
+        "q": text("q"),
+        "mailbox": text("mailbox"),
+        "from": text("from"),
+        "subject": text("subject"),
         // A caller may pass seconds (a common mistake); the index stores milliseconds.
-        since: number("since").map(from_epoch),
-        until: number("until").map(from_epoch),
-        has_attachment: args.get("has_attachment").and_then(Value::as_bool),
-        uid: args.get("uid").and_then(Value::as_u64).map(|value| value as u32),
-        before: args.get("before").and_then(Value::as_u64).map(|value| value as u32),
-        limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
-    }
+        "since": number("since").map(from_epoch),
+        "until": number("until").map(from_epoch),
+        "has_attachment": args.get("has_attachment").and_then(Value::as_bool),
+        "uid": args.get("uid").and_then(Value::as_u64).map(|value| value as u32),
+        "before": args.get("before").and_then(Value::as_u64).map(|value| value as u32),
+        "limit": limit.map(|value| value.min(u32::MAX as u64)),
+    })
 }
 
 /// Epoch milliseconds from a number that may be seconds: anything below 100_000_000_000 is taken as
@@ -84,20 +91,27 @@ fn from_epoch(value: i64) -> i64 {
     }
 }
 
+/// The wait this call asked for, under the SAME internal name the WhatsApp query uses: `__wait_ms` rides
+/// in the raw argument text and never in a tool's schema, so a closed schema stays closed. Absent means
+/// zero - queue it and answer the id at once - because the caller then holds a handle and will ask again;
+/// the shared bound (60 s, 300 s at most) is `lua/core/codemode_pending.lua`'s, not this crate's.
+
 fn ask(op: seam::Op, args: &Value, wait_ms: u64) -> Value {
     ask_in(&queue(), op, args, wait_ms)
 }
 
 fn ask_in(q: &Queue, op: seam::Op, args: &Value, wait_ms: u64) -> Value {
     let request = request_of(op, args);
-    if let Err(refusal) = request.validate() {
-        return seam::refusal(&refusal);
-    }
+    // The component decides: the envelope it returns on a refusal is the one the caller reads.
+    let verified = match seam::validate(request) {
+        Ok(verified) => verified,
+        Err(refusal) => return refusal,
+    };
     let id = match q.enqueue(
-        EnqueueRequest::new(seam::QUEUE, request.encode())
-            .fresh_for(seam::FRESH_MS)
-            .max_attempts(seam::MAX_ATTEMPTS)
-            .dedupe(request.dedupe_key()),
+        EnqueueRequest::new(&verified.queue, verified.request.clone())
+            .fresh_for(verified.fresh_ms)
+            .max_attempts(verified.max_attempts)
+            .dedupe(verified.dedupe.clone()),
     ) {
         Ok(enqueued) => enqueued.id.0,
         Err(error) => return json!({"ok": false, "error": "email_queue_failed", "detail": one_line(&error.to_string())}),
@@ -139,7 +153,7 @@ fn settle(q: &Queue, id: u64, wait_ms: u64) -> Value {
                 "ok": true,
                 "id": id,
                 "state": "running",
-                "note": "the connector has not answered yet: call the same tool again with the same arguments - it is the same job (deduplicated) and answers when the connector does; if it stays running across calls, this node's email connector is not answering, so use the mcp_google_imap_* tools instead",
+                "note": "the connector has not answered yet: this id is the handle, and calling the same tool with {job: <id>} reads its outcome; a caller under the shared wait gets that resume itself (lua/core/codemode_pending.lua), and a query still running across the whole wait means this node's email connector is not answering, so use the mcp_google_imap_* tools instead",
             });
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -156,37 +170,54 @@ mod tests {
 
     #[test]
     fn the_tool_arguments_become_the_request_the_component_reads() {
+        // The request is DESCRIBED here as the JSON the component reads back; the validation that used to
+        // run on it in-process (`Request::validate`) is the component's answer now, so this test asserts the
+        // mapping only - the same fields, under the names the contract uses - and
+        // `scripts/test-email-connector.lua` measures what the component says about them.
         let request = request_of(seam::Op::Search, &json!({"q": "fatura", "mailbox": "INBOX", "limit": 5}));
-        assert_eq!(request.q.as_deref(), Some("fatura"));
-        assert_eq!(request.mailbox.as_deref(), Some("INBOX"));
-        assert_eq!(request.limit, Some(5));
-        assert!(request.validate().is_ok());
+        assert_eq!(request["q"].as_str(), Some("fatura"));
+        assert_eq!(request["mailbox"].as_str(), Some("INBOX"));
+        assert_eq!(request["limit"].as_u64(), Some(5));
+        assert_eq!(request["op"].as_str(), Some("search"));
         // `count` is a synonym, and a second-resolution timestamp is milliseconds by the time the index
         // sees it.
         let request = request_of(seam::Op::Read, &json!({"count": 3, "since": 1_793_959_200}));
-        assert_eq!(request.limit, Some(3));
-        assert_eq!(request.since, Some(1_793_959_200_000));
+        assert_eq!(request["limit"].as_u64(), Some(3));
+        assert_eq!(request["since"].as_i64(), Some(1_793_959_200_000));
         assert_eq!(from_epoch(1_793_959_200_000), 1_793_959_200_000, "a millisecond value is left alone");
         assert_eq!(from_epoch(0), 0);
         // The op decides which fields the component will read.
         let media = request_of(seam::Op::Media, &json!({"uid": 12}));
-        assert_eq!(media.uid, Some(12));
-        assert_eq!(media.op, seam::Op::Media);
+        assert_eq!(media["uid"].as_u64(), Some(12));
+        assert_eq!(media["op"].as_str(), Some("media"));
+    }
+
+    /// Whether an `email-index` component is installed here: the refusals below are the CONTRACT's, and the
+    /// contract answers through the component now (`crate::email_index_component`). A test that invented a
+    /// validation would be testing a second copy of a rule that moved out of the host.
+    fn component_installed() -> bool {
+        crate::email_index_component::constant("queue").is_string()
     }
 
     #[test]
     fn a_question_that_cannot_be_one_is_refused_before_it_is_enqueued() {
-        let empty = request_of(seam::Op::Search, &json!({}));
-        let refusal = empty.validate().unwrap_err();
-        assert_eq!(refusal.error(), "email_empty_query");
-        let too_long = request_of(seam::Op::Search, &json!({"q": "x".repeat(seam::MAX_Q + 1)}));
-        assert_eq!(too_long.validate().unwrap_err().code, "query_too_long");
-        let bad_limit = request_of(seam::Op::Search, &json!({"q": "ok", "limit": 0}));
-        assert_eq!(bad_limit.validate().unwrap_err().code, "bad_limit");
-        let media_without_uid = request_of(seam::Op::Media, &json!({"mailbox": "INBOX"}));
-        assert_eq!(media_without_uid.validate().unwrap_err().code, "uid_required");
-        // A valid search is one job per distinct question.
-        assert_eq!(request_of(seam::Op::Search, &json!({"q": "ok"})).dedupe_key(), request_of(seam::Op::Search, &json!({"q": "ok"})).dedupe_key());
-        assert_ne!(request_of(seam::Op::Search, &json!({"q": "ok"})).dedupe_key(), request_of(seam::Op::Read, &json!({})).dedupe_key());
+        if !component_installed() {
+            eprintln!("skip a_question_that_cannot_be_one_is_refused_before_it_is_enqueued: no email-index component");
+            return;
+        }
+        let empty = seam::validate(request_of(seam::Op::Search, &json!({}))).unwrap_err();
+        assert_eq!(empty["error"], "email_empty_query", "{empty}");
+        let too_long = seam::validate(request_of(seam::Op::Search, &json!({"q": "x".repeat(seam::max_q() + 1)}))).unwrap_err();
+        assert_eq!(too_long["code"], "query_too_long", "{too_long}");
+        let bad_limit = seam::validate(request_of(seam::Op::Search, &json!({"q": "ok", "limit": 0}))).unwrap_err();
+        assert_eq!(bad_limit["code"], "bad_limit", "{bad_limit}");
+        let media_without_uid = seam::validate(request_of(seam::Op::Media, &json!({"mailbox": "INBOX"}))).unwrap_err();
+        assert_eq!(media_without_uid["code"], "uid_required", "{media_without_uid}");
+        // A valid search is one job per distinct question: the contract's key, asked twice, is the same.
+        let once = seam::validate(request_of(seam::Op::Search, &json!({"q": "ok"}))).expect("a search is valid").dedupe;
+        let again = seam::validate(request_of(seam::Op::Search, &json!({"q": "ok"}))).expect("a search is valid").dedupe;
+        assert_eq!(once, again);
+        let other = seam::validate(request_of(seam::Op::Read, &json!({}))).expect("a read is valid").dedupe;
+        assert_ne!(once, other, "a read is not the same question as a search");
     }
 }

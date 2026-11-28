@@ -13,6 +13,8 @@
 //   node scripts/landing-queue.mjs prune-pins [--pin-dir <dir>] [--install-dir <dir>] [--keep <sha,...>]
 //                                            [--keep-max <n>] [--builds-excluded-by <reason>] [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs record --tree <ref> [--command "<what ran>"] [--owner <id>]
+//   node scripts/landing-queue.mjs submit --branch <name> --commit <sha> [--mission <name>] [--priority]
+//                                          [--note <text>] [--json] [--repo <dir>]
 //   node scripts/landing-queue.mjs land --branch <name> [--checks "<cmd>"] [--dry-run] [--no-push]
 //                                       [--owner <session id>] [--lease-seconds <s>] [--repo <dir>]
 //   node scripts/landing-queue.mjs preflight --branch <name> [--checks "<cmd>"] [--worktree <dir>]
@@ -30,13 +32,13 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import {spawn, spawnSync} from 'node:child_process';
+import {spawn, spawnSync, execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {
   QueueError, classifyDelta, treeDigest, candidateTree, canonicalDirt, describeDirt, git, gitOk,
   mainWorktree, openQueue, queueDir, logRow, resolveOwner, holderOf, reclaimPass, grantNext,
   queuePosition, waitingRows, heartbeat, resolveCommit, bootId, hostName, proofOf, recordProof,
-  baselineOf, recordBaseline, checkCommandKey, recoverUnpushed, writeHolder, clearHolder,
+  baselineOf, recordBaseline, checkCommandKey, recoverUnpushed, writeHolder, clearHolder, gitCommonDir,
 } from './lib/landing-queue.mjs';
 import {parseCheckLog, baselineRecord, judgeRun, describeRun} from './lib/landing-baseline.mjs';
 import {deployGate} from './lib/deploy-gate.mjs';
@@ -1090,8 +1092,131 @@ async function recheckNewFailures({id, canonical, upstream, baseDigest, command,
 }
 
 // ---- land ---------------------------------------------------------------------------------------
+// ------------------------------------------------------------------ WHO MAY LAND (Fable 26/11)
+//
+// MEASURED 26/11 21:46Z: a worker ran `landing-queue.mjs land --branch change/codemode-seam-leaves-the-host` FROM ITS
+// OWN WORKTREE, the merge went into the CANONICAL checkout, and the unpushed merge 5ed64ea4 diverged main from
+// origin/main and blocked the install for twenty minutes. Every protection the queue had was about the TREE or the ROW
+// (dirty canonical, who holds the lease); none asked WHO was asking. `--dry-run` was the only thing between a worker and
+// main, and a worker does not pass it.
+//
+// So the two verbs that write the canonical checkout or push - `land` and `reconcile` - require the LANDING LANE, and
+// the refusal names the way forward. Three facts, any one of which refuses, checked before anything is opened or
+// written:
+//
+//   1. A SESSION/WORKER MARKER in the environment: WASM_AGENT_SESSION_ID, WA_SESSION_ID, WA_SESSION, WA_MISSION or
+//      WASM_AGENT_IN_TURN=1 - the harness's own word for "this is a turn", and docs/LANDING-QUEUE.md:211 already names
+//      the first two as the harness-env marker.
+//   2. A SESSION ANCESTOR: an ancestor process that is a `wa` CLI (scripts/lib/turn-guard.sh's rule, one language
+//      further out). MEASURED while writing this: a tool shell under a `wa chat --once` turn carries NONE of the
+//      markers above, so the environment alone would have let this very session land - the process tree is the fact
+//      that does not go stale.
+//   3. THE REPO IS A LINKED WORKTREE OF THE CANONICAL CHECKOUT: a worker's tree is a worktree of the canonical one, and
+//      that is exactly the 21:46Z shape. The canonical itself and an independent clone (the orchestrator's
+//      `_orch/tree`) are the lane's shapes and pass.
+//
+// And the lane must HOLD ITS TOKEN: `<home>/.wasm-agent/lane/land.token`, a regular file, mode 0600 or stricter, 32
+// characters or more. The path is NOT readable from an environment variable (an override is a bypass) and no flag or
+// variable skips any of this. `--dry-run` stays open to everyone: it merges and pushes nothing.
+const LANE_MARKERS = ['WASM_AGENT_SESSION_ID', 'WA_SESSION_ID', 'WA_SESSION', 'WA_MISSION'];
+
+function laneTokenPath() {
+  const home = process.env.WASM_AGENT_HOME || process.env.HOME || '';
+  return path.join(home, '.wasm-agent', 'lane', 'land.token');
+}
+
+/// The worker/session fact, named, or null. `opts.env`/`opts.ppidWalk` are the row's seam: a test cannot manufacture a
+/// `wa chat` ancestor, and refusing to test the rule because of that is how a guard rots.
+function sessionContext(opts = {}) {
+  const env = opts.env || process.env;
+  for (const marker of LANE_MARKERS) {
+    const value = env[marker];
+    if (typeof value === 'string' && value.trim() !== '') return `${marker} is set`;
+  }
+  if (String(env.WASM_AGENT_IN_TURN || '') === '1') return 'WASM_AGENT_IN_TURN=1';
+  const ancestor = (opts.ppidWalk || waAncestor)();
+  return ancestor ? `this process runs under ${ancestor}` : null;
+}
+
+/// Is an ancestor of this process a `wa` CLI? The rule is scripts/lib/turn-guard.sh's: the first token that is not an
+/// option is the subcommand, and `serve` is the node - everything else is a session (chat, run, call, ...).
+function waAncestor(startPid = process.pid) {
+  let pid = startPid;
+  for (let hops = 0; hops < 40 && pid > 1; hops++) {
+    let status;
+    try { status = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch { return null; }
+    const rest = status.slice(status.lastIndexOf(')') + 2).split(' ');
+    const ppid = Number(rest[1]);
+    if (!Number.isFinite(ppid) || ppid <= 1) return null;
+    let cmdline = '';
+    try { cmdline = fs.readFileSync(`/proc/${ppid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' '); } catch { return null; }
+    const argv = cmdline.split(' ').filter(Boolean);
+    const base = path.basename(argv[0] || '');
+    if (base === 'wa' || base === 'wa.exe') {
+      const subcommand = argv.slice(1).find(arg => !arg.startsWith('-')) || '';
+      return subcommand === 'serve' ? null : `wa ${subcommand}`.trim();
+    }
+    pid = ppid;
+  }
+  return null;
+}
+
+/// Why `land`/`reconcile` may not run here, or null. `extra` is the row's seam (env, ppidWalk, token, canonical).
+function laneProblem(verb, options, extra = {}) {
+  const worker = sessionContext(extra);
+  if (worker) {
+    return `landing is the orchestrator's: ${verb} from a worker (${worker}) is refused and nothing was written. `
+      + `A worker does not land its own branch - write READY <sha> in your ready file and the orchestrator lands it. `
+      + `A dry run is open to you: --dry-run merges and pushes nothing.`;
+  }
+  const token = extra.token !== undefined ? extra.token : laneTokenPath();
+  let stat = null;
+  try { stat = fs.lstatSync(token); } catch { stat = null; }
+  if (!stat) {
+    return `landing is the orchestrator's: ${verb} needs the lane token at ${token} and it is not there. `
+      + `The lane creates it once: mkdir -p ${path.dirname(token)} && (umask 077; head -c 32 /dev/urandom | base64 > ${token}). `
+      + `Write READY <sha> in your ready file if you are a worker; nothing was written.`;
+  }
+  if (!stat.isFile()) {
+    return `landing is the orchestrator's: the lane token ${token} is not a regular file, so it is refused and nothing was written.`;
+  }
+  const mode = stat.mode & 0o777;
+  if ((mode & 0o077) !== 0) {
+    return `landing is the orchestrator's: the lane token ${token} is mode 0${mode.toString(8)} - it must be 0600 or stricter, because a token any reader can take is not a token. Nothing was written.`;
+  }
+  let body = '';
+  try { body = fs.readFileSync(token, 'utf8').trim(); } catch { body = ''; }
+  if (body.length < 32) {
+    return `landing is the orchestrator's: the lane token ${token} holds ${body.length} character(s); 32 or more are required. Nothing was written.`;
+  }
+  // A worker's own tree is the 21:46Z shape: a worktree OF the canonical checkout. The canonical itself and an
+  // independent clone are the lane's shapes and pass.
+  const repo = path.resolve(options.repo || process.cwd());
+  let canonical = extra.canonical || null;
+  try { canonical = canonical || mainWorktree(repo); } catch { canonical = null; }
+  if (canonical && path.resolve(repo) !== path.resolve(canonical)) {
+    let commonA = null;
+    let commonB = null;
+    try { commonA = gitCommonDir(repo); commonB = gitCommonDir(canonical); } catch { commonA = null; }
+    if (commonA && commonB && commonA === commonB) {
+      return `landing is the orchestrator's: ${verb} was asked to run from ${repo}, which is a linked WORKTREE of the `
+        + `canonical checkout ${canonical}. A landing merges into the canonical tree; running the queue from a worker's `
+        + `own worktree is the 26/11 incident (an unpushed merge that diverged main). Run it from ${canonical} or from an `
+        + `independent clone, or write READY <sha> in your ready file. Nothing was written.`;
+    }
+  }
+  return null;
+}
+
+function requireTheLane(verb, options, extra = {}) {
+  const problem = laneProblem(verb, options, extra);
+  if (problem) throw new QueueError(problem, 75, verb === 'reconcile' ? 'lane_only' : 'lane_token');
+}
+
 async function commandLand(options) {
   if (!options.branch) throw new QueueError('land needs --branch <name>', 75, 'usage');
+  // --dry-run merges and pushes nothing, so it stays open to everyone (and is how a worker checks its own branch).
+  if (!options.dryRun) requireTheLane('land', options);
   const {repo, canonical, dir, db} = open(options);
   const owner = resolveOwner(options);
   // Before this lander touches anything: what did the LAST landing publish? Printed per target, with a
@@ -1198,6 +1323,23 @@ async function commandLand(options) {
     // 3. The merge, the push, the readback - the landing itself. The token is re-read before each
     //    effect: a revoked holder (reconcile --force) must not push.
     heartbeat(db, id, lease);
+    // BEFORE THE MERGE: does this diff touch what any pinned component is BUILT from, and does that
+    // component still rebuild to its own line? A pin can be wrong while its `# SOURCES` line is right
+    // (27/11: bytes built with the diagnosis toolchain override), and no other landing check compares
+    // "what this tree builds" with "what this tree pins". Refuses before anything is merged.
+    const componentGate = spawnSync('bash', [path.join(canonical, 'scripts', 'landing-component-gate.sh'),
+      resolveCommit(canonical, 'origin/main'), options.branch], {cwd: canonical, encoding: 'utf8', timeout: 45 * 60 * 1000});
+    for (const line of String(componentGate.stdout || '').trim().split(/\r?\n/).filter(Boolean).slice(-6)) say(`#${id} ${line}`);
+    if (componentGate.status === 2) {
+      const why = `component_gate_unknown: the component pin gate could not answer (${String(componentGate.stderr || componentGate.stdout || '').trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || 'no reason'}); nothing was merged`;
+      finish('refused', why);
+      throw new QueueError(why, 75, 'component_gate_unknown');
+    }
+    if (componentGate.status !== 0) {
+      const why = `component_not_reproducible: ${options.branch} touches a pinned component's inputs and the tree does not build it to the line components.lock pins; commit the pin with the change, built with the tree's own toolchain. Nothing was merged`;
+      finish('refused', why);
+      throw new QueueError(why, 75, 'component_not_reproducible');
+    }
     const containing = git(canonical, ['merge-base', '--is-ancestor', options.branch, 'HEAD']);
     let merged = headAt;
     if (containing.status === 0) {
@@ -1489,6 +1631,9 @@ function commandRelease(options) {
 // with --force the row is ended even though its pid is alive, and the holder's own token check turns
 // that into a refusal to push rather than two landers.
 function commandReconcile(options) {
+  // Reconcile applies a recovery to the canonical checkout (a row a dead lander left behind), so it is the lane's
+  // for the same reason `land` is - and there is no dry-run form to leave open.
+  requireTheLane('reconcile', options);
   const {dir, db} = open(options);
   if (!options.id) throw new QueueError('reconcile needs --id <n>', 75, 'usage');
   if (!options.evidence || String(options.evidence).trim().length < 8) {
@@ -1519,6 +1664,11 @@ function commandReconcile(options) {
 // pristine checkout itself). The record is keyed by the check command, this machine and main's retest
 // digest, so a log recorded for a different tree is refused rather than trusted.
 async function commandBaseline(options) {
+  // A BASELINE MEASURED ON DEMAND IS A LANDING'S OWN MOVE (Fable 26/11): `--measure` checks the canonical checkout out
+  // to main's commit, runs the check command there and puts it back (ensureBaseline), so it writes the canonical tree
+  // and belongs to the lane. `--record <log>` only records a log that already exists - it moves nothing - and stays
+  // open to everyone, which is why this guard sits here and not at the verb.
+  if (options.measure) requireTheLane('baseline --measure', options);
   const {repo, canonical, dir, db} = open(options);
   const command = options.command || 'bash scripts/fast.sh';
   const commit = resolveCommit(repo, options.commit || 'origin/main');
@@ -1589,6 +1739,33 @@ function commandHistory(options) {
   return rows;
 }
 
+// ---- submit: THE DOOR, in the one file everybody already calls ----------------------------------
+//
+// `land` runs a landing as a side effect of being called - the caller waits, and a refusal comes back as
+// prose. `submit` puts the SAME request in the queue's journal and answers at once with a request id and a
+// position (scripts/queue.mjs, the queue's own command line). It is idempotent on (branch, sha), so a
+// session that submits twice has one request, and it NEVER lands anything itself: the runner does, in its
+// own clone, one at a time.
+//
+// `land` is left exactly as it is in this hunk. Retiring it - and the lane token with it - is the change
+// that makes submit the only door, and that is hunk 5, reviewed as its own step (Fable 27/11).
+async function commandSubmit(options) {
+  const branch = options.branch;
+  if (!branch) throw new QueueError('submit needs --branch <name> and --commit <sha>', 75, 'usage');
+  const sha = options.commit || options.sha;
+  if (!sha) throw new QueueError('submit needs --commit <sha>', 75, 'usage');
+  const repo = options.repo || process.cwd();
+  const args = [path.join(path.dirname(fileURLToPath(import.meta.url)), 'queue.mjs'), 'submit', branch, sha, options.mission || ''];
+  if (options.priority) args.push('--priority');
+  if (options.note) args.push('--note', options.note);
+  args.push('--repo', repo);
+  if (options.json) args.push('--json');
+  const out = execFileSync(process.execPath, args, {encoding: 'utf8'});
+  if (options.json) return {exit: 0, output: out.trim()};
+  process.stdout.write(out);
+  return {exit: 0};
+}
+
 // ---- main ---------------------------------------------------------------------------------------
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
@@ -1599,6 +1776,7 @@ async function main() {
   else if (command === 'pin') result = await commandPin(options);
   else if (command === 'prune-pins') result = commandPrunePins(options);
   else if (command === 'record') result = commandRecord(options);
+  else if (command === 'submit') result = await commandSubmit(options);
   else if (command === 'land') result = await commandLand(options);
   else if (command === 'preflight') result = await commandPreflight(options);
   else if (command === 'release') result = commandRelease(options);
@@ -1606,7 +1784,7 @@ async function main() {
   else if (command === 'classify') result = commandClassify(options);
   else if (command === 'baseline') result = commandBaseline(options);
   else if (command === 'history') result = commandHistory(options);
-  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|prune-pins|record|land|preflight|release|reconcile|classify|baseline|history [options]', 75, 'usage');
+  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|prune-pins|record|submit|land|preflight|release|reconcile|classify|baseline|history [options]', 75, 'usage');
   if (result && result.exit) process.exitCode = result.exit;
   // A preflight that ran the checks and found them red is the check's own result, not a refusal: exit 1
   // so a caller can tell it from `0 recorded` and from the named refusals (75) and lane errors (76).

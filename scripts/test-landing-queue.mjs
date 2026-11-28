@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
@@ -24,6 +25,40 @@ import {DEPLOY_WORKSPACES} from './lib/deploy-gate.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(REPO, 'scripts', 'landing-queue.mjs');
+
+// THE ROW JUDGES THE LANE FROM OUTSIDE A SESSION (Fable 26/11): `land` refuses a process that runs under a `wa` CLI -
+// that is the guard - and this row's parent IS one when it is started from a chat (a person's run, an agent's run, the
+// runner when the orchestrator drives it). The gate starts it from plain bash and never reaches this branch. From a
+// session the row detaches ONCE with `setsid`, so the same file judges the same thing in both places instead of
+// skipping its own subject; both halves say which shape ran.
+function underWaCli() {
+  let pid = process.pid;
+  for (let hops = 0; hops < 40 && pid > 1; hops++) {
+    let status;
+    try { status = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch { return null; }
+    const ppid = Number(status.slice(status.lastIndexOf(')') + 2).split(' ')[1]);
+    if (!Number.isFinite(ppid) || ppid <= 1) return null;
+    let cmdline = '';
+    try { cmdline = fs.readFileSync(`/proc/${ppid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' '); } catch { return null; }
+    const argv = cmdline.split(' ').filter(Boolean);
+    const base = path.basename(argv[0] || '');
+    if (base === 'wa' || base === 'wa.exe') {
+      const subcommand = argv.slice(1).find(arg => !arg.startsWith('-')) || '';
+      return subcommand === 'serve' ? null : `wa ${subcommand}`.trim();
+    }
+    pid = ppid;
+  }
+  return null;
+}
+if (!process.env.WA_LANE_TEST_DETACHED) {
+  const ancestor = underWaCli();
+  if (ancestor) {
+    console.log(`landing queue: this run is under ${ancestor}, and a land refuses that; detaching once so the lane cases judge a real lane`);
+    const detached = spawnSync('setsid', ['--fork', process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+      {stdio: 'inherit', env: {...process.env, WA_LANE_TEST_DETACHED: '1'}});
+    process.exit(detached.status === null ? 1 : detached.status);
+  }
+}
 const SESSION = '11111111-2222-3333-4444-555555555555';
 const OTHER = '22222222-3333-4444-5555-666666666666';
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-landing-queue-'));
@@ -35,6 +70,16 @@ const ENV = {...process.env, WA_LANDING_QUEUE_LEDGER: LEDGER};
 delete ENV.WASM_AGENT_SESSION_ID;
 delete ENV.WA_SESSION_ID;
 delete ENV.WA_LANDING_QUEUE_DIR;
+
+// THE FIXTURE IS THE LANE (Fable 26/11): `land` now needs the lane token, so this row's home holds one - what a real
+// lane's home holds - instead of the runner's own ~/.wasm-agent. The worker cases below take it away or override it,
+// which is the whole point: the same binary, the same fixture, and only the caller changes.
+const HOME_DIR = path.join(WORK, 'home');
+const LANE_TOKEN = path.join(HOME_DIR, '.wasm-agent', 'lane', 'land.token');
+ENV.WASM_AGENT_HOME = HOME_DIR;
+fs.mkdirSync(path.dirname(LANE_TOKEN), {recursive: true});
+fs.writeFileSync(LANE_TOKEN, crypto.randomBytes(32).toString('base64'));
+fs.chmodSync(LANE_TOKEN, 0o600);
 
 let passed = 0;
 const started = Date.now();
@@ -641,6 +686,83 @@ try {
   deployWorkspaceGuard();
   ownerIdentity();
   classifierParity();
+  laneOnly();
+
+  // ---- 10. a landing is the orchestrator's (Fable 26/11) ------------------------------------------
+  // MEASURED 26/11 21:46Z: a worker ran `land --branch change/codemode-seam-leaves-the-host` from its own worktree; the
+  // merge went into the canonical checkout and the unpushed merge 5ed64ea4 blocked the install. The four cases below
+  // are the brief's three plus the two shapes that are not a caller's identity but a caller's TREE.
+  function laneOnly() {
+    const headBefore = git(CANONICAL, 'rev-parse', 'HEAD').trim();
+    const reflogBefore = git(CANONICAL, 'reflog', '--format=%H %gs', '-n', '40');
+    const reflogAfter = () => git(CANONICAL, 'reflog', '--format=%H %gs', '-n', '40');
+
+    // 10a. A WORKER SESSION IS REFUSED BY NAME, and nothing in the canonical checkout moves.
+    const worker = q(['land', '--branch', 'change/lane-probe', '--owner', SESSION, '--checks', 'echo never'],
+      {env: {WA_SESSION: '0f0f0f0f-1111-2222-3333-444444444444'}});
+    check('a worker session cannot land', worker.status === 75 && /landing is the orchestrator's/.test(worker.stderr), worker.stderr);
+    check('the refusal names the marker that made it a worker', /WA_SESSION is set/.test(worker.stderr), worker.stderr);
+    check('and it names the way forward: READY <sha> in the ready file', /write READY <sha> in your ready file/.test(worker.stderr), worker.stderr);
+    check('a refused land leaves the canonical HEAD where it was', git(CANONICAL, 'rev-parse', 'HEAD').trim() === headBefore);
+    check('and leaves the canonical reflog untouched', reflogAfter() === reflogBefore);
+
+    // 10b. THE OTHER MARKERS, so no spelling of \"this is a turn\" is missed.
+    for (const marker of ['WASM_AGENT_SESSION_ID', 'WA_SESSION_ID', 'WA_MISSION']) {
+      const attempt = q(['land', '--branch', 'change/lane-probe', '--owner', SESSION], {env: {[marker]: 'x'}});
+      check(`${marker} is a worker too`, attempt.status === 75 && attempt.stderr.includes(marker), attempt.stderr);
+    }
+    const inTurn = q(['land', '--branch', 'change/lane-probe', '--owner', SESSION], {env: {WASM_AGENT_IN_TURN: '1'}});
+    check('WASM_AGENT_IN_TURN=1 is a worker too', inTurn.status === 75 && /WASM_AGENT_IN_TURN=1/.test(inTurn.stderr), inTurn.stderr);
+
+    // 10c. NO TOKEN, NO LAND - and the refusal says how the lane makes one.
+    const tokenless = q(['land', '--branch', 'change/lane-probe', '--owner', SESSION],
+      {env: {WASM_AGENT_HOME: path.join(WORK, 'home-without-a-lane')}});
+    check('a land without the lane token is refused', tokenless.status === 75 && /lane token/.test(tokenless.stderr), tokenless.stderr);
+    check('and the refusal prints the one command that creates it', /head -c 32 \/dev\/urandom/.test(tokenless.stderr), tokenless.stderr);
+
+    // 10d. A TOKEN ANY READER CAN TAKE IS NOT A TOKEN.
+    const looseHome = path.join(WORK, 'home-loose-token');
+    const looseToken = path.join(looseHome, '.wasm-agent', 'lane', 'land.token');
+    fs.mkdirSync(path.dirname(looseToken), {recursive: true});
+    fs.writeFileSync(looseToken, 'x'.repeat(40));
+    fs.chmodSync(looseToken, 0o644);
+    const loose = q(['land', '--branch', 'change/lane-probe', '--owner', SESSION], {env: {WASM_AGENT_HOME: looseHome}});
+    check('a world-readable token is refused', loose.status === 75 && /0600 or stricter/.test(loose.stderr), loose.stderr);
+
+    // 10e. THE 21:46Z SHAPE: the queue asked to run FROM A LINKED WORKTREE of the canonical checkout.
+    const workerTree = path.join(WORK, 'wt-worker');
+    git(CANONICAL, 'branch', '-f', 'change/lane-probe', headBefore);
+    git(CANONICAL, 'worktree', 'add', '--force', workerTree, 'change/lane-probe');
+    const fromWorktree = spawnSync(process.execPath, [CLI, 'land', '--branch', 'change/lane-probe', '--owner', SESSION,
+      '--repo', workerTree], {encoding: 'utf8', env: ENV, timeout: 120000});
+    check('a land run from a linked worktree of the canonical checkout is refused',
+      fromWorktree.status === 75 && /linked WORKTREE/.test(fromWorktree.stderr), fromWorktree.stderr);
+    check('and that refusal still leaves the canonical checkout untouched',
+      git(CANONICAL, 'rev-parse', 'HEAD').trim() === headBefore && reflogAfter() === reflogBefore);
+
+    // 10f. A BASELINE MEASURED ON DEMAND MOVES THE CANONICAL CHECKOUT, SO IT IS THE LANE'S TOO - while `--record`,
+    // which only reads a log, stays open because it moves nothing.
+    const measure = q(['baseline', '--measure', '--command', 'echo never-runs'], {env: {WA_SESSION: '0f0f0f0f-1111-2222-3333-444444444444'}});
+    check('a worker cannot measure a baseline in the canonical checkout',
+      measure.status === 75 && /baseline --measure/.test(measure.stderr) && /landing is the orchestrator's/.test(measure.stderr), measure.stderr);
+    check('and a refused baseline leaves the canonical HEAD where it was', git(CANONICAL, 'rev-parse', 'HEAD').trim() === headBefore);
+    const recordLog = path.join(WORK, 'baseline-log');
+    fs.writeFileSync(recordLog, 'not a test run: nothing named, nothing passed\n');
+    const recordOnly = q(['baseline', '--record', recordLog], {env: {WA_SESSION: '0f0f0f0f-1111-2222-3333-444444444444'}});
+    // The log this row writes names nothing, so `--record` refuses it for ITS reason (baseline_log_unnamed): what is
+    // asserted is that the refusal is not the LANE's, which is what "stays open" means. A check on the exit code alone
+    // would pass for any refusal at all - measured, because that is exactly what the first version did.
+    check('and recording a log stays open to a worker (its refusal, if any, is not the lane\'s)',
+      !/landing is the orchestrator's/.test(recordOnly.stderr), recordOnly.stderr);
+
+    // 10g. --DRY-RUN FROM A WORKER IS ALLOWED: it merges and pushes nothing, and it is how a worker checks its branch.
+    const dry = q(['land', '--branch', 'change/lane-probe', '--owner', SESSION, '--dry-run'],
+      {env: {WA_SESSION: '0f0f0f0f-1111-2222-3333-444444444444'}});
+    check('a worker may dry-run', dry.status === 0, `${dry.stdout}\n${dry.stderr}`);
+    check('the dry run merged and pushed nothing',
+      git(CANONICAL, 'rev-parse', 'HEAD').trim() === headBefore && git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === headBefore);
+    git(CANONICAL, 'worktree', 'remove', '--force', workerTree);
+  }
   console.log(`landing queue: ${passed} checks passed in ${Math.round((Date.now() - started) / 1000)}s`);
   console.log(`fixture kept for evidence: ${WORK}`);
 } catch (error) {

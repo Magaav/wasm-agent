@@ -62,6 +62,17 @@ end
 
 function M.run(argument, opts)
   opts = opts or {}
+  -- A VIEW NEVER WAITS ON ANOTHER NODE (25/11). The chat already passes `cache_only` (chat.lua, operator
+  -- 17/11: "/mcp should be instant"), and this makes it the default for every caller, including the one a
+  -- test or a later surface adds: only `{ fresh = true }` (or an explicit `cache_only = false`) asks the
+  -- fleet from the paint, and `/mcp refresh` is the verb a reader uses instead. The rows say how old the
+  -- peer half is, so "cached" is visible rather than implied.
+  if opts.cache_only == nil and opts.fresh ~= true then
+    local copied = {}
+    for key, value in pairs(opts) do copied[key] = value end
+    copied.cache_only = true
+    opts = copied
+  end
   local io = opts.io
   local command = dofile('lua/core/mcp_command.lua')
   local ctx = opts.ctx or { role = 'master' }
@@ -86,6 +97,14 @@ function M.run(argument, opts)
       end
     end
     return set
+  end
+
+  -- `/mcp refresh`: ask every online peer for its connectors NOW. The one path of this command that waits
+  -- on another node, and only because the reader typed it - the list's own age line names this verb.
+  if rest == 'refresh' then
+    local answer = command.refresh_peers()
+    emit('  ' .. command.refresh_text(answer))
+    return answer
   end
 
   -- `/mcp <key> share <node> [replace]`: copy this node's connector to a peer, disabled there (operator 17/11).
@@ -272,9 +291,10 @@ function M.run_cli(argv, opts)
   local emit = opts.print or print
   local verb = tostring(argv[1] or '')
   local function usage()
-    emit('usage: wa mcp list [--all] [--width <columns>]   the MCP connectors this node can use')
-    emit('  --all     also print the rows the list folds away (other nodes, retired) and each connector')
-    emit('  --width   the column count to lay the rows out for (80 by default)')
+    emit('usage: wa mcp list [--all] [--refresh] [--width <columns>]   the MCP connectors this node can use')
+    emit('  --all      also print the rows the list folds away (other nodes, retired) and each connector')
+    emit('  --refresh  ask the other nodes for their connectors now, then print (the list itself never waits)')
+    emit('  --width    the column count to lay the rows out for (80 by default)')
   end
   -- A question runs nothing: `wa mcp --help` is the usage and exit 0, like every read-only verb
   -- (lua/core/cli_help.lua lists only the verbs that ACT, and this one cannot).
@@ -286,10 +306,11 @@ function M.run_cli(argv, opts)
     usage()
     return { ok = false, error = 'usage', exit = 2 }
   end
-  local all, width, index = false, nil, 2
+  local all, width, refresh, index = false, nil, false, 2
   while index <= #argv do
     local word = tostring(argv[index])
     if word == '--all' then all = true; index = index + 1
+    elseif word == '--refresh' then refresh = true; index = index + 1
     elseif word == '--width' then
       width = tonumber(argv[index + 1])
       if not width or width < 20 then
@@ -307,13 +328,35 @@ function M.run_cli(argv, opts)
   local command = dofile('lua/core/mcp_command.lua')
   -- The operator's own terminal, so the operator's own view: the same context `wa services` uses.
   local ctx = opts.ctx or { role = 'master', user_id = 'cli' }
-  local view = command.list(ctx, opts.list_options or {})
+  -- THE LIST NEVER ASKS ANOTHER NODE (25/11). "wa mcp list" took 3.4-6.4 s on the laptop and 3.5 s here,
+  -- and the two waits were a REMOTE one in each half: `federation.catalog()` re-read every online peer's
+  -- catalogue when its ten-minute cache was old (up to `federation.BUDGET` = 15 s), and the WhatsApp row
+  -- asked the account node for its chat count on every run (2.3 s measured here). Neither number is worth a
+  -- blocked prompt: the rows come from the caches and the list PRINTS HOW OLD the peer half is, with the
+  -- verb that re-reads it. `--refresh` is that verb, and it is the only thing here that waits.
+  local list_options = { cache_only = true, counts = false }
+  for key, value in pairs(opts.list_options or {}) do list_options[key] = value end
+  if refresh then
+    -- An explicit verb may wait: the reader asked for this node's peers to be asked. The chat count comes
+    -- with it, because the same reader is asking for the whole picture (`wa mcp list --all` prints it) -
+    -- and for that this read must NOT be cache-only: `whatsapp.service_row` forces `counts = false` under
+    -- `cache_only` (its own line, 17/11), so passing `counts = true` beneath it reads as nothing.
+    -- `cache_only = false` is safe here: the catalogue was just written, so `federation.catalog` answers
+    -- from it without asking anyone again (a failed refresh leaves `.tried` behind, which holds RETRY = 60 s).
+    emit('  ' .. command.refresh_text(command.refresh_peers()))
+    list_options.cache_only = false
+    list_options.counts = true
+  end
+  local view = command.list(ctx, list_options)
   if view.ok == false then
     emit('  MCP registry unreadable: ' .. tostring(view.registry_error or view.error))
     return { ok = false, error = view.registry_error or view.error, exit = 1 }
   end
-  local set = command.views(view, opts)
-  emit(balloon.text(all and set.views or { set.views[1] }, width or balloon.WIDTH))
+  local set = command.views(view, { refresh_verb = 'wa mcp list --refresh', max_pages = opts.max_pages,
+    list_only = not all })
+  -- `keys = false`: a pipe has no keys, so the panel's key hint row ("Enter opens a connector - Esc closes")
+  -- is not printed here. The page keeps it for the chat, which does have a keyboard.
+  emit(balloon.text(all and set.views or { set.views[1] }, width or balloon.WIDTH, { keys = false }))
   return { ok = true, view = view }
 end
 

@@ -1,0 +1,131 @@
+/// `wa:landing-queue` v0.1.0 - the landing queue's seam, FIXED here and served by the unit until a second
+/// consumer needs it as a component (Fable 27/11, decision 1: "B, with the WIT written in hunk 2 as the
+/// fixed interface").
+///
+/// WHAT THIS IS FOR. A worker stops asking a person to land a branch: `submit` takes (branch, sha) and
+/// returns a request the caller holds; the verdict arrives as a value the caller waits on, and every state
+/// change is an event on a stream. Nothing here is polled and nothing here blocks a caller's turn - the
+/// shape is `async func` for the waiting calls and `stream<event>` for the progress, which is what this
+/// toolchain lowers and what `wa:queue` and `wa:kernel` already use.
+///
+/// WHY IT IS WRITTEN BEFORE IT IS SERVED. The interface is the agreement, and an agreement that changes
+/// with the implementation is not one. The unit that implements it today (scripts/queue.mjs and its
+/// runner) is the reference implementation; when a second consumer exists - a panel reading `events`, or a
+/// node that lands for others - the move is mechanical, because this file did not move with it.
+///
+/// WHAT IT DOES NOT CARRY. No secrets, no message text, no diff: a branch name, a sha, a mission name, a
+/// policy hash and the verdict's own payload (row names and a few last lines). A rejection's payload is
+/// rework, so it is the one thing that is big enough to read - and it says which cause, never why in prose.
+package wa:landing-queue@0.1.0;
+
+interface types {
+    /// Where a request is. `needs-review` waits on a person and has no cap, by design; every other wait has
+    /// one and turns into `rejected` with its cause.
+    enum state {
+        queued,
+        merging,
+        rows,
+        pushing,
+        needs-review,
+        landed,
+        rejected,
+    }
+
+    /// Why a request stopped. One of these, never free prose.
+    enum cause {
+        conflict,
+        own-rows-red,
+        policy-refused,
+        stale-sha,
+        reverted-by-health,
+        other,
+    }
+
+    record request {
+        id: u64,
+        branch: string,
+        sha: string,
+        mission: string,
+        /// How many open requests will run before this one. A submitter shows this, never "pending".
+        position: u32,
+        state: state,
+    }
+
+    /// The end of a request, and the rework a worker acts on when the cause is `own-rows-red`,
+    /// `conflict` or `policy-refused`.
+    record verdict {
+        request: u64,
+        state: state,
+        cause: option<cause>,
+        /// The sha main became, when it landed.
+        main-sha: option<string>,
+        /// Rework, as JSON: {cause, files, rows:[{name,last}], submit-again}. A `*-json` field, as the
+        /// architecture requires where JSON is the value's nature.
+        payload-json: option<string>,
+    }
+
+    record event {
+        /// Monotonic within the journal: a reader tails `events(since)` and cannot miss or double-count.
+        id: u64,
+        request: u64,
+        at: string,
+        state: state,
+        cause: option<cause>,
+        detail-json: option<string>,
+    }
+
+    record approval {
+        branch: string,
+        sha: string,
+        policy-hash: string,
+        by: string,
+        at: string,
+    }
+
+    variant error {
+        /// The caller may not do this (no review lane, a closed request).
+        refused(string),
+        /// The request cannot be represented (a sha that is not a commit, a branch with no diff).
+        invalid(string),
+        /// No such request.
+        not-found,
+        /// The wait reached its own cap and nothing is implied beyond that.
+        capped(string),
+        /// The journal itself failed. Never reported as success.
+        journal(string),
+    }
+}
+
+/// The door. `submit` is idempotent on (branch, sha): the same pair is the same request.
+interface submit {
+    use types.{request, verdict, error};
+    submit: async func(branch: string, sha: string, mission: string, priority: bool) -> future<result<request, error>>;
+    /// The verdict, waited for. When the caller's turn has ended the verdict arrives as a wake instead; the
+    /// caller does not have to stay alive to receive it.
+    await-verdict: async func(id: u64) -> future<result<verdict, error>>;
+    // sync-export: a read of the journal it already holds - no I/O to wait on, nothing to stream.
+    status: func(id: u64) -> result<verdict, error>;
+}
+
+/// Progress, as a stream: dropping it cancels interest, and it resumes from an id after a restart.
+interface events {
+    use types.{event, error};
+    // sync-export: it OPENS the stream and returns it; the waiting happens on the stream itself, so an
+    // async func here would add a suspension point where there is nothing to suspend on.
+    events: func(since: u64) -> result<stream<event>, error>;
+}
+
+/// The person's half. `approve` needs the review lane's token, which is a file at a fixed path - never an
+/// environment variable, because an override is a bypass.
+interface review {
+    use types.{request, approval, error};
+    approve: async func(branch: string, sha: string) -> future<result<approval, error>>;
+    // sync-export: a read of the requests already waiting on a person - no I/O, nothing to await.
+    pending: func() -> result<list<request>, error>;
+}
+
+world landing-queue {
+    export submit;
+    export events;
+    export review;
+}

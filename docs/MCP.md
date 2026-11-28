@@ -133,6 +133,14 @@ tools and their input fields, and the actions (`Reconnect`, `Turn on`/`Turn off`
 cannot open a row. Built-in or added-here is decided once, by `mcp_command.origin_of`, and carried on the row
 as `origin`.
 
+Neither surface asks another node to draw itself (25/11). The rows for the connectors that live on other
+nodes come from the federation cache, and the list says how old that answer is and which verb re-reads it:
+`other nodes: read 3 min ago · /mcp refresh re-reads them` in a chat, `· wa mcp list --refresh re-reads them`
+in a pipe. The WhatsApp row's chat count is the one other number that needs a node, so it is read only when
+the count is already cached (the row then says `chats unknown`); `--refresh` and `/mcp refresh` are the one
+path of each surface that waits, and they say what came back. A pipe has no keys, so `wa mcp list` does not
+print the panel's key hint row (`Enter opens a connector · Esc or ← closes`) - the chat panel does.
+
 ### What an approval covers, and what the kernel re-checks
 
 An operator's `/mcp <key> probe` (or `on`) is the approval, and it is a digest rather than a boolean since

@@ -93,6 +93,9 @@ local REMOTE_OWN = { node = true, capability = true, args = true }
 -- one of them would ignore it (mission tool-args-honest-and-same-on-peers, mixed-fleet follow-up). Only
 -- what this node learned to send in that mission is named; a capability absent from this table sends
 -- everything, exactly as before.
+-- ONE LOAD, NOT ONE PER CALL: dofile re-executes the file, and asking it inside the bash branch (a 2 000-line
+-- module) is a cost paid on every command - including the one a stop is interrupting.
+local pending_native = dofile('lua/core/codemode_pending.lua')
 local PEER_FIELD_SUPPORT = { bash = { 'stdin' }, operation = { 'stdin' }, grep = { 'context' } }
 local REMOTE_EXAMPLE = '{"node":"<name>","capability":"bash","command":"ls -la"}'
 
@@ -407,7 +410,15 @@ M.shared = {
     limit = { type = "integer", minimum = 1, maximum = 8 },
     offset = { type = "integer", minimum = 0 },
     snapshot = { type = "string", description = "Carry the returned snapshot when continuing a metadata page." } }),
-  schema("capabilities", "List permitted tools and their current workspace execution limits; permission is not executability.", {}),
+  -- A FILTER, BECAUSE THE LIST IS LONG AND ONE FACT IS SHORT. Measured 25/11: an agent read all 90
+  -- entries to learn one tool's workspace status. With no arguments this answers exactly what it always
+  -- answered (byte for byte - the row that says so is scripts/test-capabilities-filter.lua); with
+  -- `names` or `status` it answers only the entries asked for.
+  schema("capabilities", "List permitted tools and their current workspace execution limits; permission is not executability. With no arguments: the whole catalogue. With names or status: only those entries, so one fact costs one entry instead of ninety.", {
+    names = { type = "array", maxItems = 200, items = { type = "string", maxLength = 128 },
+      description = "Only these tools, by exact name. A name this catalogue does not carry is refused by name, never dropped from the answer." },
+    status = { type = "string", description = "Only the entries whose workspace execution status is this exact word." },
+  }, nil, { additionalProperties = false }),
   -- Fleet knowledge and the fleet's own view (docs/FLEET-OPS.md). Both are looked up on purpose:
   -- nothing from `lessons` is injected into a session, and `fleetview` changes nothing.
   schema("lessons", "Recall or add what this fleet learned the hard way (symptom, cause, fix, rule). Look it up on purpose with action=recall before touching fleet control - the fleetops skill says when - and add one with action=add when a failure would otherwise repeat. Nothing here is injected automatically: an empty recall means these words are not in the store, not that no lesson exists.", {
@@ -424,7 +435,11 @@ M.shared = {
   schema("fleetview", "One read-only call for the whole fabric: every node's online/last_seen, version/commit, health, disk, components and the features they carry, running operations and jobs, and recent incidents from telemetry and lessons. Unknown facts are named in each node's `missing` and left absent - never a zero - so read `missing` before concluding a node is healthy. Changes nothing.", {
     lessons = { type = "boolean", description = "Attach matching lessons to the nodes they name (default true)." } }),
   schema('tool_search','Find tools by keyword, or load an exact list: `query` for keywords, or `names` to load several known tools at once with names=[...] (exact tool names, as many as you need; query="select:a,b,c" is the same request). Each permitted name is loaded and pinned like a keyword hit; a name that is unknown or not permitted comes back in `missing` with the nearest permitted names instead. A tool you already know needs no search: call it with tool_call.',{query={type='string',maxLength=256,description='Keywords. Or "select:a,b,c" - the batch spelling of names.'},names={type='array',minItems=1,items={type='string',maxLength=256},description='Exact tool names to load in one atomic batch (limit does not truncate it); exclusive with query.'},limit={type='integer',minimum=1,maximum=8}},{}),
-  schema('tool_call','Call any permitted tool by `name` with `arguments`. checked=true validates the arguments against its schema first. `calls` runs 1-8 known independent pure reads in one call (serially); `cursor` pages a large batch result.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}),
+  -- OPEN BY DECLARATION, like `remote`: a parameter written BESIDE the name is moved into the target's
+  -- `arguments` (`tool_call({name="read", path=...})`, one of the shapes the wrapper exists for), so the
+  -- names this schema declares are not the whole set the tool takes - the target's are. Closing it would
+  -- refuse the normalization that answers the weaker models this tool was built for (25/11).
+  schema('tool_call','Call any permitted tool by `name` with `arguments`. checked=true validates the arguments against its schema first. `calls` runs 1-8 known independent pure reads in one call (serially); `cursor` pages a large batch result.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}, nil, { additionalProperties = true }),
   schema("subagent", "Start and supervise a child agent on a bounded task, with its own context, transcript and a restricted tool profile (`profiles` lists approved ones; a profile only narrows your tools). `start` returns a receipt, not a result: collect with `await` (one bounded wait) or `status`/`result`, stop with `cancel`. Reuse the exact recorded subagent/dispatch or native attempt ID for `status`: one direct lookup, not `list` rediscovery. Never guess or strip a `child:` session name into an ID; if the ID is missing, use `lookup_session` with its `conversation_id`. A placed task in state `unknown` may or may not have arrived: only `reconcile` may retry or cancel it. `session` reads the child's conversation; `message` queues its next turn. `message`, `steer` and `steer_session` require a non-empty `idempotency_key`; reuse it only for the same request.", {
     action = { type = "string", enum = { "start", "status", "list", "lookup_session", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "events", "fleet" } },
     text = { type = "string", description = "message: queue a follow-up; steer: amend active child; steer_session: amend active main session. Steering fences calls not yet admitted, never undoes in-flight effects." },
@@ -645,7 +660,11 @@ M.admin = {
     path = { type = "string", description = "For read/ls/write/edit: the path on that node." },
     args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." },
     calls = { type = "array", minItems = 1, maxItems = 8, description = "With capability \"batch\": 1-8 read-only entries {capability, <its params>} run on the peer in ONE signed round trip, ordered results. Reads, history and read-only bash only.",
-      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } }
+      -- Each entry carries the CAPABILITY's own parameters beside `capability` (the description above), so
+      -- the entry is open by declaration for the same reason the tool is: a closed item would refuse the
+      -- `path` it exists to forward (25/11, measured on scripts/test-codemode-model-boundary.lua).
+      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" },
+        additionalProperties = true } }
     -- This schema does NOT declare the capability's own parameters and cannot: they are the other tool's
     -- (a bash `cwd`, an edit's `edits`, a read's `offset`). Saying so keeps the one argument validator from
     -- refusing a field `remote` is meant to forward - the open declaration is the honest one here, not a
@@ -930,7 +949,7 @@ function M.catalog(role)
       -- results come back through the same pathway.
       local run_tool=dofile('lua/core/raw_code.lua').run_tool_schema()
       list[#list+1]=schema(run_tool.name,run_tool.description,run_tool.schema.properties,run_tool.schema.required)
-      list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") finds tools (searchTools("select:a,b") adds their schemas). Await every call; effectful calls run serially. A call still running after wait_s (default 60) returns {state:"pending", op}; wait(op | [ops]) resumes it and batches with other calls. No filesystem, network or Node APIs. '..dofile('lua/core/raw_code.lua').BATCHING:gsub('run%(code%)','codemode')..'',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+  -- list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") finds tools (searchTools("select:a,b") adds their schemas). Await every call; effectful calls run serially. A call still running after wait_s (default 60) returns {state:"pending", op}; wait(op | [ops]) resumes it and batches with other calls. No filesystem, network or Node APIs. '..dofile('lua/core/raw_code.lua').BATCHING:gsub('run%(code%)','codemode')..'',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     -- Every online peer's connectors, run on that peer (lua/core/federation.lua). Masters only.
@@ -2046,6 +2065,30 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     local answer = json.decode(raw)
+    -- A STATUS OF A RUNNING OPERATION WAITS, IT DOES NOT SNAP (28/11, waiting-costs-no-turns).
+    -- MEASURED: `status wait_ms=5000` on a running operation answered in 30 ms and ignored the budget, while `wait`
+    -- on the same operation blocked 2.75 s until it settled, so knowing how a long job was doing cost one WHOLE MODEL
+    -- TURN per look (ledger, 2 days: 59 of 6,917 rounds; 0.92% of tokens).
+    --
+    -- NO BUDGET IS WRITTEN HERE (law 17). "How long may this wait" has one owner - lua/core/codemode_pending.lua,
+    -- DEFAULT_WAIT_S with its MAX_WAIT_S ceiling - and this branch spends that owner's budget through its waiter. The
+    -- caller's own wait_ms is passed through and clamped by the owner; nothing is read from the environment, because a
+    -- product whose wait can be set by an env var has two owners again.
+    do
+      local act = tostring(args.action or "")
+      local state = type(answer) == "table" and tostring(answer.state or "") or ""
+      local running = (state == "running" or state == "accepted" or state == "pending" or state == "queued")
+      local opid = answer.operation_id or args.id
+      if act == "status" and running and opid then
+        local pending = dofile("lua/core/codemode_pending.lua")
+        local asked_s = tonumber(args.wait_ms)
+        if asked_s ~= nil then asked_s = asked_s / 1000 end
+        local settled = pending.wait_for_settle(function(step)
+          return M.dispatch(memory, "operation", step, role, ctx)
+        end, opid, asked_s)
+        if type(settled) == "table" and settled.error == nil then answer = settled end
+      end
+    end
     -- A command that just SETTLED may have removed a file this run wrote: the record is where the
     -- card's lines come from (announce_gone above). One flag read per recorded file per poll, and only
     -- after a settle, so the display costs a reader nothing until there is something to show.
@@ -2227,12 +2270,65 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       if not ok then error(value) end;return value
     end,execution)
   elseif name == "capabilities" then
-    local list,execution={},{}
+    -- THE WHOLE CATALOGUE, DESCRIBED ONCE. A filter selects from THESE entries; it never describes a
+    -- subset of its own, so a filtered answer and the unfiltered one cannot disagree about an entry.
+    local whole,execution={},{}
     local describe,workspace=M.discovery_execution(memory,ctx)
     for _,item in ipairs(routed_catalog() or M.all(role)) do
-      local tool=item['function'].name;list[#list+1]=tool;execution[tool]=describe(tool)
+      local tool=item['function'].name;whole[#whole+1]=tool;execution[tool]=describe(tool)
     end
-    return {role=role,capabilities=list,execution=execution,workspace=workspace,
+    -- ONE FACT SHOULD NOT COST NINETY ENTRIES (25/11: an agent read all 90 to learn one tool's workspace
+    -- status). `names` and `status` narrow the answer to the entries asked for, and neither of them
+    -- narrows it silently: a name this catalogue does not carry, a status word no entry carries, or an
+    -- empty names array is REFUSED by name rather than answered with a list that would read as "there
+    -- are no such tools". The order is the catalogue's own, and no arguments answers exactly what this
+    -- tool answered before the filter existed - same keys, same order, same bytes.
+    local asked_names,asked_status=args.names,args.status
+    local wanted
+    if asked_names~=nil then
+      if type(asked_names)~='table' or asked_names[1]==nil then
+        return {error='capabilities_names_required',received=type(asked_names),effect='none',
+          note='`names` is a non-empty array of exact tool names; omit it to ask for the whole catalogue.'}
+      end
+      local unknown={};wanted={}
+      for _,asked in ipairs(asked_names) do
+        local wanted_name=tostring(asked)
+        if execution[wanted_name]~=nil then wanted[wanted_name]=true else unknown[#unknown+1]=wanted_name end
+      end
+      if #unknown>0 then
+        table.sort(unknown)
+        return {error='unknown_capability',unknown=unknown,role=role,effect='none',
+          note='Nothing is listed: a name this catalogue does not carry is named here rather than dropped from an answer that would look complete. searchTools finds a tool by what it does.'}
+      end
+    end
+    if asked_status~=nil then
+      if type(asked_status)~='string' then
+        return {error='capabilities_status_required',received=type(asked_status),effect='none',
+          note='`status` is one workspace execution status word; omit it to ask for every entry.'}
+      end
+      local present={}
+      for _,tool in ipairs(whole) do present[execution[tool].status]=true end
+      if not present[asked_status] then
+        local accepted={}
+        for word in pairs(present) do accepted[#accepted+1]=word end
+        table.sort(accepted)
+        return {error='unknown_capability_status',requested=asked_status,accepted=accepted,effect='none',
+          note='`status` is one of the workspace execution statuses this catalogue carries; accept is the list, and no arguments is every entry.'}
+      end
+    end
+    if wanted==nil and asked_status==nil then
+      return {role=role,capabilities=whole,execution=execution,workspace=workspace,
+        note='Permitted catalogue, not an execution guarantee. Inspect workspace status before invocation; native permissions, arguments, profile and effect checks remain authoritative.'}
+    end
+    local list,kept={},{}
+    for _,tool in ipairs(whole) do
+      if (wanted==nil or wanted[tool]) and (asked_status==nil or execution[tool].status==asked_status) then
+        list[#list+1]=tool;kept[tool]=execution[tool]
+      end
+    end
+    return {role=role,capabilities=list,execution=kept,workspace=workspace,
+      filter={names=wanted~=nil and asked_names or nil,status=asked_status,matched=#list,total=#whole,
+        note='Only the entries the filter names are listed; capabilities() with no arguments is the whole catalogue.'},
       note='Permitted catalogue, not an execution guarantee. Inspect workspace status before invocation; native permissions, arguments, profile and effect checks remain authoritative.'}
   elseif name == "subagent" then
     -- One Lua facade for the model and for the HTTP control route; the owner is
@@ -2258,6 +2354,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     return result
   elseif name == "bash" then
+    -- ESC STOPS WHAT THE TURN STARTED, WHATEVER DOOR STARTED IT (decision (a), 27/11). The record is opened HERE,
+    -- at the top of the branch, before anything can return early: the reader's own bash is the same command in the
+    -- same process group as a script's, so it belongs in the same pending store. It is pcall'd - a record that
+    -- cannot be written must never cost the command.
+    local native_handle = nil
+    if ctx.native_tool_call == true and pending_native then
+      local ok_open, opened = pcall(pending_native.native_open,
+        'native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
+      native_handle = ok_open and opened or nil
+    end
     if not args.command or args.command == "" then return { error = "command_required" } end
     local timeout = args.timeout_seconds
     if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
@@ -2332,7 +2438,59 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       watched = bash_changes.before(cwd,
         ctx.read_only_command and ctx.read_only_command(args.command) or nil)
     end
-    local result = run(args.command, timeout, cwd, provenance, stdin)
+    -- ESC STOPS WHAT THE TURN STARTED, WHATEVER DOOR STARTED IT (decision (a), 27/11). The reader's own `bash`
+    -- is the same command, in the same process group, as a script's - but only the script's was registered in
+    -- the pending store, so its stop wrote no record and the line "stopped: <command>" had nowhere to come
+    -- from. The call is opened in the SAME index here, and settled with the stop facts the operations layer
+    -- reports for it (never a value invented in Lua). A script's nested bash is already inside that index, so
+    -- it is not opened twice.
+    local native_handle = nil
+    if ctx.native_tool_call == true then
+      -- A failure here must never cost the command: the record is best effort, the work is not.
+      local ok_open, opened = pcall(pending_native.native_open, 'native:' .. tostring(ctx.session_id or 'session'), 'bash', args, false)
+      native_handle = ok_open and opened or nil
+      -- AND WHERE THE RUNNER PUTS WHAT IT SAW (28/11): the operations layer is the one owner that observes
+      -- the stop, so the call names the file it writes its facts to. The caller's answer never waits for it.
+      if native_handle ~= nil then
+        provenance.stop_record = pending_native.stop_record_path('native:' .. tostring(ctx.session_id or 'session'))
+      end
+
+    end
+    local started_at = host.now()
+    -- A STOP ABORTS run() ITSELF, so a plain call never comes back and the record was left saying "running" for
+    -- ever (measured 27/11: every scenario's record was state=running, stop=null). The call is caught here so the
+    -- record is closed on BOTH paths - the command's own answer, and the stop that ends it early - and then the
+    -- raise goes on exactly as before.
+    local ok_run, result = pcall(run, args.command, timeout, cwd, provenance, stdin)
+    if native_handle then
+      local cancelled = type(result) == 'table'
+        and (result.cancelled == true or result.stopped == true or result.stop ~= nil
+          or tostring(result.error or ''):find('cancel', 1, true) ~= nil)
+      local note = pending_native.native_settle(native_handle,
+        function(n, a) return M.dispatch(memory, n, a, role, ctx) end,
+        { operation_id = type(result) == 'table' and result.operation_id or nil,
+          cancelled = cancelled or (not ok_run and tostring(result):find('cancel', 1, true) ~= nil),
+          stop = type(result) == 'table' and result.stop or nil,
+          signal = type(result) == 'table' and result.signal or nil,
+          survivors = type(result) == 'table' and result.survivors or nil,
+          after_s = 0 })
+      if note ~= nil then ctx.stop_notice = note end
+    end
+    if not ok_run then error(result, 0) end
+    if native_handle then
+      local cancelled = type(result) == 'table'
+        and (result.cancelled == true or result.stopped == true or result.stop ~= nil
+          or tostring(result.error or ''):find('cancel', 1, true) ~= nil)
+      local note = pending_native.native_settle(native_handle,
+        function(n, a) return M.dispatch(memory, n, a, role, ctx) end,
+        { operation_id = type(result) == 'table' and result.operation_id or nil,
+          cancelled = cancelled,
+          stop = type(result) == 'table' and result.stop or nil,
+          signal = type(result) == 'table' and result.signal or nil,
+          survivors = type(result) == 'table' and result.survivors or nil,
+          after_s = host.now() - started_at })
+      if note ~= nil then ctx.stop_notice = note end
+    end
     -- The phase breakdown is AGGREGATE EVIDENCE, not context: it leaves the answer a caller receives
     -- (lua/core/bash_result.lua) and the agent records it on this call's tool span from here
     -- (lua/core/agent.lua, tool_output.execution_timing), so the numbers are neither lost nor spent on

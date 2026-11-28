@@ -21,6 +21,16 @@ local refusal=dofile('lua/core/refusal.lua')
 -- `summary: "read 200 · contacts 400 schema_extra:arguments.query · send 200"`, so the model reads what
 -- happened to each call before it reads any payload. Both loops record it; finish() writes the line.
 local status_lib=dofile('lua/core/status.lua')
+-- The names a tool accepts without its schema declaring them: the runtime's own fields and the synonyms
+-- its handlers map, in the ONE list that already exists (lua/core/tool_arguments.lua INTERNAL). The
+-- contract layer refuses a name the schema never declares, so the caller that knows the tool passes this.
+local accepted_extra
+local function extra_names()
+ if accepted_extra~=nil then return accepted_extra or nil end
+ local ok,module=pcall(dofile,'lua/core/tool_arguments.lua')
+ accepted_extra=(ok and type(module)=='table' and type(module.INTERNAL)=='table') and module.INTERNAL or false
+ return accepted_extra or nil
+end
 local function call_status(value) return status_lib.of(value) end
 local function call_why(value)
  if type(value)~='table' or (value.ok~=false and value.error==nil) then return nil end
@@ -73,7 +83,13 @@ local function summary_of(calls)
  local parts={}
  for i,call in ipairs(calls) do
   if i>12 then parts[#parts+1]='+'..(#calls-12)..' more';break end
-  parts[#parts+1]=tostring(call.name)..' '..tostring(call.status or (call.ok and 200 or 500))..(call.why and call.why~='' and (' '..call.why) or '')
+  local part=tostring(call.name)..' '..tostring(call.status or (call.ok and 200 or 500))..(call.why and call.why~='' and (' '..call.why) or '')
+  -- A REMOTE CALL'S STATUS IS NOT ITS EXIT (refusals-that-help (j)). Measured: `tools.remote` bash on a peer
+  -- answered status 200 WITH process_exit_code 1 and stderr 'no such column: bucket_id', and the run line said
+  -- only 'remote 200' - so a failed command looked like success and its empty stdout read as 'no rows'.
+  if call.exit and call.exit~=0 then part=part..' exit='..tostring(call.exit) end
+  if call.stderr_bytes and call.stderr_bytes>0 then part=part..' stderr '..tostring(call.stderr_bytes)..' B' end
+  parts[#parts+1]=part
  end
  return table.concat(parts,' · ')
 end
@@ -90,6 +106,16 @@ local session_results=dofile('lua/core/codemode_results.lua')
 -- on the managed operations the node already supervises - this file only names which tool call an
 -- operation is (`lua/core/codemode_pending.lua`).
 local pending_calls=dofile('lua/core/codemode_pending.lua')
+-- THE STOP NAMES WHAT IT STOPPED (week 1, "Esc stops what it started"). The pending layer answers a
+-- stopped call with one sentence (`stop_note`: `stopped: sleep 30, after 0.7 s (nothing survived the
+-- 250 ms grace)`), which settles into this run's ctx; the cancel error then carries it, so the reader's
+-- own line can say what went with the run. It is display text and a ledger fact, never part of a
+-- request the provider sees: the run is over by the time this string exists.
+local function cancel_error(ctx)
+  local note=type(ctx)=='table' and type(ctx.stop_notice)=='string' and ctx.stop_notice or nil
+  if note==nil or note=='' then return 'run_cancelled' end
+  return 'run_cancelled: '..note
+end
 -- What a command's answer keeps for the caller, in one allow-list (lua/core/bash_result.lua).
 local bash_result=dofile('lua/core/bash_result.lua')
 -- What a connector answers, learned from its settled answers for the connector index (keys only).
@@ -263,16 +289,14 @@ local function global_params(raw)
   return json.decode(text)
 end
 
--- The longest a script may pause in one sleep(ms). A pause is not work, so it is not charged to the
--- script's computing budget; the cap is what keeps one script from holding the node's thread (a pause
--- really does sleep the host - rust/wa-capabilities/src/host.rs host.sleep). A longer wait belongs to a
--- call's own wait_s, where a managed operation runs while the script waits (22/11).
-local SLEEP_MS_MAX = 5000
--- ...and a script's pause in TOTAL is bounded too: one CALL may sleep 5 s, one SCRIPT may sleep 30 s.
--- Without this cap the per-call bound said nothing - 100 calls of 5 s held the node's thread for eight
--- minutes (22/11 review, MUST). The count lives on this script's own handle table, so a new script
--- starts at zero and neither loop can be talked into a longer one.
-local SLEEP_TOTAL_MS = 30000
+-- How long a script may pause is ONE surface, and it is owned by lua/core/codemode_pending.lua: the
+-- per-pause ceiling (PAUSE_MS_MAX) and the budget a script may pause in total (MAX_WAIT_S). sleep(ms),
+-- every timer built on it, and wait(op) all read those two fields, so a change there reaches all three
+-- and there is no second limit to drift out of step (Victor 27/11). A pause is not work: it is not
+-- charged to the script's computing budget (the host sleeps, rust/wa-capabilities/src/host.rs).
+local function pause_limits()
+  return tonumber(pending_calls.PAUSE_MS_MAX) or 5000, (tonumber(pending_calls.MAX_WAIT_S) or 0) * 1000
+end
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
@@ -314,7 +338,8 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     if not asked or asked ~= asked or asked < 0 then
       return { error = 'codemode_sleep_requires_milliseconds' }, false
     end
-    if asked > SLEEP_MS_MAX then
+    local pause_max, budget_ms = pause_limits()
+    if asked > pause_max then
       return { error = 'codemode_sleep_too_long' }, false
     end
     -- The pause of THIS SCRIPT, not of this call (MUST, 22/11 review): a cap per call says nothing
@@ -322,7 +347,7 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     -- count stands and what to use instead - a pause spaces retries, it never waits for work.
     local spent = tonumber(popts and popts.slept_ms) or 0
     local slept = math.floor(asked)
-    if spent + slept > SLEEP_TOTAL_MS then
+    if spent + slept > budget_ms then
       return { error = 'codemode_sleep_total_too_long', paused_ms = spent, asked_ms = slept }, false
     end
     if type(host.sleep) == 'function' then pcall(host.sleep, slept) end
@@ -637,7 +662,7 @@ local function settle_call(s,call)
    if wait_error then value,success={error=wait_error,effect='none'},false
    else
     stripped=contract.normalize_names(current['function'].parameters,stripped)
-    local _,err=contract.validate(current['function'].parameters,stripped or '{}')
+    local _,err=contract.validate(current['function'].parameters,stripped or '{}',extra_names())
     -- The refusal carries the rejected argument text AND the tool's own schema, so the fix can name
     -- the arguments this tool takes instead of letting the model guess (13/11: `notes_write` answered
     -- `notes_text_required` three times before the model found `text`).
@@ -645,11 +670,24 @@ local function settle_call(s,call)
       parameters=current['function'].parameters,input=stripped,site='the code-mode script loop'}),false
     else
      local params=json.decode(stripped or '{}')
-     local span=telemetry.start(ctx,'tool',{name=call.tool,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
+     -- ONE MODEL CALL IS ONE EVENT (27/11, run-is-the-only-declared-door item 3). MEASURED with
+     -- scripts/test-run-logged-once.lua on 07d2b7c5: a model that calls `run` produced TWO kind='tool' phase='start'
+     -- rows both named run and carrying the SAME arguments_hash - the model's own span (agent.lua:4069) and this
+     -- nested one, because the door is re-entered through this loop to execute what it was given. The nested span is
+     -- for a call made INSIDE a script; the door itself is not inside anything, so it gets no second span and no
+     -- duplicate row for the stats to count.
+     local span=nil
+     if call.tool~='run' then
+       span=telemetry.start(ctx,'tool',{name=call.tool,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
+     end
      live(ctx,{type='codemode_call',id=call.id,name=call.tool,arguments=params,state='running'})
      local live_started=tonumber(host.now()) or 0
      local called,result=pcall(pending_calls.invoke,s.dispatch,s.popts,call.tool,params,stripped,wait_s);admitted=true
      live_settled(ctx,call.id,call.tool,result,called,live_started)
+     -- The stop's sentence, kept on this run's ctx for the cancel error below (see cancel_error).
+     if called and type(result)=='table' and type(result.stop_note)=='string' and type(ctx)=='table' then
+       ctx.stop_notice=result.stop_note
+     end
      if called then
       -- A command's answer keeps what a caller acts on (lua/core/bash_result.lua). The dispatcher already
       -- slimmed a DIRECT call; this one is the same shape built from the operation record by the pending
@@ -711,6 +749,14 @@ local function settle_call(s,call)
       -- result (both loops settle through this one function, so both attach the same pictures).
       take_result_images(s,call,value,params)
      else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
+     -- WHAT THE CALL SAID ABOUT ITS OWN ENDING, read BEFORE the script's view is slimmed: a remote command
+     -- that exits non-zero still answers HTTP 200, and `bash_result.slim_for` keeps only the tool's declared
+     -- fields, so `process_exit_code` and `stderr` are gone by the time the call record is written.
+     local exit_code, stderr_text = nil, nil
+     if type(value)=='table' then
+       exit_code=tonumber(value.process_exit_code or value.code)
+       stderr_text=type(value.stderr)=='string' and value.stderr or nil
+     end
      local encoded=json.encode(value);local reference=output.store(encoded)
      value,success=script_value(value,success)
      -- The shape the script RECEIVES is the allow-list, whatever a producer added to the answer (the
@@ -729,8 +775,18 @@ local function settle_call(s,call)
        local command = type(params) == "table" and tostring(params.command or "") or ""
        read_only = command ~= "" and dofile("lua/core/orchestration_mode.lua").read_only_command(command) or nil
      end
-     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value),read_only=read_only}
-     telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
+     local stderr_first=nil
+     if stderr_text and stderr_text~='' then
+       local line=stderr_text:match('([^\n]*)') or ''
+       if #line>160 then line=line:sub(1,160)..'...' end
+       stderr_first=line
+     end
+     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value),read_only=read_only,
+       exit=(exit_code~=nil and exit_code~=0) and exit_code or nil,
+       stderr_bytes=(stderr_text and #stderr_text>0) and #stderr_text or nil,stderr_first=stderr_first}
+     if span then
+       telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
+     end
     end
    end
   end
@@ -825,7 +881,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
   while not done do
    local _,context_error=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
    if context_error then error(context_error) end
-   if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error('run_cancelled')end
+   if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error(cancel_error(ctx))end
    local admitted_now=json.decode(host.quickjs('admit',json.encode({id=sandbox,owner=scope})))
    if not admitted_now.ok then error(admitted_now.error)end
    local call=table.remove(pending,1)
@@ -948,7 +1004,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
   -- rechecked, and a cancelled run stops before another effect.
   local _,context_error=guard_policy.admit(memory,role,ctx)
   if context_error then loop_error=context_error
-  elseif host.run_cancelled and json.decode(host.run_cancelled()).cancelled then loop_error='run_cancelled'
+  elseif host.run_cancelled and json.decode(host.run_cancelled()).cancelled then loop_error=cancel_error(ctx)
   else
    local progress,reason=seam({op='advance',session=session,reply=reply})
    reply=nil
@@ -1069,16 +1125,14 @@ local function excerpt(origin,line,radius)
  return table.concat(out,'\n')
 end
 -- A MISSING GLOBAL IS ONE CLASS, AND ITS FIX LINE SAYS WHY (22/11). Counted over the retained ledger
--- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40,
+-- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40 (and 91
+-- over the last 7 days on 27/11, which is why the timers are real globals now - codemode_harness.lua),
 -- Buffer 17, HOME 16, location 12, require 6 - and btoa/atob 0: those two are already in the guest
 -- (the pinned QuickJS), which is why they are not in this table; the harness only wraps their message. A name below is not a typo:
 -- the script is running in the wrong runtime, so "Change line N" (which names where, not why) is
 -- replaced by the way that exists here. The table is an ALLOW-LIST on purpose - a name it does not
 -- hold (a script's own variable, `raw`, `wt`) keeps the plain sentence, because nothing here can say
 -- what the script meant (AGENTS.md: an allow-list for anything a refusal depends on).
-local NO_TIMERS = 'There are no timers in this sandbox: pause with await sleep(ms) - 0 to 5000 ms, in the '
-  ..'host, so it spends none of the script\'s budget - and wait on work with the call\'s wait_s option or '
-  ..'wait(op, {wait_s}).'
 local NO_NODE = 'This is not Node: a script has no require, module, process or fs. Run a command with '
   ..'await tools.bash({command: "..."}), and read, write or search files with tools.read, tools.write, '
   ..'tools.ls and tools.grep.'
@@ -1094,8 +1148,7 @@ local GLOBAL_FIX = {
     ..'argument (raw: {script: "..."}) and reach the script as raw.script. Base64 is built in: btoa, atob.',
   HOME = 'There are no environment variables in a script: read one with '
     ..'await tools.bash({command: "printenv HOME"}) - a command runs with this node\'s environment.',
-  setTimeout = NO_TIMERS, setInterval = NO_TIMERS, clearTimeout = NO_TIMERS, clearInterval = NO_TIMERS,
-  setImmediate = NO_TIMERS,
+
   require = NO_NODE, module = NO_NODE, exports = NO_NODE, process = NO_NODE, fs = NO_NODE, path = NO_NODE,
   __dirname = NO_NODE, __filename = NO_NODE,
   location = NO_BROWSER, window = NO_BROWSER, document = NO_BROWSER, navigator = NO_BROWSER,
@@ -1110,6 +1163,50 @@ local function fixed_tail(fix, tail)
  if type(tail)~='string' or tail=='' then return fix end
  if fix:find(tail,1,true) then return fix end
  return fix..tail
+end
+-- ── THE FINISHED RESULTS OF A BLOCK THAT STOPPED (25/11, item 3) ────────────────────────────────────
+-- Bounded twice so a failure never costs more context than a success: one answer up to DONE_EACH bytes
+-- and the whole block up to DONE_TOTAL. An answer over that is a POINTER, never a silent cut: the entry
+-- carries `unread` {sha256, offset, bytes} and tool_result reads it byte for byte. The entries are in the
+-- order the calls settled, which is the order the script made them.
+local DONE_EACH=1200
+local DONE_TOTAL=4000
+local function settled_answers(calls)
+  local done,used={},0
+  for _,call in ipairs(calls or {}) do
+    if type(call)=='table' then
+      local entry={n=#done+1,id=call.id,name=call.name,ok=call.ok==true}
+      local evidence=type(call.evidence)=='table' and call.evidence or nil
+      if evidence and type(evidence.path)=='string' then
+        local raw=host.read_file(evidence.path)
+        if type(raw)=='string' and raw~='' then
+          -- AN ANSWER THAT CARRIED A CONFIGURED SECRET IS A POINTER, NEVER AN INLINE COPY. Redaction of a
+          -- whole answer is the presentation's job (lua/core/redact.lua, lua/core/codemode_view.lua) and it
+          -- is not something this block can prove for a bag it decodes here: measured on
+          -- scripts/test-codemode-model-boundary.lua, an inline copy of a finished call put a configured
+          -- value back into the model's text. So the answer travels by reference, and `redacted` says why.
+          local clean,hits=dofile('lua/core/redact.lua').secrets(raw)
+          local redacted=next(hits or {})~=nil
+          local fits=not redacted and (#raw<=DONE_EACH and used+#raw<=DONE_TOTAL)
+          if fits then
+            local decoded_ok,decoded=pcall(json.decode,raw)
+            entry.result=decoded_ok and decoded or raw
+            used=used+#raw
+          else
+            entry.unread={sha256=evidence.sha256,offset=1,bytes=evidence.bytes or #raw}
+            if redacted then
+              local names={}
+              for name in pairs(hits) do names[#names+1]=tostring(name) end
+              table.sort(names)
+              entry.redacted=names
+            end
+          end
+        end
+      end
+      done[#done+1]=entry
+    end
+  end
+  return done
 end
 local function explain(result,source,budget,origin,origin_line)
  if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
@@ -1283,11 +1380,18 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local session_key=type(ctx.session_id)=='string' and ctx.session_id~='' and ctx.session_id
    or ('no-session:'..tostring(host.uuid and host.uuid() or '')..':'..tostring(host.now and host.now() or 0))
  local scope=host.sha256(json.encode({session=session_key,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
- args={code=harness.decorate(args.code,session_vars(memory,scope)),timeout_ms=args.timeout_ms}
+ args={code=harness.decorate(args.code,session_vars(memory,scope),select(1,pause_limits()),select(2,pause_limits())),timeout_ms=args.timeout_ms}
  -- One handle table for this script, on either loop: a call that outlives its wait answers
  -- {state:"pending", op} and wait(op)/cancel(op) answer it. A wait is bounded by its own wait_s and by
  -- the sandbox's CPU guard, never by a wall clock (18/11: a script is not killed for waiting).
  local popts={ctx=ctx,scope=scope,session=ctx.session_id,dispatch=dispatch}
+ -- THE SCRIPT'S OWN SCOPE ON THE CONTEXT (28/11): a stop that tears this script down never reaches the pending
+ -- layer's own stop_work, and the records it left are in THIS scope's index (a hash), not the native one - so the
+ -- one place that can still answer for them is the stop closer, and it has to be told where to look.
+ if type(ctx) == 'table' then ctx.pending_scope = scope end
+ -- AND ON THE HOST, because the stop that ends the RUN is handled by lua/core/agent.lua's run_body, which has no
+ -- ctx: the host table is the one object every module instance shares (each dofile is its own instance).
+ if host then host.pending_scope = scope end
  -- A budget exists only when the caller asked for one, and it bounds COMPUTING: the sandbox pauses it
  -- while a call is in the host (rust/wa-capabilities/src/quickjs.rs). It is deliberately NOT used to
  -- bound a wait any more (18/11): a wall clock cannot say how much of a script's budget a wait spent,
@@ -1301,6 +1405,46 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local function finish(result)
   if type(result)~='table' then return result end
   result=explain(result,source,budget,origin,origin_line)
+  -- A BLOCK THAT STOPPED HANDS BACK WHAT IT FINISHED (25/11, item 3). Measured: a script that ran a
+  -- command and then hit a failing call answered only the error and a sentence naming the command
+  -- ("Already done, not undone: bash"). The command's output was in this node's evidence store and
+  -- nowhere the model could see it without already knowing its hash, so the model re-ran work that had
+  -- already finished - and a bash call is not always repeatable. A failed block now carries `done`.
+  -- A healthy block never does: its own items and value are the answer, and its bytes must not move.
+  if result.ok==false and result.done==nil then
+    local done=settled_answers(result.calls)
+    -- ONE FAILED CALL IS ITS OWN ERROR, and repeating it costs bytes for nothing: measured on the scripted
+    -- task set, a single refused call answered `error` AND `done[1].result.error` with the same sentence
+    -- (+799 bytes a turn). The block hands back finished work when there IS some - another call settled
+    -- beside the failure, or the block stopped for a reason that is not a call at all (a timeout, a
+    -- stall, a syntax error), where a lone finished answer is exactly what was lost.
+    local failed_call=false
+    for _,call in ipairs(result.calls or {}) do
+      if type(call)=='table' and call.ok==false then failed_call=true end
+    end
+    if #done>0 and (#done>1 or not failed_call) then
+      result.done=done
+      result.done_note='done: the calls that finished before this error, in order, with the answer each one '
+        ..'produced. Read them instead of running the work again. An entry that carries `unread` instead of '
+        ..'`result` is an answer too large for this block, and tool_result(sha256,offset,limit) reads it byte for byte.'
+    end
+  end
+  -- A FAILED CALL WHOSE STDERR THE SCRIPT'S OWN RETURN DROPPED IS NAMED ONCE (refusals-that-help (j)). The
+  -- measured script returned only `.stdout`, so the peer's "no such column: bucket_id" never reached the model
+  -- and the empty stdout read as "no rows". `stderr_first` does not travel: it is consumed here.
+  if type(result)=='table' then
+    local returned=result.returned~=nil and result.returned or result.value
+    local text
+    if type(returned)=='string' then text=returned
+    elseif returned~=nil then local ok,encoded=pcall(json.encode,returned); text=ok and encoded or nil end
+    for _,call in ipairs(type(result.calls)=='table' and result.calls or {}) do
+      local first=call.stderr_first
+      if type(first)=='string' and first~='' and ((call.exit and call.exit~=0) or call.ok==false) then
+        if not (type(text)=='string' and text:find(first,1,true)) then call.stderr_dropped=first end
+      end
+      call.stderr_first=nil
+    end
+  end
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end

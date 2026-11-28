@@ -207,6 +207,65 @@ function M.facts(options)
   return facts
 end
 
+-- Two short commits, either a prefix of the other. Anything shorter than seven hex is no evidence (the rule
+-- `lua/core/update_follow.lua` compares by, kept here so the fast path does not depend on the follower).
+local function same_commit(left, right)
+  local a, b = trim(left):lower(), trim(right):lower()
+  if #a < 7 or #b < 7 then return false end
+  return a:sub(1, #b) == b or b:sub(1, #a) == a
+end
+M.same_commit = same_commit
+
+-- IS THIS NODE ALREADY WHAT AN UPDATE WOULD INSTALL? (the mission's budget 8: "already up to date", the
+-- whole command under 1 s and ONE request - no git fetch, no sentinel round trip).
+--
+-- MEASURED 25/11 with the old path: `wa update` on a tree node queued a full deploy - build, the whole test
+-- suite, the swap - even when the tree WAS the installed commit, and it paid a git fetch and a sentinel
+-- `preflight` before it could say anything (1.2-1.6 s to the first line on a fixture with no network).
+--
+-- THREE FACTS HAVE TO AGREE, and anything less is UNKNOWN - never "already up to date":
+--   * the install record's commit, the tree's HEAD and origin's main are the same commit;
+--   * the tree has nothing uncommitted (the gate refuses a dirty tree anyway);
+--   * origin answered. `git ls-remote` is ONE request and fetches no objects; a fetch, the sentinel and the
+--     pre-update backup all belong to the slow path, which is what an unknown falls back to.
+function M.up_to_date(options)
+  local o = options or {}
+  local install = o.install or M.install_dir()
+  local tree = o.tree or M.runtime_tree(install)
+  if type(tree) ~= "string" or tree == "" then
+    return { known = false, reason = "this node has no runtime tree, so only the release updater can answer" }
+  end
+  local record = installed_record(install)
+  local installed = trim(record.source_commit_hint or record.commit or "")
+  local head = trim(git(slashes(tree), "rev-parse HEAD") or "")
+  if installed == "" or head == "" then
+    return { known = false, reason = "the installed commit or the tree's HEAD could not be read" }
+  end
+  if not same_commit(installed, head) then
+    return { known = false, reason = "the tree is not at the commit this node runs", installed = installed, head = head }
+  end
+  local dirty = lines(git(slashes(tree), "status --porcelain")) or 0
+  if dirty > 0 then
+    return { known = false, reason = "the tree has uncommitted changes", dirty = dirty }
+  end
+  if o.offline == true or (o.offline == nil and (host.getenv and (host.getenv("WA_OFFLINE") or "") ~= "")) then
+    return { known = false, reason = "this node is offline, so the newest main cannot be confirmed", commit = head }
+  end
+  local answered = shell("timeout 5 git -C " .. quote(slashes(tree)) .. " ls-remote --heads origin main 2>/dev/null")
+  if not answered or (answered.code or 1) ~= 0 then
+    return { known = false, reason = "origin did not answer, so the newest main is unknown", commit = head }
+  end
+  local newest = trim(tostring(answered.stdout or ""):match("^(%x+)") or "")
+  if newest == "" then
+    return { known = false, reason = "origin named no main branch", commit = head }
+  end
+  if not same_commit(newest, head) then
+    return { known = false, reason = "main has moved on origin", commit = head, origin = newest }
+  end
+  return { known = true, current = true, commit = head }
+end
+
+
 -- Bring the node-owned worktree to the source the deploy gate will build. `/update` used to queue
 -- a deploy from whichever branch happened to be checked out; the gate then refused it after the
 -- user had already been told it was queued. Only an explicit `/update` runs this, and only on a
@@ -289,7 +348,17 @@ function M.preconditions(facts)
                  ((facts.pending_deploys and #facts.pending_deploys > 0)
                    and ("; a deploy is already waiting there: " .. table.concat(facts.pending_deploys, ", "))
                    or ""),
-      next = "inspect the watcher/service outside this node if identity or preflight is unverified; install the current sentinel through the deployment gate if needed, then start it and ask again: " .. M.start_command(facts),
+      -- THE FIX COMES FIRST, AND IT IS ONE COMMAND (Fable 26/11, work). MEASURED there: `wa update` answered "no
+      -- sentinel watcher ownership was verified ... inspect the watcher/service outside this node", and the operator's
+      -- next move was a guess - while the whole fix was one command that the line named LAST, after a sentence that sent
+      -- them looking somewhere else. The INSTALLER is named only where it is the fact: a node whose install directory
+      -- has no sentinel has nothing to start, and that shape is `facts.sentinel_present`. For every other node the
+      -- installer would be an unnecessary instruction, so it is not there.
+      next = (facts.sentinel_present
+        and (M.start_command(facts)
+          .. " - that is the one command that fixes this: it starts the watcher this node expects, so ask again once it answers. If the watcher is meant to be supervised, inspect the service outside this node.")
+        or ("this node's install has no sentinel to start (" .. tostring(facts.sentinel)
+          .. "): install the current sentinel through the deployment gate, then start it with its absolute path and ask again.")),
     }
   end
   if facts.inventory_verified == false then
@@ -540,6 +609,24 @@ end
 
 -- The installed front door, when this node has one. Presence, not a version test: the bundle either
 -- shipped it (and files.sha256 verified it with every other member) or it did not.
+-- THE VERSION A COMMIT DECLARES, read from the tree that carries it (mission update-is-one-line):
+-- the last line of `wa update` says "updated to v0.1.2 . 82f57859", and v0.1.2 is the version the
+-- INSTALLED build declares - not this command's own (they differ exactly when an update installed a
+-- different version than the one running the command). `lua/core/build_identity.lua` is the one place the
+-- tree spells the product version; `git show` reads it at that commit, from objects already on disk (no
+-- fetch, no network). A commit the tree does not carry, or a file without the line, answers nil and the
+-- caller prints the commit alone - never an invented number.
+function M.version_at(tree, commit)
+  local sha = trim(commit)
+  if type(tree) ~= "string" or tree == "" or sha == "" then return nil end
+  if not sha:match("^%x+$") then return nil end
+  local result = shell("git -C " .. quote(tree) .. " show " .. quote(sha .. ":lua/core/build_identity.lua") .. " 2>/dev/null")
+  if not result or (result.code or 1) ~= 0 then return nil end
+  local version = tostring(result.stdout or ""):match('PRODUCT_VERSION%s*=%s*"([^"]+)"')
+  version = trim(version or "")
+  return version ~= "" and version or nil
+end
+
 function M.installed_updater(install)
   if type(install) ~= "string" or install == "" then return nil end
   local path = slashes(install) .. "/scripts/install.sh"
@@ -588,10 +675,16 @@ M.release_plan = release_plan
 function M.run_release_updater(options, facts, record, updater)
   local base = { install = facts.install, installed_commit = facts.installed_commit, installed_release = record.release,
                  channel = "release-bundle", updater = "installed" }
-  local function with(fields) for k, v in pairs(base) do if fields[k] == nil then fields[k] = v end end; return fields end
+  local function with(fields) for k, v in pairs(base) do if fields[k] == nil then fields[k] = v end end; if fields.raw == nil then fields.raw = plan end; return fields end
   local cmd = "sh " .. quote(updater)
-  local checked = shell(cmd .. " --check --prefix " .. quote(facts.install) .. " 2>&1")
-  local plan = trim(checked and checked.stdout or "")
+  local plan, checked
+  if type(options.plan_raw) == "string" and trim(options.plan_raw) ~= "" then
+    plan = trim(options.plan_raw)   -- the probe answered; do not ask the same question twice
+    checked = { code = 0, stdout = plan }
+  else
+    checked = shell(cmd .. " --check --prefix " .. quote(facts.install) .. " 2>&1")
+    plan = trim(checked and checked.stdout or "")
+  end
   if not checked or checked.code ~= 0 then
     return with({ ok = false, status = "release_check_failed", error = "release_check_failed", observed = plan,
       message = "the installed updater could not verify the published bundle, so nothing was installed." })
@@ -735,10 +828,33 @@ local function publishability(tree, commit)
   return { state = fields.components, tag = fields.tag, buildable = fields.buildable, note = note }
 end
 
+-- THE CHANNEL IS DECIDED PER UPDATE FROM WHAT IS PUBLISHED (decision, 27/11; law 17: one owner).
+--
+-- It used to be decided by the install RECORD - `M.release_install(record)`, i.e. `record.via == "linux-bootstrap"` - so
+-- a node installed any other way could never take a published bundle, whatever was on the shelf. The bundle channel in
+-- this file is the owner now: if a published release exists for this commit and target, the update DOWNLOADS it (the
+-- updater verifies signature and sha256); `scripts/deploy.sh` is the source-build path, taken only when nothing is
+-- published. A node with no installed updater cannot download at all, so it is never sent down this path by accident.
+local function published_bundle(facts, record)
+  if type(M.installed_updater) ~= "function" then return nil end
+  if not M.installed_updater(facts.install) then return nil end
+  local probe = M.run_release({ check = true }, facts, record)
+  if type(probe) ~= "table" then return nil end
+  local state = tostring(probe.state or "")
+  -- release_plan PRINTS `bootstrap: install <dir>: current|update|adopt|fresh`, and nothing else: the first version of
+  -- this comparison tested "behind"/"installable"/"available", so every real plan answered nil and the law-17 decision
+  -- was inert in production. `current` means there is nothing to install.
+  if state == "update" or state == "adopt" or state == "fresh" then return probe end
+  return nil
+end
+
 function M.check(options)
   options = options or {}
   local facts = M.facts(options)
   local record = installed_record(facts.install)
+  -- The same owner for the question `--check` asks: report the bundle whenever one is published for this commit.
+  -- NOT PROBED HERE (measured 27/11: 2305 ms against a 1000 ms budget, because the probe runs the
+  -- installed updater as a subprocess). The published bundle decides at INSTALL time, in M.run.
   if not facts.tree and M.release_install(record) then
     return M.run_release({ check = true }, facts, record)
   end
@@ -866,9 +982,19 @@ function M.run(options)
   end
   -- Asked before the tree is synchronized: a request no watcher can perform is refused without moving
   -- the runtime worktree for it, and without writing anything.
-  if not facts.tree then
+  -- Law 17: what is PUBLISHED decides, for every node - not how it was installed. A tree node with a bundle on the
+  -- shelf downloads it; deploy.sh is the source-build path below.
+  do
     local record = installed_record(facts.install)
-    if M.release_install(record) then return M.run_release(options, facts, record) end
+    local probe = published_bundle(facts, record)
+    if probe then
+      -- ONE ROUND, NOT TWO: the probe already asked; its plan goes to the install.
+      local merged = {}
+      for k, v in pairs(options) do merged[k] = v end
+      merged.plan_raw = probe.raw
+      return M.run_release(merged, facts, record)
+    end
+    if not facts.tree and M.release_install(record) then return M.run_release(options, facts, record) end
   end
   local blocked = M.preconditions(facts)
   if blocked then return decorate(blocked, facts) end

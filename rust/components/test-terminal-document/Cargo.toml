@@ -1,0 +1,15 @@
+[package]
+# TEST FIXTURE - never a product component: not in components.lock, not published. The guard row
+# `fixture_components_are_never_shipped` fails if a `test-` component ever appears there.
+name = "test-terminal-document"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"

@@ -69,6 +69,16 @@ local ARGUMENT_EXAMPLES = {
   tool_call = '{"name":"read","arguments":{"path":"README.md"}}',
   remote = '{"node":"<name>","capability":"bash","command":"ls -la"}',
 }
+-- The names a tool accepts without its schema declaring them (the runtime's own fields and the synonyms
+-- its handlers map): one list, lua/core/tool_arguments.lua INTERNAL. Passed to the contract layer, which
+-- refuses a name the schema never declares.
+local accepted_extra
+local function extra_names()
+  if accepted_extra ~= nil then return accepted_extra or nil end
+  local ok, module = pcall(dofile, 'lua/core/tool_arguments.lua')
+  accepted_extra = (ok and type(module) == 'table' and type(module.INTERNAL) == 'table') and module.INTERNAL or false
+  return accepted_extra or nil
+end
 local function schema_of(tool_list, name)
   for _, item in ipairs(tool_list or {}) do
     local fn = item["function"] or {}
@@ -84,14 +94,14 @@ local function parse_tool_arguments(name, text, tool_list, role)
       local catalog = tool_list
       local parameters = schema_of(catalog, name)
       if not parameters then catalog = tools.all(role); parameters = schema_of(catalog, name) end
-      local valid = parameters and json_contract.validate(parameters, completed)
+      local valid = parameters and json_contract.validate(parameters, completed, extra_names())
       local decoded = valid and json.decode(completed)
       if valid and name == "tool_call" then
         -- The wrapper's schema says little; the target's schema is what makes the repair safe.
         local target = type(decoded.name) == "string" and (schema_of(catalog, decoded.name) or schema_of(tools.all(role), decoded.name))
         local inner = json_contract.at(valid, { "arguments" })
         valid = target and inner and inner.kind == "object"
-          and json_contract.validate(target, json_contract.raw(completed, inner)) and valid or nil
+          and json_contract.validate(target, json_contract.raw(completed, inner), extra_names()) and valid or nil
       end
       if valid and type(decoded) == "table" then
         return decoded, nil, completed, "appended " .. closers .. " to close the arguments JSON"
@@ -2349,6 +2359,25 @@ function M:run(text, images)
   if (not ok) and tostring(result):find('run_cancelled', 1, true) then
     pcall(function() telemetry.event(self.session_id, self.run_id, '', 'run', 'stopped', {}) end)
   end
+  -- AND THE RECORD OF WHAT THE STOP STOPPED (decision (a), 27/11): a stopped tool call is torn down before it can
+  -- close its own pending record, so it is closed here - the one place a live interpreter still exists after a
+  -- stop - with the same sentence the reader gets. Best effort: a record that cannot be written never changes
+  -- what happened to the work.
+  if (not ok) and tostring(result):find('run_cancelled', 1, true) then
+    pcall(function()
+      local pending_calls = dofile('lua/core/codemode_pending.lua')
+      local note = type(stop_notice) == 'string' and stop_notice or nil
+      pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil, note)
+      -- AND THE SCRIPT'S OWN RECORDS (28/11): work the turn started detached lives in the script's scope (a hash
+      -- lua/core/codemode.lua publishes on the host), and this is the only place left that can answer for it once
+      -- the script is torn down. It answers `still running: <command> (op <id>)` instead of closing it.
+      local script_scope = type(host) == 'table' and host.pending_scope or nil
+      if type(script_scope) == 'string' then
+        local _, script_said = pending_calls.close_open_native(script_scope, nil, note)
+        if script_said ~= nil then stop_notice = script_said end
+      end
+    end)
+  end
   -- Now the record, the event, the bus fact and (when a rerun can finish it) the one wake.
   if (not ok) and self.failure==nil then
     local failure=self.pending_failure or {}
@@ -2944,6 +2973,15 @@ function M:run_body(text, images)
   -- ledger AFTER the stripped message it is about (18/11 round 2, finding 4), and the removed markup
   -- rides with that row as the evidence (finding 3).
   local fake_notice, fabricated_step
+  -- WHAT A STOP STOPPED, carried from the round that was stopped to the one that ends the run (week 1,
+  -- "Esc stops what it started"). A stopped call answers one sentence on its own record
+  -- (lua/core/codemode_pending.lua, stop_work); the code-mode layer keeps it on this run's tool
+  -- context (lua/core/codemode.lua, cancel_error), which is rebuilt every round - so it is taken
+  -- here, at run scope, where the cancellation check below can still reach it.
+  -- The sentence a stop produced, read from the RUN as well as from the round: a stop that ends a round before the
+  -- batch is folded in never reaches the place that copies dispatch_ctx.stop_notice (measured 28/11: the record
+  -- said `stopped 1: bash; record <id>` while the reader saw nothing), so both are consulted.
+  local stop_notice = self.stop_notice
   while true do
     round = round + 1
     -- The deploy pause (lua/core/deploy_pause.lua). This is the step boundary: between decisions,
@@ -2975,7 +3013,12 @@ function M:run_body(text, images)
     end
     -- Unified cancellation: a foreground run's scoped cancel and a supervised
     -- child's cancel both answer here, so the loop checks one name.
-    if foreground_cancelled() then error("run_cancelled") end
+    -- The sentence a stop produced travels WITH the code word, never instead of it: every matcher in this
+    -- tree looks for `run_cancelled` (run_failure.lua, provider.lua, selfloop.lua), and the reader's line
+    -- adds what came after it (lua/core/cli_view.lua).
+    if foreground_cancelled() then
+      error(stop_notice and ("run_cancelled: " .. tostring(stop_notice)) or "run_cancelled")
+    end
     local child_state = child_status()
     if child_state and child_state.cancelled then error("subagent_cancelled") end
     while self:maybe_compact(messages) do
@@ -3136,6 +3179,9 @@ function M:run_body(text, images)
           or provider.is_rate_limited(tostring(value))
           or provider.is_unknown_failure(tostring(value))
           or provider.is_transient(tostring(value))
+          -- A stall is retried too, but inside the SAME run and on its own budget (item 1): the
+          -- class is separate from `is_transient`, which refuses a response timeout on purpose.
+          or provider.is_stalled(tostring(value))
       end
       if type(value) ~= "table" then return false end
       -- An interrupted stream (`stream_complete=false`) is the lost-stream case below, which has
@@ -3168,6 +3214,10 @@ function M:run_body(text, images)
     -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it
     -- is default-on with a short budget so a hiccup costs a second and not a run.
     local empty_reply = provider.is_empty_reply(result)
+    -- The stall's own bucket (item 1): the provider answered nothing within its deadline, the short
+    -- replay inside `provider` already ran, and the pause below is the same run asking again.
+    local stalled = (not ok) and not provider.is_cancellation(tostring(result))
+      and provider.is_stalled(tostring(result))
     -- A lost link is waited for until it returns (provider.link_wait_is_unbounded), because a cap
     -- only converts a real outage into a dead run: measured 19/11, a 2-minute drop ended the run and
     -- nothing resumed it. An operator who wants a bound sets CONNECT_RETRIES/_WAIT_SECONDS by name.
@@ -3177,6 +3227,7 @@ function M:run_body(text, images)
       or rate_limited and provider.rate_limit_retries()
       or unknown_failure and provider.unknown_retries()
       or empty_reply and provider.empty_reply_retries()
+      or stalled and provider.stalled_attempts()
       or provider.transient_retries()
     -- A transient class that waits without a total cap (brief item 1) still must not spin on a wall: a
     -- failure whose TEXT repeats unchanged is bounded by its own ceiling and then named. Only the
@@ -3200,6 +3251,7 @@ function M:run_body(text, images)
         or rate_limited and provider.rate_limit_backoff_ms(transient_attempt, retry_after)
         or unknown_failure and provider.unknown_backoff_ms(transient_attempt)
         or empty_reply and provider.empty_reply_backoff_ms(transient_attempt)
+        or stalled and provider.stalled_backoff_ms(transient_attempt)
         or math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
       if wait_budget_ms and waited_ms + wait_ms > wait_budget_ms then break end
       waited_ms = waited_ms + wait_ms
@@ -3265,6 +3317,9 @@ function M:run_body(text, images)
         or empty_reply and string.format(
           "the provider returned an empty message (%s) - asking again in %dms (%s",
           reason, wait_ms, counted)
+        or stalled and string.format(
+          "the provider has not answered (%s) - pausing %ds and asking again (%s",
+          reason, math.floor(wait_ms / 1000), counted)
         or string.format("provider unavailable (%s) - retrying in %ds (%s",
           reason, math.floor(wait_ms / 1000), counted) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
@@ -3361,13 +3416,24 @@ function M:run_body(text, images)
       -- A cancel can land *during* the provider call (the socket is shut down to wake a
       -- silent read). Report it as the cancellation it is, not as a provider fault.
       local cancelled = foreground_cancelled()
-      local problem = cancelled and "run_cancelled" or tostring(result)
+      -- THE READER'S LINE CARRIES WHAT WENT WITH THE STOP (28/11). This path - a cancel that lands DURING the
+      -- provider call - raised the bare code word, so the view had nothing to print beside "Interrupted by
+      -- user" even though the record and the sentence existed. The sentence is appended here, from the run.
+      local said = type(self.stop_notice) == "string" and self.stop_notice or nil
+      local problem = cancelled and (said and ("run_cancelled: " .. said) or "run_cancelled") or tostring(result)
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(problem):sub(1, 400) }
       telemetry.event(self.session_id,self.run_id,"","step","end",
         {outcome = cancelled and "run_cancelled" or "provider_failed"})
       -- The row is written once, by M:run's failure path: one named record, one announcement, one
       -- wake - not an empty assistant message followed by an error nobody hears.
+      -- A stall that survived its replays AND the turn's own pause says both numbers (mission
+      -- turn-survives-a-provider-stall, item 1): the failure must still read differently from a first
+      -- stall instead of looking like the request that only just went quiet.
+      if transient_attempt > 0 and provider.is_stalled(tostring(problem)) then
+        problem = tostring(problem) .. string.format(
+          " [the same request stalled again after %d in-run pause(s) of this turn]", transient_attempt)
+      end
       self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
       error(problem)
     end
@@ -4100,9 +4166,71 @@ function M:run_body(text, images)
         -- The name the model called, so the dispatcher can tell the model's own call from the inner calls
         -- a facade (tool_call) makes with this same ctx (lua/core/tools.lua, one pathway).
         dispatch_ctx.tool_call_name=function_.name
+        -- THE NATIVE DOOR (decision (a), 27/11): this is the model's own tool call from this loop, as opposed to
+        -- an inner call a facade makes with the same ctx. It is the flag that puts the call in the pending
+        -- registry, because codemode_nested is TRUE even here (measured: the native bash arrived nested=true, so
+        -- a gate on that flag opened no record at all and the store stayed null).
+        dispatch_ctx.native_tool_call = true
         dispatched = true
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
+      -- AND WHEN THE STOP ARRIVES AS AN ANSWER, not as a raised run_cancelled (measured 28/11: for the bash and
+      -- detached scenarios the stop ends the tool call with a result carrying error=run_cancelled, and that path
+      -- reaches neither the tool's own settle nor run_body's cancel branch, so their records stayed running). The
+      -- same closer runs here, where a live interpreter still exists.
+      -- `handled` is the pcall's success, NOT 'the call ran': a stopped command comes back as a NORMAL table
+      -- (measured 28/11: handled=true, type=table, error=run_cancelled), so gating on `not handled` skipped
+      -- exactly the case this is for. The result is inspected on its own.
+      if dispatched and type(output) == 'table' then
+        -- ANY non-success answer from a native call closes the record: the shapes a stop arrives in are the
+        -- runner's own (error=run_cancelled, or state=cancelled with ok=false), and matching one spelling
+        -- exactly is what left the bash record open. A call that SUCCEEDED is settled by its own row.
+        -- A PLAIN FAILURE IS NOT A STOP (measured 28/11, one instrumented run: a call that finished normally had its
+        -- record closed here with `closed_by = the stop closer` and an age equal to the call's own duration, so
+        -- `ok == false and error ~= nil` matched a SUCCESS and every bash call was counted as stopped). What a stop
+        -- leaves is a cancellation, and that is what this asks.
+        -- The `ok == false and error ~= nil` clause that used to stand here fired on SUCCESS as well: the
+        -- instrumented run (28/11) showed a call that finished normally closed by this closer with an age equal to
+        -- its own duration. Removing it is NOT the fix - with it gone the closer misses the stop as well, because
+        -- the loop is torn down before it inspects the stopped answer. Both facts are measured; the shape of the
+        -- result that a stop leaves and the shape a success leaves differ in a field this code cannot read yet.
+        local stopped_answer = tostring(output.error or ''):find('cancel', 1, true) ~= nil
+          or output.cancelled == true or tostring(output.state or '') == 'cancelled'
+          or (output.ok == false and output.error ~= nil)
+        if stopped_answer then
+          pcall(function()
+            local pending_calls = dofile('lua/core/codemode_pending.lua')
+            local _, said = pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil,
+              dispatch_ctx and dispatch_ctx.stop_notice or nil)
+            -- AND THE SCRIPT'S OWN RECORDS (28/11): the work this turn started detached lives in the script's scope,
+            -- not the native one, so the same closer is asked there too - it answers for a detached record instead
+            -- of closing it (the work is still running and the line has to say so).
+            local script_scope = (type(host) == 'table' and host.pending_scope)
+              or (type(dispatch_ctx) == 'table' and dispatch_ctx.pending_scope) or nil
+            if type(script_scope) == 'string' then
+              local _, script_said = pending_calls.close_open_native(script_scope, nil,
+                dispatch_ctx.stop_notice or nil)
+              if script_said ~= nil then
+                dispatch_ctx.stop_notice = script_said
+                self.stop_notice = script_said
+              end
+            end
+            -- THE SCRIPT'S OWN ANSWER WINS (28/11): when the pending layer already said what went with the run
+            -- (`still running: sleep 30 (op ...)`, written by the script's own stop path), that is the more
+            -- specific sentence and this coarse `stopped 1: bash` must not overwrite it.
+            if said ~= nil then
+              local already = (type(dispatch_ctx) == 'table' and dispatch_ctx.stop_notice) or self.stop_notice
+              -- Only the sentence about work LEFT RUNNING outranks this one; a stale note from an earlier step must
+              -- not swallow the stop of this one (measured 28/11: the bash stop line disappeared when any earlier
+              -- note was enough to block it).
+              if type(already) ~= 'string' or not already:find('still running', 1, true) then
+                if type(dispatch_ctx) == 'table' then dispatch_ctx.stop_notice = said end
+                self.stop_notice = said
+              end
+            end
+          end)
+        end
+      end
       host.beat()
       if dispatched then
         -- A real tool call is the model doing what the notice asked it to do, so the imitation streak
@@ -4143,6 +4271,11 @@ function M:run_body(text, images)
           redact.text(tostring(audit_why or "unknown")):sub(1, 120) .. ") - the node keeps it and retries") })
       end
       output = redacted_output
+      -- See `stop_notice` above: the round after a stop is the one that ends the run, so the note the
+      -- stopped call left on this round's tool context has to outlive this round.
+      if type(dispatch_ctx) == "table" and type(dispatch_ctx.stop_notice) == "string" then
+        stop_notice = dispatch_ctx.stop_notice
+      end
       if type(output)=="table" and output.error=="graph_patch_review_required" then
         remember_audit_leads(output.audit)
       elseif function_.name=="graph" and args.action=="audit_assess"

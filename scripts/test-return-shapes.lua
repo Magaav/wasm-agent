@@ -130,7 +130,9 @@ check(#capped<=shapes.CAP+3 and capped:sub(-4)=='…}','a wide shape is capped a
 check(shapes.render(shapes.tree({list={{a={b={c={d=1}}}}}}))=='{list:[{a:{b:{…}}}]}','three object levels at most (an array is not one): '..shapes.render(shapes.tree({list={{a={b={c={d=1}}}}}})))
 check(shapes.render(shapes.tree('text'))=='string' and shapes.render(shapes.tree({1,2}))=='[number]','scalars and scalar arrays')
 
--- 6. Ours: the WhatsApp read has its static shape and it is not learned over.
+-- 6. Ours: the WhatsApp read has its static shape and it is not learned over. The shape gained
+--    `limit_asked` would push it to 124 characters, past the 120 cap this index keeps (`M.CAP`), so the
+--    read line stays as it was: contacts and search advertise the clamp, read carries it in the answer only.
 local whatsapp=dofile('lua/core/whatsapp.lua')
 local wa_index=policy.connector_index(whatsapp.schemas())
 check(wa_index:find('- mcp_whatsapp_read({chat, limit?, before?}) → {header:{chat,name,type},messages:[{id,at_local,from:{own,name},text,reply_to:{id,quote}}],has_more,next_before}',1,true),

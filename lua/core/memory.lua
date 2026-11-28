@@ -1205,6 +1205,31 @@ end
 
 local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
+-- Renaming a thread (/sessions, r on a row): the title is the name the reader sees in every list, so it
+-- is the session's own row and nothing else changes. An empty name is refused rather than stored - a
+-- blank title is what an unnamed session already has, and clearing a name a reader typed is not
+-- something a keypress should do quietly.
+function M.rename_session(session_id, title)
+  session_id, title = tostring(session_id or ""), tostring(title or "")
+  title = title:gsub("^%s+", ""):gsub("%s+$", "")
+  if session_id == "" or title == "" then return false end
+  if #title > 200 then title = title:sub(1, 200) end
+  exec("UPDATE sessions SET title = ? WHERE id = ?", { title, session_id })
+  return true
+end
+
+-- The FIRST thing a person said in a thread, for the lists that name an unnamed session by it
+-- (/sessions): one row, the newest query the store has an index for. A thread with no user turn yet is
+-- "" - the caller decides what to show instead.
+function M.first_user_line(session_id)
+  session_id = tostring(session_id or "")
+  if session_id == "" then return "" end
+  local rows = query("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1",
+    { session_id }) or {}
+  local row = rows[1]
+  return row and tostring(row.content or "") or ""
+end
+
 function M.base64_decode(text)
   if type(text) ~= "string" or text == "" then return "" end
   text = text:gsub("%s", ""):gsub("=+$", "")

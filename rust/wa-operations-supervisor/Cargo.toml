@@ -1,0 +1,18 @@
+[package]
+name = "wa-operations-supervisor"
+version = "0.1.0"
+edition = "2021"
+
+# The process runner as its own program (`ready-operations-slice-2.md`, stage B). It links the runner and the
+# leaf crates it needs, and NOT the node: that is what makes a landing here stop shipping the whole `wa`.
+[[bin]]
+name = "wa-operations-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+ring = "0.17"
+wa-operations-runner = { path = "../wa-operations-runner" }
+wa-disk = { path = "../wa-disk" }
+wa-tool-progress = { path = "../wa-tool-progress" }
+wa-files = { path = "../wa-files" }

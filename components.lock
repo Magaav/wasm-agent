@@ -228,7 +228,18 @@ agent-core b24672b26ae4585f53bb6d4f5d9ab3cde61a663148385099eba4951ce8b57d53 3925
 # budget - and the two `codemode_sleep_*` refusal codes come with it. That moves the wasm bytes; everything
 # else in the component is the file above. Built with scripts/build-components.sh codemode at wasi-sdk 34:
 # 225,184 bytes.
-codemode 35cfcfe1145b3436a13b5bf4abb6e1cd6fb322fda3aab0d294d0d5c4dbd29960 216485
+# 25/11 repin of codemode alone (change/codemode-seam-leaves-the-host): the code-mode seam's JSON control
+# channel moved INTO the component. The request decode and the answer rendering - the shape of a step, of a
+# refusal and of a report, which lua/core/codemode.lua reads key by key - lived in
+# rust/wa-capabilities/src/codemode_seam.rs, so every change to them rebuilt the wa binary (f2d2c3cc added
+# error and answered; 1c19bf5c added the searchTools row shape). They are rust/components/codemode/src/
+# channel.rs now, behind one new export: wa:codemode/control serve(request) -> answer. The typed wa:codemode
+# interface is unchanged and the door renders it. The new host needs this artifact: served the older one it
+# names the failure (component_instantiate / component_failed) and the loop falls back to its native path
+# before a step is handed out, which is the documented rule for a mismatch.
+# Built by scripts/build-components.sh codemode: rustc 1.99.1, build root /tmp/wa-component-build/src, two
+# builds in two target dirs, same sha256 both times. 242,422 bytes.
+codemode 541bbba1ec2db6b71af48456a24544ab4ef9aa12d3bb724bb88cde9f8fdb1b26 242422
 graph 0539d0263a021f1734a5d2f6434320dafcbc8068c7b3f2a6f5adf038e4e718b5 8187401
 hooks f5fef7083eedac3269aecb50590297935be53e522d282f70bfa97e4bfa7e3e30 215897
 memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
@@ -251,9 +262,102 @@ model-gateway 827afeb60f67991c832acc6f5c62dc346582ee0cbb6fd0d89f4ca517bbcb40b8 4
 # `scripts/build-components.sh selfloop`, and twice (a real rebuild and a warm second run) for the same
 # sha256, with the toolchain and build root this file pins.
 selfloop 949c657d3dcd365095425133d755e6023ddc3fe7bd5735d87064872346cff0a8 247835
+# 26/11 first pin of stt (change/stt-becomes-a-component): the speech queue's wire layer becomes a
+# component - wit/stt's async world (wa:stt: admit, encode, signature-message, reply-ok, sanitize) over
+# wa-stt-remote, which is pure and builds for wasip2 as it is. The node asks the feature resolver
+# (features.stt - the switch is the feature, with no env override in product code) per call and falls back to
+# rust/wa-kernel-runtime/src/stt_node.rs, which keeps the queue, the worker thread, the clock, the
+# recogniser and the node's key. Built by scripts/build-components.sh stt: rustc 1.99.1, build root
+# /tmp/wa-component-build/src, two builds in two target dirs, same sha256 both times. 152,942 bytes.
+# 26/11 second pin of stt, same day: the world kept only what this node answers (admit, reply-ok,
+# sanitize) after the first pin carried encode and signature-message, which the producer composes and
+# signs inside wa-stt-remote and which therefore had no caller here. reply-ok is now routed, so every
+# export in the world is one the node actually asks. Two builds, same sha256, 146,696 bytes.
+stt bc7db7b0f63f3187edb02490ba73dca0d655ce70991eda791e14841a10f63d73 146696
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
-wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
+# WHY THESE TWO WERE REPINNED (27/11, mission fix-components-lock-email-whatsapp). One commit moved both
+# components and repinned neither, and nothing checked, so every publish since e6bddc6f refused
+# `artifact_not_pinned: wa-email wa-whatsapp`:
+#
+#   `33f1eeec` (26/11, "whatsapp-read-is-consistent, re-applied ... the component change is not repinned")
+#   changed `rust/wa-queue` - which BOTH components link, wa-email through wa-email-outbox and wa-whatsapp
+#   through its index and outbox - and also `rust/wa-whatsapp-index`, `rust/wa-whatsapp-outbox` and
+#   `rust/components/wa-whatsapp/src/*`. The wa-whatsapp pin line was written by the merge `9c15db94` from the
+#   other side, so it looked newer than those sources while describing older bytes; that is why the guard
+#   below hashes FILES and not commit times.
+#
+#   `7839260f` (27/11, email-read-waits-on-a-future) then removed the mail index's private 2 s wait, which
+#   changed `wa-email` on its own. Its size is unchanged (565827) and its bytes are not: a source change with
+#   no size change is exactly the drift a pin cannot carry.
+#
+# Both artifact lines below are the builds of this tree; `scripts/test-components-lock-follows-source.lua` is
+# the guard that a future change cannot repeat this quietly.
+wa-email 44c73d1b1df0f3d62362b5f99d56b183f5793f7f6ec2343aac5180d7e9890db8 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
 # into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
 # its bytes are the ones published in components-033542eb9a37.
-wa-whatsapp 3ab893733cd6160b572c65afc7500bc3d3b067b04ebfd46c87ad053f3e0dcb80 8865574
+# Repin for the merge of origin/main (617fed07) into whatsapp-index-heals-itself: main's contacts answer
+# (hidden/hidden_why) and this branch's paging (next, before) and clamp (say_limit) are one answer now, so
+# the bytes are the build of the merged source, not either side's. Built on avell in the pinned root
+# (/tmp/wa-component-build/src) with rustc 1.100.0, wasi-sdk 34.0.
+# Repin for whatsapp-read-slow-is-not-an-error, stacked on whatsapp-leaves-the-host: this branch changes
+# rust/components/wa-whatsapp/src/{index,view}.rs (the slow read answers {state:pending} and text:full
+# carries text_cap), so the bytes of the move branch no longer describe this tree. Built at the pinned
+# root with the pinned toolchain, rustc 1.100.0 / wasi-sdk 34.0.
+# 27/11: the pin named bytes built with WA_COMPONENT_TOOLCHAIN=1.100.0, the diagnosis override the build
+# script warns is NOT the pinned compiler (scripts/build-components.sh:30). The tree built with its OWN
+# pinned toolchain (1.99.1) gives these bytes, so every publish after the read-slow landing was refused
+# `artifact_not_pinned: wa-whatsapp`. No source moved: components-lock-follows-source was already 5/0.
+# 27/11 whatsapp-media-of-any-size, rebased on main that carries the lock fix: the component writes a
+# downloaded file into the directory the node grants it (`/downloads`, capabilities.dirs) instead of
+# pushing the bytes through the job's progress stream, so media is bounded by what the node KEEPS
+# (64 MB) and not by the queue (1 MiB). Built at the pinned root with the tree's OWN toolchain.
+wa-whatsapp b92137035ff30b79e654047e450b335283fd22e2c9f5922796c65a7ccfcf44b6 8957816
+# SOURCES agent-core 7e841b7234b00801ecee490bc07f5c702b596d68228a5bf8c5298040d7f5fd4a
+# SOURCES codemode a88a41d057f15ead5266aec40cbce9cd6079a96b9c697af8bf65fe60c0aa0544
+# SOURCES graph 963d98538e92d3d7b12b7df989369636f8b2a4a7308b0791c19c6aae0de8beb5
+# SOURCES hooks c2e4583da7364bc8963e3e0d79bc2749c6d93412eaabd3229e7b5422eed3a143
+# SOURCES memory 0f970ab90801c636a5ed6d7beeacabe43df5d725c068a08ad7f35517d26d9eeb
+# SOURCES mesh c82e5d45fe45fd16b02391c7da6103e319d61d3190a0d387622e61ba86494de3
+# SOURCES model-gateway 3f958b4c710cbd34113e9c38496c606098ea4a9df39c248a5adffd829644279e
+# SOURCES selfloop c7f20da9dd79111ffadd87479a13034f92f56d632e143454ba03940af7f21baf
+# SOURCES stt 646efcd5dc6663bafaa4fbba3645ff6fc0b856934e311eddbc28f1b9ae33e62f
+# SOURCES telemetry-sink a05024a258ef6d406635aad7f2926e88056001d725c280c619c14c12f3b75849
+# SOURCES wa-email 0770be529a0b6ed5b9cab5318dd2ac8fd5b64856c4a87f55da6c33c49c7d35b2
+# SOURCES wa-whatsapp 436c0aec8ce931250a226263fdb356be8cf3c492c965217447fbdca3c633e6b2
+# 27/11 first pin of vision (change/vision-is-a-component): the reading of an image becomes a component
+# (wit/vision: async read -> words, boxes and confidence; models.lock carries the model pins). The engine is
+# rten 0.28 on the PP-OCRv3 det+rec pair the node already ships, and the model bytes are HOST-SUPPLIED - they
+# are not inside this artifact. Feature `vision` (wa-features) decides; the kernel reader in
+# rust/wa-kernel-runtime/src/vision_host.rs stays the fallback until the flip after round 2. Built by
+# cargo build --release --target wasm32-wasip2 in rust/components/vision.
+vision 5577e2ca25ab72c52c7317628b3e9218ce0ce869a1c1b13d0c6f63f08233ce56 3642503
+# 28/11 first pin of tz (change/everything-is-a-component): the node's own time-zone identifier becomes a
+# component. rust/wa-local-tz was linked into `wa` for one function with one call site (the guest's
+# host.local_tz), so a change to how the OS zone is read rebuilt the whole node. The component decides from
+# TZ, /etc/localtime and /etc/timezone (the kernel mounts /etc read-only, manifest.json), one tool `zone`
+# answering {id, source}; the seam is rust/wa-capabilities/src/tz_component.rs and the library is built only
+# for this target now, as wa-graph is for graph.
+tz 6bcbe3543793625d0da9de931d636e5c38c85c1a884f16a4b7b85227aa6ecaa0 160247
+# 28/11 first pin of outbox (change/everything-is-a-component, move 2): the explicit-send contract becomes a
+# component. rust/wa-whatsapp-outbox held the exact-JID rule, the payload, the dedupe key, the limits and the
+# outcome - the part BOTH ends of the queue must agree on - and both ends were in the host, so a change to
+# either rebuilt the node. The host now asks this for validate/chat/status/constants
+# (rust/wa-capabilities/src/outbox_component.rs) and `cargo tree -p wa-host` no longer lists the crate.
+outbox 3674c717e9c9ec2d64e2723b66aed603acbc5d1855f6aa343a3f943bf87bca44 232613
+# 28/11 first pin of whatsapp-archive (change/whatsapp-archive-is-a-component): the archive's OPERATIONS as a
+# component - which month is due, which are restored, a file's name and expiry, the seal context and sha256 -
+# over `wit/archive`, which imports the two things those ops need from outside: the store an index lives behind
+# (`Kv`) and the keystore's seal/open (`Sealer`). A host answers both through a callback, the shape
+# `wa-kernel-runtime/src/sandbox_host.rs` established for codemode.
+# NOT YET CALLED BY ANYONE: the host's side is `wa-capabilities/src/whatsapp_archive.rs`, which this branch may
+# not touch (whatsapp-leaves-the-host's ground). The component is built and pinned so that seam is all that is
+# left: `archive_host` in the kernel answers the two imports, and the path-bound ops (`list`, `cut`, `restore`,
+# `expire`) work in a directory the host preopens.
+whatsapp-archive 5b97f67a357b67ec05a5eefcb3ba9af70ab1f897b619b246cbea3c221e9e01b6 792016
+# 28/11 first pin of email-outbox (change/everything-is-a-component, row 14): the email-send contract - what a
+# `cargo tree -p wa-host` no longer lists `wa-email-outbox`; the host asks this for
+email-outbox 1aeed47e2e035f5b9fd0f3aaaa71f25a40f732cad0f003589d104575197d5a05 220091
+# 28/11 first pin of email-index (change/everything-is-a-component, row 14): the email-query contract - the
+# crate, so a change to either end rebuilt the node. `cargo tree -p wa-host` no longer lists `wa-email-index`;
+email-index 7c41a91aed440e1507504f3f7f0fa55a9df0f4381f358dc95f40dc31b0aa252e 209085

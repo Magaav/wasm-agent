@@ -43,7 +43,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use wa_whatsapp_index::keys;
+use wa_whatsapp_wire::keys;
 
 pub mod ops;
 
@@ -233,7 +233,7 @@ impl Manifest {
 
 // One definition, in the seam: the component names a restored record's month with the same code the
 // node cuts with, so a mark and an answer never disagree about where a boundary is.
-pub use wa_whatsapp_index::month::{bounds as month_bounds, is_month, of as month_of};
+pub use wa_whatsapp_wire::month::{bounds as month_bounds, is_month, of as month_of};
 
 /// Is `month` past the 360 days it is kept after its last day?
 pub fn expired(month: &str, now_ms: i64) -> bool {
@@ -490,7 +490,7 @@ pub fn facts_of(chat: &str, id: &str, ts: i64, raw: &[u8]) -> keys::RecordFacts 
     let record: RecordView = serde_json::from_slice(raw).unwrap_or_default();
     let options: Vec<&str> = record.poll.as_ref().map(|poll| poll.options.iter().map(String::as_str).collect()).unwrap_or_default();
     let contacts: Vec<&str> = record.contacts.iter().map(|contact| contact.name.as_str()).collect();
-    let searchable = wa_whatsapp_index::Searchable {
+    let searchable = wa_whatsapp_wire::Searchable {
         body: &[record.text.as_str(), record.transcript.as_str(), record.ocr.as_str()],
         media: record.media.as_ref().map(|media| (media.filename.as_str(), media.mime.as_str())),
         place: record.place.as_ref().map(|place| (place.name.as_str(), place.address.as_str())),

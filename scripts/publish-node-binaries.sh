@@ -67,7 +67,6 @@ CHECK=0
 LOCAL=0
 ENSURE=0
 PUBLISH=0
-NAMED_FROM_COVER=0
 COMMIT=""
 GLIBC_FLOOR="2.31"
 TARGETS=""
@@ -103,7 +102,6 @@ while [ "$#" -gt 0 ]; do
     --local) LOCAL=1; shift ;;
     --ensure) ENSURE=1; shift ;;
     --publish) PUBLISH=1; shift ;;
-    --named-from-cover) NAMED_FROM_COVER=1; shift ;;
     --allow-empty-codemode) ALLOW_EMPTY=1; shift ;;
     -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown_option: $1" ;;
@@ -128,6 +126,15 @@ esac
 # tree and every node worktree.
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail "not_a_checkout: $ROOT"
 . "$ROOT/scripts/lib/node-binaries.sh"
+# THE LUA TREE THE BINARY EMBEDS (rust/wa-host/build.rs collects lua/core, lua/vendor and the four
+# AGENTS documents with include_str!). It is deliberately NOT a compiled input - a node WITH a tree stages
+# its own lua-core beside the binary and never reads the embedded copy - but a TREE-LESS node runs exactly
+# this, so a release records its digest (lua_inputs=) and a cover is verified against it
+# (scripts/upgrade.sh). One definition, the same file list the deploy already stages
+# (scripts/lib/lua-tree.sh).
+[ -f "$ROOT/scripts/lib/lua-tree.sh" ] \
+  || fail "lua_tree_lib_missing: $ROOT/scripts/lib/lua-tree.sh (the digest of the Lua a binary embeds is what makes a cover checkable)"
+. "$ROOT/scripts/lib/lua-tree.sh"
 . "$ROOT/scripts/lib/build-requirements.sh"
 # The glibc floor measurement, shared with the three installers (scripts/lib/glibc-floor.sh): the number this
 # script refuses to publish above and the number an installer refuses to run are the same measurement of the
@@ -387,18 +394,6 @@ if [ "$ENSURE" = 1 ]; then
       components_step || true
       publish_report
     fi
-    # A RELEASE NAMED FOR THIS COMMIT (25/11, Fable decision A). "Covered" is not installable on a node with
-    # no tree: scripts/release-install.sh fetches exactly node-<sha12> of the commit it is asked for, and a
-    # cut answered only by "covered: node-<other12>" published nothing, so that node answered
-    # node_release_unavailable. The bytes for this commit are the cover's (asserted, not assumed), so they are
-    # published once more under this commit's own name - a NEW release, never a replacement.
-    if [ "$NAMED_FROM_COVER" = 1 ] && [ "$ensure_tag" != "$(wa_node_release_tag "$COMMIT")" ]; then
-      named_args=(--commit "$COMMIT" --cover-tag "$ensure_tag" --out "$OUT/named-$SHORT")
-      [ -n "$(wa_node_release_repo "$ROOT" 2>/dev/null)" ] && named_args+=(--repo "$(wa_node_release_repo "$ROOT" 2>/dev/null)")
-      [ "$PUBLISH" = 1 ] && named_args+=(--publish)
-      bash "$ROOT/scripts/publish-named-release.sh" "${named_args[@]}" \
-        || fail "named_release_refused: the release named for $COMMIT could not be made from $ensure_tag" 2
-    fi
     exit 0
   fi
   say "not covered for$ensure_missing; building $MANIFEST_TRIPLES (a deploy of $COMMIT needs this release)"
@@ -422,18 +417,23 @@ fi
 asset_list() {
   local triple
   for triple in $MANIFEST_TRIPLES; do
-    printf 'wa-%s-%s wa-sentinel-%s-%s\n' "$triple" "$SHORT" "$triple" "$SHORT"
+    # THE MEMBER LIST IS ONE PLACE (law 17). A member added here is published, verified, staged and installed by
+    # every loop that reads WA_BUNDLE_MEMBERS, instead of a new hand-written pair in each of them.
+    # the ONE list (scripts/lib/node-binaries.sh): full names, so nothing is prefixed twice
+    members=""; for m in $WA_BUNDLE_MEMBERS; do members="$members $m-$triple-$SHORT"; done
+    printf 'wa-%s-%s%s\n' "$triple" "$SHORT" "$members"
   done
 }
 
 if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
   say "would build $COMMIT for: $MANIFEST_TRIPLES"
-  say "with: cargo zigbuild --release --offline --locked -p wa-host --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
+  say "with: cargo zigbuild --release --offline --locked -p wa-host -p wa-term -p wa-operations-supervisor --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
   say "zig: ${ZIG_BIN:-none found (a build would refuse with zig_missing; pass WA_ZIG or install pip ziglang)}"
   [ -n "$ZIG_BIN" ] && say "cargo zigbuild uses: CARGO_ZIGBUILD_ZIG_COMMAND=$CARGO_ZIGBUILD_ZIG_COMMAND"
   say "cargo target dir: $TARGET_DIR (one directory for wa-host and wa-sentinel; --target-dir overrides)"
   say "code-mode assets: $CODEMODE${ASSETS:+ ($ASSETS)}${ASSETS_WHY:+ - $ASSETS_WHY}"
   say "compiled inputs: $(wa_compiled_inputs_digest "$ROOT" "$COMMIT" 2>&1) (a later commit with this digest installs this release)"
+  say "lua inputs: $(wa_lua_tree_digest "$ROOT" "$COMMIT" 2>&1) (the Lua tree this binary EMBEDS: a tree-less node runs it, so a cover must match it)"
   say "release tag: $TAG   (repo $REPO_SLUG)${LOCAL:+ [--local: not publishable]}"
   say "would write $OUT/node-$SHORT.manifest and: $(asset_list)"
   say "would print (not run) the gh release command; nothing was built"
@@ -448,7 +448,7 @@ cp "$ROOT/assets/fonts/waIcons-Regular.ttf" "$OUT/waIcons-Regular.ttf" \
 
 # ---- the artifact set, from a build here or from --from --------------------------------------------
 emit_manifest() { # <out dir> -> manifest path, after every member is checked
-  local dir="$1" triple manifest tmp digest
+  local dir="$1" triple manifest tmp digest lua_digest
   manifest="$dir/node-$SHORT.manifest"
   tmp="$dir/.node-$SHORT.manifest.$$"
   # The compiled-inputs digest is a fact about the COMMIT, not about this machine's build, so it is read
@@ -456,6 +456,10 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
   # release a docs-only descendant cannot use, which is the whole reason the row exists.
   digest="$(wa_compiled_inputs_digest "$ROOT" "$COMMIT")" || fail "compiled_inputs_unavailable: cannot digest the compiled inputs of $COMMIT" 2
   [ -n "$digest" ] || fail "compiled_inputs_unavailable: no sha256 tool for the compiled-inputs digest" 7
+  # A release with no lua_inputs row cannot serve a cover on a tree-less node, so it is refused HERE rather
+  # than discovered there: the row is a fact about $COMMIT that its tree answers, exactly like the digest above.
+  lua_digest="$(wa_lua_tree_digest "$ROOT" "$COMMIT")" || fail "lua_inputs_unavailable: cannot digest the Lua tree the binary of $COMMIT embeds" 2
+  [ -n "$lua_digest" ] || fail "lua_inputs_unavailable: no sha256 tool for the Lua-tree digest" 7
   {
     echo 'schema=wasm-agent-node-binaries/1'
     echo "source_commit=$COMMIT"
@@ -467,6 +471,7 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     echo "unpushed=${ALLOW_UNPUSHED_COMMIT:+yes}"
     [ -n "${ALLOW_UNPUSHED_REASON:-}" ] && echo "unpushed_reason=${ALLOW_UNPUSHED_REASON}"
     echo "compiled_inputs=$digest"
+    echo "lua_inputs=$lua_digest"
     echo "rustc_version=$(rustc --version 2>/dev/null | sed 's/^rustc //')"
     echo "zig_version=$(zig version 2>/dev/null || echo unknown)"
     [ -n "${BUILD_SECONDS:-}" ] && echo "build_seconds=$BUILD_SECONDS"
@@ -475,14 +480,24 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     # The frozen identity, never `date` at the moment of writing: see the stamp block above. The fallback
     # only fires on a run that could not write its stamp, and it says so there.
     echo "built_utc=${BUILT_UTC:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-    echo '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes'
+    echo '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes'
     for triple in $MANIFEST_TRIPLES; do
-      local wa="$dir/wa-$triple-$SHORT" sentinel="$dir/wa-sentinel-$triple-$SHORT"
+      local wa="$dir/wa-$triple-$SHORT" sentinel="$dir/wa-sentinel-$triple-$SHORT" program="$dir/wa-term-$triple-$SHORT"
+      local supervisor="$dir/wa-operations-supervisor-$triple-$SHORT"
       [ -f "$wa" ] || fail "binary_missing: $wa" 2
       [ -f "$sentinel" ] || fail "binary_missing: $sentinel" 2
-      printf '%s %s %s %s %s\n' "$triple" \
+      [ -f "$program" ] || fail "binary_missing: $program" 2
+      # A BUNDLE WITHOUT THE SUPERVISOR IS REFUSED HERE (P0, 27/11): since 03579b19 `wa` needs its sibling and
+      # nothing shipped it, so every node installing such a build lost every command. Refusing at PUBLISH is the
+      # only place that stops one existing.
+      [ -f "$supervisor" ] || fail "binary_missing: $supervisor (wa-operations-supervisor: a node that installs without it loses every bash/operations call)" 2
+      # THE SUPERVISOR IS TWO TRAILING COLUMNS, NEVER INSERTED: a reader that predates them still parses the first seven
+      # fields, which is how wa-term became a column and how this stays a format old nodes can read.
+      printf '%s %s %s %s %s %s %s %s %s\n' "$triple" \
         "$(wa_node_sha256 "$wa")" "$(wc -c < "$wa" | tr -d '[:space:]')" \
-        "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')"
+        "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')" \
+        "$(wa_node_sha256 "$program")" "$(wc -c < "$program" | tr -d '[:space:]')" \
+        "$(wa_node_sha256 "$supervisor")" "$(wc -c < "$supervisor" | tr -d '[:space:]')"
     done
   } > "$tmp" || fail "manifest_unwritable: $tmp"
   mv -f "$tmp" "$manifest" || fail "manifest_unwritable: $manifest"
@@ -515,6 +530,15 @@ if [ -n "$FROM" ]; then
   if [ -n "$INCOMING" ] && [ "$INCOMING" != "$DIGEST" ]; then
     fail "compiled_inputs_mismatch: $FROM's manifest records compiled_inputs=$INCOMING and $COMMIT's tree is $DIGEST, so that manifest is not this commit's" 5
   fi
+  # The Lua row is recomputed for the same reason, and it is the row a TREE-LESS node is judged by: a
+  # manifest naming another Lua tree than $COMMIT's is a build of another PROGRAM, whatever its compiled
+  # inputs hash to (25/11: node-3589b5ca9690 carried node-a1857d15887c's bytes because the digests were equal).
+  LUA_DIGEST="$(wa_lua_tree_digest "$ROOT" "$COMMIT")" || fail "lua_inputs_unavailable: cannot digest the Lua tree the binary of $COMMIT embeds" 2
+  [ -n "$LUA_DIGEST" ] || fail "lua_inputs_unavailable: no sha256 tool for the Lua-tree digest" 7
+  LUA_INCOMING="$(wa_node_manifest_value "$OUT/node-$SHORT.manifest" lua_inputs)"
+  if [ -n "$LUA_INCOMING" ] && [ "$LUA_INCOMING" != "$LUA_DIGEST" ]; then
+    fail "lua_inputs_mismatch: $FROM's manifest records lua_inputs=$LUA_INCOMING and $COMMIT's Lua tree is $LUA_DIGEST, so those bytes embed another program than this commit's" 5
+  fi
   # The identity travels with the bytes, and it is never re-invented here: `--from` runs on a host that may
   # not be able to build, and a fresh built_utc is exactly what invalidates the signature made over the sums
   # the signing host saw.
@@ -525,32 +549,45 @@ if [ -n "$FROM" ]; then
     stamp_write "$FROM_UTC" "$FROM_SECONDS" || say "warning: the build stamp $BUILD_STAMP could not be written"
     say "identity taken from $FROM: built_utc=$FROM_UTC${FROM_SECONDS:+ build_seconds=$FROM_SECONDS}"
   fi
-  if [ "$INCOMING" = "$DIGEST" ]; then
+  if [ "$INCOMING" = "$DIGEST" ] && [ "$LUA_INCOMING" = "$LUA_DIGEST" ]; then
     # Already this commit's: NOT rewritten. A manifest rewritten byte-for-byte is still a different file to
     # anything that hashed it (mtime, inode, a concurrent reader), and the sums that name it must stay
     # exactly the bytes the signing host signed.
-    say "manifest kept byte-for-byte (compiled_inputs=$DIGEST already recorded)"
+    say "manifest kept byte-for-byte (compiled_inputs=$DIGEST, lua_inputs=$LUA_DIGEST already recorded)"
   else
-    awk -v d="$DIGEST" '
+    awk -v d="$DIGEST" -v l="$LUA_DIGEST" '
       /^compiled_inputs=/ {next}
+      /^lua_inputs=/ {next}
       {print}
-      /^source_tree=/ {print "compiled_inputs=" d; done = 1}
-      END {if (!done) print "compiled_inputs=" d}
+      /^source_tree=/ {print "compiled_inputs=" d; print "lua_inputs=" l; done = 1}
+      END {if (!done) {print "compiled_inputs=" d; print "lua_inputs=" l}}
     ' "$OUT/node-$SHORT.manifest" > "$OUT/.node-$SHORT.manifest.$$.tmp" \
       && mv -f "$OUT/.node-$SHORT.manifest.$$.tmp" "$OUT/node-$SHORT.manifest" \
       || fail "manifest_unwritable: $OUT/node-$SHORT.manifest" 2
   fi
-  for triple in $MANIFEST_TRIPLES; do
-    for name in "wa-$triple-$SHORT" "wa-sentinel-$triple-$SHORT"; do
+  # THE ONE MEMBER LIST (law 17), not a hand-written trio: this loop named wa-, wa-sentinel- and wa-term- and
+  # left the supervisor behind, so a --from publish of a COMPLETE set could never succeed - the bundle step
+  # below requires wa-operations-supervisor and refused the copy this loop had just skipped (measured: a set
+  # with all four members in --from gave binary_missing for the supervisor in the bundle, exit 2).
+  while read -r line; do
+    for name in $line; do
       [ -f "$FROM/$name" ] || fail "binary_missing: $FROM/$name" 2
       cp -f "$FROM/$name" "$OUT/.$name.$$" && mv -f "$OUT/.$name.$$" "$OUT/$name" || fail "bundle_unwritable: $OUT/$name" 2
     done
-  done
+  done <<< "$(asset_list)"
   # The manifest travels with the binaries, so the pin checked below is the pin that ships.
   for triple in $MANIFEST_TRIPLES; do
     pin="$(wa_node_manifest_pin "$OUT/node-$SHORT.manifest" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
     set -- $pin
-    for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4"; do
+    # THE PROGRAM IS VERIFIED TOO (wa-term-own-program): a release whose node is pinned and whose
+    # program is not is exactly the install this whole change exists to prevent, and it would be
+    # refused on every node instead of here.
+    [ "$#" -ge 4 ] || fail "manifest_incomplete: no row for $triple" 2
+    if ! term_pin="$(wa_node_manifest_program "$OUT/node-$SHORT.manifest" "$triple")"; then
+      fail "manifest_incomplete: the row for $triple does not pin wa-term - this release would install a node that cannot draw a prompt; republish with this script" 2
+    fi
+    set -- "$1" "$2" "$3" "$4" "${term_pin% *}" "${term_pin#* }"
+    for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4" "wa-term-$triple-$SHORT:$5:$6"; do
       name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
       actual="$(wa_node_sha256 "$OUT/$name")" || fail 'sha256_tool_missing: no sha256sum or shasum' 7
       [ "$actual" = "$want_sha" ] || fail "artifact_not_pinned: $name is $actual, the manifest pins $want_sha" 5
@@ -611,7 +648,7 @@ else
   for zig_target in $ZIG_TARGETS; do
     triple="${zig_target%%.2.*}"
     started=$(date +%s)
-    ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked -p wa-host --target "$zig_target" ) > "$OUT/build-wa-$triple.log" 2>&1 \
+    ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked -p wa-host -p wa-term -p wa-operations-supervisor --target "$zig_target" ) > "$OUT/build-wa-$triple.log" 2>&1 \
       || { tail -20 "$OUT/build-wa-$triple.log" >&2; fail "build_failed: wa for $zig_target (log $OUT/build-wa-$triple.log)" 8; }
     ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --target "$zig_target" ) > "$OUT/build-sentinel-$triple.log" 2>&1 \
       || { tail -20 "$OUT/build-sentinel-$triple.log" >&2; fail "build_failed: wa-sentinel for $zig_target (log $OUT/build-sentinel-$triple.log)" 8; }
@@ -624,9 +661,25 @@ else
     [ -f "$sentinel_bin" ] || sentinel_bin="$target_dir/$triple/release/wa-sentinel"
     [ -f "$wa_bin" ] || fail "binary_missing: no built wa for $zig_target under $target_dir" 8
     [ -f "$sentinel_bin" ] || fail "binary_missing: no built wa-sentinel for $zig_target under $target_dir" 8
+# THE PROGRAM THAT DRAWS THE TERMINAL ships in the same payload (wa-term-own-program): a node
+# installed without it starts and cannot open a prompt, which is why this work was once reverted.
+    term_bin="$target_dir/$zig_target/release/wa-term"
+    [ -f "$term_bin" ] || term_bin="$target_dir/$triple/release/wa-term"
+    [ -f "$term_bin" ] || fail "binary_missing: no built wa-term for $zig_target under $target_dir" 8
+    # AND THE SUPERVISOR `wa` RUNS FOR EVERY BASH/OPERATIONS CALL (P0, 27/11). It is built above (the zigbuild line names
+    # its crate) and the manifest demands it - but the copy into out/ still took only three binaries, so a publish that
+    # built for 170 s per target died on the asset it never placed: `binary_missing: .../out/wa-operations-supervisor-...`.
+    supervisor_bin="$target_dir/$zig_target/release/wa-operations-supervisor"
+    [ -f "$supervisor_bin" ] || supervisor_bin="$target_dir/$triple/release/wa-operations-supervisor"
+    [ -f "$supervisor_bin" ] || fail "binary_missing: no built wa-operations-supervisor for $zig_target under $target_dir" 8
     cp -f "$wa_bin" "$OUT/.wa-$triple-$SHORT.$$" && mv -f "$OUT/.wa-$triple-$SHORT.$$" "$OUT/wa-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
     cp -f "$sentinel_bin" "$OUT/.wa-sentinel-$triple-$SHORT.$$" && mv -f "$OUT/.wa-sentinel-$triple-$SHORT.$$" "$OUT/wa-sentinel-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
-    chmod +x "$OUT/wa-$triple-$SHORT" "$OUT/wa-sentinel-$triple-$SHORT" 2>/dev/null || true
+    cp -f "$term_bin" "$OUT/.wa-term-$triple-$SHORT.$$" && mv -f "$OUT/.wa-term-$triple-$SHORT.$$" "$OUT/wa-term-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
+    cp -f "$supervisor_bin" "$OUT/.wa-operations-supervisor-$triple-$SHORT.$$" \
+      && mv -f "$OUT/.wa-operations-supervisor-$triple-$SHORT.$$" "$OUT/wa-operations-supervisor-$triple-$SHORT" \
+      || fail "bundle_unwritable: $OUT" 2
+    chmod +x "$OUT/wa-$triple-$SHORT" "$OUT/wa-sentinel-$triple-$SHORT" "$OUT/wa-term-$triple-$SHORT" \
+      "$OUT/wa-operations-supervisor-$triple-$SHORT" 2>/dev/null || true
   done
   BUILD_SECONDS=$(( $(date +%s) - build_started ))
   emit_manifest "$OUT" >/dev/null || fail "manifest_unwritable: $OUT" 2
@@ -639,7 +692,15 @@ fi
 for triple in $MANIFEST_TRIPLES; do
   pin="$(wa_node_manifest_pin "$OUT/node-$SHORT.manifest" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
   set -- $pin
-  for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4"; do
+    # THE PROGRAM IS VERIFIED TOO (wa-term-own-program): a release whose node is pinned and whose
+    # program is not is exactly the install this whole change exists to prevent, and it would be
+    # refused on every node instead of here.
+    [ "$#" -ge 4 ] || fail "manifest_incomplete: no row for $triple" 2
+    if ! term_pin="$(wa_node_manifest_program "$OUT/node-$SHORT.manifest" "$triple")"; then
+      fail "manifest_incomplete: the row for $triple does not pin wa-term - this release would install a node that cannot draw a prompt; republish with this script" 2
+    fi
+    set -- "$1" "$2" "$3" "$4" "${term_pin% *}" "${term_pin#* }"
+    for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4" "wa-term-$triple-$SHORT:$5:$6"; do
     name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
     file="$OUT/$name"
     [ -f "$file" ] || fail "binary_missing: $file" 2

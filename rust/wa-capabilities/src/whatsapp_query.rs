@@ -17,7 +17,8 @@
 //!
 //! Why the node waits instead of answering "queued": a search is a local kv read in a component that
 //! is already running, and a model that has to poll for the answer to "what did they say" would spend a
-//! turn doing it. The wait is bounded ([`wa_whatsapp_index::WAIT_MS`]) and heartbeats the node
+//! turn doing it. The wait is the ONE shared one ([`crate::serve::wait_ms`], 60 s by default
+//! with the 300 s ceiling `lua/core/codemode_pending.lua` enforces) and it heartbeats the node
 //! (`serve::beat`) while it waits, so a slow answer is an answer ("still running, here is the id") and
 //! never a frozen node. The dedupe key is the request itself, so a caller that asks again after a slow
 //! answer reads the *same* job instead of queueing a second scan.
@@ -32,7 +33,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wa_queue::{EnqueueRequest, JobId};
-use wa_whatsapp_index as seam;
+use crate::whatsapp_index_component as seam;
 
 /// The component whose queue namespace this is (its manifest grants `queue.consume` on
 /// `whatsapp.query`; `rust/components/wa-whatsapp/manifest.json`).
@@ -42,7 +43,6 @@ const COMPONENT: &str = "wa-whatsapp";
 const POLL: Duration = Duration::from_millis(20);
 /// How long `whatsapp_download` waits for the decrypted bytes. Longer than a search (a CDN fetch plus a
 /// decrypt), still bounded: a slow one answers "still running" and the same call reads the same job.
-const DOWNLOAD_WAIT_MS: u64 = 10_000;
 /// The directory the decrypted media lands in, under the components directory.
 const DOWNLOAD_DIR: &str = "wa-whatsapp.downloads";
 /// How many files that directory keeps before the oldest go.
@@ -80,8 +80,12 @@ pub extern "C-unwind" fn message(l: *mut wa_host_support::lua::LuaState) -> std:
 }
 
 /// `host.whatsapp_reactions({chat, id})`.
+///
+/// The first op carried as DATA instead of a variant this module names: the bind says the word on the
+/// wire, `Request::validate` parses it, and nothing in this file has to be edited for the op to exist
+/// (see [`answer_text`], the first slice of "WhatsApp leaves the host").
 pub extern "C-unwind" fn reactions(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
-    answer(l, seam::Op::Reactions)
+    answer_text(l, "reactions")
 }
 
 /// `host.whatsapp_media({chat, id})`.
@@ -91,10 +95,45 @@ pub extern "C-unwind" fn media(l: *mut wa_host_support::lua::LuaState) -> std::o
 
 /// `host.whatsapp_download({chat, id})` - decrypt to the bounded directory and answer with the path.
 pub extern "C-unwind" fn download(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    // Its own row names the op, so this bind takes the arguments and no `op` field: delegating it to the
+    // generic door would have made `whatsapp_download({chat, id})` demand one (measured 25/11 - the row
+    // caught it, not a reviewer).
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(args) => component_absent(seam::Op::Download).unwrap_or_else(|| ask_download(&args)),
         Err(_) => seam::refusal(seam::Op::Download, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// `host.whatsapp_file({op, ...args})` - the ops that write into this node's bounded folder.
+///
+/// The third and last effect class, carried the same way: the question in the request, the class on the
+/// row. `download` is the same conversation as the other doors (validate, enqueue on `whatsapp.query`,
+/// wait) with one difference that stays here - its answer is a FILE the node writes from the job's
+/// progress stream, so it is the one path that does not end in a stored answer.
+pub extern "C-unwind" fn file(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer_file(l, "file")
+}
+
+/// The file door's answer: the class gate and the absent answer are the read door's, the wait is the
+/// download's own (`DOWNLOAD_WAIT_MS`: a CDN fetch plus a decrypt).
+fn answer_file(l: *mut wa_host_support::lua::LuaState, door: &str) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => match index_op(&args) {
+            Some(op) => match seam::Op::parse(op) {
+                Some(asked) if asked.effect() != seam::Effect::WritesFiles => seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is not what this door declares: ask whatsapp_{op}, the row that declares its effect"),
+                ),
+                _ => component_absent_text(op).unwrap_or_else(|| ask_download(&args)),
+            },
+            None => seam::refusal_text(door, "op_required", OP_REQUIRED),
+        },
+        Err(_) => seam::refusal_text(door, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
     1
@@ -146,13 +185,21 @@ pub(crate) fn component_missing() -> Option<(String, Option<String>)> {
 /// node, so the answer names it when the node was told (`WASM_AGENT_WHATSAPP_OWNER`) instead of
 /// pretending the job is in flight. A CLI or `WA_SCRIPT` process has no registry of its own and is
 /// skipped: only the serving node may call its own absent component absent.
+///
+/// One shaper for both spellings of the op (see [`component_absent_text`]): the answer a tool reads
+/// must not depend on whether its capability named a variant or the word on the wire.
 fn component_absent(op: seam::Op) -> Option<Value> {
+    component_absent_text(op.as_str())
+}
+
+/// [`component_absent`] for an op named as data: the same answer, in the tool's own words.
+fn component_absent_text(op: &str) -> Option<Value> {
     let (state, owner) = component_missing()?;
     let detail = match &owner {
         Some(owner) => format!("this node runs no {COMPONENT} component; the WhatsApp account is served by {owner}"),
         None => format!("this node runs no {COMPONENT} component"),
     };
-    let mut answer = seam::refusal(op, "whatsapp_component_absent", detail);
+    let mut answer = seam::refusal_text(op, "whatsapp_component_absent", detail);
     answer["component"] = json!(COMPONENT);
     answer["state"] = json!(state);
     if let Some(owner) = owner {
@@ -165,11 +212,104 @@ fn component_absent(op: seam::Op) -> Option<Value> {
 fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => component_absent(op).unwrap_or_else(|| ask(op, &args, seam::WAIT_MS)),
+        Ok(args) => component_absent(op)
+            .unwrap_or_else(|| ask(op, &args, crate::serve::wait_ms(&args))),
         Err(_) => seam::refusal(op, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
     1
+}
+
+/// An op named as data: the same call as [`answer`], with the word on the wire instead of the enum.
+///
+/// This is the seam a move out of the hub needs. A bind says `answer_text(l, "reactions")`, so an op
+/// adds no variant and no match arm here - the set of ops is written down once, in `seam::Op` (the
+/// component's dispatch) and in `seam::Request::validate`, which parses the op out of the payload.
+///
+/// Nothing about the answer changes: the same `seam::Request`, the same `validate()`, the same dedupe
+/// key, the same `settle()`, and the same answer shapers - because `validate()` hands back the parsed
+/// `seam::Op` and every shaper downstream still takes it. What is gone is this file's list of ops.
+fn answer_text(l: *mut wa_host_support::lua::LuaState, op: &str) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => answer_with(op, &args),
+        Err(_) => seam::refusal_text(op, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// The answer for one already-read request: this node cannot answer at all, or validate, queue and wait.
+fn answer_with(op: &str, args: &Value) -> Value {
+    component_absent_text(op).unwrap_or_else(|| ask_text(op, args, crate::serve::wait_ms(args)))
+}
+
+/// `host.whatsapp_index({op, ...args})` - the read answers a component can grow without the host.
+///
+/// The op travels IN the request instead of in this crate's row list, which is what makes a new
+/// read-only op the component's business: `op` is checked by `seam::Request::validate` (the check the
+/// component itself runs), an op nothing here can answer is refused `bad_op` before a job exists, and
+/// the answer is byte for byte the one `whatsapp_<op>` gives - proved for every op it carries in this
+/// module's tests (`the_generic_row_answers_the_same_bytes_as_the_named_row_for_every_read_op`).
+///
+/// The word comes from the catalogue row that called it (`M.invoke`, `lua/core/whatsapp.lua`), never
+/// from the arguments a caller typed, so a model cannot reach an op its tool does not name.
+pub extern "C-unwind" fn index(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer_class(l, "index", seam::Effect::ReadOnly)
+}
+
+/// `host.whatsapp_request({op, ...args})` - the ops that ask the primary phone, behind the row that
+/// declares it.
+///
+/// The same forwarder as `whatsapp_index` (`backfill` is the same request, the same queue and the same
+/// settle), carried by the row whose effect class says what it does: a sandbox that joins `Network`
+/// calls serializes them, which is exactly what a read must not pay for and a phone request must.
+pub extern "C-unwind" fn request(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer_class(l, "request", seam::Effect::Network)
+}
+
+/// The generic door: the question in the request, and only the ops whose effect class this row declares.
+///
+/// The class is the OP's (`seam::Op::effect`), so a door cannot be talked into an effect it does not
+/// declare, and the refusal names the row that does - `whatsapp_index` is read-only and `backfill` asks
+/// the phone (measured 25/11: a ReadOnly row queued it before this check existed).
+fn answer_class(l: *mut wa_host_support::lua::LuaState, door: &str, want: seam::Effect) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
+    let answer = match serde_json::from_str::<Value>(&raw) {
+        Ok(args) => match index_op(&args) {
+            Some(op) if op == seam::registry_op() => {
+                if want != seam::Effect::ReadOnly {
+                    seam::refusal_text(
+                        op,
+                        "use_its_own_door",
+                        format!("{op} is the registry: ask whatsapp_index, the row that declares what it does"),
+                    )
+                } else {
+                    answer_registry(&args)
+                }
+            }
+            Some(op) => match seam::Op::parse(op) {
+                Some(asked) if asked.effect() != want => seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is not what this door declares: ask whatsapp_{op}, the row that declares its effect"),
+                ),
+                _ => answer_with(op, &args),
+            },
+            None => seam::refusal_text(door, "op_required", OP_REQUIRED),
+        },
+        Err(_) => seam::refusal_text(door, "invalid_request", "the arguments are not a JSON object"),
+    };
+    wa_host_support::json::push_json(l, &answer);
+    1
+}
+
+/// The one sentence a caller sees when the generic door is opened without saying which question it is.
+const OP_REQUIRED: &str = "op names the question and the arguments that op takes: {op: \"search\", ...}";
+
+/// The op a generic request carries, or `None` when it carries no usable one.
+fn index_op(args: &Value) -> Option<&str> {
+    args.get("op").and_then(Value::as_str).map(str::trim).filter(|op| !op.is_empty())
 }
 
 /// Build the request from the tool's arguments, in the one shape the component reads back.
@@ -178,29 +318,69 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
 /// answer, `count` for `whatsapp_backfill` (which asks the phone how many messages per chat, it does
 /// not page anything). Either name is accepted for either op, so a caller that says `count` to a
 /// search or `limit` to a backfill is understood instead of silently getting the default.
-fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusal> {
+fn request_of(op: seam::Op, args: &Value, build: &str) -> Result<seam::Verified, seam::Refusal> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
-    let number = |key: &str| args.get(key).and_then(Value::as_i64);
+    // A time is passed through in the form the caller wrote it: the FORMS are the shared seam's
+    // (`seam::time_forms()`, `seam::parse_time`), so the host neither repeats the rule nor lets a date
+    // string fall on the floor of an `as_i64` that answers `None`.
+    let time = |key: &str| -> Result<Option<i64>, seam::Refusal> {
+        let code = if key == "since" { "bad_since" } else { "bad_until" };
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(number)) => Ok(number.as_i64()),
+            Some(Value::String(text)) => {
+                seam::parse_time(text).map(Some).ok_or_else(|| seam::Refusal::new(code, seam::time_forms()))
+            }
+            Some(_) => Err(seam::Refusal::new(code, seam::time_forms())),
+        }
+    };
     let limit = match op {
         seam::Op::Backfill => args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64)),
         _ => args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64)),
     };
-    let request = seam::Request {
-        op: op.as_str().to_string(),
-        q: text("q"),
-        chat: text("chat"),
-        id: text("id"),
-        kind: text("kind"),
-        from: text("from"),
-        since: number("since"),
-        until: number("until"),
-        before: text("before"),
-        limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
-        max_bytes: args.get("max_bytes").and_then(Value::as_u64),
-        // `search` only (`seam::Order`); the seam refuses it on any other op rather than ignoring it.
-        order: args.get("order").and_then(Value::as_str).map(str::to_string),
+    // THE EXACT-JID RULE IS THE CONTRACT'S (28/11). An address-shaped chat is accepted or refused by the
+    // `outbox` component before the index sees it, so a malformed one keeps the same refusal word it
+    // always had while the rule lives in one place. A string with no `@` is a NAME - `read` and
+    // `contacts` resolve those, and that path is untouched.
+    let judged = |value: Option<String>| -> Result<Option<String>, seam::Refusal> {
+        match value {
+            Some(raw) if raw.contains('@') => match crate::outbox_component::chat(&raw) {
+                Ok(accepted) => Ok(Some(accepted)),
+                Err(refusal) => {
+                    // `Refusal::new` takes a `&'static str` code, and the contract's codes are the same
+                    // two words this path has always answered: `bad_chat` and `unsupported_chat`.
+                    let code = match refusal["code"].as_str().unwrap_or("bad_chat") {
+                        "unsupported_chat" => "unsupported_chat",
+                        _ => "bad_chat",
+                    };
+                    Err(seam::Refusal::new(
+                        code,
+                        refusal["detail"].as_str().unwrap_or("the chat is not an exact JID").to_string(),
+                    ))
+                }
+            },
+            other => Ok(other),
+        }
     };
-    request.validate()
+    // The request is described, not decided: the component says whether it is valid, what bytes the queue
+    // must carry and what its dedupe key is for this build (`seam::validate`).
+    let request = serde_json::json!({
+        "op": op.as_str(),
+        "q": text("q"),
+        "chat": judged(text("chat"))?,
+        "id": text("id"),
+        "kind": text("kind"),
+        "from": judged(text("from"))?,
+        "since": time("since")?,
+        "until": time("until")?,
+        "before": text("before"),
+        "limit": limit.map(|value| value.min(u32::MAX as u64)),
+        "max_bytes": args.get("max_bytes").and_then(Value::as_u64),
+        // `search` only; the contract refuses it on any other op rather than ignoring it.
+        "order": args.get("order").and_then(Value::as_str),
+        "text": text("text"),
+    });
+    seam::validate(request, build)
 }
 
 /// Validate, enqueue and wait for the component's answer.
@@ -227,9 +407,17 @@ fn component_build() -> String {
 /// The same, against a queue the caller owns: what the tests drive without touching the node's own
 /// component directory. `build` is the answering component's identity (see [`component_build`]).
 fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: &str) -> Value {
-    let verified = match request_of(op, args) {
+    // A call that names `__job` CONTINUES a job it was already told about: the pending handle's `op`
+    // carries the id, and `lua/core/codemode_pending.lua`'s query executor starts with `__wait_ms: 0`,
+    // keeps the id, and asks about it with the call's remaining budget. There is no request to validate -
+    // the id is the whole question - and the answer is the settled answer the first call would have given.
+    // Both internal fields ride in the raw argument text and never in a tool's schema.
+    if let Some(job) = args.get("__job").and_then(Value::as_u64) {
+        return settle(q, op, job, wait_ms);
+    }
+    let verified = match request_of(op, args, build) {
         Ok(verified) => verified,
-        Err(refusal) => return seam::refusal(op, refusal.code, refusal.detail),
+        Err(refusal) => return seam::refusal(op, &refusal.code, &refusal.detail),
     };
     let id = match enqueue(q, &verified, build) {
         Ok(id) => id,
@@ -238,15 +426,123 @@ fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: 
     settle(q, op, id, wait_ms)
 }
 
+/// [`ask`] for an op named as data.
+fn ask_text(op: &str, args: &Value, wait_ms: u64) -> Value {
+    ask_text_in(&queue(), op, args, wait_ms, &component_build())
+}
+
+/// The registry through the queue: enqueue the word, wait, answer the component's document itself.
+///
+/// It is not an index question (`Request::validate` would refuse it `bad_op`), so it is forwarded as it
+/// arrives and settled by its own wait - the same bound, the same poll, the same beat.
+fn answer_registry(args: &Value) -> Value {
+    component_absent_text(seam::registry_op())
+        .unwrap_or_else(|| ask_registry_in(&queue(), args, &component_build()))
+}
+
+fn ask_registry_in(q: &wa_queue::Queue, args: &Value, build: &str) -> Value {
+    let payload = serde_json::to_vec(args).unwrap_or_else(|_| br#"{"op":"ops"}"#.to_vec());
+    let id = match q.enqueue(
+        EnqueueRequest::new(seam::queue(), payload)
+            .fresh_for(seam::fresh_ms())
+            .max_attempts(seam::max_attempts())
+            .dedupe(format!("{}|{build}", seam::registry_op()))
+            .dedupe_in_flight(),
+    ) {
+        Ok(enqueued) => enqueued.id.0,
+        Err(error) => return seam::refusal_text(seam::registry_op(), "queue_failed", one_line(&error.to_string())),
+    };
+    let deadline = Instant::now() + Duration::from_millis(crate::serve::wait_ms(args).max(1));
+    loop {
+        match q.job(JobId(id)) {
+            Ok(Some(job)) => match job.state.as_str() {
+                "done" => {
+                    let Some(result) = job.result.as_deref() else {
+                        return seam::refusal_text(seam::registry_op(), "answer_missing", "the registry settled without a document");
+                    };
+                    return match serde_json::from_slice::<Value>(result) {
+                        Ok(document) => document,
+                        Err(_) => seam::refusal_text(seam::registry_op(), "answer_unreadable", "the stored registry is not readable"),
+                    };
+                }
+                "dead" | "expired" => {
+                    let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
+                    return seam::refusal_text(seam::registry_op(), "failed", reason.chars().take(160).collect::<String>());
+                }
+                state => {
+                    if Instant::now() >= deadline {
+                        return seam::slow_text(seam::registry_op(), id, state);
+                    }
+                }
+            },
+            Ok(None) => return seam::refusal_text(seam::registry_op(), "job_lost", "the registry job is not in the queue any more"),
+            Err(error) => return seam::refusal_text(seam::registry_op(), "queue_failed", one_line(&error.to_string())),
+        }
+        crate::serve::beat();
+        std::thread::sleep(POLL);
+    }
+}
+
+/// [`ask_text_in`] for a request that carries its own op (the generic row's path, driven by the tests).
+fn ask_index_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
+    ask_class_in(q, args, "index", seam::Effect::ReadOnly, wait_ms, build)
+}
+
+/// [`ask_index_in`] against any generic door: the same three steps, gated by the door's effect class.
+fn ask_class_in(q: &wa_queue::Queue, args: &Value, door: &str, want: seam::Effect, wait_ms: u64, build: &str) -> Value {
+    match index_op(args) {
+        Some(op) if op == seam::registry_op() => {
+            if want != seam::Effect::ReadOnly {
+                seam::refusal_text(
+                    op,
+                    "use_its_own_door",
+                    format!("{op} is the registry: ask whatsapp_index, the row that declares what it does"),
+                )
+            } else {
+                ask_registry_in(q, args, build)
+            }
+        }
+        Some(op) => match seam::Op::parse(op) {
+            Some(asked) if asked.effect() != want => seam::refusal_text(
+                op,
+                "use_its_own_door",
+                format!("{op} is not what this door declares: ask whatsapp_{op}, the row that declares its effect"),
+            ),
+            _ => ask_text_in(q, op, args, wait_ms, build),
+        },
+        None => seam::refusal_text(door, "op_required", OP_REQUIRED),
+    }
+}
+
+/// [`ask_in`] for an op named as data: validate, enqueue, wait - the same three steps, the same queue.
+fn ask_text_in(q: &wa_queue::Queue, op: &str, args: &Value, wait_ms: u64, build: &str) -> Value {
+    // The word arrives as data and the request builder takes the typed op (main's `request_of`), so the
+    // door parses it once here: a word this seam does not carry is refused by name instead of being
+    // forwarded as if it were one.
+    let typed = match seam::Op::parse(op) {
+        Some(typed) => typed,
+        None => return seam::refusal_text(op, "bad_op", format!("`{op}` is not a whatsapp op")),
+    };
+    let verified = match request_of(typed, args, build) {
+        Ok(verified) => verified,
+        Err(refusal) => return seam::refusal_text(op, &refusal.code, &refusal.detail),
+    };
+    let id = match enqueue(q, &verified, build) {
+        Ok(id) => id,
+        Err(answer) => return answer,
+    };
+    settle(q, verified.op, id, wait_ms)
+}
+
 fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified, build: &str) -> Result<u64, Value> {
     let op = verified.op;
-    let request = verified.to_request();
+    let request = verified.request.clone();
     match q.enqueue(
-        EnqueueRequest::new(seam::QUEUE, request.encode())
-            .fresh_for(seam::FRESH_MS)
-            .max_attempts(seam::MAX_ATTEMPTS)
+        EnqueueRequest::new(seam::queue(), request)
+            .fresh_for(seam::fresh_ms())
+            .max_attempts(seam::max_attempts())
             // The build is part of the key (`seam::Verified::dedupe_key_in`), never the request alone.
-            .dedupe(verified.dedupe_key_in(build))
+            .dedupe(verified.dedupe.clone())
             // ...and the key stops answering the moment the job settles (dedupe_in_flight): a query
             // answers the state of the index now, so a settled answer handed to a later caller is a
             // silent cache. That is what three reads of one chat in a row did on 23/11: 15:40, 16:15,
@@ -277,17 +573,17 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
             Err(error) => return seam::refusal(op, "queue_failed", one_line(&error.to_string())),
         };
         match job.state.as_str() {
-            "done" => return settled_answer(op, &job),
+            "done" => return with_job(settled_answer(op, &job), id),
             "dead" | "expired" => {
                 let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
                 if let Some(code) = seam::permanent_code(&reason) {
-                    let mut answer = refused(op, code, &reason, None);
+                    let mut answer = refused(op, &code, &reason, None);
                     answer["state"] = Value::String(seam::state_word(job.state.as_str()).to_string());
-                    return answer;
+                    return with_job(answer, id);
                 }
                 let mut answer = seam::refusal(op, "failed", reason.chars().take(160).collect::<String>());
                 answer["state"] = Value::String(seam::state_word(job.state.as_str()).to_string());
-                return answer;
+                return with_job(answer, id);
             }
             state => {
                 if Instant::now() >= deadline {
@@ -299,6 +595,21 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
         crate::serve::beat();
         std::thread::sleep(POLL);
     }
+}
+
+/// The job that answered, in the answer itself.
+///
+/// `job` is the queue id, and it is what makes a FRESH answer distinguishable from a replayed one from
+/// outside the process: two identical calls answered by one job id are one answer, and two calls answered
+/// by two ids are two reads of the index. Before this field the difference was invisible - which is why the
+/// reads that answered 15:40, 16:15 and 15:44 in a row could not be told apart from three honest ones by
+/// anything but the numbers inside them, and why the cross-process row for that bug had nothing to assert.
+/// The slow path already names the same id (it IS the handle `wait(op)` continues).
+fn with_job(mut answer: Value, id: u64) -> Value {
+    if let Value::Object(map) = &mut answer {
+        map.insert("job".to_string(), Value::from(id));
+    }
+    answer
 }
 
 /// The tool's answer from a job the component settled.
@@ -345,13 +656,13 @@ fn refused(op: seam::Op, code: &str, detail: &str, asked_op: Option<&str>) -> Va
 // ---- download ----------------------------------------------------------------------------------
 
 fn ask_download(args: &Value) -> Value {
-    ask_download_in(&queue(), args, DOWNLOAD_WAIT_MS, &component_build())
+    ask_download_in(&queue(), args, crate::serve::wait_ms(&args), &component_build())
 }
 
 fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
-    let verified = match request_of(seam::Op::Download, args) {
+    let verified = match request_of(seam::Op::Download, args, build) {
         Ok(verified) => verified,
-        Err(refusal) => return seam::refusal(seam::Op::Download, refusal.code, refusal.detail),
+        Err(refusal) => return seam::refusal(seam::Op::Download, &refusal.code, &refusal.detail),
     };
     let id = match enqueue(q, &verified, build) {
         Ok(id) => id,
@@ -365,6 +676,16 @@ fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str)
         Some(manifest) => manifest,
         None => return seam::refusal(seam::Op::Download, "answer_unreadable", "the download manifest is not readable"),
     };
+    // THE COMPONENT MAY HAVE WRITTEN THE FILE ITSELF (`manifest.path`, the directory the node granted it).
+    // A component's word is checked, not trusted: the path must be inside the directory THIS node owns,
+    // and the size and digest are recomputed here. Only a manifest without a path - a node that granted
+    // nothing - falls back to the chunks.
+    if manifest.path.is_some() {
+        return match verify_stored(&manifest) {
+            Ok(answer) => answer,
+            Err((code, detail)) => seam::refusal(seam::Op::Download, &code, &detail),
+        };
+    }
     match collect_in(q, id, &manifest) {
         Ok(bytes) => match store(&manifest, &bytes) {
             Ok(path) => json!({
@@ -384,6 +705,51 @@ fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str)
         },
         Err((code, detail)) => seam::refusal(seam::Op::Download, code, detail),
     }
+}
+
+/// The answer for a file the COMPONENT wrote, verified against this node's own directory.
+///
+/// The component answers with the path it wrote (`/downloads/<name>` in its own world); what the tool
+/// answers with is the host's path, after the host has checked three things itself: the file is inside the
+/// directory this node owns (`DOWNLOAD_DIR`), its size is the size the manifest claims, and its sha256 is
+/// the digest the message carries (`hash_mismatch` when either differs, the same words the chunk path
+/// uses). Nothing about the file is taken on the component's word.
+fn verify_stored(manifest: &seam::Download) -> Result<Value, (String, String)> {
+    let guest = manifest.path.as_deref().unwrap_or_default();
+    let dir = wa_host_support::paths::component_dir().join(DOWNLOAD_DIR);
+    let leaf = std::path::Path::new(guest).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if leaf.is_empty() || leaf.starts_with('.') {
+        return Err(("path_refused".to_string(), "the component named no usable file".to_string()));
+    }
+    let path = dir.join(leaf);
+    // A symlink or a `..` in the middle would escape the directory the node owns; `canonicalize` answers
+    // the real place, and it must still be the file in OUR directory.
+    let real = path.canonicalize().map_err(|error| ("path_refused".to_string(), format!("the file is not readable where the component said: {error}")))?;
+    let owned = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    if !real.starts_with(&owned) {
+        return Err(("path_refused".to_string(), "the file is outside this node's download directory".to_string()));
+    }
+    let bytes = std::fs::read(&real).map_err(|error| ("path_refused".to_string(), format!("the file is not readable: {error}")))?;
+    if bytes.len() as u64 != manifest.bytes {
+        return Err(("hash_mismatch".to_string(), format!("the file is {} bytes; the manifest says {}", bytes.len(), manifest.bytes)));
+    }
+    let digest = sha256_hex(&bytes);
+    if !manifest.sha256.is_empty() && !manifest.sha256.eq_ignore_ascii_case(&digest) {
+        return Err(("hash_mismatch".to_string(), "the file does not hash to the message's own digest".to_string()));
+    }
+    Ok(json!({
+        "ok": true,
+        "op": "download",
+        "chat": manifest.chat,
+        "id": manifest.id,
+        "kind": manifest.kind,
+        "mime": manifest.mime,
+        "filename": manifest.filename,
+        "bytes": bytes.len() as u64,
+        "sha256": digest,
+        "path": real.to_string_lossy(),
+        "note": "the bytes are in this node's component directory, in a bounded download folder, and this tool checked the file against the message's own size and digest",
+    }))
 }
 
 /// Collect the chunks of the **last** download attempt of this job.

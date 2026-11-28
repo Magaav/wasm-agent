@@ -2,7 +2,16 @@
 > routine landing is focused checks plus `integrate` (`gate_verified:false`, see `AGENTS.md`). These
 > numbers are not the cost of landing a wave and must not be used to price one.
 
+Architecture laws: ARCHITECTURE.md (your brief names the ones that apply).
+
 # The factory — running a batch of delegated work to landed code
+
+**What a landing is, in three sentences (ARCHITECTURE.md laws 14-16).** A landing has guards, never a gate: the who-check,
+the branch's own rows on the merged tip, and a revert on a real red - the full suite runs beside the train (the health
+loop) and at a release cut, never inside a landing. Every wait has a reason and a cap, and a wait that cannot end (an
+install record for a landing that installs nothing; a quiet tree while workers always run) is refused by the landing's
+own self-check. An incident is answered with a guard that costs nothing per landing, plus a revert; a new wait on the
+landing path needs Fable's word and its measured cost.
 
 This records how this repository's changes were actually produced and landed during the
 first batch that used worker subagents with independent verification. It is a ledger plus
@@ -25,6 +34,8 @@ intake (an observed symptom, with evidence)
 
 Two invariants hold the whole thing up:
 
+0. **Every brief applies the subtask rule** (ARCHITECTURE.md law 17, Victor 27/11): whatever a task spots as a second
+   answer to a question that already has one owner is fixed inside that task, right away - not queued for later.
 1. **An agent's report is evidence, not verification.** Every acceptance in this batch
    came from re-running, re-reading, or re-attacking the artifact.
 2. **No effect before its proof.** A gate receipt is bound to an exact tree; a merge

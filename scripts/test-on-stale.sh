@@ -2,6 +2,11 @@
 # Test the onStale decision, not the schedule. Every case feeds a fixed /health payload (WA_HEALTH_FILE)
 # and a fixed installed.txt, because the thing being asserted is: WHEN may this node act, and when must it
 # refuse or hold. A test that races a live node's own state would prove nothing about the decision.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"

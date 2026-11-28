@@ -1,0 +1,24 @@
+[package]
+name = "whatsapp-index"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The WhatsApp query contract as a WASI component (everything-is-a-component, row 10).
+#
+# `rust/wa-whatsapp-index` is the vocabulary every WhatsApp query is written in: the op list, what a
+# request may carry, which arguments make one valid (`Request::validate` -> `Verified`), the refusal a bad
+# one gets, and the sentence a caller reads back. Two ends need it and both were compiled into the node:
+# the HOST validates and words every query (`wa-capabilities/src/whatsapp_query.rs`) and the `wa-whatsapp`
+# COMPONENT writes its answers in the same words. It is pure - no fs, no net, no clock it does not
+# receive - which is what makes it a component; after this the host asks instead of linking.
+[workspace]
+
+[dependencies]
+wa-whatsapp-index = { path = "../../wa-whatsapp-index" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

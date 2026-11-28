@@ -144,7 +144,7 @@ services {"action":"features"}      the same document, for a caller that already
 | the rule, the pin check, the live file, the JSON | `rust/wa-features/src/lib.rs` (+ `tests.rs`) |
 | the Lua door every gate asks | `lua/core/features.lua` |
 | the gates | `lua/core/{selfloop,codemode,hooks,memory}.lua` |
-| the capability | `rust/wa-capabilities/src/features.rs`, registered in `capabilities.rs`, documented in `HOST.md` |
+| the capability | `rust/wa-capabilities/src/features.rs`, its row in `capability_rows/kernel.rs`, documented in `HOST.md` |
 | `services features` | `rust/wa-kernel-runtime/src/services.rs` |
 | `wa features` | `rust/wa-host/src/main.rs` |
 | the installed set | `components.lock`, `scripts/lib/deploy-components.sh`, `scripts/deploy.sh` step 3e |

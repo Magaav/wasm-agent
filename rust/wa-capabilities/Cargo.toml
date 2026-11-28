@@ -12,18 +12,29 @@ edition = "2021"
 # the binary wires it. That direction is what the split buys: a change to a capability rebuilds this
 # crate and the binary, and does not touch the engine, the policy or the console.
 [dependencies]
+# ONE answer to "how long may a component call wait" (ARCHITECTURE.md law 17); the codemode seam used to carry
+# its own 120 000.
+wa-component-wait = { path = "../wa-component-wait" }
 # Contention policy for every SQLite store (rust/wa-sqlite): one busy timeout, WAL, and a bounded
 # retry that names itself instead of dying as `database is locked`. A leaf crate.
 wa-sqlite = { path = "../wa-sqlite" }
 wa-host-support = { path = "../wa-host-support" }
 wa-governance = { path = "../wa-governance" }
-wa-term = { path = "../wa-term" }
+# wa-term is NOT needed: the transcript, the editor, the panel, the keys, the rows and the opening
+# are all the program's, answered over wa-term-proto (wa-term-own-program's last slice).
+# wa-term = { path = "../wa-term" }
+# The versioned wire to the terminal program (src/screen.rs): the call table the node speaks when
+# `WA_TERM_REMOTE=1` puts the transcript behind the boundary. A leaf, so the node can keep speaking it
+# after it stops linking `wa-term` (docs/missions/reports/wa-term-own-program.md).
+wa-term-proto = { path = "../wa-term-proto" }
 wa-rendezvous = { path = "../wa-rendezvous" }
 wa-kernel-runtime = { path = "../wa-kernel-runtime" }
 # The feature resolver behind the `features` capability (docs/FEATURES.md): the Lua gates ask through it,
 # so the env override, the policy file and the installed-component check are resolved in one place.
 wa-features = { path = "../wa-features" }
+wa-disk = { path = "../wa-disk" }
 wa-operation = { path = "../wa-operation" }
+wa-files = { path = "../wa-files" }
 # The row for a long tool call (`tool_progress.rs`, docs/TOOL-PROGRESS.md): the parsers, the tail and
 # the stall rule, shared with the two renderers so the CLI, the native editor and the window cannot
 # disagree about what a call is doing. A leaf crate; this adds no arrow the split did not have.
@@ -41,22 +52,19 @@ wa-grant-policy = { path = "../wa-grant-policy" }
 # The send request's shape, JID rules and dedupe key, shared with the component that performs the send
 # (docs/SERVICE-COMPONENTS.md, "Sending an ordinary message"): pure Rust, so the same source still
 # builds for wasm32-wasip2 inside `rust/components/wa-whatsapp`.
-wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 # The email send's seam (`email_send`): the request shape, its bounds and its audit digest, shared with
 # the `wa-email` component that consumes the job.
-wa-email-outbox = { path = "../wa-email-outbox" }
 # The query seam (`whatsapp.query`): the request/answer shape, its bounds and the download manifest,
 # shared with the WA component that answers it (docs/SERVICE-COMPONENTS.md).
-wa-whatsapp-index = { path = "../wa-whatsapp-index" }
 # Retention's other half (`docs/WHATSAPP-ARCHIVE.md`): the monthly cut, the encrypted archive file,
 # the push and the restore. Pure (kv + sealer + a directory), so its own tests need no node.
 wa-whatsapp-archive = { path = "../wa-whatsapp-archive" }
+wa-whatsapp-wire = { path = "../wa-whatsapp-wire" }
 wa-keystore = { path = "../wa-keystore" }
 # The archive reads the component's kv namespace through the same adapter the host's own kv uses.
 wa-kv = { path = "../wa-kv" }
 # The email index's seam (`email_query`): the request, the key layout and the bounded answer, shared with
 # the `wa-email` component that answers from its own kv.
-wa-email-index = { path = "../wa-email-index" }
 # Direct peer-to-peer calls by hierarchy (`host.mesh_call`, docs/MESH.md): the roster, the grants and
 # the transport. The node mounts its listener from `serve::run` behind `WA_MESH=1`, so this crate is
 # the only edge that names it.
@@ -67,7 +75,6 @@ wa-vault = { path = "../wa-vault" }
 # The zone the node's OS is in, by the identifier the OS itself uses (`core_component.rs`'s
 # `host.local_tz`): the one part of the node's clock a guest cannot read for itself. A leaf with no
 # dependencies; the offset it reports comes from the C runtime, not from here (docs/KERNEL.md).
-wa-local-tz = { path = "../wa-local-tz" }
 anyhow = "1"
 base64 = "0.23"
 ring = "0.17"
@@ -81,6 +88,23 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p
 tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
+# The email-query contract answers through its component now (`email_index_component`); the crate stays a
+# dev-dependency for the tests that assert the contract beside the seam.
+wa-email-index = { path = "../wa-email-index" }
+# The email-send contract answers through its component now (`email_outbox_component`); the crate stays a
+# dev-dependency because the tests assert the contract's own rules beside the seam.
+wa-email-outbox = { path = "../wa-email-outbox" }
+wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
+# The seam `whatsapp_index_component` mirrors the contract's op names and its op -> effect table, because a
+# caller has to name an op locally. That mirror is the one place the two can drift (28/11: `backfill` was
+# called read-only here and the call went to the wrong door), so the crate is a dev-dependency: the tests
+# compare the two tables and nothing else may use it.
+wa-whatsapp-index = { path = "../wa-whatsapp-index" }
+wat = "1"
+# `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and no configuration
+# declared it, so `cargo test -p wa-capabilities` did not compile on main itself. A path
+# dev-dependency is what the import always assumed.
+wa-operations-runner = { path = "../wa-operations-runner" }
 # The archive's node-side tests run against a real namespace and a real keystore in a temp directory,
 # so nothing they measure is a mock of the storage the node actually uses.
 tempfile = "3"

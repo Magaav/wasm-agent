@@ -33,30 +33,7 @@ use std::{
 ///
 /// The list is a policy, not a secret: a `*_API_KEY` name is denied by shape, and the rest by exact name.
 /// Anything added here must also be named in `docs/missions/reports/session-isolation.md`.
-pub const DENY_ENV: &[&str] = &[
-    "WA_VAULT_ADMIN_TOKEN",
-    "WASM_AGENT_VAULT_ADMIN_TOKEN",
-    "WASM_AGENT_PROMPT_CACHE_KEY",
-    "WASM_AGENT_LLM_API_KEY",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    // Also denied by shape ("*_TOKEN"), and kept here so the report can name it exactly: a provider that
-    // hands its credential in ANTHROPIC_AUTH_TOKEN must not be readable from a tool child.
-    "ANTHROPIC_AUTH_TOKEN",
-];
-
-/// The deny SHAPES: a name this node's policy has not re-granted is withheld when it ends in one of these.
-///
-/// A list of exact names is a list that is always one release behind: every new provider invents a
-/// variable ("*_API_KEY", "*_TOKEN"), and a session could read a model's own key by printing "env" in a
-/// bash child. The shape is the rule; DENY_ENV only names what the shape cannot reach (a "*_KEY" that is
-/// not an API key) and what must stay listed for a reader and for the report.
-pub const DENY_ENV_SUFFIXES: &[&str] = &[
-    "_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
-    // The two AWS/GCP spellings that carry a credential and end in neither "key" nor "token" (item 7):
-    // `AWS_SECRET_ACCESS_KEY` ends in "_ACCESS_KEY", and a `*_PRIVATE_KEY` is a signing key by name.
-    "_SECRET_ACCESS_KEY", "_PRIVATE_KEY",
-];
+/// The git-environment rule moved to a leaf crate the node can link on its own.
 
 /// The `GIT_*` names a tool child may keep: every one of them changes how git behaves, none of them can
 /// choose a repository, an index or a working tree.
@@ -95,7 +72,19 @@ pub const GIT_ENV_KEEP: &[&str] = &[
     "GIT_TRACE_CURL", "GIT_TRACE_CURL_NO_DATA", "GIT_TRACE2", "GIT_TRACE2_EVENT",
     "GIT_TRACE2_PERF", "GIT_TRACE_REDACT",
 ];
-
+/// Remove the git names that choose a repository from a command the NODE runs itself (disk.rs reads a
+/// worktree and removes one through `git -C <path>`), before it is spawned.
+///
+/// The tool child is scrubbed at its own spawn (`scrub_inherited_env`); the node's own git calls were not,
+/// and they are the more dangerous half: `git -C <worktree> worktree remove --force` with a `GIT_DIR`
+/// inherited from a hook removes a DIFFERENT worktree's registration, and a change list read through it
+/// shows another session's files. One rule, both callers: whatever `GIT_ENV_KEEP` does not carry is gone.
+pub fn scrub_git_env(command: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy().to_string();
+        if git_env_withheld(&name.to_ascii_uppercase()) { command.env_remove(&name); }
+    }
+}
 /// Is this a `GIT_*` name a tool child must not inherit? The keep list is consulted by exact name for the
 /// listed names, and by prefix for the two families git spells per entry (`GIT_CONFIG_KEY_<n>` and
 /// `GIT_CONFIG_VALUE_<n>`, which a config count indexes).
@@ -105,6 +94,50 @@ fn git_env_withheld(name: &str) -> bool {
     }
     !GIT_ENV_KEEP.iter().any(|kept| *kept == name)
 }
+/// Say it once per (name, serving pid): the node's own environment carries a git name that could choose the
+/// repository every child of it commits in (see `GIT_ENV_KEEP`). Naming the serving pid and its command line
+/// is the point - the next occurrence names its own source instead of costing an investigation like the one
+/// in `docs/missions/reports/session-isolation-git.md`.
+fn report_git_env_withheld(name: &str) {
+    let key = format!("{}|{}", std::process::id(), name);
+    let reported = REPORTED_GIT_ENV.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut seen = match reported.lock() { Ok(guard) => guard, Err(poisoned) => poisoned.into_inner() };
+    if !seen.insert(key) {
+        return;
+    }
+    drop(seen);
+    eprintln!(
+        "[tool-env] withheld {name} from a tool child: this node's own environment carries it, and it can point a git command at another repository - the child runs with it removed, whatever directory it cd's into. Reported once per name and serving process: pid {} cmdline {}",
+        std::process::id(),
+        serving_cmdline()
+    );
+}
+
+pub const DENY_ENV: &[&str] = &[
+    "WA_VAULT_ADMIN_TOKEN",
+    "WASM_AGENT_VAULT_ADMIN_TOKEN",
+    "WASM_AGENT_PROMPT_CACHE_KEY",
+    "WASM_AGENT_LLM_API_KEY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    // Also denied by shape ("*_TOKEN"), and kept here so the report can name it exactly: a provider that
+    // hands its credential in ANTHROPIC_AUTH_TOKEN must not be readable from a tool child.
+    "ANTHROPIC_AUTH_TOKEN",
+];
+
+/// The deny SHAPES: a name this node's policy has not re-granted is withheld when it ends in one of these.
+///
+/// A list of exact names is a list that is always one release behind: every new provider invents a
+/// variable ("*_API_KEY", "*_TOKEN"), and a session could read a model's own key by printing "env" in a
+/// bash child. The shape is the rule; DENY_ENV only names what the shape cannot reach (a "*_KEY" that is
+/// not an API key) and what must stay listed for a reader and for the report.
+pub const DENY_ENV_SUFFIXES: &[&str] = &[
+    "_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
+    // The two AWS/GCP spellings that carry a credential and end in neither "key" nor "token" (item 7):
+    // `AWS_SECRET_ACCESS_KEY` ends in "_ACCESS_KEY", and a `*_PRIVATE_KEY` is a signing key by name.
+    "_SECRET_ACCESS_KEY", "_PRIVATE_KEY",
+];
+
 
 /// The node's own re-grant: the names its policy lists under "tool_env_allow" in policy.json.
 ///
@@ -163,19 +196,6 @@ pub fn withheld_note(names: &[String]) -> String {
     format!("withheld_from_tool_children: {} - {}. To hand one to tool children on this node, list its exact name in policy.json under tool_env_allow (a shape is never re-granted, only the name you list).", names.join(", "), what)
 }
 
-/// Remove the git names that choose a repository from a command the NODE runs itself (disk.rs reads a
-/// worktree and removes one through `git -C <path>`), before it is spawned.
-///
-/// The tool child is scrubbed at its own spawn (`scrub_inherited_env`); the node's own git calls were not,
-/// and they are the more dangerous half: `git -C <worktree> worktree remove --force` with a `GIT_DIR`
-/// inherited from a hook removes a DIFFERENT worktree's registration, and a change list read through it
-/// shows another session's files. One rule, both callers: whatever `GIT_ENV_KEEP` does not carry is gone.
-pub fn scrub_git_env(command: &mut std::process::Command) {
-    for (name, _) in std::env::vars_os() {
-        let name = name.to_string_lossy().to_string();
-        if git_env_withheld(&name.to_ascii_uppercase()) { command.env_remove(&name); }
-    }
-}
 
 /// The `GIT_*` names this serving process has already reported, so a node that hands its children a redirect
 /// says so ONCE per name instead of on every spawn (a session starts hundreds of children a minute, and a
@@ -200,24 +220,6 @@ fn serving_cmdline() -> String {
     std::env::args().collect::<Vec<_>>().join(" ")
 }
 
-/// Say it once per (name, serving pid): the node's own environment carries a git name that could choose the
-/// repository every child of it commits in (see `GIT_ENV_KEEP`). Naming the serving pid and its command line
-/// is the point - the next occurrence names its own source instead of costing an investigation like the one
-/// in `docs/missions/reports/session-isolation-git.md`.
-fn report_git_env_withheld(name: &str) {
-    let key = format!("{}|{}", std::process::id(), name);
-    let reported = REPORTED_GIT_ENV.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
-    let mut seen = match reported.lock() { Ok(guard) => guard, Err(poisoned) => poisoned.into_inner() };
-    if !seen.insert(key) {
-        return;
-    }
-    drop(seen);
-    eprintln!(
-        "[tool-env] withheld {name} from a tool child: this node's own environment carries it, and it can point a git command at another repository - the child runs with it removed, whatever directory it cd's into. Reported once per name and serving process: pid {} cmdline {}",
-        std::process::id(),
-        serving_cmdline()
-    );
-}
 
 /// Remove the denied names from a child's inherited environment. Called by both platform spawns before
 /// `spec.env` is applied, so a granted name can still be handed over explicitly.
@@ -318,6 +320,11 @@ pub struct Spec {
     /// child's stdin is the null device, which is what every start had before this field existed. The
     /// caller bounds the text (lua/core/tools.lua, STDIN_MAX_BYTES); this side only carries it.
     pub stdin: Option<String>,
+    /// WHERE THE STOP FACTS GO, when the caller named a record (28/11, the orchestrator's decision: the runner
+    /// writes them). The one owner of the process is the only place that OBSERVES the signal and the survivors,
+    /// so it is the only place that can say how the group ended without asking the caller to wait. Absent for
+    /// every operation nobody pointed at a record: nothing is written and nothing changes.
+    pub stop_record: Option<std::path::PathBuf>,
     /// This start is a CONTROL call: the node's own short read (an MCP connector read, a catalogue
     /// probe), not a workload. It is the only kind of start admitted into the two reserved slots, so a
     /// session that holds its whole share cannot stop the node from asking a question
@@ -341,6 +348,7 @@ impl Spec {
             promote_descendants: false,
             background: false,
             stdin: None,
+            stop_record: None,
             control: false,
         }
     }
@@ -1577,7 +1585,42 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                     if descendants {
                         reason.get_or_insert("background_descendants: use an explicit operation and keep its shell waiting".into());
                     }
-                    cleanup = Some(match process.terminate() {
+                    // A STOP ASKS FIRST (week 1, "Esc stops what it started"): a cancel or a deadline
+                    // ends the command's whole process group with TERM, then KILL after the stated
+                    // grace, and the record says which signal it took and whether anything was still
+                    // listed after it. Every other end of a command keeps the old abrupt kill: those are
+                    // a refusal (a shell that left descendants behind) and this process going away.
+                    let stop_asked = matches!(reason.as_deref(), Some("cancelled") | Some("deadline_exceeded"));
+                    let outcome = if stop_asked {
+                        let asked = process.stop();
+                        if let Ok(ref what) = asked {
+                            let facts = json!({
+                                "signal": what.signal,
+                                "grace_ms": what.grace_ms,
+                                "needed_kill": what.needed_kill,
+                                "survivors": what.survivors,
+                            });
+                            entry.state.lock().unwrap()["stop"] = facts.clone();
+                            // AND THE CALLER'S OWN RECORD (28/11). The Esc answer carries a count and a record id and
+                            // never waits; the facts behind that id are written HERE, by the owner that observed the
+                            // signal, so a reader of the record does not have to ask this process anything. A failure
+                            // is not the work's problem: the kill already happened and the record keeps its state.
+                            if let Some(path) = spec.stop_record.as_ref() {
+                                let mut said = facts.clone();
+                                said["op"] = json!(dir.file_name().map(|n| n.to_string_lossy().to_string()));
+                                if let Some(parent) = path.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                                if let Ok(text) = serde_json::to_vec(&said) {
+                                    let _ = fs::write(path, text);
+                                }
+                            }
+                        }
+                        asked.map(|_| ())
+                    } else {
+                        process.terminate()
+                    };
+                    cleanup = Some(match outcome {
                         Ok(()) => "terminated",
                         Err(e) => {
                             reason.get_or_insert(format!("cleanup_failed:{e}"));

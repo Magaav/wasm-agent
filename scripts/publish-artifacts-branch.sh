@@ -100,19 +100,35 @@ TRIPLES="$(awk '!/^#/ && !/^[a-z_]+=/ { print $1 }' "$MANIFEST")"
 ASSETS=""
 ROWS=""
 for triple in $TRIPLES; do
-  pin="$(wa_node_manifest_pin "$MANIFEST" "$triple")" || fail "manifest_incomplete: no row for $triple" 2
-  set -- $pin
-  [ "$#" = 4 ] || fail "manifest_incomplete: row for $triple is '$pin'" 2
-  for pair in "wa-$triple-$SHORT:$1:$2" "wa-sentinel-$triple-$SHORT:$3:$4"; do
-    name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
+  # THE MEMBERS COME FROM THE ONE LIST (law 17) and each one is pinned by the manifest COLUMN THAT NAMES IT
+  # (<member>_sha256 / <member>_bytes). One loop for every member - wa, wa-sentinel, wa-term, the supervisor - so a
+  # member added to WA_BUNDLE_MEMBERS needs no edit here, and a release whose row predates it returns neither from
+  # wa_node_bundle_members nor as a column: opt-in by artifact, the rule the fetch loops already use.
+  header="$(awk '/^#/{sub(/^#[[:space:]]*/,""); print; exit}' "$MANIFEST")"
+  for name in $(wa_node_bundle_members "$(dirname "$MANIFEST")" "$triple" "$SHORT"); do
+    member="${name%-$triple-$SHORT}"
+    sha_col="$(printf '%s\n' "$header" | awk -v w="${member}_sha256" '{for(i=1;i<=NF;i++) if($i==w){print i; exit}}')"
+    bytes_col="$(printf '%s\n' "$header" | awk -v w="${member}_bytes" '{for(i=1;i<=NF;i++) if($i==w){print i; exit}}')"
+    [ -n "$sha_col" ] && [ -n "$bytes_col" ] \
+      || fail "manifest_incomplete: the row for $triple names no ${member}_sha256/_bytes column" 2
+    want_sha="$(awk -v t="$triple" -v c="$sha_col" '$1==t{print $c; exit}' "$MANIFEST")"
+    want_bytes="$(awk -v t="$triple" -v c="$bytes_col" '$1==t{print $c; exit}' "$MANIFEST")"
+    [ -n "$want_sha" ] && [ -n "$want_bytes" ] \
+      || fail "manifest_incomplete: the row for $triple does not pin $member" 2
     file="$OUT/$name"
     [ -f "$file" ] || fail "binary_missing: $file" 2
     actual="$(wa_node_sha256 "$file")" || fail 'sha256_tool_missing' 7
     [ "$actual" = "$want_sha" ] || fail "artifact_not_pinned: $name is $actual, the manifest pins $want_sha" 5
-    [ "$(wc -c < "$file" | tr -d '[:space:]')" = "$want_bytes" ] || fail "artifact_not_pinned: $name is not $want_bytes bytes" 5
+    [ "$(wc -c < "$file" | tr -d '[:space:]')" = "$want_bytes" ] \
+      || fail "artifact_not_pinned: $name is not $want_bytes bytes" 5
     ASSETS="$ASSETS $name"
     ROWS="$ROWS$want_sha  $want_bytes  $name"$'\n'
   done
+  # THE PROGRAM IS NOT OPTIONAL (wa-term-own-program): a set whose row does not pin wa-term would install a node
+  # that starts and cannot draw a prompt, so it is refused here rather than shipped.
+  wa_node_manifest_program "$MANIFEST" "$triple" >/dev/null \
+    || fail "manifest_incomplete: the row for $triple does not pin wa-term; this set is refused rather than shipped" 2
+
 done
 ASSETS="$ASSETS node-$SHORT.manifest"
 [ -f "$MANIFEST" ] || fail "manifest_missing: $MANIFEST" 2
@@ -215,6 +231,10 @@ STAGE="$(mktemp -d "${KEEP:-${TMPDIR:-/tmp}}/wasm-agent-artifacts.XXXXXX")" || f
   # The pointer wa.colmeio.com/install.sh reads first (scripts/web/install.sh): GitHub's release listing is
   # not ordered by date (17/11: an edited older release came first and the installer picked it).
   echo "# The installer's pointer, where this host serves wa.colmeio.com:"
+  # THE OLD VALUE IS RECORDED BEFORE IT IS REPLACED (26/11, Fable): the pointer moves every anonymous install at
+  # once, so the evidence must say what it replaced - otherwise a regression is a guess about which build was served.
+  echo 'if [ -d /srv/wasm-agent-releases ]; then before=$(cat /srv/wasm-agent-releases/latest-node.txt 2>/dev/null || echo none);'
+  echo '  printf "pointer_before=%s\npointer_after=%s\n" "$before" "$TAG" >> "$(dirname "$0")/POINTER.log"; fi'
   echo 'if [ -d /srv/wasm-agent-releases ]; then printf "%s\n" '"$TAG"' > /tmp/latest-node.txt && sudo -n install -m0644 /tmp/latest-node.txt /srv/wasm-agent-releases/latest-node.txt && echo "pointer: '"$TAG"'"; fi'
 } > "$STAGE/PUBLISH.sh" || fail "stage_unwritable: $STAGE/PUBLISH.sh" 2
 chmod +x "$STAGE/PUBLISH.sh"

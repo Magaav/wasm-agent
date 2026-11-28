@@ -1,0 +1,56 @@
+/// wa:terminal@0.1.0 - the terminal seam, as the DOCUMENT it actually is.
+///
+/// `wa-term` left this binary already: the node reaches it over `wa-term-proto` (`wa-capabilities/Cargo.toml:23`,
+/// "wa-term is NOT needed"). What that program owns is a document - the transcript the node paints - and its own
+/// dispatcher names the verbs (`rust/wa-term/src/session.rs:56`): write, block, code_block, head, rewrite,
+/// pin_toggle. This world is those verbs and nothing invented on top of them.
+///
+/// A PTY is NOT here on purpose (law 17, one owner each): spawning a process and streaming its output is the
+/// operations runner's job and is `wa:process`'s subject. A first draft of this file modelled a pty - open, write,
+/// resize, events - and no provider could have honoured it.
+package wa:terminal@0.1.0;
+
+interface types {
+    variant error {
+        refused(string),
+        again,
+        closed,
+        failed(string),
+    }
+}
+
+/// The transcript as a component: one document per session, the verbs the program answers.
+interface document {
+    use types.{error};
+
+    /// Append text to the transcript.
+    write: async func(text: string) -> result<_, error>;
+
+    /// Open or close a block around what follows.
+    block: async func(open: bool) -> result<_, error>;
+
+    /// Mark a fenced code block.
+    code-block: async func() -> result<_, error>;
+
+    /// Write a heading; the answer is the line it landed on, as the program counts lines.
+    head: async func(text: string) -> result<u32, error>;
+
+    /// Replace one line.
+    rewrite: async func(line: u32, text: string) -> result<u32, error>;
+
+    /// Pin or unpin the current block; `none` when there is nothing to pin.
+    pin-toggle: async func() -> result<option<bool>, error>;
+
+    /// Whether the document changed since the last frame - the flag the wire already carries.
+    dirty: func() -> bool;
+}
+
+/// What a component imports to paint the node's transcript.
+world terminal-client {
+    import document;
+}
+
+/// What a component-side provider would export (the node provider speaks `wa-term-proto` instead).
+world terminal-provider {
+    export document;
+}

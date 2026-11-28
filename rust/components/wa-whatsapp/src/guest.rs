@@ -1497,6 +1497,12 @@ async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> (Option<outbox::
 /// This lane's worker identity: one lease, one name (the outbox uses the same name, and a lease belongs
 /// to one identity - the queue refuses a second concurrent lease for the same worker).
 const QUERY_WORKER: &str = "wa-whatsapp";
+
+/// The `op` word of a payload, read without validating it - the one question that is answered
+/// before `Request::decode` (the registry).
+fn payload_op(payload: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(payload).ok()?.get("op")?.as_str().map(str::to_string)
+}
 /// Lease length for one query: a scan of a local index is fast, and a killed instance's job is
 /// recovered by the next take instead of waiting for a human.
 const QUERY_LEASE_MS: u64 = 30_000;
@@ -2044,7 +2050,7 @@ const PACE_PENDING: usize = 8;
 /// It reads the lanes, never a guess: `INDEX_INBOX` is exactly the records this component has accepted
 /// and a later tick will write, so its length and its newest time are the gap between the wire and the
 /// index. A history sync still queued is a catch-up the component knows it is behind on.
-fn pace() -> index::Pace {
+async fn pace() -> index::Pace {
     let mut pending: Vec<(String, String)> = Vec::new();
     let mut total = 0usize;
     let mut newest_seen = 0i64;
@@ -2056,7 +2062,25 @@ fn pace() -> index::Pace {
         pending = inbox.iter().rev().take(PACE_PENDING).map(|(record, _)| (record.chat.clone(), record.id.clone())).collect();
     });
     let catching_up = HISTORY_INBOX.with(|inbox| !inbox.borrow().is_empty());
-    index::Pace { pending, pending_total: total, newest_seen, catching_up }
+    // WHICH chats are behind and since when: per chat, the OLDEST record still waiting is the instant
+    // that chat fell behind. One pass over the inbox the count above already walked.
+    let mut oldest: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    INDEX_INBOX.with(|inbox| {
+        for (record, _) in inbox.borrow().iter() {
+            let entry = oldest.entry(record.chat.clone()).or_insert(record.ts);
+            if record.ts > 0 && (record.ts < *entry || *entry == 0) {
+                *entry = record.ts;
+            }
+        }
+    });
+    let mut behind: Vec<(String, i64)> = oldest.into_iter().collect();
+    behind.sort_by_key(|(_, since)| *since);
+    behind.truncate(PACE_PENDING);
+    // A HOLE the index recorded (a reconnect's gap, `heal_tick`'s work list) is being behind, even with
+    // nothing in the inbox: an answer must not say `current` while one is open.
+    let gaps = index::gaps(&IndexKv).await.unwrap_or_default();
+    let (catching_up, behind) = index::fold_gaps(catching_up, behind, &gaps);
+    index::Pace { pending, pending_total: total, newest_seen, catching_up, behind }
 }
 
 /// Refill the OCR inbox from the index when it is empty: images that were indexed without text (the
@@ -2113,6 +2137,16 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
     };
     let job = taken.job;
     let id = job.id;
+    // The world's registry (`wa:whatsapp@0.2.0`, `ops.registry`): the op set and its effect classes,
+    // answered by the side that knows them. It is not an index question, so it never goes through
+    // `Request::decode` - the word is read from the payload and answered here, on the same queue.
+    if payload_op(&job.payload).as_deref() == Some(seam::REGISTRY_OP) {
+        let body = serde_json::to_vec(&seam::registry()).unwrap_or_default();
+        if let Err(error) = worker::done(seam::QUEUE.to_string(), id, QUERY_WORKER.to_string(), body).await {
+            query_note(format!("registry not settled for job={id}: {error:?}"));
+        }
+        return true;
+    }
     let (op_text, validated) = match seam::Request::decode(&job.payload) {
         Ok(request) => (request.op.clone(), request.validate()),
         Err(refusal) => (String::new(), Err(refusal)),
@@ -2139,8 +2173,8 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         // Both answer with how caught up the writer is (`index::Pace`): the records this component has
         // accepted and not written yet, and whether a catch-up is running. A read that cannot show a
         // message it already has says so (`pending`) instead of answering with the picture from before it.
-        seam::Op::Search => index::search_paced(&IndexKv, &request, &pace()).await,
-        seam::Op::Read => index::read_paced(&IndexKv, &request, &pace()).await,
+        seam::Op::Search => index::search_paced(&IndexKv, &request, &pace().await).await,
+        seam::Op::Read => index::read_paced(&IndexKv, &request, &pace().await).await,
         seam::Op::Message => index::message(&IndexKv, &request).await,
         seam::Op::Reactions => index::reactions(&IndexKv, &request).await,
         seam::Op::Media => index::media(&IndexKv, &request).await,
@@ -2197,7 +2231,9 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
 /// is only the client half.
 async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Result<serde_json::Value, String> {
     use crate::wa::queue::worker;
-    let (chat, id, media, limit) = match index::download_plan(&IndexKv, request, cfg.download_max).await? {
+    // `limit` is the plan itself: `download_plan` already refuses media bigger than what this node will
+    // keep (`MAX_STORED_BYTES`), so what is left to decide here is only HOW the bytes travel.
+    let (chat, id, media, _limit) = match index::download_plan(&IndexKv, request, cfg.download_max).await? {
         index::DownloadPlan::Refused(answer) => return Ok(answer),
         index::DownloadPlan::Fetch(target) => (target.chat, target.id, target.media, target.limit),
     };
@@ -2221,21 +2257,29 @@ async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Resu
         Err(error) => return Err(format!("download:{}", one_line(&error.to_string()))),
     };
     let took = now_ms() - started;
-    if bytes.len() as u64 > limit {
-        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the decrypted media is larger than this node will hand back");
-        answer["size"] = serde_json::Value::from(bytes.len());
-        answer["max_bytes"] = serde_json::Value::from(limit);
-        return Ok(answer);
+    // THE FILE, NOT A QUEUE PAYLOAD. The node grants this component a directory to write in (`/downloads`,
+    // the manifest's `capabilities.dirs`, mapped to a directory the node owns by
+    // `rust/wa-kernel-runtime/src/services.rs`), so a 4.3 MB video - or a 40 MB one - is a download.
+    // A node that granted nothing, or a disk that refused, keeps the old path, and there the transport is
+    // the bound: the bytes ride the job's progress stream, which `wa:queue` caps at 1 MiB.
+    let stored = store_at_downloads(&bytes, &id, &media.filename, &media.mime);
+    if stored.is_none() && bytes.len() as u64 > seam::MAX_DOWNLOAD_BYTES {
+        return Ok(seam::download_too_large_answer(bytes.len() as u64));
     }
-    let chunks = bytes.len().div_ceil(DOWNLOAD_CHUNK).max(1) as u32;
+    let chunks = match stored {
+        Some(_) => 0,
+        None => bytes.len().div_ceil(DOWNLOAD_CHUNK).max(1) as u32,
+    };
     // The first entry of each attempt is a header naming the job, so a retried download can be told
     // apart from the chunks a failed attempt already wrote: the reader takes the *last* header.
-    if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, seam::download_header(job)).await {
-        return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
-    }
-    for chunk in bytes.chunks(DOWNLOAD_CHUNK) {
-        if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, chunk.to_vec()).await {
+    if stored.is_none() {
+        if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, seam::download_header(job)).await {
             return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
+        }
+        for chunk in bytes.chunks(DOWNLOAD_CHUNK) {
+            if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, chunk.to_vec()).await {
+                return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
+            }
         }
     }
     let manifest = seam::Download {
@@ -2247,11 +2291,56 @@ async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Resu
         sha256: media.sha256.clone(),
         bytes: bytes.len() as u64,
         chunks,
+        path: stored.clone(),
     };
     say!("download: ok job={job} kind={} bytes={} chunks={chunks} took_ms={took}", manifest.kind, manifest.bytes);
     let mut answer = seam::answer(seam::Op::Download, serde_json::to_value(&manifest).unwrap_or_default());
     answer["bytes"] = serde_json::Value::from(manifest.bytes);
     Ok(answer)
+}
+
+/// Where the node lets this component put a downloaded file: the `/downloads` preopen the manifest
+/// declares (`capabilities.dirs`), which the node maps to a directory it owns. `Some(path)` means the
+/// bytes are ON DISK and nothing rides the queue; `None` means this node granted nothing or the write
+/// failed, and the caller falls back to the transport-bounded path.
+///
+/// The name is the message id plus what the sender called the file, sanitised the same way the host's
+/// own `file_name` does it: no separators, no leading dot, a short alphanumeric extension.
+fn store_at_downloads(bytes: &[u8], id: &str, filename: &str, mime: &str) -> Option<String> {
+    let safe_id: String = id.chars().filter(char::is_ascii_alphanumeric).take(24).collect();
+    let cleaned: String = filename
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') { ch } else { '_' })
+        .take(80)
+        .collect();
+    let (stem, extension) = match cleaned.rsplit_once('.') {
+        Some((stem, ext)) if !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|ch| ch.is_ascii_alphanumeric()) => {
+            (stem.to_string(), ext.to_ascii_lowercase())
+        }
+        _ => (cleaned.clone(), extension_for(mime).to_string()),
+    };
+    let stem: String = stem.trim_matches(|ch| ch == '.' || ch == '_').chars().map(|ch| if ch == '.' { '_' } else { ch }).take(60).collect();
+    let stem = if stem.is_empty() { "media".to_string() } else { stem };
+    let safe_id = if safe_id.is_empty() { "media".to_string() } else { safe_id };
+    let name = format!("{safe_id}-{stem}.{extension}");
+    let path = format!("/downloads/{name}");
+    std::fs::write(&path, bytes).ok().map(|()| path)
+}
+
+fn extension_for(mime: &str) -> &'static str {
+    match mime.split(';').next().unwrap_or("").trim() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "video/mp4" => "mp4",
+        "video/3gpp" => "3gp",
+        "audio/ogg" => "ogg",
+        "audio/mpeg" => "mp3",
+        "audio/mp4" => "m4a",
+        "application/pdf" => "pdf",
+        _ => "bin",
+    }
 }
 
 // ---- the past: history sync and the on-demand request ----------------------------------------
@@ -2317,6 +2406,46 @@ async fn history_tick(cfg: &IndexConfig) -> bool {
         total.line()
     );
     true
+}
+
+/// How often a heal round runs. A hole is minutes to days old, so a minute is fast enough to matter and
+/// far too slow to be a storm of requests to the phone (the query lane ticks every 200 ms; healing must
+/// not).
+const HEAL_EVERY: Duration = Duration::from_secs(60);
+
+/// One heal round: take the holes the index recorded (`index::gaps`), turn at most
+/// `history::HEAL_PER_ROUND` of them into asks (`history::heal_asks`), and make each ask the call the
+/// backfill lane already makes. A hole is cleared by the drain when the fetched range arrives, so this
+/// does not track answers: it asks, and the index says when it is healed.
+async fn heal_tick(state: &mut Instant) -> bool {
+    if Instant::now() < *state {
+        return false;
+    }
+    *state = Instant::now() + HEAL_EVERY;
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else { return false };
+    let asks = match history::heal_asks(&IndexKv).await {
+        Ok(asks) => asks,
+        Err(reason) => {
+            say!("heal: cannot read the holes: {}", history::one_word(&reason));
+            return false;
+        }
+    };
+    let (mut asked, mut refused) = (0usize, 0usize);
+    for ask in &asks {
+        let Ok(jid) = crate::chat::jid(&ask.chat) else {
+            refused += 1;
+            continue;
+        };
+        match client.fetch_message_history(&jid, &ask.id, ask.from_me, ask.ts, ask.count as i32).await {
+            Ok(_request_id) => asked += 1,
+            Err(_) => refused += 1,
+        }
+    }
+    if asked + refused > 0 {
+        // Counts only, as the backfill lane logs it: one request per chat, and how far back it reaches.
+        say!("heal: asked the phone for {asked} chat(s) x {}, refused={refused}", history::HEAL_PER_CHAT);
+    }
+    asked > 0
 }
 
 /// `whatsapp_backfill`: ask the primary phone for messages older than the index holds.
@@ -2918,6 +3047,10 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut names_announced = false;
     // Where the address-book <-> `@lid` join stands (`alias_tick`).
     let mut aliases = AliasRun::new();
+    // When the next heal round may ask the phone (heal_tick).
+    let mut heal_at = Instant::now();
+    // When the next subject round may ask the phone (subjects_tick).
+    let mut subjects_at = Instant::now();
     loop {
         for notice in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_notice(notice).await;
@@ -2956,6 +3089,11 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // Then the past: one history sync per tick, bounded by its budget (`history.rs`), so a relink
         // cannot starve the pipeline it arrived in.
         history_tick(index).await;
+        // Then the holes a reconnect left (`heal_tick`, once a minute): the drain above just recorded
+        // them, and the ask is the same call the backfill lane makes. Nothing new crosses to the phone.
+        if index.enabled {
+            heal_tick(&mut heal_at).await;
+        }
         settle_completions().await;
         // The drain (`wa:kernel/drain@0.2.0`, `wit/wa.wit`): a hot swap is replacing this instance, so
         // take no new work. Everything is settled here - `outbox_tick` and `query_tick` settle the job

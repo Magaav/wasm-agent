@@ -1,0 +1,12 @@
+{
+  "name": "whatsapp-archive",
+  "kind": "component",
+  "needs_wasi_sdk": false,
+  "description": "The WhatsApp archive's operations: which month is due, which months are restored, a month's file name and expiry, and the seal/open a body passes through, over an imported store and sealer",
+  "capabilities": {
+    "env": [],
+    "file_env": [],
+    "net": [],
+    "dirs": []
+  }
+}

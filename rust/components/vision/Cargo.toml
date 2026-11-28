@@ -1,0 +1,31 @@
+[package]
+name = "vision"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Images become words as a component (`wa:vision`, docs/WHATSAPP-OCR.md, docs/CORE-SPLIT.md): the reading
+# the kernel used to own behind a Python worker, with the engine in pure Rust. Request-shaped
+# (wasm32-wasip2) and built by `scripts/build-components.sh`, never by the core build.
+#
+# The models are NOT in this artifact (Victor 27/11): `wa:vision` imports `assets`, the host hands the
+# bytes in, and the component verifies them against the sha256 pins in `models.lock` beside
+# `components.lock`.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+# The pipeline itself, shared with the row (`rust/vision-ocr`), so the component and the fixture row run
+# one implementation rather than two that agree today.
+vision-ocr = { path = "../../vision-ocr" }
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

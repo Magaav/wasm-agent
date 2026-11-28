@@ -1,0 +1,10 @@
+# THE UNITS THAT STILL RUN A HAND COPY TODAY (27/11), one line each: <unit> <TAB> <why it is still there>
+# factory/units.sh --apply replaces each of them; this list can only shrink. A NEW unit that points outside a clone fails
+# in scripts/test-factory-runs-from-a-clone.mjs by name.
+orch-canary.service	still runs ~/Work/missions/_orch/canary.sh; units.sh --apply replaces it
+orch-daily.service	still runs ~/Work/missions/_orch/daily-line.sh; units.sh --apply replaces it
+orch-disk.service	still runs ~/Work/missions/_orch/disk-watch.sh; units.sh --apply replaces it
+orch-slots5.service	still runs ~/Work/missions/_orch/slots5.sh; units.sh --apply replaces it
+orch-snapshot.service	still runs ~/Work/missions/_orch/reboot-snapshot.sh; units.sh --apply replaces it
+orch-throughput.service	still runs ~/Work/missions/_orch/throughput-watch.sh; units.sh --apply replaces it
+orch-what-hurt.service	still runs ~/Work/missions/_orch/what-hurt-loop.sh; units.sh --apply replaces it

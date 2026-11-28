@@ -23,6 +23,23 @@
 # fast.sh defines this; a caller that sources this file alone (a test) still gets a path.
 command -v native >/dev/null 2>&1 || native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf %s "$1"; fi; }
 
+# THE BUDGET TRACKS THE MACHINE, because the work does (measured 27/11: the two land rows take 22-46 s
+# at load 3-6 and were killed at the 120 s wall on a node at load 34-37 - `watchdog: ... produced no
+# verdict within 120s`). A wall-clock budget is a load-dependent verdict; a bigger constant only moves the
+# cliff, so the budget scales with the load the node reports at start and is clamped: 1x on an idle box,
+# 8x at worst. `WA_FAST_ROW_SECONDS` still sets the base, `WA_FAST_ROW_LOAD` overrides the reading.
+wa_fast_row_seconds() { # -> the seconds one row may take on THIS machine
+  local base=${WA_FAST_ROW_SECONDS:-120} load=${WA_FAST_ROW_LOAD:-} factor
+  case "$base" in ''|*[!0-9]*) base=120 ;; esac
+  if [ -z "$load" ]; then load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || printf 1); fi
+  case "$load" in ''|*[!0-9.]*) load=1 ;; esac
+  # ceil(load / 4) in whole numbers, without bc: the load is truncated to its integer part first.
+  factor=$(( ( ${load%%.*} + 3 ) / 4 ))
+  [ "$factor" -lt 1 ] && factor=1
+  [ "$factor" -gt 8 ] && factor=8
+  printf %s $(( base * factor ))
+}
+
 wa_fast_row_exec() { # <seconds> <label> <binary> <db> [-- <env-argument>...]
   local seconds=${1-} label=${2-} bin=${3-} db=${4-}
   shift 4 2>/dev/null || true
@@ -132,7 +149,7 @@ lua_run() { # <script> <home>
   # environment), the binary last. MEASURED 19/11: this ended in 'env ... wa_fast_watchdog ...', and env
   # execs a PROGRAM, never a shell function - exit 127, no row reached the node. The order, and why, is
   # in scripts/lib/fast-row-exec.sh; scripts/test-fast-watchdog.sh runs a row through it.
-  wa_fast_row_exec "${WA_FAST_ROW_SECONDS:-120}" "$base" "$FAST_BIN" "$2/t.db" -- \
+  wa_fast_row_exec "$(wa_fast_row_seconds)" "$base" "$FAST_BIN" "$2/t.db" -- \
     ${cleared_flags[@]+"${cleared_flags[@]}"} \
     ${overrides[@]+"${overrides[@]}"} \
     WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \

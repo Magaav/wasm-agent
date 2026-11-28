@@ -70,16 +70,16 @@ fn every_chat_a_search_hit_can_name_is_accepted_by_every_other_question() {
             let verified = request
                 .validate()
                 .unwrap_or_else(|refusal| panic!("{} {chat}: {}", op.tool(), refusal.detail));
-            assert_eq!(verified.chat.as_ref().map(Chat::jid).as_deref(), Some(chat.as_str()), "{} {chat}", op.tool());
+            assert_eq!(verified.chat.as_deref(), Some(chat.as_str()), "{} {chat}", op.tool());
             // The component re-validates the payload it took from the queue; the round trip through
             // the wire must not change the chat either.
             let back = seam::Request::decode(&verified.to_request().encode()).expect("payload");
-            assert_eq!(back.validate().expect("revalidated").chat.as_ref().map(Chat::jid).as_deref(), Some(chat.as_str()));
+            assert_eq!(back.validate().expect("revalidated").chat.as_deref(), Some(chat.as_str()));
         }
 
         // `from` is the same exact-JID rule (a search may narrow by sender).
         let from = seam::Request { op: "search".into(), q: Some("x".into()), from: Some(chat.clone()), ..Default::default() };
-        assert_eq!(from.validate().expect("from").from.map(|chat| chat.jid()).as_deref(), Some(chat.as_str()));
+        assert_eq!(from.validate().expect("from").from.as_deref(), Some(chat.as_str()));
 
         // And the send path: a chat the index reports is a chat the agent may answer.
         let send = wa_whatsapp_outbox::Request {
@@ -117,9 +117,18 @@ fn an_older_group_id_is_the_legacy_hyphen_form_and_nothing_else_is() {
         "-9999999999@g.us",
     ] {
         assert!(!stored_chats().iter().any(|stored| stored == chat), "the generator must not claim {chat}");
+        // THE RULE IS THE CONTRACT'S, the shape is the index's (28/11). `Chat::parse` is the outbox
+        // crate's, and its refusals for these strings are asserted there (`wa-whatsapp-outbox`, the
+        // legacy-shape test gains `1-2-3@g.us`); the index refuses them for the one reason it still
+        // owns - they are not a JID shape it can key - and every caller asks the contract first.
         assert_eq!(Chat::parse(chat).unwrap_err().code, "bad_chat", "{chat}");
         let read = seam::Request { op: "read".into(), chat: Some(chat.into()), ..Default::default() };
-        assert_eq!(read.validate().unwrap_err().code, "bad_chat", "{chat}");
+        let refused = match read.validate() {
+            Err(refusal) => Some(refusal.code),
+            // A well-shaped but unsupported server is the contract's refusal, decided one layer up.
+            Ok(verified) => verified.chat.map(|_| "accepted_here_judged_by_the_contract"),
+        };
+        assert!(refused.is_some(), "{chat} must not reach the index as a chat");
     }
     // The legacy spelling of the phone server is accepted and normalized (never a fourth kind of chat),
     // which is why it is not in the generator: the index stores `s.whatsapp.net`.

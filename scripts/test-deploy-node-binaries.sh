@@ -26,6 +26,11 @@
 #     binary_commit=, and refuses to write a record whose commit is not a full id.
 #
 #   bash scripts/test-deploy-node-binaries.sh
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
@@ -81,8 +86,12 @@ release="$WORK/release"
 mkdir -p "$release"
 mkelf "$release/wa-$X64-$SHORT" 3e
 mkelf "$release/wa-sentinel-$X64-$SHORT" 3e
+mkelf "$release/wa-term-$X64-$SHORT" 3e
+mkelf "$release/wa-operations-supervisor-$X64-$SHORT" 3e
 xsha="$(wa_node_sha256 "$release/wa-$X64-$SHORT")"; xbytes="$(wc -c < "$release/wa-$X64-$SHORT" | tr -d '[:space:]')"
 ssha="$(wa_node_sha256 "$release/wa-sentinel-$X64-$SHORT")"; sbytes="$(wc -c < "$release/wa-sentinel-$X64-$SHORT" | tr -d '[:space:]')"
+tsha="$(wa_node_sha256 "$release/wa-term-$X64-$SHORT")"; tbytes="$(wc -c < "$release/wa-term-$X64-$SHORT" | tr -d '[:space:]')"
+usha="$(wa_node_sha256 "$release/wa-operations-supervisor-$X64-$SHORT")"; ubytes="$(wc -c < "$release/wa-operations-supervisor-$X64-$SHORT" | tr -d '[:space:]')"
 cat > "$release/node-$SHORT.manifest" <<MANIFEST
 schema=wasm-agent-node-binaries/1
 source_commit=$COMMIT
@@ -92,8 +101,8 @@ zig_version=fixture
 glibc_floor=2.31
 codemode=embedded
 built_utc=2026-11-06T00:00:00Z
-# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes
-$X64 $xsha $xbytes $ssha $sbytes
+# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes
+$X64 $xsha $xbytes $ssha $sbytes $tsha $tbytes $usha $ubytes
 MANIFEST
 sign_release "$release"
 
@@ -172,6 +181,9 @@ fresh() { rm -rf "$WORK/install-$1"; printf '%s\n' "$WORK/install-$1"; }
 bad="$WORK/bad"; mkdir -p "$bad"
 cp "$release/node-$SHORT.manifest" "$bad/"
 cp "$release/wa-$X64-$SHORT" "$bad/"; cp "$release/wa-sentinel-$X64-$SHORT" "$bad/"
+cp "$release/wa-term-$X64-$SHORT" "$bad/"
+cp "$release/wa-operations-supervisor-$X64-$SHORT" "$bad/"
+cp "$release/wa-term-$X64-$SHORT" "$bad/"; cp "$release/wa-operations-supervisor-$X64-$SHORT" "$bad/"
 printf 'tampered' >> "$bad/wa-$X64-$SHORT"
 sign_release "$bad"
 i="$(fresh hash)"
@@ -183,6 +195,8 @@ ok
 
 short_size="$WORK/short"; mkdir -p "$short_size"
 cp "$release/wa-$X64-$SHORT" "$short_size/"; cp "$release/wa-sentinel-$X64-$SHORT" "$short_size/"
+cp "$release/wa-term-$X64-$SHORT" "$short_size/"
+cp "$release/wa-operations-supervisor-$X64-$SHORT" "$short_size/"
 sed "s/^$X64 $xsha $xbytes /$X64 $xsha 999999 /" "$release/node-$SHORT.manifest" > "$short_size/node-$SHORT.manifest"
 sign_release "$short_size"
 i="$(fresh size)"
@@ -192,6 +206,8 @@ contains "$out" "node_size_mismatch:" "the size refusal is named"
 
 foreign="$WORK/foreign"; mkdir -p "$foreign"
 cp "$release/wa-$X64-$SHORT" "$foreign/"; cp "$release/wa-sentinel-$X64-$SHORT" "$foreign/"
+cp "$release/wa-term-$X64-$SHORT" "$foreign/"
+cp "$release/wa-operations-supervisor-$X64-$SHORT" "$foreign/"
 sed "s/^source_commit=$COMMIT/source_commit=$OTHER/" "$release/node-$SHORT.manifest" > "$foreign/node-$SHORT.manifest"
 sign_release "$foreign"
 i="$(fresh commit)"
@@ -221,6 +237,8 @@ contains "$out" "node_machine_mismatch:" "the machine refusal is named"
 
 empty_cm="$WORK/emptyc"; mkdir -p "$empty_cm"
 cp "$release/wa-$X64-$SHORT" "$release/wa-sentinel-$X64-$SHORT" "$empty_cm/"
+cp "$release/wa-term-$X64-$SHORT" "$empty_cm/"
+cp "$release/wa-operations-supervisor-$X64-$SHORT" "$empty_cm/"
 sed 's/^codemode=embedded/codemode=empty/' "$release/node-$SHORT.manifest" > "$empty_cm/node-$SHORT.manifest"
 sign_release "$empty_cm"
 i="$(fresh emptycodemode)"
@@ -248,6 +266,9 @@ contains "$out" "the build refused to start" "the refusal carries the floor's ow
 # --- an operator's directory, and the staging the deploy does ----------------------------------------
 explicit="$WORK/explicit"; mkdir -p "$explicit"
 mkelf "$explicit/wa" 3e; mkelf "$explicit/wa-sentinel" 3e
+# The whole bundle: the member list is one place (wa-sentinel, wa-term, wa-operations-supervisor), so an
+# operator directory that carries only wa and wa-sentinel cannot be staged - the deploy refuses it by name.
+mkelf "$explicit/wa-term" 3e; mkelf "$explicit/wa-operations-supervisor" 3e
 i="$(fresh explicit)"
 out="$(WA_DEPLOY_BINARY_SOURCE="$explicit" WA_NODE_TARGET="$X64" wa_node_binaries_prepare "$ROOT" "$COMMIT" "$WORK/stage-explicit" "$i" 2>&1)"
 expect_status 0 "$?" "WA_DEPLOY_BINARY_SOURCE stages"
@@ -291,12 +312,15 @@ mkbytes() { wc -c < "$1" | tr -d '[:space:]'; }
 head_release="$WORK/head-release"; mkdir -p "$head_release"
 mkelf "$head_release/wa-$X64-$HEAD_SHORT" 3e
 mkelf "$head_release/wa-sentinel-$X64-$HEAD_SHORT" 3e
+mkelf "$head_release/wa-term-$X64-$HEAD_SHORT" 3e
+mkelf "$head_release/wa-operations-supervisor-$X64-$HEAD_SHORT" 3e
 cat > "$head_release/node-$HEAD_SHORT.manifest" <<MANIFEST
 schema=wasm-agent-node-binaries/1
 source_commit=$HEAD_SHA
 glibc_floor=2.31
 codemode=embedded
-$X64 $(mksha "$head_release/wa-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-sentinel-$X64-$HEAD_SHORT")
+# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes
+$X64 $(mksha "$head_release/wa-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-term-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-term-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-operations-supervisor-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-operations-supervisor-$X64-$HEAD_SHORT")
 MANIFEST
 sign_release "$head_release"
 
@@ -432,14 +456,21 @@ mk_release() { # a `-` digest writes a manifest with no compiled_inputs row (an 
   dir="$base/node-$short"; mkdir -p "$dir"
   mkelf "$dir/wa-$X64-$short" 3e
   mkelf "$dir/wa-sentinel-$X64-$short" 3e
+  mkelf "$dir/wa-term-$X64-$short" 3e
+  mkelf "$dir/wa-operations-supervisor-$X64-$short" 3e
   wa="$dir/wa-$X64-$short"; sentinel="$dir/wa-sentinel-$X64-$short"
   {
     printf 'schema=wasm-agent-node-binaries/1\nsource_commit=%s\n' "$commit"
     [ "$digest" = - ] || printf 'compiled_inputs=%s\n' "$digest"
     printf 'glibc_floor=2.31\ncodemode=embedded\n'
-    printf '%s %s %s %s %s\n' "$X64" \
+    # NINE COLUMNS: a release this publisher can make pins the program and the supervisor too, and the deploy
+    # refuses a prebuilt set without wa-term (it would install a node that cannot draw a prompt).
+    printf '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes\n'
+    printf '%s %s %s %s %s %s %s %s %s\n' "$X64" \
       "$(wa_node_sha256 "$wa")" "$(wc -c < "$wa" | tr -d '[:space:]')" \
-      "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')"
+      "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-term-$X64-$short")" "$(wc -c < "$dir/wa-term-$X64-$short" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-operations-supervisor-$X64-$short")" "$(wc -c < "$dir/wa-operations-supervisor-$X64-$short" | tr -d '[:space:]')"
   } > "$dir/node-$short.manifest"
   # The tag directory IS this release's base for the digest search (`wa_node_tag_base`), so the sums and
   # their signature live beside the manifest here.
@@ -788,6 +819,12 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     echo 'set -uo pipefail'
     echo "INSTALL_DIR=\"$rec_install\""
     echo 'COMMIT=deadbee'                 # deliberately short: a prebuilt record must NOT name this
+    # THE 40-HEX OF THE TREE THIS DEPLOY INSTALLED: the block reads COMMIT_FULL for a covering prebuilt record,
+    # and without it the record falls to commit=unknown and refuses - which is what this row was reporting.
+    echo "COMMIT_FULL=$HEAD_SHA"
+    # deploy.sh reaches the record step AFTER the swap (SWAPPED=1): the 24/11 rule is a refusal BEFORE it and a
+    # recorded problem after it, so the harness must model that flag, not omit it.
+    echo "SWAPPED=${SWAPPED_RECORD:-0}"
     echo 'BRANCH=main'
     echo 'DIRTY=0'
     echo 'HASH=nodehash'
@@ -804,6 +841,20 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     echo "BINARY_COMMIT=$bcommit"
     echo "BINARY_SOURCE_COMMIT=$scommit"
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
+    # THE BLOCK'S OWN DEPENDENCIES. It runs OUT of deploy.sh here, so nothing deploy.sh sources or defines is
+    # present: a build-info reader (wa_build_info / wa_build_field, whose FIELD is the SECOND argument), a note
+    # printer, a post-swap reporter, the compiled-inputs digest, the reuse probe, the running-identity probe, and
+    # the REAL wa_same_commit out of scripts/lib/commit-id.sh - stubbing that one made the block refuse a commit
+    # it had just accepted ("reports commit X but this deploy meant to install X"). Measured standalone first.
+    echo 'note() { echo "note: $*"; }'
+    echo 'post_swap_problem() { echo "note: $*" >&2; }'
+    echo 'wa_build_info() { echo "commit=${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}"; }'
+    echo 'wa_build_field() { case "$2" in commit) echo "${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
+    echo 'wa_compiled_inputs_digest() { echo deadbeef; }'
+    echo 'wa_node_binary_reuse() { return 1; }'
+    echo 'wa_running_identity() { :; }'
+    echo "ROOT=\"$ROOT\""
+    echo ". \"$ROOT/scripts/lib/commit-id.sh\""
     cat "$RECORD_BLOCK"
     echo 'record_installed'
   } > "$WORK/run-record.sh"
@@ -820,11 +871,14 @@ contains "$record" "binary_source_commit=$HEAD_SHA" "the record names the source
 contains "$record" "sentinel_sha256=sentinelhash" "the record still names the installed supervisor's hash"
 if printf '%s' "$record" | grep -q '^commit=deadbee$'; then fail "the record named the short id instead of the 40-hex commit"; fi
 ok
-# A prebuilt record whose commit is not a 40-hex id is refused, and the record that was already there stands.
-out="$(run_record abc1234)"
-expect_status 3 "$?" "the record step for a prebuilt install with a short commit"
-contains "$out" "not a 40-hex commit id" "the refusal says what a prebuilt record must name"
-contains "$(cat "$rec_install/installed.txt")" "commit=$HEAD_SHA" "the refused write did not replace the good record"
+# A prebuilt record whose commit is not a 40-hex id is NOT refused here: the step is reached AFTER the swap
+# (deploy.sh rule 24/11 - a refusal before it, a recorded problem after it), so it records commit=unknown with
+# record_id_why beside it, which is what a later reader needs to know it cannot act on this record.
+out="$(SWAPPED_RECORD=1 run_record abc1234)"
+expect_status 0 "$?" "the record step, AFTER the swap, for a prebuilt install with a short commit"
+contains "$out" "not a 40-hex commit id" "the recorded problem says what a prebuilt record must name"
+contains "$(cat "$rec_install/installed.txt")" "record_id_why=commit=abc1234 is not a 40-hex commit id" "...and the record carries the why"
+contains "$(cat "$rec_install/installed.txt")" "commit=unknown" "...with commit= recorded as unknown, never guessed"
 
 # --- installed.txt for a DIGEST-FALLBACK install (job relmatch) ---------------------------------------
 # A docs-only commit is installed from an older commit's release: the record then has to name BOTH - the
@@ -838,10 +892,11 @@ contains "$record" "commit=$HEAD_SHA" "the digest-fallback record names the inst
 contains "$record" "binary_commit=$COMMIT" "...and the commit the bytes are a build of"
 contains "$record" "binary_source_commit=$COMMIT" "...under the name the deploy records (binary_source_commit=)"
 contains "$record" "binary_release=node-$HEAD_SHORT" "...beside the release that was used"
-out="$(run_record "$HEAD_SHA" abc1234)"
-expect_status 3 "$?" "the record step with a source commit that is not 40 hex"
-contains "$out" "binary_source_commit=abc1234" "the refusal names the value it would have written"
-contains "$(cat "$rec_install/installed.txt")" "binary_source_commit=$COMMIT" "the refused write did not replace the good record"
+out="$(SWAPPED_RECORD=1 run_record "$HEAD_SHA" abc1234)"
+expect_status 0 "$?" "the record step, AFTER the swap, with a source commit that is not 40 hex"
+contains "$out" "binary_source_commit=abc1234" "the recorded problem names the value it would have written"
+contains "$(cat "$rec_install/installed.txt")" "binary_commit=unknown" "...and binary_commit= is recorded as unknown, not guessed"
+contains "$(cat "$rec_install/installed.txt")" "binary_id_why=binary_source_commit=abc1234 is not a 40-hex commit id" "...with the why beside it"
 
 
 # --- the wiring in scripts/deploy.sh ------------------------------------------------------------------
@@ -850,7 +905,10 @@ contains "$(cat "$rec_install/installed.txt")" "binary_source_commit=$COMMIT" "t
 # line that only exists in the lib would pass every check above while changing nothing on a node.
 DEPLOY="$ROOT/scripts/deploy.sh"
 [ -f "$DEPLOY" ] || fail "no scripts/deploy.sh"
-grep -q 'for wa_lib_part in build-status build-requirements deploy-components node-binaries' "$DEPLOY"   || fail "deploy.sh does not source scripts/lib/node-binaries.sh"
+# THE CONSTRUCT, NOT THE LIST (measured): the exact string named five libraries, and three more were added since -
+# the assertion then failed on a deploy.sh that sources the lib perfectly well. What matters is that node-binaries
+# is among the parts sourced in that loop.
+grep -qE 'for wa_lib_part in [^;]*node-binaries' "$DEPLOY"   || fail "deploy.sh does not source scripts/lib/node-binaries.sh"
 ok
 grep -q 'wa_node_binaries_prepare "$ROOT"' "$DEPLOY" || fail "deploy.sh never calls wa_node_binaries_prepare"
 ok
@@ -868,7 +926,10 @@ grep -q 'binary_source_commit=%s' "$DEPLOY" || fail "deploy.sh does not record b
 ok
 grep -q 'wa_node_release_digest_search' "$ROOT/scripts/lib/node-binaries.sh" || fail "the lib has no digest search"
 ok
-grep -q 'wa_compiled_input "$changed_path"' "$DEPLOY" || fail "deploy.sh's fast path does not use the one compiled-input classification"
+# THE ONE CLASSIFICATION, not one spelling of it: deploy.sh no longer calls wa_compiled_input directly - it
+# asks wa_compiled_inputs_digest for the whole digest - so the pin accepts either entry point and still
+# refuses a deploy that grew a list of its own.
+grep -qE 'wa_compiled_input"? "|wa_compiled_inputs_digest' "$DEPLOY" || fail "deploy.sh's fast path does not use the one compiled-input classification"
 ok
 grep -q 'wa_compiled_inputs_digest' "$ROOT/scripts/publish-node-binaries.sh" || fail "the publisher records no compiled-inputs digest"
 ok

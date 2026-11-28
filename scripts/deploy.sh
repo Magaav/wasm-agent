@@ -110,8 +110,17 @@ wa_node_path >/dev/null \
 NODE_BIN="$(wa_node_require)" \
   || { printf 'deploy: refused(node_runtime_missing): %s\n' "$(wa_node_refusal)" >&2; exit 2; }
 EXPLICIT_INSTALL="${WA_INSTALL_DIR:-}"
-PORT="${WA_PORT:-8799}"
-CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
+# WHICH NODE THIS DEPLOY TALKS TO (25/11). These two lines used to read `WA_PORT`/`WA_CLIENT_PORT` alone, so a
+# runner that exports the node's own spelling (`WASM_AGENT_PORT` - what rust/wa-sentinel reads and
+# scripts/lib/sentinel-unit.sh writes) had this deploy probing the LIVE 8799 node while it installed a scratch
+# one. `service-target.sh` (sourced above) now holds the one expression, and both spellings are honoured.
+if command -v wa_node_port >/dev/null 2>&1; then
+  PORT="$(wa_node_port)"
+  CLIENT_PORT="$(wa_node_client_port)"
+else
+  PORT="${WA_PORT:-${WASM_AGENT_PORT:-8799}}"
+  CLIENT_PORT="${WA_CLIENT_PORT:-${WASM_AGENT_CLIENT_PORT:-8800}}"
+fi
 if command -v wa_install_target >/dev/null 2>&1; then
   INSTALL_DIR="$(wa_install_target)"
   wa_read_service_claim || true
@@ -595,9 +604,17 @@ while :; do
   if [ "$HEAD_NOW" != "$MAIN_NOW" ] && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "HEAD" ]; then
     fail "refused(source_pin_stale): $SOURCE_ROOT is a detached worktree at ${HEAD_NOW:0:12} and origin/main is ${MAIN_NOW:0:12}; a landing never fast-forwards a detached tree, so this wait could only time out after ${WA_TREE_WAIT}s. Unset WA_DEPLOY_ROOT (a deploy exports it for the processes it starts and a watcher started by one inherits it), or point it at the canonical checkout. Nothing was built."
   fi
-  [ "$HEAD_NOW" = "$MAIN_NOW" ] && [ "$DIRT_NOW" = "0" ] && break
+  # IS THIS TREE ON MAIN, OR IS IT THE TIP? (P0, 27/11: a peer's update waited the full 600 s and refused
+  # `canonical_busy` while the factory landed every ~10 minutes - with HEAD == origin/main as the test, a tree whose
+  # deploy fetches can never install, because origin/main never stops moving.) Ancestry answers the question the
+  # deploy actually needs: a tree on a main commit that has since moved forward IS main. A clean tree is still
+  # required, and a commit that is NOT an ancestor still waits and then refuses by name.
+  if [ "$DIRT_NOW" = "0" ] && [ -n "$HEAD_NOW" ] && [ -n "$MAIN_NOW" ]     && git merge-base --is-ancestor "$HEAD_NOW" "$MAIN_NOW" 2>/dev/null; then
+    [ "$HEAD_NOW" = "$MAIN_NOW" ] || note "the tree is on ${HEAD_NOW:0:12}, which is on origin/main (${MAIN_NOW:0:12}) but not its tip: deploying the tree as it is, which is a main commit"
+    break
+  fi
   if [ "$TREE_WAITED" -ge "$WA_TREE_WAIT" ]; then
-    fail "refused(canonical_busy): $SOURCE_ROOT is not exactly origin/main after waiting ${WA_TREE_WAIT}s (HEAD ${HEAD_NOW:0:12}, origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s)); a landing is in progress or the tree owns edits nobody has committed. Nothing was built. The queue's status names its holder."
+    fail "refused(canonical_busy): $SOURCE_ROOT is not on origin/main after waiting ${WA_TREE_WAIT}s (HEAD ${HEAD_NOW:0:12} is not an ancestor of origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s)); a landing that never stops is not a reason to wait, so this is refusal after the bound, not a rule about the tip"
   fi
   [ "$TREE_WAITED" = "0" ] && note "waiting for the canonical tree to be exactly origin/main: HEAD ${HEAD_NOW:0:12}, origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s) - a landing is in progress"
   sleep 5
@@ -627,6 +644,12 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_PREFLIGHT"
   fi
   note "runtime worktree resolved before the build: $WA_RUNTIME_PREFLIGHT"
+  # WHAT THE PREFLIGHT VERIFIED, kept for the install-time question (Victor on work, 27/11: the deploy passed
+  # here, compiled for 1961 s, then refused with `deploy source must be the exact fetched origin/main` - a
+  # sentence that cannot be acted on because it does not say WHAT moved). Both shas are recorded now, so the
+  # late refusal names the difference instead of repeating the rule.
+  WA_RUNTIME_PREFLIGHT_HEAD="$(git -C "$BINDING_PREFLIGHT_REPO" rev-parse HEAD 2>/dev/null || true)"
+  WA_RUNTIME_PREFLIGHT_MAIN="$(git -C "$BINDING_PREFLIGHT_REPO" rev-parse "${WA_DEPLOY_MAIN_REF:-origin/main}" 2>/dev/null || true)"
 fi
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
@@ -655,13 +678,20 @@ done
 MAIN_REFS="${MAIN_REFS# }"
 DEPLOY_MAIN_REF=origin/main
 for MAIN_REF in $MAIN_REFS; do
-  [ "$(git rev-parse "$MAIN_REF")" = "$(git rev-parse HEAD)" ] && { DEPLOY_MAIN_REF="$MAIN_REF"; break; }
+  # THE FOURTH ANSWER, JOINED (work retry 4): this picked the main ref only when HEAD EQUALLED it, so a tree that was
+  # on main but behind its tip selected no ref at all and the checks below read an empty one. Ancestry is the rule.
+  git merge-base --is-ancestor HEAD "$MAIN_REF" 2>/dev/null && { DEPLOY_MAIN_REF="$MAIN_REF"; break; }
 done
 export WA_DEPLOY_MAIN_REF="$DEPLOY_MAIN_REF"
 if [ -n "$MAIN_REFS" ]; then
   for MAIN_REF in $MAIN_REFS; do
     BEHIND="$(git rev-list --count "HEAD..$MAIN_REF" 2>/dev/null || echo 0)"
-    [ "$BEHIND" = "0" ] || fail "this tree is $BEHIND commit(s) behind $MAIN_REF; merge main first (a node that cannot see main cannot see its own fixes)"
+  # THE THIRD ANSWER TO "IS THIS TREE MAIN", JOINED TO THE ONE OWNER (work retry 4, 27/11: the deploy said "the tree
+  # is on 27b99c8ee9ec, which is on origin/main ... deploying the tree as it is" and then refused two lines later with
+  # "this tree is 23 commit(s) behind origin/main; merge main first"). Step 0b decides that question by ancestry, and a
+  # remote update deliberately fast-forwards the tree to a NAMED commit that may sit behind a moving tip. So being
+  # behind is a fact to say, never a refusal: only a commit that is not on main at all is refused, at 0b.
+  [ "$BEHIND" = "0" ] || note "the tree is $BEHIND commit(s) behind $MAIN_REF; deploying it as it is (it is a main commit, which is the rule at 0b)"
   done
   # ... and a tree AHEAD of main is the other half of the same failure. An unmerged `change/`
   # branch deploys fine, and then main lags the live binary, so the next main-side deploy is
@@ -1167,6 +1197,15 @@ else
   done <<BINARY_LINES
 $BINARY_PLAN
 BINARY_LINES
+  # A COVERING RELEASE PUBLISHED BEFORE THE PROGRAM EXISTED has no `wa-term`: it was built when the node
+  # drew its own terminal and nothing was installed beside it. That release is still the right bytes for
+  # this tree's compiled inputs, and refusing it would make an update IMPOSSIBLE that worked yesterday -
+  # the pair rule is about what gets INSTALLED, never about refusing to update. So a set without the
+  # program is not used: this tree is built instead, which produces both, and the note says why.
+  if [ "$BINARY_RC" = 0 ] && command -v wa_node_set_has_program >/dev/null 2>&1      && ! wa_node_set_has_program "$BINARY_STAGE"; then
+    note "the covering release has no wa-term (published before the program shipped with the node): building this tree instead, so the node and its program are installed together"
+    BINARY_RC=8
+  fi
   case "$BINARY_RC" in
     0)
       PREBUILT_BINARIES=1
@@ -1174,7 +1213,13 @@ BINARY_LINES
       NEW_SENTINEL="$BINARY_STAGE/wa-sentinel"
       # Presence, not the exec bit: a filesystem where `chmod` is a no-op (this checkout's /c mount) would
       # refuse a good binary, and the prove gate below executes it anyway - a file that cannot run fails there.
-      [ -f "$NEW" ] && [ -f "$NEW_SENTINEL" ] || fail "refused(prebuilt_binary_incomplete): the staged binary is missing $NEW or $NEW_SENTINEL; nothing installed"
+      NEW_TERM="$BINARY_STAGE/wa-term"
+      [ -f "$NEW_TERM" ] || NEW_TERM="$BINARY_STAGE/wa-term.exe"
+      # THE SUPERVISOR SHIPS WITH wa TOO (P0, 27/11): since 03579b19 `wa` runs it for every bash/operations call, so a
+      # set staged without it installs a node that answers nothing. Same refusal shape as wa-term above.
+      NEW_SUPERVISOR="$BINARY_STAGE/wa-operations-supervisor"
+      [ -f "$NEW_SUPERVISOR" ] || NEW_SUPERVISOR="$BINARY_STAGE/wa-operations-supervisor.exe"
+      [ -f "$NEW" ] && [ -f "$NEW_SENTINEL" ] && [ -f "$NEW_TERM" ] && [ -f "$NEW_SUPERVISOR" ] || fail "refused(prebuilt_binary_incomplete): the staged set is missing $NEW, $NEW_SENTINEL or $NEW_TERM. The program that draws the terminal ships WITH the node - both, or neither - so nothing was installed."
       SENTINEL_NAME="wa-sentinel"
       if [ -n "${WA_DEPLOY_BINARY_SOURCE:-}" ]; then
         BINARY_PROVENANCE="prebuilt-source"
@@ -1258,6 +1303,14 @@ BINARY_LINES
         fail "refused(no_prebuilt_binary): nothing is published for $(git rev-parse --short HEAD) on $(wa_node_target_triple 2>/dev/null || echo 'this host') and this deploy was asked for a published binary only (WA_DEPLOY_PREBUILT_ONLY=1); nothing was built and nothing installed. Publish it (bash scripts/publish-node-binaries.sh --ensure --publish on the building host) or run the deploy without that variable"
       fi
       if command -v wa_node_disk_floor_ok >/dev/null 2>&1 && wa_node_disk_floor_ok "$ROOT"; then
+      # THE SHELF NOTE (Victor on work, 27/11). "no published binary for this commit" is true and useless alone: it
+      # does not say whether the shelf holds anything, or how stale it is - and the operator had to infer "the factory
+      # is behind" from a screenshot afterwards. The sentence is built by wa_node_shelf_note so it can be proven
+      # without a build (scripts/test-node-shelf-note.sh), and it never invents a distance it cannot measure.
+      PUBLISHED_REPO="${WA_NODE_BINARIES_REPO:-$(git remote get-url origin 2>/dev/null | sed -n 's|.*[:/]\([^/]\{1,\}/[^/]\{1,\}\)$|\1|p')}"
+      PUBLISHED_REPO="${PUBLISHED_REPO%.git}"
+      PUBLISHED_NEWEST="$(wa_node_release_list "$PUBLISHED_REPO" 1 2>/dev/null | head -1)"
+      echo "deploy: $(wa_node_shelf_note "$PUBLISHED_NEWEST" "$(git rev-parse HEAD)")"
         echo "deploy: no published binary for this commit; building this tree (disk floor ok)"
       else
         fail "refused(no_prebuilt_binary_and_disk_floor): no published binary for $(git rev-parse --short HEAD) on $(wa_node_target_triple 2>/dev/null || echo 'this host'), and this machine is below the disk floor a build needs - so neither path can install this commit. Publish it (bash scripts/publish-node-binaries.sh on a machine with cargo, then the printed gh command), pass WA_DEPLOY_BINARY_SOURCE=<dir>, or free space (scripts/reclaim-disk.sh). Nothing installed."
@@ -1523,6 +1576,20 @@ case "$NEW_SENTINEL_LOWER" in
   *.exe) SENTINEL_NAME="wa-sentinel.exe" ;;
   *)     SENTINEL_NAME="wa-sentinel" ;;
 esac
+
+# AND THE PROGRAM THAT DRAWS THE TERMINAL (wa-term-own-program). `wa` runs `wa-term` from beside itself,
+# so a deploy that installs one and not the other leaves a node that starts and cannot open a prompt -
+# the refusal below is that bug, caught before anything is staged, sealed or swapped. (The FIRST landing
+# of this work was reverted for exactly this: the installed `wa` had no `wa-term` beside it.)
+NEW_TERM="$DEPLOY_BUILD_TARGET/release/wa-term.exe"
+[ -f "$NEW_TERM" ] || NEW_TERM="$DEPLOY_BUILD_TARGET/release/wa-term"
+# AND THE SUPERVISOR (P0, 27/11): `wa` runs `wa-operations-supervisor` for every bash/operations call; a deploy that
+# builds one and not the other installs a node whose commands all refuse (operations_supervisor_missing).
+NEW_SUPERVISOR="$DEPLOY_BUILD_TARGET/release/wa-operations-supervisor.exe"
+[ -f "$NEW_SUPERVISOR" ] || NEW_SUPERVISOR="$DEPLOY_BUILD_TARGET/release/wa-operations-supervisor"
+[ -x "$NEW_TERM" ] || fail "refused(term_program_missing): no built program at $NEW_TERM. The workspace builds it (cargo build --release --manifest-path rust/Cargo.toml produces wa-term beside wa) and the node cannot draw a prompt without it; nothing was built into the install and nothing was installed."
+WA_UPGRADE_TERM="$NEW_TERM"; export WA_UPGRADE_TERM
+WA_UPGRADE_SUPERVISOR="$NEW_SUPERVISOR"; export WA_UPGRADE_SUPERVISOR
 fi
 
 # 5. Prove it answers before it goes near the running node. A build that cannot start must not replace one
@@ -1690,8 +1757,14 @@ if ! WA_COMPONENTS_DIR="$COMPONENT_STAGE" WASM_AGENT_HOME="$COMPONENT_PROOF_HOME
   env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY -u WA_GRAPH_ROOT -u WA_GRAPH_DB \
   "$NEW" --db "$COMPONENT_PROOF_HOME/proof.db" >"$COMPONENT_PROOF_HOME/proof.log" 2>&1; then
   tail -5 "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null | sed 's/^/  component: /' >&2
+  # WHICH COMPONENT, WHICH CALL (P0, 27/11: work's update refused with the sentence below and nothing else, so the
+  # operator could not tell memory from graph, or a call from a dormant refusal). The proof prints a step before each
+  # check; the last one it reached is the answer, and when it printed none the refusal says that too instead of
+  # guessing.
+  PROOF_STEP="$(grep 'component proof step:' "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null | tail -1 | sed 's/^component proof step: //')"
   rm -rf "$COMPONENT_PROOF_HOME"
-  fail "refused(component_proof_failed): the candidate binary did not answer a call through the staged component (or a dormant feature did not refuse by name); nothing installed"
+  [ -n "$PROOF_STEP" ] || PROOF_STEP="the proof printed no step, so it failed before the first check"
+  fail "refused(component_proof_failed): $PROOF_STEP - the staged components were:$COMPONENT_SET; nothing installed"
 fi
 COMPONENT_PROOF="$(grep -c 'component proof ok' "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null)"
 rm -rf "$COMPONENT_PROOF_HOME"
@@ -1790,6 +1863,101 @@ UPGRADE="$ROOT/scripts/upgrade.sh"
 if [ -n "$EXPECTED_SHA" ]; then
   [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] || fail "source changed from expected SHA before install"
 fi
+# THE VERSION-FOLDER INSTALL: ONE SWITCH, OFF AT LANDING (Fable 25/11, condition b). It is turned on per node, on
+# Fable's word, the laptop first - so nothing in this branch changes how any node installs until someone sets it.
+# With it off, this file is byte-for-byte the install path it was.
+#
+# WHAT THE SWITCH DOES, in the order the case runs it (the sequence is immediately below, not somewhere else):
+#   1 convert    scripts/versions-adopt.sh converts an in-place node ONCE, verifies it, and rolls itself back if
+#                the verification fails - the deploy stops there with the in-place install untouched;
+#   2 stage      upgrade.sh runs with WA_VERSION_STAGING: it writes the program, itself and the record into the
+#                staging tree and exits 0 (no swap, no restart); the deploy adds lua-core, scripts and ui, and
+#                REFUSES BY NAME if any of them is missing - a version sealed without them would be incomplete
+#                while looking complete;
+#   3 seal+point scripts/version-install.sh seals the tree (one folder, one rename) and moves the pointer BEFORE
+#                any restart, so a restart can only ever run a complete, immutable version;
+#   4 restart    upgrade.sh runs again through the pointer: the installed program is already the new bytes, so it
+#                takes its own already-the-installed-one branch and only restarts and verifies;
+#   5 sentinel   scripts/lib/sentinel-move.sh moves the sentinel LAST, only once the node answered on the new
+#                version, and a failed start leaves the previous version supervising.
+# If the restart fails, current is moved BACK by one rename (no copy, no reinstall) and the sentinel makes the next
+# restart. NOT here: retiring upgrade.sh own $BACKUP copy, and the other two record writers guard calls.
+case "${WA_VERSION_FOLDERS:-0}" in
+  0) : ;;
+  1)
+    # THE SEQUENCE, in the order Fable approved. Nothing here runs unless the switch is on, and every step fails
+    # the deploy by name rather than continuing.
+    . "$ROOT/scripts/lib/versions.sh"
+    . "$ROOT/scripts/lib/sentinel-move.sh"
+    VF_SHARE="$(wa_share_root)"
+    VF_ID="$(wa_version_id "$EXPECTED_SHA")" || fail "version_folders_id: cannot name the version for $EXPECTED_SHA"
+    VF_PREV="$(wa_version_current 2>/dev/null || true)"
+
+    # 1. THE CONVERSION, first and verified: convert an in-place node once, or say it is already on a folder.
+    #    If it fails, its own rollback has already put the in-place install back and the deploy stops here.
+    bash "$ROOT/scripts/versions-adopt.sh" --install "$INSTALL_DIR" --share "$VF_SHARE" \
+      || fail "version_folders_adopt_failed: the conversion step failed; the in-place install is untouched"
+
+    # 2. STAGE the new version: upgrade.sh writes the program, itself and the record into the staging tree and
+    #    stops (no swap, no restart). It is the same invocation the live path uses, with one variable more.
+    [ -n "$VF_SHARE" ] && [ -n "$VF_ID" ] \
+      || fail "version_folders_names: an empty share root or version id (share='$VF_SHARE' id='$VF_ID') - refusing before anything is removed"
+    VF_STAGE="$VF_SHARE/versions/.stage-$VF_ID"
+    rm -rf "$VF_STAGE"; mkdir -p "$VF_STAGE" || fail "version_folders_stage_unwritable: $VF_STAGE"
+    WA_VERSION_STAGING="$VF_STAGE" \
+      WA_UPGRADE_FORCE_REASON="$([ "${FORCE:-0}" = 1 ] && printf '%s' "${REASON:-}")" \
+      WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+      WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
+      bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
+      || fail "version_folders_stage_failed: see $INSTALL_DIR/deploy-upgrade.log"
+    #    the trees the version also holds (the program and the record were staged by upgrade.sh). EACH ONE IS
+    #    REQUIRED: a version folder missing lua-core, scripts or ui is INCOMPLETE but would look complete once
+    #    sealed, so a missing or uncopyable member fails the deploy by name instead of being skipped (Fable 25/11
+    #    fix c - the first version wrote "cp -a ... || true" here).
+    [ -d "$LUA_STAGE" ] || fail "version_folders_member_missing: lua-core ($LUA_STAGE is not there)"
+    cp -a "$LUA_STAGE" "$VF_STAGE/lua-core" \
+      || fail "version_folders_member_failed: lua-core ($LUA_STAGE -> $VF_STAGE/lua-core)"
+    [ -d "$ROOT/scripts" ] || fail "version_folders_member_missing: scripts ($ROOT/scripts is not there)"
+    mkdir -p "$VF_STAGE/scripts" && cp -a "$ROOT/scripts/." "$VF_STAGE/scripts/" \
+      || fail "version_folders_member_failed: scripts ($ROOT/scripts -> $VF_STAGE/scripts)"
+    [ -d "$ROOT/ui" ] || fail "version_folders_member_missing: ui ($ROOT/ui is not there)"
+    cp -a "$ROOT/ui" "$VF_STAGE/ui" \
+      || fail "version_folders_member_failed: ui ($ROOT/ui -> $VF_STAGE/ui)"
+
+    # 3. SEAL it and MOVE THE POINTER - before any restart, so the restart runs a complete, immutable version.
+    bash "$ROOT/scripts/version-install.sh" --staging "$VF_STAGE" --commit "$EXPECTED_SHA" --install "$INSTALL_DIR" \
+      || fail "version_folders_seal_failed: the staged version could not be sealed or pointed at"
+
+    # 4. RESTART through the pointer. The installed program is now the new bytes, so upgrade.sh takes its own
+    #    "already the installed one" branch: it restarts and verifies, and its existing rollback is untouched - the
+    #    rollback BECOMING a pointer move is the next hunk, not a reason to change the swap today.
+    WA_UPGRADE_FORCE_REASON="$([ "${FORCE:-0}" = 1 ] && printf '%s' "${REASON:-}")" \
+      WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+      WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
+      bash "$UPGRADE" "$CANDIDATE" >> "$INSTALL_DIR/deploy-upgrade.log" 2>&1 \
+      || {
+        # THE ROLLBACK IS THE POINTER (Fable 25/11: rollback = a pointer move + a restart, zero operator steps).
+        # The restart failed with the pointer on the new version; move it back to the one that was running, so the
+        # NEXT restart - and the sentinel is always there to make one - brings the node up on the version that
+        # worked. No file is copied, nothing is reinstalled, and the deploy says exactly what it did.
+        if [ -n "$VF_PREV" ]; then
+          wa_version_point "$VF_PREV" >/dev/null \
+            && note "version folders: the restart failed, so current is back on $VF_PREV (a pointer move, no reinstall); the sentinel brings the node up on it"
+        fi
+        fail "version_folders_restart_failed: see $INSTALL_DIR/deploy-upgrade.log (current ${VF_PREV:+is back on $VF_PREV; }the new version $VF_ID is sealed and kept)"
+      }
+
+    # 5. THE SENTINEL moves last, only now that the node answered on the new version; a failed start leaves the
+    #    previous version supervising (scripts/lib/sentinel-move.sh).
+    if [ -n "$VF_PREV" ]; then
+      WA_SENTINEL_NODE_HEALTHY=1 wa_sentinel_move "$INSTALL_DIR" "$VF_SHARE/versions/$VF_PREV" || \
+        note "the sentinel did not move cleanly (see above); the node is on $VF_ID"
+    fi
+    note "version folders: current -> $VF_ID (previous ${VF_PREV:-none}); the deploy continues with its own checks"
+    ;;
+  *) fail "version_folders_switch: WA_VERSION_FOLDERS must be 0 or 1, not $WA_VERSION_FOLDERS" ;;
+esac
+
 echo "deploy: installing through upgrade.sh"
 wa_phase installing
 # No log to follow: the heartbeat keeps the row alive through upgrade.sh's wait for an idle node.
@@ -1803,7 +1971,7 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     BINDING_SCRIPT="$(cygpath -w "$BINDING_SCRIPT")"; BINDING_REPO="$(cygpath -w "$BINDING_REPO")"
   fi
   WA_RUNTIME_WORKTREE="$("$NODE_BIN" "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
-    || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE"
+    || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE$(wa_runtime_binding_moved_note "$BINDING_REPO" "$WA_RUNTIME_PREFLIGHT_HEAD" "$WA_RUNTIME_PREFLIGHT_MAIN")"
   # The same question asked again, now that the build is done, and compared with the preflight answer: the
   # binding must still be clean and equal to main, and it must still be the tree step 0c chose. Comparison
   # lives in scripts/lib/runtime-binding.sh so it can be tested without a build (review of 18/11, item 9).
@@ -2148,14 +2316,14 @@ record_installed() {
       if [ "${#record_commit}" != 40 ] || [ -n "$(printf '%s' "$record_commit" | tr -d '0123456789abcdef')" ]; then
         # ONE ARGUMENT (25/11, Fable's C): the label and the sentence were two arguments, so the record kept
         # the word "recording" and lost what went wrong. The label belongs in the sentence.
-        post_swap_problem "recording: commit=$record_commit is not a 40-hex id, so the record names it as unknown with record_id_why="
+        post_swap_problem "recording: commit=$record_commit is not a 40-hex commit id, so the record names it as unknown with record_id_why="
         record_id_why="commit=$record_commit is not a 40-hex commit id"
         record_commit=unknown
       fi
       # ...and the commit the BYTES are a build of, when that is another one (the digest fallback): it is
       # the id a later fast-path deploy reads back as binary_commit=, so it is held to the same rule.
       if [ -n "${BINARY_SOURCE_COMMIT:-}" ] && { [ "${#BINARY_SOURCE_COMMIT}" != 40 ] || [ -n "$(printf '%s' "$BINARY_SOURCE_COMMIT" | tr -d '0123456789abcdef')" ]; }; then
-        post_swap_problem "recording: binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex id, so binary_commit= is recorded as unknown with binary_id_why="
+        post_swap_problem "recording: binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id, so binary_commit= is recorded as unknown with binary_id_why="
         BINARY_ID_WHY="binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id"
         BINARY_SOURCE_COMMIT=""
       fi ;;
@@ -2266,9 +2434,17 @@ record_installed() {
   local recorded_commit
   recorded_commit="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
   case "$recorded_commit" in
-    ''|unknown) fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
+    # RECORDED, NOT REFUSED (review 27/11): this step is reached AFTER the swap and deploy.sh's own rule is a
+    # refusal BEFORE it and a recorded problem after it - a fail here leaves the new bytes running under the
+    # interim record, the state that rule exists to prevent. The why is already on the record (record_id_why)
+    # from the non-40-hex path above; this line names the consequence for a reader.
+    ''|unknown) post_swap_problem "recording: installed.txt names commit=unknown, which a staleness check reads as nothing to do" ;;
   esac
 }
+# EXPORTED: upgrade.sh runs as a CHILD process (bash "$UPGRADE") and its staging path calls this writer,
+# so "the same writer as the live path" is only true when the child inherits it. Without this the staging path
+# staged the program and then died on "record_installed: command not found".
+export -f record_installed
 
 # Record what is installed HERE, not only at the end. Every fact this record names - the exact commit, the
 # binary hash, the sentinel hash, the install directory - is already true at this point, and the steps that

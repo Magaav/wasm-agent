@@ -1,0 +1,9 @@
+{
+  "name": "stt",
+  "kind": "tool",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "The speech queue's wire layer (wa:stt): the envelope's encode/decode, the admission rule with its one rid ledger, the exact signature message, the two reply codecs and the sanitizer every log line passes through. It imports nothing: no kv, no audio store, no socket, no clock, no key.",
+  "capabilities": {},
+  "limits": {"memory_mb": 32}
+}

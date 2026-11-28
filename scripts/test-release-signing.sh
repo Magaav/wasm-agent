@@ -280,6 +280,10 @@ stub_release() { # <base> <sign: yes|no|flip|other-key>
   dir="$base"; mkdir -p "$dir"
   elf 62 "$dir/wa-$TRIPLE-$SHORT"            # 0x3e = EM_X86_64
   elf 62 "$dir/wa-sentinel-$TRIPLE-$SHORT"
+  # THE OTHER TWO MEMBERS, for the same reason: publish-node-binaries.sh:487-493 refuses a set without
+  # wa-term (the program) or wa-operations-supervisor, and reads them from the manifest's own columns.
+  elf 62 "$dir/wa-term-$TRIPLE-$SHORT"
+  elf 62 "$dir/wa-operations-supervisor-$TRIPLE-$SHORT"
   # AND THE ICON FONT, because a real set from this tree carries it (item 7, Victor 23/11):
   # scripts/publish-node-binaries.sh:412-413 copies assets/fonts/waIcons-Regular.ttf beside the binaries and
   # refuses a set without it (font_missing), and :713 puts it in $assets, so the release's SHA256SUMS names
@@ -296,10 +300,11 @@ stub_release() { # <base> <sign: yes|no|flip|other-key>
     printf 'codemode=embedded\n'
     # A '#'-prefixed header: every non-comment non-KEY=VALUE line is read as a target row, so a bare
     # header would be one more (unpinned) triple.
-    printf '#target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes\n'
-    printf '%s %s %s %s %s\n' "$TRIPLE" \
+    printf '#target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes\n'
+    printf '%s %s %s %s %s %s %s\n' "$TRIPLE" \
       "$(wa_release_sha256 "$dir/wa-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-$TRIPLE-$SHORT" | tr -d '[:space:]')" \
-      "$(wa_release_sha256 "$dir/wa-sentinel-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-sentinel-$TRIPLE-$SHORT" | tr -d '[:space:]')"
+      "$(wa_release_sha256 "$dir/wa-sentinel-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-sentinel-$TRIPLE-$SHORT" | tr -d '[:space:]')" \
+      "$(wa_release_sha256 "$dir/wa-term-$TRIPLE-$SHORT")" "$(wc -c < "$dir/wa-term-$TRIPLE-$SHORT" | tr -d '[:space:]')"
   } > "$dir/node-$SHORT.manifest"
   case "$mode" in
     yes) python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$dir" --key A >/dev/null 2>&1 ;;
@@ -392,6 +397,22 @@ contains "$out" "release_not_signed" "the refusal names the missing signature"
 printf '%s\n' "$out" | grep -qF 'release_unsigned' && fail "the refusal did not come from the publisher's signing step"
 ok
 [ -z "$(git ls-remote "$dropbox" 'refs/heads/artifacts/*')" ] || fail "an unsigned set reached the drop box"
+ok
+# LET THE PUBLISHER WRITE THE SUMS IT SHIPS, THEN SIGN THEM (27/11). MEASURED on main 04b7a38b: the fixture built a
+# set and signed it by hand, then the publisher RE-WROTE SHA256SUMS from the bytes it ships (it adds the
+# node-<sha>.manifest row) - so the signature was stale by construction and the case could never pass:
+#   release_signature_invalid: ...SHA256SUMS.sig is about <a>, the sums here are <b>
+#   publish-node-binaries: signature_stale: ... sign the new SHA256SUMS where the vault is ... (exit 6)
+# The real order is build -> sign -> ship, so the fixture follows it now instead of signing a set the publisher
+# then changes. This is the rot an unwired row grows: nothing ran scripts/test-release-sign.log on main.
+env ALLOW_UNPUSHED_COMMIT=1 ALLOW_UNPUSHED_REASON="a fixture release for scripts/test-release-signing.sh: its payloads are ELF headers this test writes, and no node installs them" \
+  WA_RELEASE_SIGN_DEFER=1 WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" WA_PUBLISH_RUNNER=true \
+  bash "$ROOT/scripts/publish-node-binaries.sh" --commit "$COMMIT" --out "$WORK/release-yes" \
+  --target "$TRIPLE" --from "$WORK/release-yes" >"$WORK/publish.log" 2>&1 \
+  || fail "the fixture publisher could not write the set: $(tail -3 "$WORK/publish.log" | tr '\n' ' ')"
+ok
+sign_with_vault "$WORK/release-yes/SHA256SUMS" "$WORK/release-yes/SHA256SUMS.sig" >/dev/null 2>&1 \
+  || fail "the vault could not sign the sums the publisher itself wrote"
 ok
 out="$(ship "$WORK/release-yes" "$dropbox" with)"; code=$?
 expect 0 "$code" "a signed set ships" "$out"

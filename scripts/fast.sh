@@ -56,6 +56,8 @@
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh" && wa_git_isolate
+# ^ EVERY ROW THIS RUNNER STARTS INHERITS A CLEAN GIT ENVIRONMENT (27/11): one owner clears it before the first row.
 jobs=${WA_FAST_JOBS:-}; all_rust=0; docker_mode=0; binary_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -78,6 +80,7 @@ done
 # a refusal (exit 2) that nothing downstream can count as a failed row. "Unknown is not yes": a machine whose
 # free space cannot be measured is refused too, by the same path.
 . "$ROOT/scripts/lib/temp-floor.sh"
+. "$ROOT/scripts/lib/fast-cargo-lock.sh"
 if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
   case "$tmp_note" in
     tmp_unknown:*) tmp_code=tmp_unknown ;;
@@ -163,6 +166,7 @@ export -f wa_fast_watchdog wa_watchdog_hung 2>/dev/null || true
 # OUTERMOST - env cannot exec a shell function, which is exit 127 on every row.
 . "$ROOT/scripts/lib/fast-row-exec.sh"
 export -f wa_fast_row_exec 2>/dev/null || true
+export -f wa_fast_row_seconds 2>/dev/null || true
 
 # ---- the binary -------------------------------------------------------------------------------------
 # Which `wa` the rows run is a fact about the verdicts, not a detail: see scripts/lib/fast-binary.sh for
@@ -231,6 +235,20 @@ case "${FAST_BIN_CODEMODE:-unknown}" in
   unknown) echo "fast: this binary does not report code-mode assets; a row that needs them says so by name" ;;
 esac
 bin="$FAST_BIN"
+# THE TERMINAL PROGRAM (mission wa-term-own-program, the last slice). The node DRAWS THROUGH IT: since
+# the in-process transcript was deleted, every `wa chat` in every row below attaches to `wa-term`, and a
+# row that cannot find it refuses by name instead of drawing. So it is built here, unconditionally,
+# beside the binary under test - the pair an install ships - and BEFORE any row runs: the Rust section
+# below builds it too, but that section is skipped when a change touches no Rust file, which would leave
+# every chat row on a stale or missing program.
+if [ "${WA_FAST_IN_DOCKER:-}" != 1 ] && command -v cargo >/dev/null 2>&1; then
+  program_dir=$(dirname "$bin")
+  if [ ! -x "$program_dir/wa-term" ] || [ "$program_dir/wa-term" -ot "$ROOT/rust/wa-term/src/transcript.rs" ]; then
+    echo "fast: building the terminal program (wa-term) beside $bin"
+    ( cd "$ROOT/rust" && WA_CODEMODE_ALLOW_EMPTY=1 CARGO_TARGET_DIR="$(dirname "$program_dir")" cargo build --release --offline -p wa-term --bin wa-term ) >"${work:-${TMPDIR:-/tmp}}/build-wa-term-early.log" 2>&1 \
+      || echo "fast: the terminal program did not build; the rows that need it say so by name (${work:-${TMPDIR:-/tmp}}/build-wa-term-early.log)"
+  fi
+fi
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 # Milliseconds, portably. `date +%s%N` is a GNU extension: on BSD/macOS it prints a literal 'N', and
 # inside $(( )) that is a shell error rather than a duration, so every row time in this file was wrong
@@ -373,7 +391,7 @@ wa_fast_keep_failed_logs() {
   # One file that answers "what failed" without opening a log per row.
   : > "$dir/failures.txt" 2>/dev/null || true
   while IFS= read -r log; do
-    { wa_fast_row_failure_line "$log"; last_line_of "$log"; } | while IFS= read -r named; do
+    { wa_fast_row_failure_lines "$log"; last_line_of "$log"; } | while IFS= read -r named; do
       [ -n "$named" ] && printf '%s: %s\n' "$(basename "$log")" "$named"
     done >> "$dir/failures.txt" 2>/dev/null || true
   done < <(wa_fast_row_logs ${failed_rows:-} | awk '!seen[$0]++')
@@ -395,7 +413,17 @@ wa_fast_row_failure_line() { # <log>
   [ -n "$line" ] || line=$(first_error_of "$log")
   printf '%s' "$line" | cut -c1-300
 }
-export -f wa_fast_row_failure_line wa_fast_row_logs 2>/dev/null || true
+# EVERY line the row marked as a failure, not the first one (refusals-that-help (g)): a row stops at its
+# first assertion, so `-m1` names the first assertion in the file rather than the one the test was written
+# for, and a suite that prints one line per case is reduced to one of them. Deduplicated, and bounded so a
+# looping row cannot flood the report.
+wa_fast_row_failure_lines() { # <log> [max]
+  local log=$1 max=${2:-8}
+  [ -s "$log" ] || return 0
+  grep -aE '^(FAIL|FAILED|not ok)( |:|$)|^[A-Za-z0-9_.-]+: FAILED|assertion failed|lua error:|AssertionError|panicked at' "$log" 2>/dev/null \
+    | tr '\t' ' ' | awk '!seen[$0]++' | head -n "$max" | cut -c1-300
+}
+export -f wa_fast_row_failure_line wa_fast_row_failure_lines wa_fast_row_logs 2>/dev/null || true
 trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
@@ -507,7 +535,11 @@ export -f record_row first_error_of
 # reason, which crosses the seam in `done-event.error` - a host-side record field. A node whose binary
 # predates it answers the suite with one named SKIP and returns in full once that node is installed;
 # nothing about the comparison is narrowed while it waits (scripts/test-codemode-component.lua).
-FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode svc-echo}
+FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode svc-echo tz outbox whatsapp-index email-outbox email-index}
+# `tz` and `outbox` (28/11, everything-is-a-component) are the two components whose ROWS fail when the
+# artifact is absent - scripts/test-tz-component.sh and scripts/test-outbox-component.sh assert that a node
+# with no such component answers "absent" rather than answering in-process, which is the whole point of the
+# move. Without them in this list those rows have nothing to build and would report the failure as a red.
 # `svc-echo` (11/11) is the service-component fixture: `scripts/test-services-cli.lua` runs the whole
 # start/status/stop/enable/disable lifecycle through the operator's `wa services` door, and it used to be
 # a row whose lifecycle half silently skipped because no service artifact was ever built for it. The
@@ -650,7 +682,7 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$ms" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
 }
-export -f lua_run run_lua native wa_fast_row_exec wa_fast_watchdog
+export -f lua_run run_lua native wa_fast_row_exec wa_fast_row_seconds wa_fast_watchdog
 xargs -P "$jobs" -I{} bash -c 'run_lua "$1"' _ {} < "$work/lua.list" > "$work/lua.tsv"
 # The rows the machine could not run: retried once, one at a time, AFTER the batch, so the retry is
 # genuinely alone on the machine. A row that passes then is a pass (reported as one); a row that still
@@ -678,9 +710,48 @@ if [ -n "$envrows" ]; then
 fi
 lua_total=$(wc -l < "$work/lua.list"); lua_fail=$(awk -F'\t' '$1!=0' "$work/lua.tsv" | wc -l)
 envleft=$(awk -F'\t' '$1!=0 && $5=="environment"' "$work/lua.tsv" | wc -l)
+# (gate-stays-fast 1) The per-row cost table needs yesterday's rows too: the git-path file above is
+# OVERWRITTEN by every run, and main-health keeps only the latest record, so the trend over twenty runs
+# existed nowhere. Each run also archives its own lua.tsv, named by commit and time, and every fifth run
+# is kept: cheap, bounded, and enough for a 20-run trend (scripts/rows-cost.sh reads it).
 [ -n "$timings" ] && cp "$work/lua.tsv" "$timings" 2>/dev/null || true
+if [ -s "$work/lua.tsv" ]; then
+  rows_dir=${WA_ROWS_ARCHIVE:-$HOME/.wasm-agent/main-health/rows}
+  mkdir -p "$rows_dir" 2>/dev/null && {
+    keep="$rows_dir/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD 2>/dev/null || echo nosha).tsv"
+    cp "$work/lua.tsv" "$keep" 2>/dev/null || true
+    ls -1t "$rows_dir"/*.tsv 2>/dev/null | tail -n +41 | xargs -r rm -f
+  }
+fi
 ran=$((ran + lua_total)); fails=$((fails + lua_fail));
 awk -F'\t' '$1!=0{ if ($5=="hung") printf "FAIL lua %s (hung): %s\n",$3,$4; else if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
+# refusals-that-help (e): the one line above names the row and its first error. A mission then re-runs the
+# row by hand to learn the rest, so each failed row also gets: EVERY assertion the row printed (not the
+# first, not the last), the log this run kept for it, and whether the verdict is the first attempt or a
+# retry (a row the machine refused once and then ran is a different fact from one that ran and failed).
+awk -F'\t' '$1!=0 && $5!="hung" && $5!="environment" {print $3}' "$work/lua.tsv" | while IFS= read -r failed_row; do
+  [ -n "$failed_row" ] || continue
+  log="$work/logs/$(basename "$failed_row").log"
+  retrylog="$work/logs/$(basename "$failed_row").retry.log"
+  attempts="1 (first run)"
+  [ -f "$retrylog" ] && attempts="2 (the first attempt was refused by the machine: see .retry.log)"
+  echo "fast:   $failed_row"
+  echo "fast:     attempt: $attempts"
+  if [ -f "$log" ]; then
+    echo "fast:     log: $log"
+    wa_fast_row_failure_lines "$log" 5 | while IFS= read -r line; do
+      echo "fast:     failed: $(printf '%s' "$line" | cut -c1-200)"
+    done
+    n=$(wa_fast_row_failure_lines "$log" 100 | grep -c . )
+    [ "${n:-0}" -gt 5 ] && echo "fast:     ($n matching lines in the log; the five above are the first)"
+  else
+    echo "fast:     log: (none kept at $log)"
+  fi
+done
+
+# Which tree and which binary produced the verdicts below: a report that cannot say this is not a report
+# (refusals-that-help (e)). The binary is the one every Lua row in this run was given.
+echo "fast: tree $(git rev-parse --short HEAD 2>/dev/null || echo unknown) binary ${FAST_LUA_BIN:-${WA_BIN:-unknown}}"
 echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(wa_fast_row_skips | grep -c . ) excluded: scripts/fast-path.exclude)"
 [ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
 # A hung row is neither a pass nor a verdict on the code, and it is counted apart from both: its process
@@ -758,6 +829,21 @@ else
   fi
   base=$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD)
   changed=$( { git diff --name-only "$base" -- rust; git diff --name-only -- rust; git diff --name-only --cached -- rust; } | sort -u)
+  # THE LOCK AND THE MEMBERS GO TOGETHER (27/11, P0). 26dcbb41 deleted `members = [...]` from rust/Cargo.toml
+  # and nothing in this path noticed: with no members cargo wants the lock REWRITTEN, every `--locked` build
+  # refuses ("cannot update the lock file ... because --locked was passed"), and it surfaced only when the
+  # release publish failed hours later. The check is one `cargo metadata` and it names the cause instead.
+  if grep -qE '^rust/(Cargo\.toml|Cargo\.lock|[^/]+/Cargo\.toml)$' <<< "$changed"; then
+    s_ms=$(fast_now_ms)
+    if locked_out=$(wa_cargo_lock_matches "$PWD"); then
+      record_row pass rust 'rust: the lock matches the members' 0 "$(( $(fast_now_ms) - s_ms ))" 0 ''
+      ran=$((ran + 1))
+    else
+      record_row fail rust 'rust: the lock matches the members' 1 "$(( $(fast_now_ms) - s_ms ))" 0 \
+        "rust/Cargo.toml (or a member's Cargo.toml) changed and the lock no longer matches it: cargo --locked says \`$(printf '%s' "$locked_out" | tr '\n' ' ' | cut -c1-200)\`. Run \`cargo metadata --offline\` (or \`cargo update --workspace --offline\`) in rust/ and commit rust/Cargo.lock with this change."
+      ran=$((ran + 1)); fails=$((fails + 1))
+    fi
+  fi
   crates=""
   # The crates of the host split (docs/KERNEL.md) are listed by their directory, so a change under
   # rust/wa-term/ tests wa-term instead of rebuilding and testing the whole binary.
@@ -815,6 +901,17 @@ else
     echo "SKIP: the Rust rows need a scratch HOME and mktemp failed"
     record_row skip rust 'rust rows' 0 0 0 'mktemp failed: the Rust rows need a scratch HOME and the operator own is refused'
     skipped=$((skipped + 1))
+  fi
+  # THE TERMINAL PROGRAM the wire rows attach to (mission wa-term-own-program, slice 1). It is a binary
+  # of its own - that is what the move buys - so nothing here builds it by accident: wasm-agent's
+  # rust/wa-capabilities tests/term_remote.rs and scripts/test-term-remote-pty.mjs both drive the REAL
+  # `wa-term`, and both FAIL by name when it is missing rather than comparing nothing. Built into the
+  # same target dir the crate loop and the pty rows use, so the pair (`wa` and `wa-term`) is the one
+  # this tree makes.
+  if [ -n "$rust_home" ]; then
+    pstart=$(fast_now_ms); program_rc=0
+    HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(wa_build_jobs)}" wa_build_host_lock cargo build --release --offline --manifest-path rust/Cargo.toml -p wa-term --bin wa-term > "$work/build-wa-term-program.log" 2>&1 || program_rc=$?
+    wa_build_time_record crate 'wa-term (program)' "$(( $(fast_now_ms) - pstart ))" "$(wa_build_time_note "$work/build-wa-term-program.log" "$program_rc")"
   fi
   for crate in $( [ -n "$rust_home" ] && printf '%s' "$crates" ); do
     # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
@@ -922,6 +1019,8 @@ WA_BIN="$bin" check features-registry node scripts/check-features-registry.mjs
 # verb with NO `--db` and NO lua root, from a directory that is not a checkout, against the same
 # binary every other check row here uses.
 WA_BIN="$bin" check features-canary-installed bash scripts/test-features-canary-installed.sh
+WA_BIN="$bin" check tz-component bash scripts/test-tz-component.sh
+WA_BIN="$bin" check outbox-component bash scripts/test-outbox-component.sh
 if command -v node >/dev/null 2>&1; then
   # Which binary the rows run (11/11): the tree's own and named in the first line, or a named refusal.
   # A lane whose rows graded the canonical checkout's node instead of its own tree was green and wrong.
@@ -939,6 +1038,27 @@ if command -v node >/dev/null 2>&1; then
   # named here by its path (19-20/11: three of ten hidden tests did not discriminate, and every
   # review of that round carried a test MUST). Self-contained: a fixture repository, no binary.
   check discrimination node scripts/test-discriminates-test.mjs
+  # THE LANDING QUEUE ITSELF (hunk 1, 27/11): its journal is append-only and its submit is idempotent, and
+  # both facts are cheap shelf rows on a temp file - no node, no tree, no push.
+  check queue-journal node scripts/test-queue-journal.mjs
+  check queue-submit node scripts/test-queue-submit.mjs
+  # THE QUEUE TWO DECISIONS ABOUT A PERSON (hunk 2): what the path policy stops, and that an approval is
+  # for exactly (branch, sha, policy-hash) - a new sha voids it, and only the review lane may write one.
+  check queue-policy node scripts/test-queue-policy.mjs
+  check queue-approval node scripts/test-queue-approval.mjs
+  # THE RUNNER STATE MACHINE (hunk 3): a crash mid-landing resumes from main, and the order is priority then
+  # the id. Neither row pushes anything - the steps are injected - so both are shelf rows.
+  check queue-resume node scripts/test-queue-resume.mjs
+  check queue-order node scripts/test-queue-order.mjs
+  # THE DOOR IN THE FILE EVERY CALLER ALREADY KNOWS (hunk 4): submit queues and lands nothing, the policy
+  # applies at the door, and `land` is still there until hunk 5 retires it on purpose.
+  check queue-door node scripts/test-queue-door.mjs
+  # THE REJECTION REACHES ITS WORKER (hunk 5): the rework file, the wake through the carrier decision 4
+  # keeps (injected here), and the third rejection for a mission escalating in one line.
+  check queue-rework node scripts/test-queue-rework.mjs
+  # THE SHA THAT WAS READ IS THE SHA THAT LANDS: the queue pins a ref at the request s sha and hands the
+  # lander THAT, so a branch rewritten after submit is rejected stale_sha instead of landing a moved tip.
+  check queue-pin node scripts/test-queue-pin.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
   # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...
@@ -1084,6 +1204,15 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # Same shape as the fence card above it: the REAL binary in a private tmux pty against a local
   # SSE fixture that plays the model, and a failure (never a pass) when the fixture served nothing.
   WA_BIN="$bin" check diff-card-pty node scripts/test-diff-card-pty.mjs
+  # A CHANGED LINE IS READABLE ON ITS BAND (item 3 of the same brief): reads the escape sequences a real
+  # terminal received and measures every glyph of a changed row against the band under it - 4.5:1 for
+  # text, 3:1 for the frame glyph - including a comment, the darkest colour a body row can carry, and it
+  # re-measures once the card is no longer the newest block.
+  WA_BIN="$bin" check diff-card-contrast-pty node scripts/test-diff-card-contrast-pty.mjs
+  # THE COPY NOTICE IS A BALLOON (q99, Victor 23/11): the notice reserves rows at the top, pushes the
+  # chat down and gives the space back. A mouse press on a fence icon opens it, which only a real pty
+  # with SGR 1006 can exercise - wired here 27/11, it landed declared nowhere.
+  WA_BIN="$bin" check copied-notice-pty node scripts/test-copied-notice-pty.mjs
   # The TWO BLOCKS OF change/tui-reflow-blocks FOLLOW THE WINDOW (Victor 22/11): a ```bash card and a
   # ```js run block, drawn at 120, 60, 120 and 60 columns in a real pty. Each is whole and unmarked where
   # it fits, cut with ONE mark in the left gutter of the row the line goes on where it does not (the run
@@ -1098,6 +1227,17 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # operation row is read back too, so a fast row drawn without the fresh views is not a pass. The real
   # binary in a private tmux pty, as the rows above.
   WA_BIN="$bin" check chat-start-pty node scripts/test-chat-start-pty.mjs
+  # /mcp and `wa mcp list` in a real chat, against four peers that accept and never answer: the chat may not
+  # pay a peer deadline before the list draws, and the pipe may not ask one at all (mission mcp-list-is-fast,
+  # 25/11). Its own wrapper (scripts/test-mcp-list-pty.sh) is the same measurement for a row runner that takes
+  # .sh rows; this line is where the fast path runs it.
+  WA_BIN="$bin" check mcp-list-pty node scripts/test-mcp-list-pty.mjs
+  # THE TERMINAL PROGRAM DRAWS THE SAME SCREEN (mission wa-term-own-program, slice 1): the same fixture
+  # chat twice in a private tmux pty, once on the in-process path and once across `WA_TERM_REMOTE=1` to
+  # `wa-term`, with the transcript rows compared byte for byte and the program's own spawn mark proving
+  # which path ran - plus the two named refusals (`term_switch_invalid`, `term_program_missing`) on
+  # screen instead of a silent fall back. It SKIPs by name when the program is not beside `$bin`.
+  WA_BIN="$bin" check term-remote-pty node scripts/test-term-remote-pty.mjs
   # ESC ENDS A RUN AT ONCE (change/esc-stops-now, items 1-4): the real binary in a private tmux pty against
   # a fixture that is both the rendezvous and the provider, pressing Esc in each of the five ways a run can
   # wait - before response headers (30 s hold), mid-stream after a 10 s silence, during a local shell, during
@@ -1140,12 +1280,55 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # `/status` is typed into it, and the screen must show the bar with its age and never "limits
   # unavailable", while the mid-run snapshot asks the provider nothing. On the base the age row and the
   # cost row both fail.
+  # THE LIMITS DOOR SECURITY (26/11): the wrapper owns two listeners (a provider and a redirect
+  # origin), the scratch HOME and the key; its Lua half is excluded from the bare loop for that reason.
+  WA_BIN="$bin" check status-limits-security node scripts/test-status-limits-security.mjs
   WA_BIN="$bin" check status-midrun-pty node scripts/test-status-midrun-pty.mjs
+# A TIP THAT IS ONLY PUBLISHED MUST STILL BE GRADED (28/11): the health loop read "no release" because its digest
+# scan ran at the 20 s default on a cold stage, and the bundle it would have used carries no wa-term and no
+# wa-operations-supervisor. This row is the guard on the bound, the named step and the built sidecars.
+check health-graded bash scripts/test-health-graded.sh
+# A TIP YOUNGER THAN ITS OWN PUBLISH MUST BE GRADED (28/11): the loop waits for the publish and names the bundle.
+check health-settles bash scripts/test-health-settles.sh
+# EVERY TIP ENDS IN ONE LINE (28/11): green, red, or NO VERDICT with SIGTERM, budget or LOCK HOLDER named.
+check health-verdict bash scripts/test-health-verdict.sh
+# MAIN-HEALTH GRADES THE TIP IT IS TOLD (28/11): the loop said "grading 12379703" while the suite graded the
+# checkout's stale local main (9eaa1dbc). Fixture repo with a stale main and a newer origin/main, fake fast path.
+check main-health-grades-the-tip bash scripts/test-main-health-grades-the-tip.sh
+# A FORGOTTEN SWAP IS A LINE, NOT AN AFTERNOON (28/11): the loop runs a copy under _orch that a human swaps, and a
+# stale lib made every tip print NOT GRADED while the fix sat landed in main. This row exercises the self-check.
+check health-swap-visible bash scripts/test-health-swap-visible.sh
+# A STATUS OF A RUNNING OPERATION WAITS (28/11, waiting-costs-no-turns): measured 30 ms before, so a session spent a whole
+# model turn per poll; the ledger says 131 of 35,172 rounds over 7 days were exactly that.
+check operation-status-waits env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-operation-status-waits.lua" "$bin" --db "$work/operation-status-waits.db"
+# A SENTINEL TOLD WHERE ITS HOME IS MUST NEVER OPEN THE OPERATOR ONE (28/11, P0): with WASM_AGENT_HOME set it
+# reports that home, writes its tree there, and leaves HOME alone.
+check sentinel-home bash scripts/test-sentinel-home.sh
+# THE WATCHER LINE ASKS THE SENTINEL (28/11): `wa status` said "not running" while `wa-sentinel status` said up
+# with a pid - two answers to one question. This row needs no real sentinel: a fixture executable answers.
+check status-watcher-line env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-status-watcher-line.lua" "$bin" --db "$work/status-watcher-line.db"
+# THE REPORT CITED A QUERY THAT DID NOT EXIST (27/11): docs/missions/reports/waiting-costs-no-turns.md names
+# wct-query.sql as its after-measurement, and the file was never in the tree. The row checks the query exists,
+# parses, still counts the four numbers the before was taken with, and answers a real 1-day window.
+check wct-query bash scripts/test-wct-query.sh
+# THE WAITING QUERY ANSWERS A SHORT WINDOW TOO (28/11): the mission after is a question about hours, and two defects
+# were found by asking it (a repeated cursor is the end of the ledger; a fractional day broke the header).
+check wct-waiting bash scripts/test-wct-waiting.sh
+# THE RESET TIME HAS TO SURVIVE THE PANEL (/status, Victor 27/11): a limits row is measured at the room a console
+# panel really gives (PANEL_ROOM cells after the box chrome) and must still say when it resets - the text is the LAST
+# field on the row, so it is the first thing a narrow panel cuts.
+check status-resets env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-status-resets.lua" "$bin" --db "$work/status-resets.db"
+  WA_BIN="$bin" check status-limits-pty node scripts/test-status-limits-pty.mjs
   # A COMMAND A RUN BLOCK RAN SAYS WHICH FILES IT CHANGED (chat-view-round-2, item 2): a scratch git
   # work tree, a run block whose `tools.bash` CREATES a file, and the card that names it - the base
   # emitted nothing for a script's command (the watcher sat after the managed-operation return) and
   # `git status -uno` hid every created file even on the direct path.
   WA_BIN="$bin" check bash-changes-pty node scripts/test-bash-changes-pty.mjs
+  # /sessions SWITCHES THREADS IN ONE PROCESS (sessions-is-a-balloon, Victor + Fable 26/11): the real
+  # binary in a private tmux pty, two seeded sessions and a fixture provider, and the ledger read by a
+  # SECOND process - the turn after the switch lands in the new session and not the old one, going back
+  # reverses it, and the provider key is in no file.
+  WA_BIN="$bin" check sessions-switch-pty node scripts/test-sessions-switch-pty.mjs
   # THE WINDOW'S CHROME (change/tui-chrome, Victor 21/11): the input box grows to max(3, 30% of the
   # window), scrolls with the transcript's scrollbar and takes the wheel when the pointer is over it.
   # And a fenced card's copy icon sits after its corner, where a click on it still copies the content.
@@ -1362,6 +1545,28 @@ check wit-lint bash scripts/wit-lint.sh
 # naming hooks.json, a doc describing a RETURN value), the baseline accepts the recorded holes, and
 # the marker alone turns a polling func green. Seconds, no toolchain.
 check wit-lint-selftest bash scripts/test-wit-lint.sh
+# ASYNC-BORN INTERFACES (Victor 26/11): every NEW or MOVED wit interface is async - a future per result, a stream
+# for progress, cancellation and backpressure declared - and a sync export passes only with a reason line in the
+# file. Existing worlds are grandfathered by an explicit list (wit/async-grandfather.txt), never by a pattern.
+# The land path needs no separate hook: scripts/landing-queue.mjs defaults to `bash scripts/fast.sh` (its line 227),
+# so these two are what the landing gate runs. Proved by running them with the same argv fast.sh uses.
+check wit-async node scripts/lint-wit-async.mjs
+check wit-async-selftest bash scripts/test-wit-async-lint.sh
+# ONE MODEL CALL IS ONE 'run' EVENT (27/11): the row counts the ledger for a single run call and refuses a second
+# nested row. It caught a real duplicate (two starts, same arguments_hash) that the structural reading had argued away.
+check run-logged-once env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-run-logged-once.lua" "$bin" --db "$work/run-logged-once.db"
+# ONE OWNER FOR HOW AN UPDATE IS SHOWN (law 17, 27/11): the four verdict sentences verbatim, both surfaces calling the
+# owner, and NO second author anywhere in lua/core. It caught a real defect on the way in - `gsub("^node-", "")` in Lua
+# strips only "nod" ( `-` is a lazy quantifier), so the last line said `updated to v0.1.2 (e-82f578)`.
+check update-one-owner env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-update-one-owner.lua" "$bin" --db "$work/update-one-owner.db"
+# THE TURN NOTE READS BOTH SHAPES (27/11, turn-note-is-lean): old notes (what hurt/what it buys/focus) and the lean ones
+# (tool/cost/hurt), plus the silent case - no block, no note.
+check turn-note-shapes env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-turn-note-shapes.lua" "$bin" --db "$work/turn-note-shapes.db"
+# SIGNED RELEASES ON THE FAST PATH (27/11): scripts/test-release-sign.lua shipped from 5185436b and was wired into no
+# runner, so nothing judged it and it rotted - by the time this line existed the fixture signed a set the publisher
+# then rewrote (release_signature_invalid ... signature_stale). It is wired here, and green, so the next drift is a
+# red row instead of a surprise at a release.
+check release-sign env WASM_AGENT_LUA_ROOT="$PWD" WA_FAST_BIN="$bin" WA_SCRIPT="$PWD/scripts/test-release-sign.lua" "$bin" --db "$work/release-sign.db"
 # The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
 # manifest not at all), a win line and the flag for the modules without one, a ledger's seconds, a
 # co-change pair over 70% and a decision inside the 30-day / 100-commit cooldown - plus the exit code
@@ -1391,6 +1596,20 @@ fi
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.
+# ---- the time budget (gate-stays-fast 2) --------------------------------------------------------------
+# Victor's number: the full suite on a quiet machine finishes inside ten minutes. A budget nobody checks is
+# a wish, so passing it FAILS the run - naming the rows that grew, measured against the archived runs this
+# runner keeps (scripts/rows-cost.sh). WA_SUITE_BUDGET_S overrides the number; a quiet machine is the only
+# place the verdict means anything, which is why the line says the seconds it measured.
+BUDGET_S=${WA_SUITE_BUDGET_S:-600}
+rows_total_ms=$(awk -F'\t' '$2 ~ /^[0-9]+$/ {s+=$2} END {print s+0}' "$work/lua.tsv" 2>/dev/null)
+if [ "${rows_total_ms:-0}" -gt $((BUDGET_S * 1000)) ]; then
+  fails=$((fails + 1))
+  echo "FAIL suite-budget (${rows_total_ms}ms of Lua rows): past the ${BUDGET_S}s budget for the full suite"
+  bash "$ROOT/scripts/rows-cost.sh" --rows 10 2>/dev/null | sed -n '/slowest rows/,/^$/p' | sed 's/^/fast: /'
+  bash "$ROOT/scripts/rows-cost.sh" --rows 10 2>/dev/null | sed -n '/got slower/,/^$/p' | sed 's/^/fast: /'
+fi
+
 if [ "$fails" = 0 ]; then
   exit_code=0
   verdict_line="fast path ok ($ran checks, $skipped skipped, ${elapsed}s)"

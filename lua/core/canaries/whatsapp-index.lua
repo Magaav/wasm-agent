@@ -14,7 +14,8 @@ local M = { mode = 'read' }
 
 -- One read, as the numbers this canary judges: only counts and times leave here, never an id or text.
 local function read_once(chat)
-  local answered, raw = pcall(host.whatsapp_read, json.encode({ chat = chat, limit = 5 }))
+  local serving_lib = dofile('lua/core/canaries/serving.lua')
+  local answered, raw = serving_lib.ask('whatsapp_read', { chat = chat, limit = 5 })
   if not answered then return { ok = false, stage = 'read_unreadable', detail = 'the read refused' } end
   local answer = type(raw) == 'string' and json.decode(raw) or raw
   if type(answer) ~= 'table' then return { ok = false, stage = 'read_unreadable', detail = 'the read answered nothing' } end
@@ -45,15 +46,29 @@ end
 
 function M.run()
   local ran, ok, stage, detail = guard.no_send(function()
-    if type(host.whatsapp_contacts) ~= 'function' or type(host.whatsapp_search) ~= 'function' then
-      return false, 'capability_missing', 'this binary has no WhatsApp query capability'
+    -- THE SERVING NODE ANSWERS (26/11, Fable item 2b): see lua/core/canaries/serving.lua.
+    local serving = dofile('lua/core/canaries/serving.lua')
+    local answered, contacts, how = serving.ask('whatsapp_contacts', {})
+    -- A QUEUED ANSWER IS NOT A BREAK (26/11, Fable item c, kept through the merge): a node that does not hold the
+    -- account answers state = queued while the owner is still being asked. That is not_proven; every other
+    -- refusal keeps the FAIL r4 made it.
+    if type(contacts) == "table" and tostring(contacts.state or "") == "queued" then
+      return "not_proven", "queued", "the account question is still queued on the serving node"
     end
-    local answered, raw = pcall(host.whatsapp_contacts, '{}')
-    if not answered then return false, 'index_unreadable', tostring(raw) end
-    local contacts = type(raw) == 'string' and json.decode(raw) or raw
+    if not answered then return false, tostring(contacts.error or 'index_unreadable'), serving.detail(contacts, tostring(contacts.detail or '')) end
     if type(contacts) ~= 'table' then return false, 'index_unreadable', 'the contacts query answered nothing' end
     local list = contacts.chats or contacts.contacts or {}
-    if #list == 0 then return false, 'index_empty', 'the index answers, but knows no chat' end
+    -- A REFUSAL IS NOT AN EMPTY INDEX (26/11, openclaw). A node that runs no wa-whatsapp component answers
+    -- whatsapp_component_absent (with the state and the owner) BEFORE any index is touched; reading that as an
+    -- empty index turns a stopped component into an account with no data - the one thing a canary must not do.
+    if type(contacts) == 'table' and contacts.error then
+      return false, tostring(contacts.error),
+      'the query was REFUSED, not answered: ' .. tostring(contacts.error)
+        .. (contacts.state and (' (state ' .. tostring(contacts.state) .. ')') or '')
+        .. (contacts.owner and ('; the account is served by ' .. tostring(contacts.owner)) or '')
+    end
+    -- RULING (c), 25/11: an account present with no chat indexed is no_data, not a broken feature.
+    if #list == 0 then return 'not_proven', 'no_data', 'no_data: no chat in the index' end
     -- The read contract of 23/11, on the node that holds the account: a read says how fresh it is
     -- (as_of), in which order (order), whether the writer is behind (index) - and two reads in a row
     -- never go backwards. Two read-only queries, no id and no message text in this report.

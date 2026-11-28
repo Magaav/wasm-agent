@@ -105,9 +105,32 @@ pub struct Recognition {
     started: Instant,
 }
 
+
+/// A `State` for the rows of the worlds served from this crate (`terminal_host`, `process_world`): everything a call
+/// touches, and nothing that needs an engine. It lives HERE because `State`'s fields are private to this module.
+#[cfg(test)]
+pub(crate) fn state_for_tests(name: &str) -> State {
+    State {
+        wasi: WasiCtxBuilder::new().build(),
+        table: ResourceTable::new(),
+        limits: StoreLimitsBuilder::new().build(),
+        net: Vec::new(),
+        shared: Arc::new(Shared::default()),
+        kv: GuestKv::new(KvStore::new(None)),
+        log: None,
+        secrets: Default::default(),
+        stt: false,
+        ocr: false,
+        config: None,
+        dirs: Vec::new(),
+        name: name.into(),
+        instance: format!("{name}#1"),
+    }
+}
+
 pub struct State {
     wasi: WasiCtx,
-    table: ResourceTable,
+    pub(crate) table: ResourceTable,
     limits: StoreLimits,
     net: Vec<String>,
     shared: Arc<Shared>,
@@ -124,6 +147,10 @@ pub struct State {
     /// object), for `wa:kernel/config` (`wasi_ext_host.rs`). `None` means the interface is not
     /// linked; a value is data, not a capability - every read is `config.read`.
     pub(crate) config: Option<String>,
+    /// The directories this component was granted, kept beside the preopens they became. `wa:kernel/media`
+    /// takes guest paths and has to answer in host paths: the grant is the only thing that can map one to the
+    /// other, and a path it cannot map is refused (`outside_the_grant` / `no_such_grant`), never resolved.
+    pub(crate) dirs: Vec<crate::components::DirGrant>,
     /// The instance token (`name#generation`): the subject this instance's queue grants and bus
     /// subscriptions are keyed by, so a replacement can revoke them without touching the winner.
     pub(crate) instance: String,
@@ -841,6 +868,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         stt,
         ocr,
         config: scope.config.clone(),
+        dirs: grant.dirs.clone(),
         instance: crate::services::instance_token(shared, &installed.name),
         name: installed.name.clone(),
     };
@@ -884,6 +912,9 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         // The OCR reader (`wa:kernel/vision`): served to whoever imports it, never required of a
         // guest (`docs/WHATSAPP-OCR.md`).
         crate::vision_host::link(&mut linker),
+        crate::terminal_host::link(&mut linker),
+        crate::process_world::link(&mut linker),
+        crate::media_host::link(&mut linker),
         wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
         // The cooperative hot swap (`wit/kernel-v2/kernel.wit`, `interface drain`): linked for
@@ -1132,6 +1163,9 @@ mod tests {
             wa::kernel::http::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
             crate::vision_host::link(&mut linker),
+        crate::terminal_host::link(&mut linker),
+        crate::process_world::link(&mut linker),
+        crate::media_host::link(&mut linker),
             wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
             drain_signal::wa::kernel::drain::add_to_linker::<State, State>(&mut linker, |s| s),
@@ -1150,6 +1184,7 @@ mod tests {
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new().memory_size(256 << 20).build(),
             net: Vec::new(),
+            dirs: Vec::new(),
             shared: Arc::new(Shared::default()),
             kv: GuestKv::new(KvStore::new(None)),
             log: None,
@@ -1202,7 +1237,6 @@ mod tests {
     #[test]
     fn the_v2_call_sites_charge_what_the_v1_runner_charges() {
         let root = std::env::temp_dir().join(format!("wa-v2-governance-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("audit")).unwrap();
         std::fs::write(
             root.join("policy.json"),
@@ -1391,8 +1425,7 @@ mod tests {
         fn filesystem_is_the_granted_preopen_and_nothing_else() {
             let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let root = std::env::temp_dir().join(format!("wa-wasi-fs-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(root.join("data")).unwrap();
+                std::fs::create_dir_all(root.join("data")).unwrap();
             std::fs::write(root.join("data").join("note.txt"), "hello from the preopen").unwrap();
             // The file a `../` escape would reach, if the preopen leaked one level up.
             std::fs::write(root.join("escape.txt"), "outside").unwrap();
@@ -1428,8 +1461,7 @@ mod tests {
             let outcome = refused("svc-wasi-fs", "wasi_import_", Duration::from_secs(10));
             assert_eq!(outcome, "wasi_import_import_not_granted:wasi:filesystem/types@0.3.0", "{outcome}");
             stop("svc-wasi-fs");
-            let _ = std::fs::remove_dir_all(&root);
-        }
+            }
 
         /// `wasi:sockets`: an outbound connect to the granted address works, another host is refused
         /// by the host's address check, and a name lookup has its own `dns` grant.
@@ -1519,4 +1551,69 @@ mod tests {
         let engine = engine().expect("engine");
         assert!(engine.precompile_component(b"\0asm\x0d\0\x01\0not a component").is_err());
     }
+
+    /// `wa:kernel/media`, end to end through the runner and a real guest.
+    ///
+    /// The guest is `svc-media` (`rust/components/svc-media`): it asks the capability to describe a file, take two
+    /// stills and extract the track, then asks for a path that walks out of its grant. Everything asserted here is
+    /// read from ITS LOG, not from a return value - a kernel that answered correctly and told the guest something
+    /// else would pass a return-value test and fail this one.
+    // It passes end to end: probe, two stills, the track, the refusal, and three files on disk in the granted
+    // directory. It took a day to get here because the fixture asked the capability to write into `/out`, which
+    // was NOT one of the directories its grant named - so the nested component had no preopen for that guest path
+    // and the write answered WASI ENOENT (-44), which reads like a media bug and is a missing grant.
+    #[test]
+    fn fixture_media_describes_stills_tracks_and_refuses_a_path_outside_the_grant() {
+        use crate::services::{logs, start, status, stop, support};
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `media` beside `svc-media`: the capability is the installed component, and `install` copies both into
+        // the directory the runner resolves WA_COMPONENTS_DIR to.
+        if support::install("v2-media", &["svc-media", "media"]).is_none() {
+            eprintln!("skipped: svc-media/media fixtures not installed (WA_TEST_SERVICE_DIR)");
+            return;
+        }
+        let Ok(clip) = std::env::var("WA_MEDIA_TEST_FILE") else {
+            eprintln!("skipped: set WA_MEDIA_TEST_FILE to a container to run this");
+            return;
+        };
+        // The RUNNER owns the directories: a manifest that declares `capabilities.dirs` gets host dirs beside
+        // the installed components (`svc-media.<leaf>`), and passing host paths of my own as well would preopen
+        // the same guest path twice - which is how the stills first landed in the wrong place. So the clip goes
+        // where the runner looks, and the assertions read from where it writes.
+        let components = std::path::PathBuf::from(std::env::var("WA_COMPONENTS_DIR").expect("components dir"));
+        let inside = components.join("svc-media.in");
+        let outside = components.join("svc-media.media-out");
+        std::fs::create_dir_all(&inside).expect("in dir");
+        std::fs::create_dir_all(&outside).expect("out dir");
+        for entry in std::fs::read_dir(&outside).into_iter().flatten().flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+        std::fs::copy(&clip, inside.join("clip.mp4")).expect("copy the clip into the grant");
+        // A SCRATCH HOME, never the node's: `WA_GRANT_POLICY` names a file that does not exist, which is the
+        // documented manifest mode - the component's own manifest grant is then the only gate. Pointing a test
+        // at ~/.wasm-agent/policy.json would put the operator's live policy in the path of a test run.
+        std::env::set_var("WA_GRANT_POLICY", components.join("no-policy-here.json"));
+
+        let started = start(&serde_json::json!({"name": "svc-media"}));
+        assert_eq!(started["ok"], serde_json::json!(true), "start: {started}");
+
+        let log = support::wait_for_log("svc-media", "media refused=", std::time::Duration::from_secs(180));
+        let stopped = stop("svc-media");
+        let _ = status(None);
+        let _ = logs("svc-media", 16 << 10);
+
+        assert!(log.contains("media probe=mov"), "the container is a mov: {log}");
+        assert!(log.contains("media stills=2 bytes="), "two stills were written: {log}");
+        assert!(log.contains("media audio bytes="), "the track was written: {log}");
+        assert!(
+            log.contains("media refused=") && !log.contains("refused=NOT-REFUSED"),
+            "a path outside the grant is refused, not resolved: {log}"
+        );
+        // The stills and the track are on disk in the granted directory, not merely reported.
+        let written = std::fs::read_dir(&outside).expect("out dir").count();
+        assert!(written >= 3, "two stills and a track are in the out-dir, found {written}: {log}");
+        assert_eq!(stopped["ok"], serde_json::json!(true), "stop: {stopped}");
+        let _ = &components;
+    }
+
 }

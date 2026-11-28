@@ -384,6 +384,31 @@ wa_node_manifest_pin() {
 
 # <file> -> "elf:<hex machine>" / "pe" / "unknown". Two bytes of header are enough to refuse a binary the
 # node cannot execute (an x86_64 `wa` installed on arm64 fails at exec time, after the swap).
+# <stage dir> -> 0 when the staged set carries the program that draws the terminal, 1 when it does not.
+# ONE DEFINITION, because two callers must agree about it: the deploy (which refuses to INSTALL a set
+# without the program) and the covering-release fallback (which must still UPDATE a node whose newest
+# release predates the program - it builds the tree instead of refusing the update).
+wa_node_set_has_program() {
+  local stage="$1"
+  [ -f "$stage/wa-term" ] || [ -f "$stage/wa-term.exe" ]
+}
+
+# <manifest> <triple> -> "<wa-term sha256> <bytes>" for the row that names the program; 2 no manifest,
+# 3 a row that does not pin it (an older release). The pair's reader above is unchanged on purpose: every
+# caller of it takes exactly <sha> <bytes> <sentinel sha> <sentinel bytes>.
+wa_node_manifest_program() {
+  local manifest="$1" triple="$2" line
+  [ -f "$manifest" ] || return 2
+  line="$(awk -v want="$triple" '
+    /^[[:space:]]*(#|$)/ {next}
+    index($1, "=") {next}
+    $1 == want && $6 ~ /^[0-9a-f]+$/ && $7 ~ /^[0-9]+$/ {print $6, $7; found = 1; exit}
+    END {exit !found}
+  ' "$manifest")" || return 3
+  [ -n "$line" ] || return 3
+  printf '%s\n' "$line"
+}
+
 wa_node_binary_shape() {
   local file="$1" magic machine
   [ -f "$file" ] || { printf 'missing\n'; return 2; }
@@ -437,6 +462,9 @@ wa_node_tag_base() {
 #   4. the public API, `https://api.github.com/repos/<repo>/releases` - anonymous, rate-limited, enough
 #      for the handful of releases a digest search looks at.
 # Anything that is not `node-<twelve hex>` is not this channel's release and is dropped here, once.
+# THE ONE LIST OF WHAT A BUNDLE CARRIES, full names, no prefix arithmetic anywhere else.
+WA_BUNDLE_MEMBERS="wa-sentinel wa-term wa-operations-supervisor"
+
 wa_node_release_list() {
   # A STUB CHANNEL IS A CHANNEL (25/11): when WA_NODE_BINARIES_URL names a local directory or a file:// URL, the
   # tags are that directory's releases.txt, one tag per line. Without this the covering-release search could only be
@@ -490,12 +518,39 @@ wa_node_release_list() {
   return 0
 }
 
-# <repo> <commit> <triple> -> the three asset names of one target's row, on stdout, one per line.
+# <repo> <commit> <triple> -> the four asset names of one target's row, on stdout, one per line.
 # The manifest is the release's identity, so it is fetched first and the binaries are named from it.
+# <dir> <triple> <short> -> the member files a release pins, one per line.
+# THE SUPERVISOR IS OPT-IN BY MANIFEST (decision 27/11): a release published before the two trailing columns existed
+# carries no supervisor asset, and the fetch loops treat a missing asset as terminal - so an unconditional member
+# would make every older release uninstallable. Nine fields in the row means the sibling is fetched, verified and
+# made executable; seven means the release predates it and installs exactly as it always did.
+wa_node_bundle_members() { # <dir> <triple> <short>
+  local dir="$1" triple="$2" short="$3" fields
+  printf 'wa-%s-%s\nwa-sentinel-%s-%s\n' "$triple" "$short" "$triple" "$short"
+  [ -f "$dir/node-$short.manifest" ] || return 0
+  fields="$(awk -v t="$triple" '$1==t{print NF; exit}' "$dir/node-$short.manifest" 2>/dev/null)"
+  # wa-term IS A MEMBER TOO, and by the same rule: the manifest names its columns (wa-term_sha256/wa-term_bytes)
+  # from the release that carries it, so SEVEN fields means the program travels with the node and FIVE means the
+  # release predates it. Without this line the fetch loop never asked for the program, and the staging then
+  # refused the set it had just downloaded: node_binary_missing: <cache>/<short>/<triple>/wa-term (measured).
+  [ "${fields:-0}" -ge 7 ] 2>/dev/null && printf 'wa-term-%s-%s\n' "$triple" "$short"
+  [ "${fields:-0}" -ge 9 ] 2>/dev/null && printf 'wa-operations-supervisor-%s-%s\n' "$triple" "$short"
+  return 0
+}
+
 wa_node_asset_names() {
   local commit="$1" triple="$2" short
   short="$(wa_node_short_sha "$commit")" || return 2
-  printf 'node-%s.manifest\nwa-%s-%s\nwa-sentinel-%s-%s\n' "$short" "$triple" "$short" "$triple" "$short"
+  # ONE MEMBER LIST (law 17): every asset the bundle carries comes from here, so adding the supervisor did not
+  # add a fourth hand-written pair to each loop.
+  # THE BUNDLE'S MEMBERS, IN ONE PLACE (law 17). Every loop that names an asset - the publish list, the download
+  # list, the staging copy - reads WA_BUNDLE_MEMBERS, so a member cannot be spelled one way here and another way
+  # there. (A first attempt put bare suffixes in the list and prefixed them again in the loop, which produced
+  # `wa-wa-sentinel-...` - every publish would have shipped wrong names.)
+  local member names=""
+  for member in $WA_BUNDLE_MEMBERS; do names="$names $member-$triple-$short"; done
+  printf 'node-%s.manifest%s\n' "$short" "$names"
 }
 
 # <repo> <tag> <asset> <dest> [base]
@@ -710,7 +765,7 @@ wa_node_binary_download() {
     cached_sha="$(wa_node_sha256 "$entry/wa-$triple-$short" 2>/dev/null)"
     cached_want="$(awk '{print $3}' "$entry/.complete" 2>/dev/null)"
     if [ -n "$cached_sha" ] && [ "$cached_sha" = "$cached_want" ]; then
-      for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+      for file in $(wa_node_bundle_members "$entry" "$triple" "$short"); do
         [ -f "$entry/$file" ] || continue
         [ -x "$entry/$file" ] || chmod +x "$entry/$file" 2>/dev/null || true
       done
@@ -751,7 +806,7 @@ wa_node_binary_download() {
     return "$rc"
   fi
   [ -z "$out" ] || printf '%s\n' "$out" >&2
-  for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+  for file in $(wa_node_bundle_members "$tmp" "$triple" "$short"); do
     if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "${WA_NODE_BINARIES_URL:-}" 2>&1)"; then
       rm -rf "$tmp"
       printf 'node_binary_missing: %s pins %s but the release does not carry it (%s)\n' "$tag" "$file" "$out" >&2
@@ -774,7 +829,7 @@ wa_node_binary_download() {
   # to end. The chmod comes AFTER the signature and every pin, so nothing is made executable that this
   # node has not already accepted, and a chmod that fails is a named refusal now rather than a
   # misleading message from upgrade.sh later.
-  for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+  for file in $(wa_node_bundle_members "$tmp" "$triple" "$short"); do
     [ -f "$tmp/$file" ] || continue
     chmod +x "$tmp/$file" 2>/dev/null \
       || { rm -rf "$tmp"; printf 'node_not_executable: %s could not be made executable\n' "$file" >&2; return 8; }
@@ -896,7 +951,10 @@ wa_node_release_digest_search() {
     out="$(wa_node_verify_signature "$repo" "$tag" "$tmp" 2>&1)"; rc=$?
     if [ "$rc" != 0 ]; then rm -rf "$tmp"; printf '%s\n' "$out" >&2; return "$rc"; fi
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+    # THE DIRECTORY JUST FETCHED, NOT THE CACHE ENTRY (measured): $entry does not exist yet here, so its manifest
+    # cannot be read and the member list collapses to wa + wa-sentinel - the program the manifest pins is never
+    # fetched, and the staging refuses the set one line later (node_binary_missing .../wa-term).
+    for file in $(wa_node_bundle_members "$tmp" "$triple" "$short"); do
       if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "$(wa_node_tag_base "$tag")" 2>&1)"; then
         rm -rf "$tmp"
         printf 'node_binary_missing: %s pins %s but the release does not carry it (%s)\n' "$tag" "$file" "$out" >&2
@@ -915,7 +973,7 @@ wa_node_release_digest_search() {
     # to end. The chmod comes AFTER the signature and every pin, so nothing is made executable that this
     # node has not already accepted, and a chmod that fails is a named refusal now rather than a
     # misleading message from upgrade.sh later.
-    for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+    for file in $(wa_node_bundle_members "$entry" "$triple" "$short"); do
       [ -f "$entry/$file" ] || continue
       chmod +x "$entry/$file" 2>/dev/null \
         || { rm -rf "$entry"; printf 'node_not_executable: %s could not be made executable\n' "$file" >&2; return 8; }
@@ -1070,9 +1128,12 @@ wa_node_binary_stage() {
   short="$(wa_node_release_tag "$commit")" || return 2
   short="${short#node-}"
   mkdir -p "$stage" || { printf 'node_stage_unwritable: %s\n' "$stage" >&2; return 8; }
-  for file in wa wa-sentinel; do
+  # THE PROGRAM IS PART OF THE SET (wa-term-own-program): `wa` opens its terminal by running `wa-term`
+  # from beside itself, so a release that carries one binary and not the other installs a node that
+  # cannot open a terminal at all (the reason the first landing was reverted). Both, or the staging fails.
+  for file in wa wa-sentinel wa-term wa-operations-supervisor; do
     src="$dir/$file-$triple-$short"
-    [ -f "$src" ] || src="$dir/$file"          # WA_DEPLOY_BINARY_SOURCE may name plain `wa`/`wa-sentinel`
+    [ -f "$src" ] || src="$dir/$file"          # a source directory may name the plain `wa`/`wa-sentinel`/`wa-term`
     [ -f "$src" ] || { printf 'node_binary_missing: %s\n' "$src" >&2; return 2; }
     cp -f "$src" "$stage/$file" || { printf 'node_stage_unwritable: %s\n' "$stage/$file" >&2; return 8; }
     chmod +x "$stage/$file" 2>/dev/null || true
@@ -1144,4 +1205,30 @@ RESOLVED
     printf 'binary_source: %s %s (verified against %s)\n' "$triple" "$dir" "$(wa_node_release_tag "$commit")"
   fi
   return 0
+}
+
+# THE SHELF NOTE (Victor on work, 27/11): "no published binary for this commit" is true and useless alone - it does not
+# say whether the shelf holds anything, or how stale it is. Given a published tag (node-<sha12>) and the tree's HEAD,
+# this answers one of three sentences, and NEVER invents a distance: when the tagged commit is not in this tree (a cloned
+# node that never fetched it) it says so instead of guessing a number nobody can check.
+wa_node_shelf_note() { # <tag-or-empty> <head-sha>
+  local tag="${1:-}" head="${2:-}" sha
+  if [ -z "$tag" ]; then
+    printf 'no published build could be listed here: the release list is empty or unreadable'
+    return 0
+  fi
+  sha="$(printf '%s' "$tag" | sed -n 's/^node-\([0-9a-f]\{12\}\)$/\1/p')"
+  if [ -z "$sha" ]; then
+    printf 'the newest published build is %s' "$tag"
+    return 0
+  fi
+  if [ -n "$head" ] && git cat-file -e "$sha^{commit}" 2>/dev/null; then
+    local behind
+    behind="$(git rev-list --count "$sha..$head" 2>/dev/null || true)"
+    if [ -n "$behind" ]; then
+      printf 'the newest published build is %s, %s commit(s) behind this tree' "$tag" "$behind"
+      return 0
+    fi
+  fi
+  printf 'the newest published build is %s (its commit is not in this tree, so how far behind it is cannot be measured here)' "$tag"
 }

@@ -16,6 +16,9 @@ edition = "2021"
 # The node's one SQLite contention policy (`rust/wa-sqlite`). The kernel's `wa:kernel/sql` seam opens a
 # connection per call, so it was the one store with its own number and its own durability setting.
 wa-sqlite = { path = "../wa-sqlite" }
+# ONE answer to "how long may a component call wait" (ARCHITECTURE.md law 17): five hosts used to carry
+# their own DEFAULT_TIMEOUT_MS = 2 000 and their own WA_*_COMPONENT_TIMEOUT_MS knob.
+wa-component-wait = { path = "../wa-component-wait" }
 # The vault (`docs/VAULT.md`): the kernel is the only caller of `use_by_ref`/`reveal`, and the fleet's
 # signing key may live there (`rust/wa-mesh/src/fleetchange.rs`). `wa-keystore` wraps its root key.
 wa-vault = { path = "../wa-vault" }
@@ -54,6 +57,7 @@ ureq = { version = "3", features = ["json"] }
 # drives them with `store.run_concurrent` (service_components_v2.rs).
 # pooling-allocator: `components::pooled_engine` is the engine the agent-core instance pool uses
 # (docs/KERNEL.md, "A2.3"); without the feature `InstanceAllocationStrategy` has no `Pooling` variant.
+libc = "0.2"
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow", "pooling-allocator"] }
 # p3: `wasi:clocks@0.3.0`, the suspending timer a 0.2 guest awaits; it is built on tokio's timer,
 # so the 0.2 runner owns a current-thread tokio runtime. `net` (and the IO driver it brings) is only
@@ -87,3 +91,7 @@ features = ["ring", "std", "logging"]
 [dev-dependencies.wa-tls]
 path = "../wa-tls"
 features = ["scratch"]
+
+[dev-dependencies]
+# a component built from WAT inside a row, for the hosted-world grant rows
+wat = "1"

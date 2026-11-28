@@ -114,6 +114,16 @@ wa_record_install() {
     ancestors="$(wa_build_field "$info" ancestors)"; [ -n "$ancestors" ] || ancestors=unknown
   fi
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  # AN INSTALLED RECORD IS FINAL (Fable 26/11, the nextcloud-b row). MEASURED: a release install onto a node that
+  # was ALREADY at the target wrote commit=, release= and via=remote-update.sh and NO record_role at all, so
+  # verify-install.sh first question - whose record is this - had no answer, and the row that asks for
+  # record_role=final failed on a node whose update had settled 'installed'. The default is final because this
+  # writer IS the install own; a caller handing over an INTERIM record says record_role=interim and it passes
+  # through like any other field.
+  local role=final
+  for caller_field in "$@"; do
+    case "$caller_field" in record_role=*) role="${caller_field#record_role=}"; [ -n "$role" ] || role=final ;; esac
+  done
   tmp="$dir/.installed.txt.record.$$"
   {
     printf 'commit=%s\n' "$commit"
@@ -125,9 +135,10 @@ wa_record_install() {
     printf 'built_epoch=%s\n' "$epoch"
     printf 'contains_commits=%s\n' "$ancestors"
     printf 'recorded_utc=%s\n' "$stamp"
+    printf 'record_role=%s\n' "$role"
     for line in "$@"; do
       case "$line" in
-        commit=*|tree=*|dirty=*|build_info=*|build_source=*|built_epoch=*|contains_commits=*|recorded_utc=*)
+        commit=*|tree=*|dirty=*|build_info=*|build_source=*|built_epoch=*|contains_commits=*|recorded_utc=*|record_role=*)
           # The identity is the binary's. A caller's commit= is not written, and the drop is named so a
           # reader can see the caller was not believed rather than silently corrected.
           printf 'dropped_caller_field=%s\n' "${line%%=*}"
@@ -385,6 +396,7 @@ wa_ancestry_verdict() {
   WA_ANCESTRY_LOST=""
   WA_ANCESTRY_LOST_COUNT=0
   WA_ANCESTRY_WHY=""
+  WA_ANCESTRY_REUSED=""
   running="$(printf '%s' "$running" | tr -d '[:space:]')"
   if [ -z "$running" ] || [ "$running" = unknown ]; then
     WA_ANCESTRY_WHY="the running binary names no commit, so no committed work can be shown to be at risk"
@@ -397,6 +409,54 @@ wa_ancestry_verdict() {
   # 1. git, when this machine holds the repository: authoritative, and the only source that can name the
   #    commits that would be lost (which is what a refusal has to list to be actionable).
   if [ -n "$repository" ] && git -C "$repository" rev-parse --git-dir >/dev/null 2>&1; then
+    # THIS IS ASKED FIRST, BEFORE THE RUNNING BINARY IS ASKED ANYTHING (incident 26/11 05:29Z: the running 702e4342
+    # reported that it contains the candidate stamp 7490fc56, and that answer - correct - was read as "so the target
+    # cannot contain the running commit" and refused, while the commit actually being installed (76906a27) DID contain
+    # it and its compiled-inputs digest EQUALLED the stamp's. The shortcut below reasons about the STAMP as if the
+    # stamp were what is being installed; with a reused build it is not, so the reuse question has to answer first.
+    # A REUSED BUILD IS NOT A DOWNGRADE (Fable 26/11; incident: main 71535adc was a git revert whose tree equals the
+    # older e12b38ec, the build was REUSED from that source and stamped 7490fc56, and this refusal called it a
+    # downgrade of the running 617fed07. Nothing was installed on a fleet being brought FORWARD).
+    #
+    # The question is not "is the stamp older". It is: does the SOURCE of the commit being installed contain the
+    # running commit, and is the candidate binary THAT commit's build? The second half is answered by the digest of
+    # the COMPILED INPUTS - the same definition the build cache and the manifest use - and not by tree equality: a
+    # scripts-only landing has a different tree and the SAME compiled inputs, so it must reuse the binary too.
+    #
+    # The commit being installed is HEAD of the tree this install comes from; the stamp names what was compiled.
+    # Nothing here can be widened by an operator: every input is read out of git and the tree. WA_ANCESTRY_NO_REUSE
+    # is the ROWS' switch and it only NARROWS: set, it takes this path out of the question so a row can prove the
+    # refusal still happens without it. Nothing in the product sets it, and no operator override reaches this function.
+    if [ -z "${WA_ANCESTRY_NO_REUSE:-}" ]; then
+      local installing reused_digest installing_digest
+      installing="$(git -C "$repository" rev-parse HEAD 2>/dev/null)"
+      if [ -n "$installing" ] && [ "$installing" != "$target" ] \
+         && git -C "$repository" merge-base --is-ancestor "$running" "$installing" 2>/dev/null; then
+        # the digest functions live in scripts/lib/node-binaries.sh; source it lazily so a guard called from a script
+        # that does not carry them still asks the same question instead of guessing a different one.
+        if ! command -v wa_compiled_inputs_digest >/dev/null 2>&1; then
+          _wa_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/node-binaries.sh"
+          [ -f "$_wa_lib" ] && . "$_wa_lib"
+        fi
+        if command -v wa_compiled_inputs_digest >/dev/null 2>&1; then
+          reused_digest="$(wa_compiled_inputs_digest "$repository" "$target" 2>/dev/null | tr -d '[:space:]')"
+          installing_digest="$(wa_compiled_inputs_digest "$repository" "$installing" 2>/dev/null | tr -d '[:space:]')"
+          if [ -n "$reused_digest" ] && [ "$reused_digest" = "$installing_digest" ]; then
+            WA_ANCESTRY_REUSED="$installing"
+            WA_ANCESTRY_WHY="the candidate is a build of ${target:0:12} and its compiled inputs are this commit's (${installing:0:12}, digest ${reused_digest:0:12}), which contains the running commit ${running:0:12} - a reused build, nothing compiled changed"
+            return 0
+          fi
+        fi
+        # The fallback for a tree that carries no digest tool: identical TREES make the same binary. It cannot help a
+        # scripts-only landing (different tree, same compiled inputs) - that case needs the digest above - and it is
+        # named in the reason so a reader knows which rule answered.
+        if [ "$(git -C "$repository" rev-parse "${target}^{tree}" 2>/dev/null)" = "$(git -C "$repository" rev-parse "${installing}^{tree}" 2>/dev/null)" ]; then
+          WA_ANCESTRY_REUSED="$installing"
+          WA_ANCESTRY_WHY="the candidate is a build of ${target:0:12}, whose TREE is this tree's tree (${installing:0:12}), and this tree contains the running commit ${running:0:12} - a reused build (tree rule: no digest tool answered)"
+          return 0
+        fi
+      fi
+    fi
     # (a) Ask the RUNNING binary, before any git answer can stand in the way. It carries its own ancestry and
     #     can answer one question: does the running build contain the target commit? If it does - and the two
     #     commits differ - then the target cannot contain the running build (no commit is its own ancestor), so

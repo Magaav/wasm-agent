@@ -870,14 +870,45 @@ local function pin_restored_commit(restored)
 end
 
 -- What the peer can prove about one request, from files that survive the install it performs.
+-- Exported for the row that drives it (scripts/test-remote-update-record.lua): a failure record whose sentence nobody
+-- can test is how "no installer block" survived two retries. The local name stays, so no call site changes.
 local function outcome_of(record)
   local facts = M.facts()
   local sentinel_dir = facts.sentinel_dir
   local id = record.sentinel_request_id or ''
   local outcome = { state = 'queued' }
+  -- THE DEPLOY OWN LAST VERDICT, for a record that would otherwise be silent (work, 27/11 twice: the record said "no
+  -- installer block for this request" while deploy.out held `refused(...)` and the exit line). Read once here, lazily,
+  -- and only when a failure needs it: deploy.out appends across installs, so only the last block's verdict is used, and
+  -- an empty log yields nothing rather than an invented sentence.
+  local deploy_out_verdict
+  local function last_deploy_verdict()
+    if deploy_out_verdict ~= nil then return deploy_out_verdict end
+    deploy_out_verdict = ''
+    local text = read(sentinel_dir .. '/deploy.out')
+    if not text then return deploy_out_verdict end
+    local block = text:match("%-%-%- deploy [^\r\n]*%-%-%-(.*)$") or text
+    local found
+    for line in block:gmatch("[^\r\n]+") do
+      local s = trim(line)
+      if s:find('refused%(') or s:find('^deploy: failed') or s:find('^install: the ') then found = s end
+    end
+    deploy_out_verdict = found or ''
+    return deploy_out_verdict
+  end
   local function settled(state, detail, extra)
     outcome.state = state
     outcome.detail = detail
+    if state == 'failed' then
+      local verdict = last_deploy_verdict()
+      if verdict ~= '' then
+        if detail == nil or detail == '' then
+          outcome.detail = verdict
+        elseif not tostring(detail):find(verdict, 1, true) then
+          outcome.detail = tostring(detail) .. ' - ' .. verdict
+        end
+      end
+    end
     for key, value in pairs(extra or {}) do outcome[key] = value end
     return outcome
   end
@@ -966,6 +997,8 @@ end
 -- WHERE THE ACCEPT RECORDS LIVE, and what they say. One directory, named by the id the master sent, so
 -- the deploy record (this file's own <id>.json), the caller's pending record and the accept record are
 -- one name read from three places - never a second answer to "what happened to my request".
+M.outcome_of = outcome_of
+
 function M.accept_root() return M.dir() .. '/accepted' end
 
 -- The generic phase of one id (lua/core/accepted.lua), in this module's words: a tail that finished
@@ -1197,9 +1230,15 @@ function M.read_status(args, caller)
     contains_target = outcome.contains_target == true,
     server = record.server,
   }
+  -- SETTLE THE STATE TOO (update-requests-settle, Fable 26/11). This block already wrote the OUTCOME - and left
+  -- `state` at `queued` forever, which is why openclaw held 78 records saying queued about installs that worked: a
+  -- reader of the FILE (the cut's wait) reads `state`, and `installed` had no writer at all. The state is now what
+  -- the install proved, and the time it finished under the name a reader asks for.
   if (outcome.state == 'installed' or outcome.state == 'failed' or outcome.state == 'silent') and record.outcome == nil then
+    record.state = outcome.state
     record.outcome = outcome.state
     record.settled_at = math.floor(host.now())
+    record.finished_at = record.settled_at
     record.installed_commit = outcome.installed_commit
     record.detail = outcome.detail
     write_record(record)
@@ -1210,6 +1249,75 @@ end
 
 -- What this node would do, without doing it: the facts a master needs before it asks (or that a
 -- test needs to see). Read-only.
+-- THE SWEEP (update-requests-settle, Fable 26/11): a request no install will ever serve is CLOSED with a NAMED
+-- reason, never left `queued` forever. It deletes NOTHING - a closed record is a record with a state and a reason,
+-- and it stays readable - and it is idempotent: a second run closes nothing.
+--
+--   superseded_by <id>   a NEWER request from the same requester exists, so this one will never be served
+--   expired              nothing served it within the age (default 24 h: "no request older than a day says queued")
+--
+-- What it does NOT touch: a record that is installed/failed/refused/silent (settled already), and one that is
+-- younger than the age and still the newest its requester made.
+--
+--   M.sweep({ max_age_seconds = 86400, dry_run = true })  -> what it would close, closes nothing
+function M.sweep(opts)
+  opts = opts or {}
+  local max_age = tonumber(opts.max_age_seconds) or 86400
+  local now = math.floor(host.now())
+  local listing = shell('ls -1t ' .. quote(M.dir()) .. ' 2>/dev/null')
+  local closed, kept, scanned = {}, {}, 0
+  local seen_by_node = {}
+  local names = {}
+  for name in tostring(listing and listing.stdout or ''):gmatch('[^\r\n]+') do
+    if name:match('%.json$') then names[#names + 1] = name end
+  end
+  -- NEWEST FIRST BY THE RECORD'S OWN requested_at, not by file mtime: three records written in the same second have
+  -- no useful mtime order, and the row caught it (a superseded record was chosen as the survivor).
+  local ordered = {}
+  for _, name in ipairs(names) do
+    local id = trim((tostring(name):gsub('%.json$', '')))
+    local record = M.record(id)
+    if record then ordered[#ordered + 1] = { id = id, requested = tonumber(record.requested_at or 0) or 0 } end
+  end
+  table.sort(ordered, function(a, b) return a.requested > b.requested end)
+  for _, entry in ipairs(ordered) do
+    local id = entry.id
+    local record = M.record(id)
+    if record then
+      scanned = scanned + 1
+      local node = tostring(record.requester and record.requester.node_id or '')
+      local state = tostring(record.state or '')
+      if state == 'queued' then
+        local requested = tonumber(record.requested_at or 0) or 0
+        local reason
+        if node ~= '' and seen_by_node[node] then
+          reason = 'superseded_by ' .. seen_by_node[node]
+        elseif requested > 0 and (now - requested) > max_age then
+          reason = 'expired'
+        end
+        if reason then
+          closed[#closed + 1] = { id = id, reason = reason, age_seconds = requested > 0 and (now - requested) or nil }
+          if not opts.dry_run then
+            record.closed_reason = reason
+            record.closed_at = now
+            record.state = reason:match('^superseded_by') and 'superseded' or 'expired'
+            record.detail = tostring(record.detail or '') .. (record.detail and ' | ' or '') .. 'closed: ' .. reason
+            write_record(record)
+            audit('closed', record, reason)
+          end
+        else
+          kept[#kept + 1] = id
+        end
+      else
+        kept[#kept + 1] = id
+      end
+      if node ~= '' and not seen_by_node[node] then seen_by_node[node] = id end
+    end
+  end
+  return { ok = true, scanned = scanned, closed = closed, kept = #kept, dry_run = opts.dry_run == true,
+    max_age_seconds = max_age }
+end
+
 function M.check(args, caller)
   local author = nodes.author_of(caller)
   if not author then return { error = 'forbidden_role', effect = 'none' } end

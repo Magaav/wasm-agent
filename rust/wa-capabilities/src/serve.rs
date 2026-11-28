@@ -229,6 +229,28 @@ pub fn run_state(run_id: u64) -> &'static str {
     scheduler::run_state(run_id)
 }
 
+/// How long a RUN may wait for a node-thread before the node refuses it by name (27/11). ZERO means unbounded,
+/// the same operator choice `WA_DEPLOY_HOLD_BOUND=0` makes on the sentinel side. MEASURED: a turn admitted behind
+/// a busy node sat in this queue with nothing bounding it - its caller held an open socket with no bytes, and the
+/// only bound in the system was the deploy's own, which failed the DEPLOY instead of answering the turn.
+/// Completions keep their own, longer-standing bound (`completion_wait_bound_seconds`).
+fn queue_wait_bound_ms() -> u64 {
+    env_usize("WA_QUEUE_WAIT_BOUND", 120) as u64 * 1000
+}
+
+/// One rule, used by the refusal and by `/health`, so the two can never disagree - and so the boundary (equal
+/// counts as expired) has one test.
+fn queue_entry_expired(waited_ms: u64, bound_ms: u64) -> bool {
+    bound_ms > 0 && waited_ms >= bound_ms
+}
+
+/// How long `run_id` has been admitted and not started, while it still is. `None` means a node-thread took it.
+fn pending_waited_ms(run_id: u64) -> Option<u64> {
+    if run_id == 0 { return None; }
+    let list = pending_registry().lock().ok()?;
+    list.iter().find(|entry| entry.run_id == run_id).map(|entry| now_ms().saturating_sub(entry.since_ms))
+}
+
 fn pending_snapshot() -> Vec<PendingRun> {
     pending_registry().lock().map(|list| list.clone()).unwrap_or_default()
 }
@@ -242,6 +264,10 @@ fn queue_sessions_health(pending: &[PendingRun]) -> serde_json::Value {
         "count": pending.len(),
         "named": pending.iter().filter(|entry| !entry.session.is_empty()).count(),
         "truncated": pending.len() > PENDING_PUBLISHED,
+        // THE RUN BOUND TRAVELS WITH THE ENTRIES: the sentinel reads the node's own number instead of inventing
+        // one, and `expired` is the node saying "this entry no longer holds me" - the fact that also makes the
+        // refusal at the dequeue happen.
+        "wait_bound_ms": queue_wait_bound_ms(),
         "entries": pending.iter().take(PENDING_PUBLISHED).map(|entry| serde_json::json!({
             "run_id": entry.run_id,
             "session": entry.session,
@@ -252,6 +278,11 @@ fn queue_sessions_health(pending: &[PendingRun]) -> serde_json::Value {
             // this round exists for, and /health names its session and how long, instead of leaving it to be
             // inferred from a number nobody compares.
             "over_bound": now_ms().saturating_sub(entry.since_ms) >= completion_wait_bound_seconds().saturating_mul(1000),
+            // A RUN past its own bound: the node refuses it by name when a thread frees (`queue_wait_expired`), so
+            // it neither holds the node nor leaves its caller on an open socket. A completion answers through
+            // `over_bound` above, which is r7c's rule and stays as it is.
+            "expired": entry.kind != "completion"
+                && queue_entry_expired(now_ms().saturating_sub(entry.since_ms), queue_wait_bound_ms()),
             "bound_seconds": completion_wait_bound_seconds(),
         })).collect::<Vec<_>>(),
     })
@@ -375,6 +406,26 @@ pub(crate) fn test_mark_turn(value: bool) {
 #[cfg(test)]
 pub(crate) fn test_set_run_cancel(flag: Option<Arc<AtomicBool>>) {
     set_current_run_cancel(flag);
+}
+
+/// The ONE wait a tool call obeys, in milliseconds.
+///
+/// `lua/core/codemode_pending.lua` owns the number (`DEFAULT_WAIT_S = 60`, ceiling 300 s) and hands the
+/// budget it computed to the call, because the budget is a property of the CALL and not of the process:
+/// a script that says `wait_s: 5` and one that says nothing run in the same host. A call that names none
+/// gets that same default. The fallback exists only so a caller outside a script is bounded at all, and
+/// it is the shared default rather than a crate's own smaller number - which is what the two
+/// `WAIT_MS = 2_000` index constants were, and why a slow read crossed the seam as a throw.
+///
+/// `scripts/test-waits-follow-the-shared-rule.lua` refuses any capability that keeps a private wait
+/// BELOW this one; this function is the only place a capability may read a wait from.
+pub fn wait_ms(args: &serde_json::Value) -> u64 {
+    // The budget the CALL named, and 0 when it named none: 0 is "queue the job and answer at once with
+    // its id", which is a real answer (the handle) rather than a guess at how long to hold the node.
+    // The shared bound - 60 s, 300 s at most - is `lua/core/codemode_pending.lua`'s, and the executor
+    // there is what spends it. main's `email_query.rs` carried this function; it lives here now so both
+    // the mail and the WhatsApp doors obey ONE rule.
+    args.get("__wait_ms").and_then(serde_json::Value::as_u64).unwrap_or(0)
 }
 
 fn env_usize(name: &str, fallback: usize) -> usize {
@@ -519,6 +570,15 @@ pub fn run_cancel_requested() -> bool {
     CURRENT_RUN_CANCEL.with(|cell| {
         cell.borrow().as_ref().map(|flag| flag.load(Ordering::SeqCst)).unwrap_or(false)
     })
+}
+
+/// Whether THIS thread is running a call relayed from a peer (install_relay_context put a cancel flag on
+/// it). It is the one fact that separates a wait the run's own interpreter is making - which must wake
+/// the moment the run is cancelled, so a stop is instant - from a wait a RELAYED caller is making, whose
+/// interruption is the relay's own business and whose operation must not be disturbed by the node's
+/// cancel (scripts/test-remote-pending.lua and the adoption test in wa-capabilities both pin that).
+pub fn current_call_is_relayed() -> bool {
+    CURRENT_RUN_CANCEL.with(|cell| cell.borrow().is_some())
 }
 
 /// Install (or clear) the current-run cancel flag for this node-thread thread.
@@ -2323,6 +2383,9 @@ fn deploy_refusal_body(answer: &serde_json::Value, authenticated: bool) -> serde
 /// refusal body). The deploy's own bound is minutes, and the node reports a paused turn within one step.
 const DEPLOY_WAITING_RETRY_SECONDS: u64 = 30;
 
+/// When to try a refused turn again: one number, so no client invents its own backoff.
+const QUEUE_WAIT_RETRY_SECONDS: u64 = 30;
+
 fn resolve_admission(
     tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
     request: &Request,
@@ -3266,6 +3329,25 @@ fn node_thread_loop(
                 continue;
             }
             Ok(Work::Http(mut stream, request)) => {
+                // A TURN THAT WAITED PAST THE QUEUE BOUND IS REFUSED BY NAME, NOT STARTED (27/11). It is answered
+                // here because this is the one place the entry and the caller's socket exist together: below this
+                // line the run is running and the bound no longer means anything.
+                if let Some(waited_ms) = pending_waited_ms(request.run_id) {
+                    let bound = queue_wait_bound_ms();
+                    if queue_entry_expired(waited_ms, bound) {
+                        pending_started(request.run_id);
+                        QUEUED.fetch_sub(1, Ordering::Relaxed);
+                        if is_read_route(&request) || is_control_route(&request) { release_read_destination(index); }
+                        if is_run_route(&request) { scheduler::complete_run(request.run_id); }
+                        let body = format!(
+                            "{{\"error\":\"queue_wait_expired\",\"not_started\":true,\"waited_ms\":{waited_ms},\"wait_bound_ms\":{bound},\"retry_after_seconds\":{QUEUE_WAIT_RETRY_SECONDS},\"effect\":\"none\",\"hint\":\"the node admitted this turn and did not start it within the wait bound, so nothing ran\"}}"
+                        );
+                        let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+                        beat();
+                        idle_since = std::time::Instant::now();
+                        continue;
+                    }
+                }
                 if test_stall && !stalled_once {
                     stalled_once = true;
                     eprintln!("[serve] test hook: stalling node-thread 0 on purpose");
@@ -4017,7 +4099,18 @@ mod query_value_tests {
 
 #[cfg(test)]
 mod pending_queue_tests {
-    use super::{pending_admitted, pending_snapshot, pending_started};
+    use super::{pending_admitted, pending_snapshot, pending_started, queue_entry_expired, queue_wait_bound_ms};
+
+    /// THE RUN BOUND ITSELF (27/11): equal counts as expired (the entry waited the whole bound), and 0 is the
+    /// documented operator choice of no bound - the shape `WA_DEPLOY_HOLD_BOUND=0` uses on the sentinel side.
+    #[test]
+    fn a_run_is_expired_only_at_or_past_the_bound() {
+        assert!(!queue_entry_expired(119_000, 120_000));
+        assert!(queue_entry_expired(120_000, 120_000));
+        assert!(queue_entry_expired(121_000, 120_000));
+        assert!(!queue_entry_expired(u64::MAX, 0), "0 is the unbounded choice, not an instant expiry");
+        assert_eq!(queue_wait_bound_ms(), 120_000, "the default is 120 s weighted in ms; a move must be deliberate");
+    }
 
     /// The registry answers "who is queued": the conversation, the node-thread and the kind. A run that is
     /// given its place back, or that a node-thread starts, is not waiting any more - and an id of 0 (a read or
@@ -4295,24 +4388,10 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     }
 }
 
-/// The UI file a request names, or `None` if the name could leave the UI directory. Every component
-/// must be a plain name: no `..`, and no root or prefix, because on Windows `ui.join("C:/Users/..")` or a
-/// `\\server\share` path *replaces* the base instead of extending it. A file that exists must also
-/// resolve inside the UI directory, so a link inside it cannot point elsewhere.
-fn ui_file(ui: &std::path::Path, relative: &str) -> Option<std::path::PathBuf> {
-    use std::path::Component;
-    let candidate = std::path::Path::new(relative);
-    if relative.contains("..") || relative.contains('\\') || relative.contains(':')
-        || !candidate.components().all(|part| matches!(part, Component::Normal(_)))
-    {
-        return None;
-    }
-    let file = ui.join(candidate);
-    match (file.canonicalize(), ui.canonicalize()) {
-        (Ok(real), Ok(root)) if !real.starts_with(&root) => None,
-        _ => Some(file),
-    }
-}
+// The static tier (`serve_static`): the guard below, `content_type`, and the program that serves the same
+// bytes all live there now, so the door and the program cannot disagree about what a path may name.
+use crate::serve_static::ui_file;
+// refuses a traversal travels with the answer, so the program and the door cannot disagree about it.
 
 /// Answered on the accept thread, without the interpreter: the two facts a node is
 /// asked for when it looks unwell, and the files the window needs to redraw itself.
@@ -4351,6 +4430,21 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     } else {
         route.trim_start_matches('/').to_string()
     };
+    // THE STATIC TIER, WHEN AN OPERATOR NAMED ITS PROGRAM (ready-serve-own-program.md): the bytes answer
+    // from the process that owns them. An unset switch is today's path, unchanged, below.
+    if let Some(answer) = crate::serve_static::fetch(&relative) {
+        return match answer {
+            // The program's own answer, with its status: a refusal it made leaves as the same refusal.
+            Ok(Some((status, bytes))) => Some((
+                status,
+                if status == 200 { crate::serve_static::content_type(&relative) } else { "text/plain" },
+                bytes,
+            )),
+            // Not held by the program: the agent thread decides, exactly as when the file is absent here.
+            Ok(None) => None,
+            Err(error) => Some((503, "application/json", format!("{{\"error\":{}}}", json_escape(&error)).into_bytes())),
+        };
+    }
     let Some(file) = ui_file(ui, &relative) else {
         return Some((400, "text/plain", b"bad path".to_vec()));
     };
@@ -4358,7 +4452,7 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     // handled by `dispatch`), so absence is not a 404 here - it means "ask the
     // agent thread". That keeps the route table in exactly one place.
     match std::fs::read(&file) {
-        Ok(bytes) => Some((200, content_type(&relative), bytes)),
+        Ok(bytes) => Some((200, crate::serve_static::content_type(&relative), bytes)),
         Err(_) => None,
     }
 }
@@ -4663,11 +4757,22 @@ fn dispatch(
             } else {
                 route.trim_start_matches('/').to_string()
             };
+            if let Some(answer) = crate::serve_static::fetch(&relative) {
+                return match answer {
+                    Ok(Some((status, bytes))) => Some((
+                        status,
+                        if status == 200 { crate::serve_static::content_type(&relative) } else { "text/plain" },
+                        bytes,
+                    )),
+                    Ok(None) => Some((404, "text/plain; charset=utf-8", b"not found".to_vec())),
+                    Err(error) => Some((503, "application/json", format!("{{\"error\":{}}}", json_escape(&error)).into_bytes())),
+                };
+            }
             let Some(file) = ui_file(ui, &relative) else {
                 return Some((400, "text/plain", b"bad path".to_vec()));
             };
             return match std::fs::read(&file) {
-                Ok(bytes) => Some((200, content_type(&relative), bytes)),
+                Ok(bytes) => Some((200, crate::serve_static::content_type(&relative), bytes)),
                 Err(_) => Some((404, "text/plain; charset=utf-8", b"not found".to_vec())),
             };
         }
@@ -4781,29 +4886,10 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     stream.flush()
 }
 
-fn content_type(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
-        "js" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "webmanifest" => "application/manifest+json; charset=utf-8",
-        "wasm" => "application/wasm",
-        // wa's two faces are served from the ui dir (ui/fonts/), as the .ttf files the installer copies.
-        // A font served as application/octet-stream still loads in most browsers, but the type is what
-        // the page asked for and a wrong one is a silent cost (no font MIME handling, no cache
-        // partitioning by type): the node says what the bytes are.
-        "ttf" => "font/ttf",
-        "woff2" => "font/woff2",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        _ => "application/octet-stream",
-    }
-}
 
 #[cfg(test)]
 mod content_type_tests {
-    use super::content_type;
+    use crate::serve_static::content_type;
     #[test]
     fn inline_csp_hashes_browser_normalized_line_endings() {
         assert_eq!(super::content_security_policy(b"<script>one\r\ntwo\rthree</script>"),

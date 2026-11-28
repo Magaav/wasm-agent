@@ -6,6 +6,10 @@ function wa_binding_tick() return dofile('lua/vendor/json.lua').encode(binding.t
 -- lanes run on different threads.
 function wa_binding_serve(raw) return dofile('lua/vendor/json.lua').encode(binding.serve(raw)) end
 local json = dofile("lua/vendor/json.lua")
+-- THE ONE WAY A LUA MODULE IS LOADED (law 18). `reload.require` reads WASM_AGENT_LUA_ROOT first and
+-- falls back to the binary, which is what the rest of lua/core uses; this file uses it too instead of
+-- keeping a second answer of its own.
+local reload = dofile("lua/core/reload.lua")
 local memory = dofile("lua/core/memory.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local provider = dofile("lua/core/provider.lua")
@@ -1379,11 +1383,28 @@ local function adopt_bash(args, caller, author, request)
       if properties[key] ~= nil then
         start[key] = value
       else
-        return { error = "peer_bash_field_not_adoptable", field = tostring(key), effect = "none",
-          carried = (function() local list = {}; for name in pairs(properties) do list[#list + 1] = tostring(name) end; table.sort(list); return list end)(),
-          note = "this node's adoption path (budget_ms) cannot carry `" .. tostring(key)
-            .. "` into the supervised operation, so the call is refused rather than run without it; send the "
-            .. "same call without budget_ms, or declare the field on the operation tool's own schema." }
+        -- AN UNKNOWN FIELD NAMES ITSELF, THE FIELDS THAT WOULD HAVE BEEN TAKEN, AND THE NEAREST ONE
+        -- (refusals-that-help (k)). Measured: `tools.remote` bash with `time_seconds` was refused with 'a check
+        -- on what the node applied did not hold: peer bash field not adoptable' and the fix 'read detail, then
+        -- re-read the state' - naming neither the field nor the field the caller meant. The nearest name comes
+        -- from the schema validator's own helper, so 'q' -> 'query' stays one rule (law 18).
+        local list = {}
+        for name in pairs(properties) do list[#list + 1] = tostring(name) end
+        table.sort(list)
+        -- FOUND THROUGH THE SHARED LOADER ONLY (law 18/19, post-landing read of cf870be7): this file used to
+        -- `pcall(dofile, 'lua/core/json_contract.lua')`, a path relative to the process's cwd, and a node whose
+        -- cwd is not the lua root lost `nearest` to the swallowed pcall. The answer is not a private loader
+        -- here - a second answer to "how is a module loaded" - but the loader the rest of lua/core uses.
+        local contract = reload.require('lua/core/json_contract.lua')
+        local nearest = type(contract) == 'table' and type(contract.nearest_name) == 'function'
+          and contract.nearest_name(tostring(key), properties) or nil
+        -- ONE SENTENCE, IN ONE PLACE (post-landing read of q#92): the refusal used to say the same thing in
+        -- `message`, `fix` and `note`, three times the bytes for one fact. The sentence lives in `fix`, which
+        -- is the field a caller (and this tree's own refusal table) reads for what to do next.
+        local sentence = 'unknown field ' .. tostring(key) .. '; accepted fields are '
+          .. table.concat(list, ', ') .. (nearest and ('; nearest: ' .. tostring(nearest)) or '')
+        return { error = 'peer_bash_field_not_adoptable', field = tostring(key), nearest = nearest,
+          effect = 'none', carried = list, fix = sentence }
       end
     end
   end

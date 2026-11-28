@@ -257,6 +257,14 @@
     {
       "file": "scripts/test-workspace-cwd.mjs",
       "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-install-ships-the-program.sh",
+      "reason": "release-set row: it drives the installer and asserts a scratch install ends with BOTH wa and wa-term, byte for byte, so it needs a release directory holding the pair (it SKIPs, by name, without one). It runs at a release cut, where that directory exists - declared here instead of being wired into a landing gate that has no release set to read."
+    },
+    {
+      "file": "scripts/test-row-runner-env.sh",
+      "reason": "needs a versions/adopt state that has already upgraded once: measured 27/11 it stops at \"the second upgrade never reached the restart: versions-adopt: adopt_already_adopted current...\", which is a state a landing gate cannot arrange for itself. Declared rather than deleted - it proves the row runner carries the runner environment through an upgrade, which no wired row does."
     }
   ]
 }

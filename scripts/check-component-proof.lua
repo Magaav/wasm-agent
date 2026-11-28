@@ -29,6 +29,11 @@ local function decode(raw, what)
 end
 
 ---------------------------------------------------------------- 1. the default-on component answers
+-- SAID BEFORE THE FIRST THING THAT CAN FAIL (P0, 27/11: work's update refused `component_proof_failed` and named
+-- neither the component nor the call. The step lines are here, at the top of each section, because the first
+-- failure in the empty-stage shape happens in `features.resolve` below - a step printed next to the assert would
+-- have been silent exactly when it mattered).
+print('component proof step: the default-on memory component must verify against its pin and answer a call')
 local memory = features.resolve('memory')
 assert(type(memory) == 'table', 'the feature resolver did not answer for memory')
 assert(memory.enabled == true,
@@ -57,6 +62,7 @@ end
 assert(found, 'the staged memory component answered `list` without the fact it had just stored')
 
 ---------------------------------------------------------------- 2. the graph matches its own switch
+print('component proof step: a dormant graph must refuse by name (graph_dormant) through the staged component')
 -- The graph is the ONE feature that is off by default (docs/GRAPH.md, 23/11), and the deploy's proof home is
 -- fresh, so in a deploy this is always the dormant branch - the assertion Fable asked for: a dormant feature
 -- refuses BY NAME, from THIS binary. The enabled branch is here so the proof does not DEPEND on the graph

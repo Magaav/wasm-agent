@@ -100,9 +100,11 @@ local unknown = call('edit', { path = three, edits = { { old_text = 'a2', new_te
 -- the arguments the schema declares, and the synonyms the handler still maps are not in that sentence
 -- because they are not in the schema (section 1 above proves they still work). Mission
 -- tool-args-honest-and-same-on-peers, item 2.
--- REPORT-ONLY (STEP 1): the argument check records and does not refuse, so the handler's own refusal is
--- what answers a typo option again - the same code this row asserted before the validator existed.
-check(unknown.error == 'unsupported_edit_option', 'an unknown option is refused by name: ' .. json.encode(unknown):sub(1, 300))
+-- ENFORCED (25/11): the argument contract refuses the unknown name before the handler sees it, which is
+-- what this row asserted before the validator was gated - with `effect:none`, so the row also proves the
+-- edit did not happen on the way to the refusal.
+check(unknown.error == 'unknown_argument:old_txt', 'an unknown option is refused by name: ' .. json.encode(unknown):sub(1, 300))
+check(unknown.effect == 'none', 'and nothing ran: ' .. json.encode(unknown):sub(1, 200))
 local first_line = tostring(unknown.message):match('^[^\n]*') or ''
 check(first_line:find('edits', 1, true) ~= nil and first_line:find('range_edits', 1, true) ~= nil,
   'the first line names the accepted arguments: ' .. first_line)

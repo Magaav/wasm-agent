@@ -80,8 +80,12 @@ fn media(record: &Record) -> serde_json::Value {
 /// `quote` is the snippet of the message this one replies to, when the caller could load it; `None`
 /// means "not resolved here", which is written as an empty `quote` rather than omitted, so a reader
 /// can tell "the index does not have it" from "this is not a reply".
-pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
-    let snippet = record.snippet(seam::MAX_TEXT_CHARS);
+pub fn message(record: &Record, quote: Option<&str>, full: bool) -> serde_json::Value {
+    // The snip is the default because most of a read is a glance. `full` answers the whole text up to
+    // [`seam::MAX_FULL_CHARS`], which is what an audio transcript or an image's OCR text needs - and
+    // either way the answer SAYS which cap it used, so a short text is never read as a complete one.
+    let cap = if full { seam::MAX_FULL_CHARS } else { seam::MAX_TEXT_CHARS };
+    let snippet = record.snippet(cap);
     let mut view = serde_json::json!({
         "id": record.id,
         "chat": record.chat,
@@ -97,6 +101,7 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
         "from": { "jid": record.sender, "name": record.push_name, "own": record.own },
         "text": snippet,
         "text_truncated": snippet.chars().count() < record.body().chars().count(),
+        "text_cap": serde_json::json!({"chars": cap, "mode": if full { "full" } else { "snippet" }}),
     });
     // A voice note, an image or a video never answers with an empty `text`: "this note says nothing" and
     // "nothing has read this note yet" are different facts, and an empty string reports the first. 23/11:
@@ -129,6 +134,28 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
             continue;
         }
         view[field] = serde_json::Value::String(crate::record::one_line(stored, seam::MAX_TEXT_CHARS));
+        // The store itself cut this text (`record::MAX_TEXT`): what the index holds is a PART, whatever
+        // its length says, and the whole is in the media file - so the pointer names both, and it appears
+        // even when the stored part is short enough that a snippet needed no cutting.
+        let cut_at_store = if field == "transcript" { record.transcript_cut } else { record.ocr_cut };
+        if cut_at_store {
+            view[format!("{field}_cut")] = serde_json::Value::Bool(true);
+            view[format!("{field}_full")] = serde_json::json!({
+                "tool": "whatsapp_message",
+                "chat": record.chat,
+                "id": record.id,
+                "field": field,
+                "chars": total,
+                "chars_stored": crate::record::MAX_TEXT,
+                "whole_in": {
+                    "tool": "whatsapp_download",
+                    "chat": record.chat,
+                    "id": record.id,
+                    "why": "the stored text was cut at the record bound; the file holds the whole",
+                },
+            });
+            continue;
+        }
         if total > seam::MAX_TEXT_CHARS {
             view[format!("{field}_truncated")] = serde_json::Value::Bool(true);
             view[format!("{field}_chars")] = serde_json::Value::from(total);
@@ -300,7 +327,7 @@ mod tests {
 
     #[test]
     fn a_message_carries_who_when_and_what_in_the_one_shape() {
-        let view = message(&record("text", "bom dia"), None);
+        let view = message(&record("text", "bom dia"), None, false);
         assert_eq!(view["from"]["jid"], "5511999999999@s.whatsapp.net");
         assert_eq!(view["from"]["name"], "Laura");
         assert_eq!(view["from"]["own"], false);
@@ -317,23 +344,64 @@ mod tests {
     #[test]
     fn a_long_message_is_a_pointer_to_its_stored_text() {
         let long = "a".repeat(seam::MAX_TEXT_CHARS + 40);
-        let view = message(&record("text", &long), None);
+        let view = message(&record("text", &long), None, false);
         assert_eq!(view["text_truncated"], true);
         assert_eq!(view["full"]["tool"], "whatsapp_message");
         assert_eq!(view["full"]["chat"], "5511999999999@s.whatsapp.net");
         assert_eq!(view["full"]["chars"], long.chars().count());
     }
 
+    /// A transcript (or an image's OCR text) is the one place a snippet costs a second call: the model
+    /// reads 280 characters, and what it needs is at the end. `text: "full"` answers the whole text up to
+    /// [`seam::MAX_FULL_CHARS`], and BOTH modes say which cap answered (`text_cap`), so a cut is never read
+    /// as the whole of it (whatsapp-read-slow-is-not-an-error, item 3).
+    #[test]
+    fn a_full_text_is_answered_whole_and_the_answer_states_its_cap() {
+        // One voice note whose transcript is far longer than a snippet and well inside the full cap.
+        let transcript = "a".repeat(2_000);
+        let record = record("voice", &transcript);
+
+        // Before: the snippet every reader of a chat gets.
+        let snip = message(&record, None, false);
+        let snip_text = snip["text"].as_str().unwrap_or_default();
+        assert_eq!(snip_text.chars().count(), seam::MAX_TEXT_CHARS, "the snippet is the cap");
+        assert_eq!(snip["text_truncated"], serde_json::Value::Bool(true), "and it says it is cut: {snip}");
+        assert_eq!(snip["text_cap"]["chars"], serde_json::json!(seam::MAX_TEXT_CHARS), "{snip}");
+        assert_eq!(snip["text_cap"]["mode"], serde_json::json!("snippet"), "{snip}");
+
+        // After: the whole transcript, no second call, and the cap stated again.
+        let whole = message(&record, None, true);
+        let whole_text = whole["text"].as_str().unwrap_or_default();
+        assert_eq!(whole_text.chars().count(), transcript.chars().count(), "the whole text, not a snippet");
+        assert_eq!(whole["text_truncated"], serde_json::Value::Bool(false), "nothing left out: {whole}");
+        assert_eq!(whole["text_cap"]["chars"], serde_json::json!(seam::MAX_FULL_CHARS), "{whole}");
+        assert_eq!(whole["text_cap"]["mode"], serde_json::json!("full"), "{whole}");
+
+        // The cost, in bytes of the answer itself: what a model pays for the whole transcript instead of
+        // paying a second call for it.
+        let snip_bytes = serde_json::to_string(&snip).unwrap_or_default().len();
+        let whole_bytes = serde_json::to_string(&whole).unwrap_or_default().len();
+        let snip_text_bytes = snip_text.len();
+        let whole_text_bytes = whole_text.len();
+        println!("answer bytes: snippet {snip_bytes}, full {whole_bytes}; text {snip_text_bytes} -> {whole_text_bytes}");
+        assert!(whole_bytes > snip_bytes, "the full text costs more bytes in the answer ({whole_bytes} vs {snip_bytes})");
+        // The text delta is exactly the characters the snippet left out; the answer's own delta is smaller
+        // because both answers carry the same `text_cap` object, and larger than nothing at all.
+        assert_eq!(whole_text_bytes - snip_text_bytes, transcript.len() - seam::MAX_TEXT_CHARS);
+        assert!(whole_bytes - snip_bytes > 0 && whole_bytes - snip_bytes < transcript.len(),
+            "the answer grows by the text minus what both answers share ({whole_bytes} - {snip_bytes})");
+    }
+
     #[test]
     fn a_reply_keeps_its_quote_and_an_unknown_quote_is_empty_not_absent() {
         let mut reply = record("text", "claro");
         reply.quoted = "3EB0ORIGINAL".into();
-        let with_quote = message(&reply, Some("posso ligar?"));
+        let with_quote = message(&reply, Some("posso ligar?"), false);
         assert_eq!(with_quote["reply_to"]["id"], "3EB0ORIGINAL");
         assert_eq!(with_quote["reply_to"]["quote"], "posso ligar?");
         // The index never saw the quoted message (a partial history): the id is kept, the quote is
         // empty, and neither is invented.
-        let without = message(&reply, None);
+        let without = message(&reply, None, false);
         assert_eq!(without["reply_to"]["id"], "3EB0ORIGINAL");
         assert_eq!(without["reply_to"]["quote"], "");
     }
@@ -349,7 +417,7 @@ mod tests {
             downloadable: true,
             ..Default::default()
         });
-        let view = message(&photo, None);
+        let view = message(&photo, None, false);
         assert_eq!(view["media"]["kind"], "image");
         assert_eq!(view["media"]["name"], "recibo.jpg");
         assert_eq!(view["media"]["size"], 48_213);
@@ -363,7 +431,7 @@ mod tests {
         let mut gone = record("text", "segredo");
         gone.deleted = true;
         gone.text = String::new();
-        let view = message(&gone, None);
+        let view = message(&gone, None, false);
         assert_eq!(view["deleted"], true);
         assert_eq!(view["text"], "");
     }
@@ -371,17 +439,17 @@ mod tests {
     #[test]
     fn a_voice_note_with_no_transcript_says_so_instead_of_an_empty_text() {
         // 23/11: a voice note answered `text: ""`, so "read an audio" meant opening the store by hand.
-        let view = message(&record("voice", ""), None);
+        let view = message(&record("voice", ""), None, false);
         assert_eq!(view["text"], "transcript pending", "never an empty string: {view}");
         assert_eq!(view["text_reason"], "transcript_pending");
         // A note the node cannot transcribe carries the reason it holds, not a guess.
         let mut refused = record("voice", "");
         refused.unsupported = "media_too_large".into();
-        let view = message(&refused, None);
+        let view = message(&refused, None, false);
         assert_eq!(view["text"], "not transcribed: media_too_large");
         assert_eq!(view["text_reason"], "unsupported");
         // An image nobody has read yet is the same shape, with its own word.
-        let view = message(&record("image", ""), None);
+        let view = message(&record("image", ""), None, false);
         assert_eq!(view["text"], "ocr pending");
         assert_eq!(view["text_reason"], "ocr_pending");
     }
@@ -392,12 +460,12 @@ mod tests {
         // (4012380f put the transcript on read; this measures that it is what `text` carries).
         let mut note = record("voice", "");
         note.transcript = "bom dia, o boleto vence amanhã".into();
-        let view = message(&note, None);
+        let view = message(&note, None, false);
         assert_eq!(view["text"], "bom dia, o boleto vence amanhã");
         assert_eq!(view["transcript"], "bom dia, o boleto vence amanhã");
         assert!(view.get("text_reason").is_none(), "nothing is pending when the note was read");
         note.transcript = "a".repeat(seam::MAX_TEXT_CHARS + 10);
-        let view = message(&note, None);
+        let view = message(&note, None, false);
         assert_eq!(view["transcript_truncated"], true);
         assert_eq!(view["transcript_full"]["tool"], "whatsapp_message");
         assert_eq!(view["transcript_full"]["field"], "transcript");

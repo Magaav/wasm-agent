@@ -1,0 +1,30 @@
+[package]
+name = "stt"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The speech queue's wire layer as a component (`wa:stt`, docs/QUEUE.md phase 2, docs/CORE-SPLIT.md):
+# the envelope, the admission rule, the signature message and the reply codecs — the part of a
+# `host.stt_*` call that happens *before* it reaches the queue. Request-shaped (wasm32-wasip2) and
+# built by `scripts/build-components.sh`, never by the core build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bindings for `wa:stt` (exported) from the world in `wit/stt`. The component imports nothing: no kv,
+# no audio store, no socket, no clock, no key.
+wit-bindgen = "0.63"
+# The rules themselves, shared with the node (`wa-kernel-runtime`'s `stt_node`), so the two paths are
+# one rule compiled twice rather than two implementations that agree today. The crate is pure (its own
+# doc says so) and builds for wasip2 as it is: it has no wasmtime, no threads and no I/O.
+wa-stt-remote = { path = "../../wa-stt-remote" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

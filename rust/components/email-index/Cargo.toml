@@ -1,0 +1,23 @@
+[package]
+name = "email-index"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The email-query contract as a WASI component (everything-is-a-component, row 14).
+#
+# `rust/wa-email-index` is the vocabulary an email query is written in: the three ops, the twelve fields a
+# request may carry, which ones make it valid (`Request::validate`), the refusal a bad one gets and the
+# envelope a caller reads back. The HOST words every query with it (`wa-capabilities/src/email_query.rs`) and
+# the `wa-email` component indexes with the same crate - so a change to either end rebuilt the node. The
+# contract half is pure (no fs, no net, no clock it does not receive), which is what makes it a component.
+[workspace]
+
+[dependencies]
+wa-email-index = { path = "../../wa-email-index" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

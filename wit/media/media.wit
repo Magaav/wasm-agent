@@ -1,0 +1,120 @@
+// The media capability's contract: one owner of "cut and convert a media file", for any file
+// (a WhatsApp video, an email attachment, an upload). Files in, files out - never media bytes inside a
+// tool answer, which is the rule the first slice of `whatsapp-media-of-any-size` had to learn the hard way
+// (a 4.3 MB video could not ride a queue whose progress stream caps at 1 MiB).
+//
+// WHY ITS OWN PACKAGE AND NOT AN INTERFACE IN `wit/kernel-v2/kernel.wit`: that file is copied byte for
+// byte into every component's `wit/deps/` and a row compares the copies (`scripts/test-whatsapp-send.lua`),
+// so adding an interface there edits six components in one commit and makes every one of them a suspect
+// when it breaks. A capability that is still being measured gets its own package; when it is proven and a
+// second component needs it, promoting it into the kernel contract is a diff with a reason.
+package wa:media@0.1.0;
+
+interface types {
+    /// The failure of an operation, in the words the caller can act on. `code` is a stable word
+    /// (`no_video_track`, `unsupported_codec`, `too_large`, `encode_failed`, …); `detail` is a sentence.
+    record failure {
+        code: string,
+        detail: string,
+    }
+
+    variant error {
+        failure(failure),
+        /// The work is not done and asking again later is right (a busy worker, a queue full).
+        again(string),
+    }
+
+    /// One file on disk, as every operation of this capability takes and answers them.
+    record file {
+        path: string,
+        bytes: u64,
+        sha256: string,
+        mime: string,
+    }
+}
+
+/// What a media file IS, without decoding it.
+interface probe {
+    use types.{error, file};
+
+    record stream {
+        kind: string,       // "video" | "audio" | "subtitle"
+        codec: string,      // the encoder's own name, e.g. "h264", "aac"
+        width: u32,
+        height: u32,
+        sample-rate: u32,
+        channels: u32,
+    }
+
+    record description {
+        duration-ms: u64,
+        size-bytes: u64,
+        streams: list<stream>,
+        /// The container's own name ("mp4", "matroska", "ogg").
+        format: string,
+        /// Whether an audio track exists. Whether it carries SPEECH is the transcriber's answer, never ours:
+        /// this capability does not transcribe, it hands the audio to the one that does.
+        has-audio: bool,
+        elapsed-ms: u64,
+    }
+
+    /// Header-level reading only: no frame is decoded, so this answers in milliseconds for any size.
+    describe: async func(source: file) -> result<description, error>;
+}
+
+/// Stills out of a video: the frames a model can look at directly (vision is a different capability and
+/// reads text from them; this one only produces them).
+interface frames {
+    use types.{error, file};
+
+    /// One moment to take. `at-ms` is a time in the file; a scene-change request names `scene: true` instead
+    /// and the implementation chooses the moments.
+    record moment {
+        at-ms: u64,
+        scene: bool,
+    }
+
+    record request {
+        source: file,
+        moments: list<moment>,
+        /// Longest side of the written images, keeping the aspect ratio. 0 keeps the source size.
+        max-pixels: u32,
+    }
+
+    record still {
+        at-ms: u64,
+        image: file,
+    }
+
+    /// Each still is a FILE the caller reads by path. The list is never the image bytes.
+    take: async func(request: request) -> result<list<still>, error>;
+}
+
+/// The audio track as a file the transcriber accepts. The transcript is NOT this capability's answer.
+interface audio {
+    use types.{error, file};
+
+    record request {
+        source: file,
+        /// 0 keeps the source's rate; the transcriber's own contract names what it accepts.
+        sample-rate: u32,
+        channels: u32,
+    }
+
+    record track {
+        audio: file,
+        duration-ms: u64,
+        elapsed-ms: u64,
+    }
+
+    extract: async func(request: request) -> result<track, error>;
+}
+
+/// The world a media component exports: the three operations the first slice measured as usable, and the
+/// place where `cut`, `trim`, `compress` and `thumbnail` land once the encoder question is answered (a
+/// 30 s 720p re-encode measures 41-56 s on wasm against 1.24 s native - docs/missions/reports/media-is-a-component.md).
+world media-service {
+    export probe;
+    export frames;
+    export audio;
+}

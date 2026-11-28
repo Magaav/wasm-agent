@@ -178,6 +178,33 @@ check(type(resumed) == "table" and resumed.state == "done",
 check(type(resumed.stdout) == "string" and resumed.stdout:find("rp-resumed", 1, true) ~= nil,
   "and answers the command's real output: " .. json.encode(resumed):sub(1, 200))
 
+-- 4b. A STOP ON THE CALLER STOPS THE PEER'S PROCESS GROUP (week 1, "Esc stops what it started", item 4).
+-- The call is one the caller is WAITING on (no wait_s, so its record is not detached), the run is
+-- already cancelled when the wait begins, and the peer's own supervisor is what ends the group: the
+-- caller only relays the request. What is asserted is the real thing - the peer's shell is gone - not
+-- the sentence alone.
+local stop_pids = data .. "/peer-stop-pid.txt"
+local real_cancel = host.run_cancelled
+host.run_cancelled = function() return json.encode({ cancelled = true }) end
+local stop_command = "echo $$ > '" .. stop_pids .. "'; sleep 300"
+local stop_raw = json.encode({ node = "rp-scratch-peer", capability = "bash", command = stop_command })
+local stopped_call = pending.invoke(relay, { scope = scope }, "remote",
+  { node = "rp-scratch-peer", capability = "bash", command = stop_command }, stop_raw, nil)
+host.run_cancelled = real_cancel
+check(type(stopped_call) == "table" and stopped_call.reason == "run_cancelled",
+  "a stopped remote wait answers run_cancelled: " .. json.encode(stopped_call or {}):sub(1, 240))
+check(type(stopped_call) == "table" and type(stopped_call.stop_note) == "string"
+  and stopped_call.stop_note:find("stopped: echo $$", 1, true) == 1,
+  "and names the command it stopped, on the peer: " .. tostring(stopped_call and stopped_call.stop_note))
+local stop_pid = tonumber((tostring(host.read_file(stop_pids) or "")):match("%d+") or "")
+check(stop_pid ~= nil, "the stopped command on the peer wrote its own pid")
+local peer_alive = peer_bash("kill -0 " .. tostring(stop_pid) .. " 2>/dev/null", 5000) or {}
+local peer_code = tonumber(peer_alive.code or peer_alive.process_exit_code or -1)
+check(peer_code ~= 0, "the peer's shell is gone after the stop (kill -0 answered " .. tostring(peer_code) .. ")")
+-- The row stops only what it started: if a build of this tree ever left it running, this cleans up by
+-- the pid it read, never by a process name.
+if peer_code == 0 then peer_bash("kill -9 " .. tostring(stop_pid) .. " 2>/dev/null", 5000) end
+
 -- 12 (22/11). The handle names its own next step, and the copy the MODEL reads does not invite a LOCAL
 -- read of a PEER path. Measured on the base (ee38c015): the model was handed the handle itself - 617
 -- bytes, the op id three times, stdout_path and log_path pointing at /home/ubuntu/... on the peer, and

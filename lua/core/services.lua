@@ -39,7 +39,7 @@ local function absolute(v)return type(v)=='string' and (v:sub(1,1)=='/' or v:mat
 
 function M.validate(def)
  if type(def)~='table' then return 'invalid_service_definition' end
- local allowed={name=true,env=true,file_env=true,net=true,config=true,description=true}
+ local allowed={name=true,env=true,file_env=true,net=true,config=true,description=true,dirs=true}
  for k in pairs(def)do if not allowed[k] then return 'unsupported_service_definition_field:'..tostring(k) end end
  if type(def.name)~='string' or not def.name:match('^[a-z][a-z0-9-]*$') or #def.name>40 then return 'invalid_service_name' end
  if def.net~=nil then
@@ -55,11 +55,20 @@ function M.validate(def)
   end
  end
  if def.config~=nil and type(def.config)~='table' then return 'invalid_service_config' end
+ -- `dirs` names GUEST directories ('/downloads'), never host paths: the node owns the host side
+ -- (`rust/wa-kernel-runtime/src/services.rs`, resolved_dirs), so a definition an operator writes cannot
+ -- point a component at a directory the node did not choose. A guest must be absolute and cannot climb.
+ if def.dirs~=nil then
+  if not dense(def.dirs,8) then return 'invalid_service_dirs' end
+  for _,guest in ipairs(def.dirs)do
+   if guest:sub(1,1)~='/' or guest:find('..',1,true) or #guest>128 or guest:find('[^%w/_%-%.]') then return 'invalid_service_dirs' end
+  end
+ end
  return nil
 end
 
 local function start_request(def)
- return {action='start',name=def.name,env=def.env,file_env=def.file_env,net=def.net,config=def.config}
+ return {action='start',name=def.name,env=def.env,file_env=def.file_env,net=def.net,config=def.config,dirs=def.dirs}
 end
 local function host_call(request)
  if not host.service then return fail('service_runtime_unavailable') end

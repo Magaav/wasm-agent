@@ -41,7 +41,6 @@
 //! produced when the messages arrived.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use wa_whatsapp_outbox::Chat;
 
 /// The index's key layout (`ix/m/…`, `ix/all/…`, `ix/w/…`) and the facts one record's keys follow from.
 ///
@@ -60,6 +59,12 @@ pub use text::{fold, name_key, tokenize, tokens, Searchable, MAX_TOKENS};
 /// The queue every query travels on (`docs/SERVICE-COMPONENTS.md`).
 pub const QUEUE: &str = "whatsapp.query";
 
+/// The one word that is not an op: `{"op":"ops"}` asks the component for its registry (the op set and
+/// its effect classes, `ready-whatsapp-world.md`, package `wa:whatsapp@0.2.0`). It travels on the same
+/// queue as every question and is answered by the same worker, so a caller learns what this build can do
+/// without a second channel.
+pub const REGISTRY_OP: &str = "ops";
+
 /// A query nobody picked up within this window is answered "too old" instead of answered late: the
 /// index is a snapshot, and an answer produced ten minutes after the question is a different answer.
 pub const FRESH_MS: i64 = 120_000;
@@ -72,13 +77,22 @@ pub const MAX_ATTEMPTS: u32 = 2;
 /// job id". Bounded because the caller is a Lua tool call on the node's own thread: a search is a
 /// local scan, and a node that blocks longer than this to answer "what did they say" is a node that
 /// stopped serving everything else.
-pub const WAIT_MS: u64 = 2_000;
+// No wait constant here: a tool answer obeys crate::serve::tool_wait_ms in wa-capabilities, and the
+// shared number lives in lua/core/codemode_pending.lua. See whatsapp-read-slow-is-not-an-error.
 
 /// Largest media one `whatsapp_download` may hand back. The bytes ride the job's progress stream,
 /// which `wa:queue` bounds at 1 MiB of chunks; 512 KiB of plaintext stays inside that with room for
 /// the manifest, and a photo, a voice note or a one-page document fits. A video does not: the answer
 /// says `download_too_large` with the size instead of pretending.
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024;
+
+/// Largest media this node will KEEP, which is a different question from what it can hand back through a
+/// queue. The component writes the decrypted file into the directory the node grants it
+/// (`/downloads`, `rust/wa-kernel-runtime/src/services.rs`) and answers with the path, so a 4.3 MB video
+/// or a 40 MB one is a download and not `download_too_large`. The number matches the host's own
+/// retention bound (`DOWNLOAD_KEEP_BYTES`, 64 MB): media bigger than what the directory will keep could
+/// not survive the prune that runs before the write.
+pub const MAX_STORED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Largest answer the component will settle with. `wa:queue`'s own cap is 64 KiB; the margin is the
 /// job record around the result.
@@ -87,6 +101,13 @@ pub const MAX_RESULT_BYTES: usize = 56 * 1024;
 /// Longest text a hit or a message carries in an answer. The full text stays in the index; an answer
 /// is a pointer to it (`chat` + `id`), not a transcript dump.
 pub const MAX_TEXT_CHARS: usize = 280;
+
+/// The cap a caller gets when it asks for the whole text (`text: "full"`, whatsapp-read-slow-is-not-an-error
+/// item 3). An audio's transcript and an image's OCR text are the two things a snippet cannot answer: a
+/// model that receives 280 characters has to make a second call (`whatsapp_media`) to read the rest, which
+/// is a round for a fact the index already holds. The answer always STATES which cap it used
+/// (`text_cap`), so a cut is never mistaken for the whole of it.
+pub const MAX_FULL_CHARS: usize = 64_000;
 
 /// Most mentions, reactions or poll options one answer lists.
 pub const MAX_LISTED: usize = 16;
@@ -137,6 +158,16 @@ pub const BACKFILL_MAX: u32 = 500;
 /// the phone, and a caller that names no chat is asking for "the ones I talk in", not for all of them.
 pub const BACKFILL_MAX_CHATS: usize = 20;
 
+/// What a question can do to the world outside this process, in the three classes the host's capability
+/// inventory promises ([`Op::effect`]). `ReadOnly` asks the index; `Network` asks the primary phone;
+/// `WritesFiles` writes a decrypted file into the node's bounded directory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Effect {
+    ReadOnly,
+    Network,
+    WritesFiles,
+}
+
 /// The seven questions the agent may ask about the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -184,6 +215,18 @@ impl Op {
         Op::Backfill,
         Op::Contacts,
     ];
+
+    /// What this question does to the world outside the process - the class the host's capability row
+    /// declares. It is a property of the QUESTION, not of the door that carries it: `whatsapp_index` is
+    /// one ReadOnly row, and a sandbox that joined it as a read must not be able to reach `backfill` and
+    /// ask the primary phone (measured 25/11 on avell: it could, and did).
+    pub fn effect(self) -> Effect {
+        match self {
+            Op::Search | Op::Read | Op::Message | Op::Reactions | Op::Media | Op::Contacts => Effect::ReadOnly,
+            Op::Backfill => Effect::Network,
+            Op::Download => Effect::WritesFiles,
+        }
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -301,8 +344,11 @@ pub struct Request {
     pub kind: Option<String>,
     pub from: Option<String>,
     /// Unix milliseconds (a seconds epoch is accepted and converted: a model writing `1760000000`
-    /// means the same instant as `1760000000000`).
+    /// means the same instant as `1760000000000`; a plain date `YYYY-MM-DD` is that day's UTC
+    /// midnight - see [`TIME_FORMS`]).
+    #[serde(default, deserialize_with = "time_value")]
     pub since: Option<i64>,
+    #[serde(default, deserialize_with = "time_value")]
     pub until: Option<i64>,
     /// A message id or an epoch; `read` returns what is *older* than it.
     pub before: Option<String>,
@@ -317,6 +363,9 @@ pub struct Request {
     /// (23/11: a search of old audios answered them by relevance, and a reader took the list for the
     /// tail of the conversation).
     pub order: Option<String>,
+    /// `read`/`message` only: `snippet` (the default, [`MAX_TEXT_CHARS`]) or `full` ([`MAX_FULL_CHARS`]).
+    /// Anything else is refused by name rather than quietly answered with a snippet.
+    pub text: Option<String>,
 }
 
 /// A request that passed every check, with the bounds already applied.
@@ -324,7 +373,10 @@ pub struct Request {
 pub struct Verified {
     pub op: Op,
     pub q: Option<String>,
-    pub chat: Option<Chat>,
+    /// The exact JID, once `parse_chat` accepted it. A STRING and not `wa_whatsapp_outbox::Chat` (28/11):
+    /// the value is only ever used as its JID spelling, and naming the outbox type here kept that crate
+    /// linked into the host for a type alone - it is about to become a component.
+    pub chat: Option<String>,
     /// The chat as the caller named it when it was **not** an exact JID: a name to resolve against the
     /// index (`read` only). Exactly one of `chat`/`chat_name` can be set, never both: a caller that
     /// typed a JID gets that chat, and a caller that typed a name gets an answer about which chat it
@@ -332,7 +384,8 @@ pub struct Verified {
     pub chat_name: Option<String>,
     pub id: Option<String>,
     pub kind: Option<String>,
-    pub from: Option<Chat>,
+    /// The sender's exact JID, same rule as [`Verified::chat`].
+    pub from: Option<String>,
     pub since: Option<i64>,
     pub until: Option<i64>,
     pub before: Option<String>,
@@ -341,6 +394,12 @@ pub struct Verified {
     pub max_bytes: u64,
     /// How a `search` orders its hits (`None` = the op's default, see [`Request::order`]).
     pub order: Option<Order>,
+    /// The caller asked for the whole text rather than the snippet (`text: "full"`).
+    pub full: bool,
+    /// The count the caller ASKED for, when it was over this op's cap: the answer then says what it kept
+    /// (`keeper`'s sentence), because a silently clamped list reads as "that is everything there is".
+    /// Decided 26/11: over the cap is clamped AND said, never refused.
+    pub limit_asked: Option<u32>,
 }
 
 impl Request {
@@ -367,7 +426,8 @@ impl Request {
                 Err(_) => (None, Some(parse_name(text)?)),
             },
         };
-        let from = match self.from.as_deref().map(str::trim) {            None | Some("") => None,
+        let from = match self.from.as_deref().map(str::trim) {
+            None | Some("") => None,
             Some(text) => Some(parse_chat(text)?),
         };
         let id = match self.id.as_deref().map(str::trim) {
@@ -461,7 +521,7 @@ impl Request {
                 if chat.is_none() || id.is_none() {
                     return Err(Refusal::new("chat_and_id_required", "one message: pass chat and id"));
                 }
-                let bytes = self.max_bytes.unwrap_or(MAX_DOWNLOAD_BYTES).clamp(1, MAX_DOWNLOAD_BYTES);
+                let bytes = self.max_bytes.unwrap_or(MAX_STORED_BYTES).clamp(1, MAX_STORED_BYTES);
                 (1, bytes)
             }
             Op::Backfill => {
@@ -471,7 +531,30 @@ impl Request {
             }
             Op::Contacts => (clamp_limit(self.limit, CONTACTS_MAX, CONTACTS_MAX), 0),
         };
-        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order })
+        // `text` is `snippet` unless the caller asked for `full`; anything else is refused by name rather
+        // than quietly answered with the shorter cap (whatsapp-read-slow-is-not-an-error, item 3).
+        let full = match self.text.as_deref().map(str::trim) {
+            None | Some("") | Some("snippet") => false,
+            Some("full") => true,
+            Some(other) => {
+                return Err(Refusal::new(
+                    "bad_text_mode",
+                    format!("text must be snippet or full, not {other}"),
+                ))
+            }
+        };
+        
+        // What the caller asked for, when it was more than this op keeps: the answer says so.
+        let cap = match op {
+            Op::Search => SEARCH_MAX,
+            Op::Read => READ_MAX,
+            Op::Contacts => CONTACTS_MAX,
+            Op::Backfill => BACKFILL_MAX,
+            Op::Message | Op::Reactions | Op::Media | Op::Download => 1,
+        };
+        let limit_asked = self.limit.filter(|asked| *asked > cap);
+        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes, order, full, limit_asked })
+
     }
 
     /// The payload bytes for the queue.
@@ -481,7 +564,18 @@ impl Request {
 
     /// Read a payload back. A payload this crate did not write is `malformed`, never guessed at.
     pub fn decode(bytes: &[u8]) -> Result<Request, Refusal> {
-        serde_json::from_slice(bytes)
+        let value: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|_| Refusal::new("malformed_job", "the job payload is not a whatsapp query"))?;
+        // A time nobody can read is refused BY NAME, with the forms: the payload is readable, one field
+        // is not, and a deserializer's word for it would lose which field.
+        for (key, code) in [("since", "bad_since"), ("until", "bad_until")] {
+            if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
+                if parse_time(text).is_none() {
+                    return Err(Refusal::new(code, TIME_FORMS));
+                }
+            }
+        }
+        serde_json::from_value(value)
             .map_err(|_| Refusal::new("malformed_job", "the job payload is not a whatsapp query"))
     }
 
@@ -525,11 +619,11 @@ impl Verified {
             "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.op.as_str(),
             self.q.as_deref().unwrap_or(""),
-            self.chat.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
+            self.chat.as_deref().unwrap_or_default(),
             self.chat_name.as_deref().unwrap_or(""),
             self.id.as_deref().unwrap_or(""),
             self.kind.as_deref().unwrap_or(""),
-            self.from.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
+            self.from.as_deref().unwrap_or_default(),
             self.since.map(|ms| ms.to_string()).unwrap_or_default(),
             self.until.map(|ms| ms.to_string()).unwrap_or_default(),
             self.before.as_deref().unwrap_or(""),
@@ -549,16 +643,19 @@ impl Verified {
             q: self.q.clone(),
             // A name goes back on the wire as it was typed: the component re-validates the payload
             // it took, and resolving it there is what keeps one answer for one string.
-            chat: self.chat.as_ref().map(|chat| chat.jid()).or_else(|| self.chat_name.clone()),
+            chat: self.chat.clone().or_else(|| self.chat_name.clone()),
             id: self.id.clone(),
             kind: self.kind.clone(),
-            from: self.from.as_ref().map(|chat| chat.jid()),
+            from: self.from.clone(),
             since: self.since,
             until: self.until,
             before: self.before.clone(),
             limit: Some(self.limit),
             max_bytes: Some(self.max_bytes),
             order: self.order.map(|order| order.as_str().to_string()),
+            // The validated form carries the decision, not the caller's word, so a job payload always
+            // says which cap answered it: `full` goes back on the wire as `text: "full"`.
+            text: if self.full { Some("full".to_string()) } else { None },
         }
     }
 }
@@ -592,9 +689,21 @@ pub fn backfill_answer(chats: Vec<BackfillChat>, note: &str) -> serde_json::Valu
     body
 }
 
-/// The exact-JID rule, with the outbox's refusal turned into this crate's: one code, one shape.
-fn parse_chat(text: &str) -> Result<Chat, Refusal> {
-    Chat::parse(text).map_err(|refusal| Refusal::new(refusal.code, refusal.detail))
+/// THE INDEX'S OWN CHECK IS A SHAPE, NOT THE RULE (28/11). The exact-JID rule - which servers exist,
+/// which legacy group ids are real - belongs to the send contract (`wa-whatsapp-outbox`), and naming that
+/// crate here is what kept it linked into the node. What the index needs is a stable KEY: an address-shaped
+/// string with no spaces. The callers ask the contract first (`wa-capabilities/src/outbox_component.rs`)
+/// and its refusals (`bad_chat`, `unsupported_chat`) reach the caller unchanged, so the words a person
+/// sees are the same as before - they are decided one layer up, where the rule lives.
+fn parse_chat(text: &str) -> Result<String, Refusal> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(Refusal::new("bad_chat", "empty chat: pass an exact JID or a name"));
+    }
+    if !trimmed.contains('@') || trimmed.chars().any(char::is_whitespace) {
+        return Err(Refusal::new("bad_chat", "chat is not an address: pass an exact JID"));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Does this op accept a chat *name* where a chat is expected?
@@ -604,7 +713,10 @@ fn parse_chat(text: &str) -> Result<Chat, Refusal> {
 /// address one exact chat, and `send` (which never reaches this crate) must not be able to name its
 /// target loosely either.
 fn accepts_a_name(op: Op) -> bool {
-    matches!(op, Op::Read | Op::Contacts)
+    // `read` and `contacts` always did; `search` joins them because a GROUP is named by its subject and
+    // nothing else (whatsapp-index-heals-itself P2.2): a caller that knows only "Família" must be able to
+    // search inside it without first turning that into a JID.
+    matches!(op, Op::Read | Op::Contacts | Op::Search)
 }
 
 /// A chat as a human wrote it, for the ops that resolve names: bounded, one line, never empty, and
@@ -634,6 +746,77 @@ fn parse_name(text: &str) -> Result<String, Refusal> {
 }
 
 /// One epoch as milliseconds: seconds (any value a human would type for a date) are scaled.
+/// The forms a time may take in `since` / `until`, in one sentence a refusal repeats verbatim: a caller
+/// that wrote something else (a model writes `last tuesday`, or `01/11/2026`) reads the forms instead of
+/// a deserializer's word for them.
+pub const TIME_FORMS: &str =
+    "a time is an epoch in seconds or milliseconds, or a date as YYYY-MM-DD (UTC midnight), e.g. 1760000000, 1760000000000 or 2026-11-01";
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm), so one subtraction needs no date
+/// crate. `None` for a day the calendar does not have.
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=12).contains(&month) || day < 1 {
+        return None;
+    }
+    // The day the calendar actually has: `2026-11-31` is not a date this seam accepts, and rolling it
+    // into December would answer for a day nobody asked about.
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let length = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => if leap { 29 } else { 28 },
+    };
+    if day > length {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// One time as the wire carries it: an epoch (seconds or milliseconds) or a plain date at UTC midnight.
+/// `None` when the text is neither, so every caller can refuse with [`TIME_FORMS`] instead of a guess.
+pub fn parse_time(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(epoch_ms(number));
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        let year: i64 = text[0..4].parse().ok()?;
+        let month: i64 = text[5..7].parse().ok()?;
+        let day: i64 = text[8..10].parse().ok()?;
+        // A date is UTC midnight and the answer says so: the node's own zone is a Lua concept, and a
+        // seam that guessed it would move a query's window by hours without saying it did.
+        return Some(days_from_civil(year, month, day)? * 86_400_000);
+    }
+    None
+}
+
+/// `since` / `until` on the wire: a number, a numeric string, or a date. Anything else is an error serde
+/// reports with the accepted forms, which `decode` turns into `bad_since` / `bad_until`.
+fn time_value<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => Ok(number.as_i64().map(epoch_ms)),
+        Some(serde_json::Value::String(text)) => {
+            parse_time(&text).map(Some).ok_or_else(|| serde::de::Error::custom(TIME_FORMS))
+        }
+        Some(_) => Err(serde::de::Error::custom(TIME_FORMS)),
+    }
+}
+
 fn epoch_ms(value: i64) -> i64 {
     if value.abs() < 100_000_000_000 {
         value.saturating_mul(1000)
@@ -659,8 +842,34 @@ pub struct Download {
     pub filename: String,
     pub sha256: String,
     pub bytes: u64,
-    /// How many progress chunks the job carries, in order, starting at sequence 0.
+    /// How many progress chunks the job carries, in order, starting at sequence 0. ZERO when the
+    /// component wrote the file itself (`path`): no bytes ride the queue, so there are no chunks.
     pub chunks: u32,
+    /// Where the decrypted file IS, when the node granted the component a directory to write in (the
+    /// `/downloads` preopen, `rust/wa-kernel-runtime/src/services.rs`). Its absence is not an error: a
+    /// node that granted nothing gets the chunks, bounded by [`MAX_DOWNLOAD_BYTES`]. A 4.3 MB video is
+    /// only possible through this field - the progress stream is capped at 1 MiB by `wa:queue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// The refusal a download answers when the media does not fit the road it would have to travel.
+///
+/// It names the cap, the size, and THE EXACT NEXT CALL, because a refusal that names no way forward is
+/// what made a model invent one live on 27/11 (shell on another node, ffmpeg, a store read by hand)
+/// after a 4.3 MB video came back `download_too_large`.
+pub fn download_too_large_answer(size: u64) -> serde_json::Value {
+    let mut answer = refusal(
+        Op::Download,
+        "download_too_large",
+        "the decrypted media is larger than this node will hand back through the job's progress stream, and it granted no directory to write it in",
+    );
+    answer["size"] = serde_json::Value::from(size);
+    answer["max_bytes"] = serde_json::Value::from(MAX_DOWNLOAD_BYTES);
+    answer["next"] = serde_json::Value::from(
+        "run `wa services enable wa-whatsapp` on the node that holds the account: the definition gives the component a directory (`capabilities.dirs`), and this same call then answers with the file's path instead of its bytes",
+    );
+    answer
 }
 
 impl Download {
@@ -685,25 +894,94 @@ pub fn answer(op: Op, body: serde_json::Value) -> serde_json::Value {
     bound(answer)
 }
 
+/// Put the clamp into an answer, when there was one: `limit: {asked, kept, said}` - the count the caller
+/// named, the count this node keeps, and the sentence a reader can act on. Called by every list answer
+/// (search, read, contacts), so the rule is one shape everywhere and never a refusal.
+pub fn say_limit(answer: &mut serde_json::Value, request: &Verified) {
+    let Some(asked) = request.limit_asked else { return };
+    let kept = request.limit;
+    // A SEPARATE key, never a change of type: `search` and `read` already carry `limit` as the number they
+    // kept, and turning that into an object would move more bytes than the rule asks for.
+    answer["limit_asked"] = serde_json::json!({
+        "asked": asked,
+        "kept": kept,
+        "said": format!("limit: {kept} of {asked} asked; ask for less, or page with the cursor this answer carries"),
+    });
+}
+
 /// The answer of a query that was refused or failed: a word, one line of detail, no text, and never
 /// an `ok` a caller could read as success.
 pub fn refusal(op: Op, code: &str, detail: impl AsRef<str>) -> serde_json::Value {
+    refusal_text(op.as_str(), code, detail)
+}
+
+/// One line per op for an operator reading the registry: what the question asks, in the provider's own
+/// words. It is NOT the host's capability description (`capabilities.rs` owns those and this crate must
+/// not duplicate them): it says what the op IS, on the side that answers it.
+pub fn summary(op: Op) -> &'static str {
+    match op {
+        Op::Search => "search the index by text, chat, kind, sender or time window",
+        Op::Read => "read one chat newest-first, with reactions folded on and a cursor",
+        Op::Message => "one exact message by chat and id, with its full stored text",
+        Op::Reactions => "who reacted to one message, with which emoji",
+        Op::Media => "the media metadata of one message, never the bytes",
+        Op::Download => "decrypt one message's media into the caller's bounded folder",
+        Op::Backfill => "ask the primary phone for messages older than the index holds",
+        Op::Contacts => "which chats the index knows, by the name it observed",
+    }
+}
+
+/// The `ops.registry` answer: every op this build answers, with its effect class, as the document the
+/// world returns (`ready-whatsapp-world.md`, package `wa:whatsapp@0.2.0`).
+///
+/// It is the one place the op set and its effect classes are said out loud, and it is built from
+/// [`Op::ALL`] and [`Op::effect`] - so a new op appears here by being a variant, never by a second list
+/// kept in step by hand. The host gates a door on the class it reads here (today it reads the same
+/// `effect()` directly, until the registry is served over the wire).
+pub fn registry() -> serde_json::Value {
+    let ops: Vec<serde_json::Value> = Op::ALL
+        .iter()
+        .map(|op| {
+            let effect = match op.effect() {
+                Effect::ReadOnly => "read-only",
+                Effect::Network => "network",
+                Effect::WritesFiles => "writes-files",
+            };
+            serde_json::json!({"name": op.as_str(), "effect": effect, "summary": summary(*op)})
+        })
+        .collect();
+    serde_json::json!({"ok": true, "op": "ops", "ops": ops})
+}
+
+/// [`refusal`] for a caller that carries the op as the word on the wire instead of the enum.
+///
+/// The bytes are the enum version's by construction: `refusal` is this function plus `op.as_str()`, and
+/// `Op::tool()` is `whatsapp_<word>` for every op. It exists so a host bind can name its op as DATA
+/// (`answer_text(l, "reactions")`) and still refuse in the tool's own words before anything is asked.
+pub fn refusal_text(op: &str, code: &str, detail: impl AsRef<str>) -> serde_json::Value {
     serde_json::json!({
         "ok": false,
-        "op": op.as_str(),
-        "error": format!("{}_{code}", op.tool()),
+        "op": op,
+        "error": format!("whatsapp_{op}_{code}"),
         "detail": detail.as_ref().chars().take(160).collect::<String>(),
         "effect": "none",
     })
 }
 
-/// The answer when the component has not settled inside [`WAIT_MS`]: the job id, so the caller can
+/// The answer when the component has not settled inside the wait the CALL named (see
+/// `wa_capabilities::serve::tool_wait_ms`): the job id, so the caller can
 /// ask again (the dedupe key makes that a read of the same job, not a second scan).
 pub fn slow(op: Op, id: u64, state: &str) -> serde_json::Value {
+    slow_text(op.as_str(), id, state)
+}
+
+/// [`slow`] for a caller that carries the op as the word on the wire (and for the registry word, which
+/// is not an op at all). The bytes are the enum version's by construction.
+pub fn slow_text(op: &str, id: u64, state: &str) -> serde_json::Value {
     serde_json::json!({
         "ok": false,
-        "op": op.as_str(),
-        "error": format!("{}_slow", op.tool()),
+        "op": op,
+        "error": format!("whatsapp_{op}_slow"),
         "id": id,
         "state": state_word(state),
         "retry": true,
@@ -928,7 +1206,7 @@ mod tests {
                 ..request(op)
             };
             let verified = both.validate().unwrap();
-            assert_eq!(verified.max_bytes, MAX_DOWNLOAD_BYTES, "{op}");
+            assert_eq!(verified.max_bytes, MAX_STORED_BYTES, "{op}");
         }
         assert_eq!(request("").validate().unwrap_err().code, "bad_op");
         assert_eq!(request("delete).drop table").validate().unwrap_err().code, "bad_op");
@@ -979,17 +1257,30 @@ mod tests {
 
     #[test]
     fn chats_ids_kinds_and_windows_are_bounded_with_stable_codes() {
-        // An address-shaped chat is judged by the exact-JID rule, in every op.
+        // THE INDEX OWNS THE SHAPE, the contract owns the rule (28/11). An address-shaped string with
+        // no spaces keys the index; the fine rules - which servers, which legacy group ids - are the
+        // send contract's, asserted in `wa-whatsapp-outbox`'s own tests (`1-2-3@g.us` is one of them)
+        // and applied by every caller through `wa-capabilities/src/outbox_component.rs`.
         for op in ["read", "search", "message", "contacts", "backfill", "media"] {
-            let bad_chat = Request { chat: Some("1-2-3@g.us".into()), ..request(op) };
-            assert_eq!(bad_chat.validate().unwrap_err().code, "bad_chat", "{op}");
+            // A space inside an address is not a JID the index can key, whatever the op.
+            let spaced = Request { chat: Some("a chat with spaces@g.us".into()), ..request(op) };
+            assert_eq!(spaced.validate().unwrap_err().code, "bad_chat", "{op}: an address with spaces");
         }
+        // A string with no `@` is a NAME for the two ops that resolve one, and refused as an address by
+        // every op that addresses a single chat: the split is the index's own and is asserted here.
+        let name = Request { chat: Some("5511999999999".into()), ..request("read") };
+        assert_eq!(name.validate().expect("a name read resolves").chat_name.as_deref(), Some("5511999999999"));
+        let addressed = Request { chat: Some("5511999999999".into()), ..request("message") };
+        assert_eq!(addressed.validate().unwrap_err().code, "bad_chat", "message addresses a chat");
         // A bare number has no `@`: it is a *name* `read` resolves, and the same string is refused as
         // an address by every op that addresses one chat (and by the send path's own JID rule).
         let numeric = Request { chat: Some("5511999999999".into()), ..request("read") };
         assert_eq!(numeric.validate().expect("a name to resolve").chat_name.as_deref(), Some("5511999999999"));
+        // A search filter may now name a GROUP's subject (whatsapp-index-heals-itself P2.2), so the seam
+        // carries the name to the component; the refusal for anything that is not a subject is made
+        // THERE, where the subjects are - and index/tests.rs pins it for a bare number.
         let numeric_search = Request { chat: Some("5511999999999".into()), q: Some("x".into()), ..request("search") };
-        assert_eq!(numeric_search.validate().unwrap_err().code, "bad_chat");
+        assert_eq!(numeric_search.validate().expect("a search filter resolves a name now").chat_name.as_deref(), Some("5511999999999"));
         let bad_id = Request {
             chat: Some("5511999999999@lid".into()),
             id: Some("3EB0 ABC".into()),
@@ -1039,13 +1330,19 @@ mod tests {
         assert_eq!(huge_read.validate().unwrap().limit, READ_MAX);
         let zero = Request { q: Some("a".into()), limit: Some(0), ..request("search") };
         assert_eq!(zero.validate().unwrap().limit, SEARCH_DEFAULT);
+        // The download bound MOVED on 27/11 and this assertion still holds it exactly: a download is no
+        // longer one kv record (that was `MAX_DOWNLOAD_BYTES`, 512 KiB, the queue's progress stream), it is
+        // a file the component writes into a directory the node granted it, so the bound is what the node
+        // KEEPS. The transport bound is still asserted - by the refusal that fires when no directory was
+        // granted (`the_too_large_refusal_names_the_next_call`).
         let download = Request {
             chat: Some("5511999999999@lid".into()),
             id: Some("3EB0ABCDEF".into()),
-            max_bytes: Some(64 * 1024 * 1024),
+            max_bytes: Some(200 * 1024 * 1024),
             ..request("download")
         };
-        assert_eq!(download.validate().unwrap().max_bytes, MAX_DOWNLOAD_BYTES, "a video is not one kv record");
+        assert_eq!(download.validate().unwrap().max_bytes, MAX_STORED_BYTES, "a video is a file, and the node keeps 64 MB of them");
+        assert!(MAX_STORED_BYTES > MAX_DOWNLOAD_BYTES, "the file bound is looser than the transport bound, or this change would be pointless");
     }
 
     #[test]
@@ -1125,9 +1422,24 @@ mod tests {
             sha256: "ab".repeat(32),
             bytes: 1024,
             chunks: 1,
+            path: None,
         };
         assert_eq!(Download::decode(&manifest.encode()).unwrap(), manifest);
         assert!(Download::decode(b"\x00").is_none());
+    }
+
+    /// A refusal that names no way forward sends a model looking for one. This one names the cap, the size,
+    /// and the exact next call - the difference between a dead end and a dead end with a door.
+    #[test]
+    fn the_too_large_refusal_names_the_next_call() {
+        let answer = download_too_large_answer(4_300_000);
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["error"], "whatsapp_download_download_too_large", "{answer}");
+        assert_eq!(answer["size"], 4_300_000, "{answer}");
+        assert_eq!(answer["max_bytes"], MAX_DOWNLOAD_BYTES, "{answer}");
+        let next = answer["next"].as_str().unwrap_or_default();
+        assert!(next.contains("wa services enable wa-whatsapp"), "the exact command: {next}");
+        assert!(next.contains("path"), "and what the same call answers afterwards: {next}");
     }
 
     #[test]
@@ -1182,7 +1494,7 @@ mod tests {
 
         // A named chat is validated by the same exact-JID rule the send path uses.
         let named = Request { op: "backfill".into(), chat: Some("5511999999999@lid".into()), ..Request::default() };
-        assert_eq!(named.validate().unwrap().chat.as_ref().map(|chat| chat.jid()), Some("5511999999999@lid".to_string()));
+        assert_eq!(named.validate().unwrap().chat.clone(), Some("5511999999999@lid".to_string()));
         let bad = Request { op: "backfill".into(), chat: Some("5511999999999".into()), ..Request::default() };
         assert_eq!(bad.validate().unwrap_err().code, "bad_chat");
 
@@ -1260,5 +1572,67 @@ mod tests {
         assert_eq!(answer["id"], 42);
         assert_eq!(answer["retry"], true);
         assert_eq!(state_word("done"), "done");
+    }
+
+    /// The registry is the op set and its effect classes said out loud, built from `Op::ALL` and
+    /// `Op::effect` - so it cannot disagree with either, and a new variant appears in it by existing.
+    /// This is the document the `wa:whatsapp@0.2.0` world's `ops.registry` returns.
+    #[test]
+    fn the_registry_lists_every_op_with_its_effect_class() {
+        let doc = registry();
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["op"], "ops");
+        let ops = doc["ops"].as_array().expect("a list of ops");
+        assert_eq!(ops.len(), Op::ALL.len(), "one entry per op, no more, no fewer");
+        for (entry, op) in ops.iter().zip(Op::ALL.iter()) {
+            assert_eq!(entry["name"], op.as_str(), "the order and the words are `Op::ALL`'s");
+            let expected = match op.effect() {
+                Effect::ReadOnly => "read-only",
+                Effect::Network => "network",
+                Effect::WritesFiles => "writes-files",
+            };
+            assert_eq!(entry["effect"], expected, "{} carries its own class", op.as_str());
+            assert!(!summary(*op).is_empty(), "{} has a line for an operator", op.as_str());
+            assert_eq!(entry["summary"], summary(*op));
+        }
+        // The classes the doors rely on, counted: a change here is a change to what a sandbox joins.
+        let count = |want: &str| ops.iter().filter(|e| e["effect"] == want).count();
+        assert_eq!(count("read-only"), 6, "six index reads ride the read-only door");
+        assert_eq!(count("network"), 1, "backfill is the one that asks the phone");
+        assert_eq!(count("writes-files"), 1, "download is the one whose answer is a file");
+    }
+
+    /// A plain date is that day's UTC midnight, and the two epoch forms mean what they always meant. The
+    /// refusal for anything else is `TIME_FORMS`, which the next row pins.
+    #[test]
+    fn a_time_may_be_an_epoch_or_a_date() {
+        assert_eq!(parse_time("2026-11-01"), Some(1_793_491_200_000), "a date is midnight UTC");
+        assert_eq!(parse_time("1760000000"), Some(1_760_000_000_000), "seconds become milliseconds");
+        assert_eq!(parse_time("1760000000000"), Some(1_760_000_000_000), "milliseconds stay milliseconds");
+        assert_eq!(parse_time(" 2026-11-01 "), Some(1_793_491_200_000), "surrounding space is not the caller's problem");
+        assert_eq!(parse_time("last tuesday"), None);
+        assert_eq!(parse_time("01/11/2026"), None, "a form this seam does not take is not guessed at");
+        assert_eq!(parse_time("2026-13-01"), None, "a month the calendar does not have");
+        assert_eq!(parse_time("2026-11-31"), None, "November has 30 days: an impossible day is not rolled into December");
+        assert_eq!(parse_time("2028-02-29"), Some(1_835_395_200_000), "a leap day exists");
+        assert_eq!(parse_time("2027-02-29"), None, "and the same day does not exist a year later");
+    }
+
+    /// A payload that carries a date arrives as milliseconds, and one that carries something unreadable
+    /// is refused BY NAME with the forms - not with a deserializer's sentence, and not as a whole-payload
+    /// `malformed_job` when only one field is wrong.
+    #[test]
+    fn a_bad_time_is_refused_by_name_with_the_forms() {
+        let request: Request = serde_json::from_value(serde_json::json!({"op": "search", "q": "x", "since": "2026-11-01"})).expect("a date is a time");
+        assert_eq!(request.since, Some(1_793_491_200_000));
+        assert_eq!(request.validate().unwrap().since, Some(1_793_491_200_000), "and it survives validate");
+
+        let payload = serde_json::to_vec(&serde_json::json!({"op": "search", "q": "x", "since": "last tuesday"})).unwrap();
+        let refusal = Request::decode(&payload).expect_err("a word is not a time");
+        assert_eq!(refusal.code, "bad_since");
+        assert!(refusal.detail.contains("YYYY-MM-DD"), "the refusal names the forms: {}", refusal.detail);
+
+        let payload = serde_json::to_vec(&serde_json::json!({"op": "search", "q": "x", "until": "01/11/2026"})).unwrap();
+        assert_eq!(Request::decode(&payload).expect_err("not a time").code, "bad_until");
     }
 }

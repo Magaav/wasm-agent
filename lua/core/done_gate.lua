@@ -51,16 +51,12 @@ local function dep(name)
   return deps[name]
 end
 
+local sql_answer = dofile("lua/core/sql_answer.lua")
+-- The owner runs the statement (lua/core/sql_answer.lua); the gate keeps its own policy: any refusal is this
+-- module's error, with the store's name in front of it.
 local function sql(method, statement, params)
-  local raw = host[method](statement, json.encode(params or {}))
-  local value = raw
-  if type(raw) == "string" then
-    local ok, decoded = pcall(json.decode, raw)
-    if not ok then error("done_gate_store: unreadable answer") end
-    value = decoded
-  end
-  if type(value) ~= "table" then error("done_gate_store: no answer from " .. method) end
-  if value.error then error(tostring(value.error)) end
+  local value, why = sql_answer.run(method, statement, params)
+  if not value then error("done_gate_store: " .. tostring(why)) end
   return value
 end
 local function exec(statement, params) return sql("sql_exec", statement, params) end

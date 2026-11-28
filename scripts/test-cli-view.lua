@@ -517,7 +517,9 @@ local said = recorder()
 local said_view = view_lib.new({ out = said.out, live = false, now = function() return 7 end, limit = 80 })
 said_view:run_started()
 said_view:event({ type = "commentary", text = "I'll read the config before changing it", message_id = "c1" })
-ok(has(said.text(), "\226\156\166 Commentary"), "commentary is announced as commentary, with the UI's glyph")
+-- THE HEADING IS DELETED (Victor 27/11): a live turn never put a "Commentary" label over this sentence,
+-- and the renderer no longer does either - one drawing, the body, in both the live turn and a replay.
+ok(not has(said.text(), "Commentary"), "commentary carries no heading a live turn never showed")
 ok(not has(said.text(), "\226\156\187 Thinking\226\128\166"), "and is not drawn as thinking")
 ok(has(said.text(), "read the config before changing it"), "and printed in full")
 local white = recorder()
@@ -544,10 +546,12 @@ local chat = recorder()
 local chat_view = view_lib.new({ out = chat.out, live = false, now = function() return 7 end, limit = 80 })
 chat_view:run_started()
 chat_view:event({ type = "step_phase", phase = "commentary", text = "I'll list /work/bin first.", message_id = "a1" })
-ok(has(chat.text(), "\226\156\166 Commentary") and has(chat.text(), "list /work/bin first"),
-  "a chat provider's step commentary is printed as commentary")
+ok(has(chat.text(), "list /work/bin first"),
+  "a chat provider's step commentary is printed")
 chat_view:event({ type = "step_phase", phase = "commentary", text = "  ", message_id = "a2" })
-local _, blocks = chat.text():gsub("Commentary", "")
+-- ONE block for the sentence, and nothing for an empty step: counted on the sentence now that the
+-- heading is gone (it was never what the reader read).
+local _, blocks = chat.text():gsub("list /work/bin first", "")
 ok(blocks == 1, "an empty step leaves no block behind")
 local peer = recorder()
 local peer_view = view_lib.new({ out = peer.out, live = false, now = function() return 7 end, limit = 80 })
@@ -1229,6 +1233,46 @@ do
   local drawn = table.concat(bash_written)
   ok(drawn:find("!git status", 1, true) and drawn:find("clean tree", 1, true), "a bash row is replayed as its command and output")
   ok(not drawn:find("<bash-input>", 1, true), "without its tags")
+end
+
+-- A turn that ran ELSEWHERE (the node, a sentinel wake) is drawn with the same blocks a typed turn uses
+-- (mission turn-survives-a-provider-stall, item 3 / report §4.3). Measured on work 24/11: the wake turn
+-- came back as the Commentary topic because it carried tool calls, and no typed turn ever reads that way.
+do
+  local rows = {
+    { role = "user", content = "[run failure] the previous run stopped" },
+    -- No escaped quotes inside the arguments: a tool_calls string that does not decode leaves `calls`
+    -- empty, and then neither the commentary branch nor the call itself is drawn - which is exactly what
+    -- this row caught on its first run.
+    { role = "assistant", content = "I read the config and fixed it.", reasoning = "",
+      tool_calls = '[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{}"}}]' },
+    -- A bash result, the shape the existing replay case above already proves is drawn: a tool row's own
+    -- renderer is a table per tool, and a shape it does not know draws nothing (learned here, not guessed).
+    { role = "tool", tool_call_id = "c1", tool_name = "bash", ok = 1, ms = 40,
+      content = '{"code":0,"stdout":"cfg fixed\n"}' },
+  }
+  -- As history (what --continue shows): the commentary treatment is the truthful one.
+  local hist_view, hist_written = capture({ live = false, limit = 100 })
+  hist_view:replay(rows, {})
+  local hist = table.concat(hist_written)
+  -- ONE RENDERER (Victor 27/11, restart-redraws-with-the-current-tui): the history is drawn by the SAME
+  -- path a live turn uses, so a text beside a tool call is NOT filed under a "Commentary" heading that a
+  -- live turn never shows - which is the bug a restart put on screen.
+  ok(hist:find("Commentary", 1, true) == nil, "replayed history shows no Commentary heading a live turn never shows")
+  ok(hist:find("I read the config and fixed it.", 1, true) ~= nil, "and its text still reaches the reader")
+  -- As a TURN (what catch_up draws for a node-run wake): the answer is an answer.
+  local turn_view, turn_written = capture({ live = false, limit = 100 })
+  turn_view:replay(rows, { rule = false, answer = true })
+  local turn = table.concat(turn_written)
+  ok(turn:find("I read the config and fixed it.", 1, true) ~= nil,
+    "a wake turn's text reaches the reader")
+  ok(turn:find("Commentary", 1, true) == nil,
+    "and not under the Commentary heading a typed turn never shows")
+  -- NOT asserted here, on purpose: whether the tool-call row inside this same capture is drawn. A
+  -- replayed partial row set (text, call, result, no trailing assistant row) does not flush the pending
+  -- call row in this capture, and I did not establish whether that is the fixture's shape or the
+  -- renderer's. The existing replay case above pins call rows, so nothing here regressed; this row pins
+  -- ONLY the thing the change is: the answer text and the absent Commentary heading.
 end
 
 -- ---- session-status-content: between the text area and the session status bar ---------

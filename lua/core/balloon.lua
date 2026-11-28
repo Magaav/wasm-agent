@@ -167,6 +167,11 @@ function M.page(spec)
     -- A field's own handler: what to do with the text, returning the page that says so. Only the
     -- interpreter can run one, which is why a published page never carries it.
     act = spec.act,
+    -- The letters a page names: one that CHOOSES a row, one that asks for an ACTION on the row the
+    -- reader is on. Both are the panel's own fields (`keys`, `keys_action`) and this list is the page's
+    -- whole vocabulary - a field missing here is a field the panel never sees.
+    keys = spec.keys,
+    keys_action = spec.keys_action,
   }
 end
 
@@ -228,8 +233,14 @@ function M.page_text(page, width, opts)
       rows[#rows + 1] = string.format("     %u more - the terminal list scrolls", #page.options - shown)
     end
   end
-  rows[#rows + 1] = ""
-  rows[#rows + 1] = M.fit(M.hint_for(page), width)
+  -- A PIPE HAS NO KEYS. `opts.keys == false` (the plain-text renderer a command prints to stdout,
+  -- `wa mcp list`) leaves the key hint row out: "Enter opens a connector - Esc closes" is advice to a
+  -- reader who has no Enter to press, and it is the last line of a page nobody can walk. The page keeps its
+  -- `hint` - the panel drawn in a chat still shows it (mcp-list-80x24.txt).
+  if opts.keys ~= false then
+    rows[#rows + 1] = ""
+    rows[#rows + 1] = M.fit(M.hint_for(page), width)
+  end
   return rows
 end
 
@@ -256,7 +267,7 @@ function M.text(pages, width, opts)
         lines[#lines + 1] = ""
         lines[#lines + 1] = string.rep("\u{2500}", math.min(width, 40))
       end
-      for _, row in ipairs(M.page_text(page, width)) do lines[#lines + 1] = row end
+      for _, row in ipairs(M.page_text(page, width, opts)) do lines[#lines + 1] = row end
     end
   end
   return table.concat(lines, "\n")
@@ -323,7 +334,10 @@ function M.panel_spec(page, selected, opts)
     options[#options + 1] = { label = tostring(option.label or ""), hint = tostring(option.hint or ""),
       -- The group a row starts, drawn by the renderer above it: `wa_term`'s panel takes it as a row of its
       -- own that no key selects (`Panel::from_spec`, `heading`), the same way the plain rendering does.
-      heading = option.heading ~= nil and tostring(option.heading) or nil }
+      heading = option.heading ~= nil and tostring(option.heading) or nil,
+      -- WHAT A CLICK ON THIS ROW COPIES (`c` does the same from the keyboard): the full id behind a
+      -- shortened label. A row that names none is a row a click does not touch.
+      copy = option.copy ~= nil and tostring(option.copy) or nil }
   end
   local spec = {
     title = page.title, lines = page.lines, options = options, selected = selected or page.selected or 1,
@@ -335,6 +349,10 @@ function M.panel_spec(page, selected, opts)
     spec.placeholder = page.placeholder
   end
   if page.hint then spec.hint = page.hint end
+  -- A letter that NAMES an action instead of a row (`keys_action = { c = "copy" }`): the panel answers
+  -- `{"action": "key", "key": "copy", "index": <the row the reader was on>}` and the caller decides.
+  -- `keys` (a letter that CHOOSES a row) is unchanged, and a page that names neither keeps its keys.
+  if page.keys_action then spec.keys_action = page.keys_action end
   if opts and opts.timeout_ms then spec.timeout_ms = opts.timeout_ms end
   return spec
 end
@@ -377,6 +395,11 @@ function M.flow(pages, io)
     local answer = open(M.panel_spec(page, frame.focus, io))
     if type(answer) ~= "table" then answer = { action = "cancel" } end
     if answer.action == "unsupported" then return { action = "unsupported" } end
+    -- A letter the page named as an ACTION (not a row): the caller owns it, and the page stays open
+    -- for it - `c` copies and the list is still there to pick from.
+    if answer.action == "key" then
+      return { action = "key", key = tostring(answer.key or ""), index = tonumber(answer.index) or 0 }
+    end
     if answer.action == "timeout" then close(); return { action = "timeout" } end
     if answer.action == "cancel" then
       if #stack == 1 then close(); return { action = "cancel" } end

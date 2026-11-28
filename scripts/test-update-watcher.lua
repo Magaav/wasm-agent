@@ -141,6 +141,28 @@ ok(not report.queued and report.status == "no_watcher", "and it is not reported 
 ok(report.message:find("was not queued", 1, true) ~= nil, "the answer says the request was not queued")
 ok(report.observed:find("sentinel.pid", 1, true) ~= nil, "the refusal names the file it looked at", report.observed)
 ok(report.next:find(sentinel .. " start", 1, true) ~= nil, "and the command that starts a watcher", report.next)
+-- THE FIX COMES FIRST (Fable 26/11, work): there `wa update` answered "inspect the watcher/service outside this node"
+-- while the whole fix was one command the line named LAST, after a sentence that sent the operator elsewhere.
+ok(report.next:find(sentinel .. " start", 1, true) == 1,
+  "and it names that command FIRST, not after a sentence that sends the operator elsewhere", report.next)
+ok(report.next:find("install the current sentinel", 1, true) == nil,
+  "and a node that HAS a sentinel is not told to install one", report.next)
+ok(report.next:find("one command that fixes this", 1, true) ~= nil,
+  "it says the command is the fix, so the next move is not a guess", report.next)
+-- THE OTHER SHAPE: an install directory with no sentinel has nothing to start, so there the installer IS the answer -
+-- named once, and the refusal still says what is missing.
+vfs[sentinel] = nil
+report = ask()
+ok(report.error == "no_watcher", "a node with no sentinel at all is refused the same way, got " .. tostring(report.error))
+ok(report.next:find("no sentinel to start", 1, true) ~= nil,
+  "and its answer names what is missing: there is nothing to start", report.next)
+ok(report.next:find("install the current sentinel", 1, true) ~= nil,
+  "so the installer is named - for this shape only", report.next)
+vfs[sentinel] = "#!/bin/sh - the fixture's sentinel\n"
+-- The assertions below are the ORIGINAL ones for this case and they read the shape where the sentinel exists, so the
+-- answer is taken again rather than left on the case just probed (measured: the first version left `report` on the
+-- no-sentinel answer and the next assertion failed for the wrong reason).
+report = ask()
 ok(report.next:find("schtasks /Run /TN wasm-agent-sentinel", 1, true) ~= nil,
   "and the registered Windows task, which is what survives a logoff")
 ok(queued("request deploy") == 0, "no request was written for it")

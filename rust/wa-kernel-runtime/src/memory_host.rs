@@ -61,7 +61,7 @@ const DEFAULT_MEMORY_MB: u64 = 128;
 /// deadline has to be the worst case for all of them, which is the wrong bound for the cheap ones.
 /// Each value is 10 × the worst p99 of two bench runs, rounded up to the next round number, with the
 /// floor under it. The risk this knob carries: a store much larger than 10k/50k facts will exceed
-/// these, and the answer is a re-measurement (or `WA_MEMORY_COMPONENT_TIMEOUT_MS`), not silently
+/// these, and the answer is a re-measurement (or `WA_COMPONENT_WAIT_MS`), not silently
 /// raising them. A timeout is not data loss — the router falls back to the native path with one log
 /// line — but a deadline that fires on legitimate work buys the same query twice.
 ///
@@ -104,9 +104,10 @@ pub fn measured_deadline_ms(op: &str) -> u64 {
         // 10 × 51 ms: one query, but a correlated last-message join per thread.
         "sessions" => DEADLINE_FLOOR_MS,
         "retention" => DEADLINE_FLOOR_MS,
-        // An operation this table has never measured keeps the old default rather than an invented
-        // small one: an unknown op is a bug in the caller, and the deadline is not where it lands.
-        _ => 2_000,
+        // An operation this table has never measured takes the node's ONE component wait (rust/wa-component-wait,
+        // ARCHITECTURE.md law 17) rather than an invented small number: an unknown op is a bug in the caller, and the
+        // deadline is not where it lands.
+        _ => wa_component_wait::DEFAULT_WAIT_MS,
     };
     measured.max(DEADLINE_FLOOR_MS)
 }
@@ -126,7 +127,7 @@ pub struct Config {
     pub wasm: Option<PathBuf>,
     /// `WA_MEMORY_COMPONENT_MANIFEST`: the manifest that goes with `wasm`.
     pub manifest: Option<PathBuf>,
-    /// `WA_MEMORY_COMPONENT_TIMEOUT_MS`: one deadline for every operation, replacing the measured
+    /// `WA_COMPONENT_WAIT_MS` (the one knob, `rust/wa-component-wait`): one deadline for every operation, replacing the measured
     /// per-operation table. A test knob and an operator's escape hatch; unset on a node.
     pub timeout_ms: Option<u64>,
 }
@@ -139,10 +140,7 @@ impl Config {
             db: sql_host::database_path(),
             wasm: env_path("WA_MEMORY_COMPONENT_WASM"),
             manifest: env_path("WA_MEMORY_COMPONENT_MANIFEST"),
-            timeout_ms: std::env::var("WA_MEMORY_COMPONENT_TIMEOUT_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0),
+            timeout_ms: None,
         }
     }
 
@@ -365,7 +363,7 @@ fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String>
         .with_journal(JOURNAL_KIND, origin)
         .with_statement_deadline(Duration::from_millis(deadline_ms + STATEMENT_MARGIN_MS));
     let started = Instant::now();
-    let result = run_once(&installed, scope, op, request, deadline_ms)?;
+    let result = run_once(&installed, scope, op, request, deadline_ms).map_err(expiry_counted)?;
     let mut answer = json!({"result": result});
     answer["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
     answer["deadline_ms"] = json!(deadline_ms);
@@ -374,6 +372,15 @@ fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String>
 
 /// One instance, one call. The store is dropped at the end, which also closes the SQL session and
 /// rolls back a transaction the component left open (a guest killed mid-call lands here).
+/// One deadline, counted where it is seen (the question "how often does the window expire?" is answered once,
+/// in `wa-component-wait`, by every host that asks it).
+fn expiry_counted(error: String) -> String {
+    if wa_component_wait::is_expiry(&error) {
+        wa_component_wait::note_expiry();
+    }
+    error
+}
+
 fn run_once(
     installed: &Installed,
     scope: SqlScope,

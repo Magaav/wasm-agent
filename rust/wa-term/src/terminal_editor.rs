@@ -228,6 +228,15 @@ impl Editor {
     fn replace(&mut self, text: &str) { self.chars = text.chars().collect(); self.cursor = self.chars.len(); }
     fn insert(&mut self, ch: char) { self.delete_selection(); self.chars.insert(self.cursor, ch); self.cursor += 1; }
     /// The selected range `[start, end)`, when there is one.
+    /// The draft as it stands (its text, without bash mode's `!`): what the node shows and what the
+    /// wire reads (`editor_state`).
+    pub fn draft(&self) -> String { self.text() }
+    /// The history the node recalls with Up/Down, newest last: the node keeps it in Lua's config and
+    /// hands it over with the rest of the state.
+    pub fn set_history(&mut self, history: Vec<String>) {
+        self.history = history;
+        self.history_at = None;
+    }
     pub fn selection(&self) -> Option<(usize, usize)> {
         let anchor = self.anchor?;
         let cursor = self.cursor.min(self.chars.len());
@@ -1019,6 +1028,9 @@ pub struct PanelOption {
     pub label: String,
     pub hint: String,
     pub heading: Option<String>,
+    /// What a CLICK on this row puts on the clipboard (`copy` in the spec): the full id behind a
+    /// shortened row, a path, a command. None on every page that did not ask for one.
+    pub copy: Option<String>,
 }
 
 /// A panel over the bottom of the screen, the way Claude Code shows `/model` or `/usage`: a title, a
@@ -1042,6 +1054,10 @@ pub struct Panel {
     /// (`{"e": 2}`). Opt-in per page, so no other panel's keys change: pressing a letter on a list
     /// that did not name it still does nothing.
     pub keys: Vec<(u8, usize)>,
+    /// The letters a page names as an ACTION rather than a row (`{"c": "copy"}`): pressing one asks
+    /// the caller for it - `{"action": "key", "key": "copy", "index": <the row the reader was on>}`
+    /// - and the panel is NOT finished by it, because the list is still there to pick from.
+    pub key_actions: Vec<(u8, String)>,
     text: Vec<char>, escape: Vec<u8>, paste: bool, utf8: Vec<u8>,
     pub result: Option<serde_json::Value>, pub width: usize, pub rows: usize,
 }
@@ -1061,6 +1077,7 @@ impl Panel {
                 // An EMPTY heading is kept: it is the blank row that sets a block of rows apart from the group
                 // above it, and dropping it here would put the folded rows back among the connectors.
                 heading: o.get("heading").and_then(|v| v.as_str()).map(str::to_string),
+                copy: o.get("copy").and_then(|v| v.as_str()).filter(|text| !text.is_empty()).map(str::to_string),
             }).collect()).unwrap_or_default();
         // A page that does not say is numbered: every panel that existed before this field was one.
         let numbered = spec.get("numbered").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -1089,6 +1106,14 @@ impl Panel {
                 Some((byte[0].to_ascii_lowercase(), option))
             })
             .collect()).unwrap_or_default();
+        let key_actions: Vec<(u8, String)> = spec.get("keys_action").and_then(|v| v.as_object())
+            .map(|object| object.iter().filter_map(|(letter, action)| {
+                let byte = letter.as_bytes();
+                if byte.len() != 1 { return None; }
+                let name = action.as_str()?.to_string();
+                if name.is_empty() { return None; }
+                Some((byte[0].to_ascii_lowercase(), name))
+            }).collect()).unwrap_or_default();
         let selected = spec.get("selected").and_then(|v| v.as_u64()).map(|n| (n as usize).saturating_sub(1)).unwrap_or(0)
             .min(options.len().saturating_sub(1));
         let hint = match text("hint") {
@@ -1098,7 +1123,7 @@ impl Panel {
             _ => "Esc or \u{2190} to go back".into(),
         };
         Panel { title: text("title"), lines, options, selected, numbered, input, placeholder: text("placeholder"), hint,
-            spaces, keys, text: value, width, rows, ..Default::default() }
+            spaces, keys, key_actions, text: value, width, rows, ..Default::default() }
     }
 
     /// The rows a page's group headings take: one each, and only on a page that has them (`/mcp`'s list).
@@ -1144,7 +1169,9 @@ impl Panel {
         // field, every printable byte is the text being typed.
         if self.input.is_none() {
             if let Some(act) = keymap::panel_digit(byte) { self.perform(act, byte); return; }
-            if !self.options.is_empty() {
+            // `key_actions` counts too: a page whose letters are ACTIONS (`c` copies, `r` renames) has
+            // named its letters just as much as one whose letters pick rows.
+            if !self.options.is_empty() || !self.key_actions.is_empty() {
                 if let Some(act) = keymap::panel_letter() { self.perform(act, byte); return; }
             }
         }
@@ -1199,6 +1226,14 @@ impl Panel {
                         self.selected = index - 1;
                         self.finish(serde_json::json!({"action": "select", "index": *index}));
                     }
+                } else if let Some((_, action)) = self.key_actions.iter().find(|(named, _)| *named == letter) {
+                    // An ACTION letter: the reader asked for something to happen to the row they are on,
+                    // not to pick it. It finishes the page like every other answer - a panel that keeps
+                    // drawing while its answer is already with the caller reads keys and does nothing
+                    // (measured: Esc and Enter were swallowed after `c`). The caller re-opens the list
+                    // when it wants the reader back on it.
+                    self.finish(serde_json::json!({"action": "key", "key": action,
+                        "index": self.selected + 1}));
                 }
             }
             A::Backspace => { if self.input.is_some() { self.text.pop(); } }
@@ -1208,9 +1243,11 @@ impl Panel {
 
     /// The panel, anchored to the bottom row, and the cursor where typing goes (hidden otherwise):
     /// a divider above and below, and the text at the edge - no box, no padding.
-    pub fn render(&self) -> String {
+    /// THE ROWS THIS PANEL DRAWS, and which OPTION each one is (`None` for a title, a line, a heading
+    /// and the hint). One plan, used by `render` and by the pointer: a click that hit-tested a second
+    /// copy of this layout would drift from what is on the screen.
+    fn plan(&self) -> (Vec<(String, Option<usize>)>, Option<(usize, usize)>) {
         let w = self.width.max(20);
-        // Colour sequences (`ESC [ ... m`, a `/status` bar) take no cells: copied through, not counted.
         let fit = |text: &str| -> String {
             let mut out = String::new(); let mut used = 0; let mut sequence = false;
             for ch in text.chars() {
@@ -1221,13 +1258,13 @@ impl Panel {
             if sequence || out.contains('\x1b') { out.push_str(RESET); }
             out
         };
-        let mut rows: Vec<String> = Vec::new();
-        rows.push(format!("\x1b[1m{}{RESET}", fit(&self.title)));
-        rows.push(String::new());
-        for text in &self.lines { rows.push(fit(text)); }
+        let mut rows: Vec<(String, Option<usize>)> = Vec::new();
+        rows.push((format!("\x1b[1m{}{RESET}", fit(&self.title)), None));
+        rows.push((String::new(), None));
+        for text in &self.lines { rows.push((fit(text), None)); }
         let mut cursor = None;
         if let Some(secret) = self.input {
-            rows.push(String::new());
+            rows.push((String::new(), None));
             let (body, col) = if self.text.is_empty() {
                 (format!("{PROMPT}{HINT}{}{RESET}", fit(&self.placeholder)), 2)
             } else if secret {
@@ -1240,9 +1277,9 @@ impl Panel {
                 (shown, used)
             };
             cursor = Some((rows.len(), col));
-            rows.push(body);
+            rows.push((body, None));
         } else if !self.options.is_empty() {
-            rows.push(String::new());
+            rows.push((String::new(), None));
             let label_width = self.options.iter().map(|option| option.label.chars().count()).max().unwrap_or(0) + 2;
             let shown = self.visible_options();
             let start = self.selected.saturating_sub(shown - 1).min(self.options.len() - shown);
@@ -1250,8 +1287,8 @@ impl Panel {
                 // A group's name, drawn as a row of its own above the row it starts: never a choice, never
                 // marked, and a blank row keeps it apart from the group above it.
                 if let Some(heading) = option.heading.as_deref() {
-                    if index > 0 { rows.push(String::new()); }
-                    if !heading.is_empty() { rows.push(fit(heading)); }
+                    if index > 0 { rows.push((String::new(), None)); }
+                    if !heading.is_empty() { rows.push((fit(heading), None)); }
                 }
                 let mark = if index == self.selected { "\u{276f}" } else { " " };
                 let digits = self.options.len().to_string().len();
@@ -1262,21 +1299,43 @@ impl Panel {
                 };
                 let room = w.saturating_sub(head.chars().map(cell_width).sum());
                 let tail: String = clip_cells(&option.hint, room);
-                rows.push(if index == self.selected { format!("{SELECTED}{head}{tail}{RESET}") }
-                    else { format!("{head}{HINT}{tail}{RESET}") });
+                rows.push((if index == self.selected { format!("{SELECTED}{head}{tail}{RESET}") }
+                    else { format!("{head}{HINT}{tail}{RESET}") }, Some(index)));
             }
         }
-        rows.push(String::new());
+        rows.push((String::new(), None));
         let hint = if self.options.len() > self.visible_options() {
             format!("{} \u{b7} {}/{}", self.hint, self.selected + 1, self.options.len())
         } else { self.hint.clone() };
-        rows.push(format!("{HINT}{}{RESET}", fit(&hint)));
+        rows.push((format!("{HINT}{}{RESET}", fit(&hint)), None));
         let keep = self.height().saturating_sub(2);
         if rows.len() > keep {
             let drop = (rows.len() - keep).min(rows.len().saturating_sub(2));
             rows.drain(2..2 + drop);
             if let Some((row, _)) = cursor.as_mut() { *row -= drop; }
         }
+        (rows, cursor)
+    }
+
+    /// Which option a screen row (1-based) is, when it is one: what a click on this panel means.
+    pub fn option_at(&self, screen_row: usize) -> Option<usize> {
+        let (plan, _) = self.plan();
+        let top = self.rows.saturating_sub(plan.len() + 1);
+        if screen_row <= top { return None; }
+        plan.get(screen_row - top - 1).and_then(|(_, index)| *index)
+    }
+
+    /// The text a click on this row copies, when the page gave that row one (`copy` in the spec).
+    pub fn copy_at(&self, screen_row: usize) -> Option<String> {
+        let index = self.option_at(screen_row)?;
+        self.options.get(index).and_then(|option| option.copy.clone())
+    }
+
+    pub fn render(&self) -> String {
+        let w = self.width.max(20);
+        // Colour sequences (`ESC [ ... m`, a `/status` bar) take no cells: copied through, not counted.
+        let (plan, cursor) = self.plan();
+        let rows: Vec<String> = plan.into_iter().map(|(text, _)| text).collect();
         let top = self.rows.saturating_sub(rows.len() + 1);
         let divider = format!("{PANEL}{}{RESET}", "\u{2500}".repeat(w));
         let mut frame = format!("\x1b[?25l\x1b[{top};1H\x1b[2K{divider}");
@@ -2247,6 +2306,54 @@ mod tests {
         let mut p = Panel::from_spec(&plain, 60, 30);
         type_panel(&mut p, b"c");
         assert_eq!(p.result, None, "a page that named no letter keeps none");
+    }
+
+    // A letter that names an ACTION (`keys_action`) answers with the row the reader was on and does NOT
+    // pick it: `/sessions` copies the id of the row under the cursor without switching to it.
+    #[test]
+    fn a_letter_that_names_an_action_answers_with_the_row_it_was_on() {
+        let spec = serde_json::json!({
+            "title": "Sessions",
+            "options": [{"label": "this one"}, {"label": "beta"}, {"label": "gamma"}],
+            "selected": 2,
+            "keys_action": {"c": "copy", "r": "rename"},
+        });
+        let mut p = Panel::from_spec(&spec, 60, 30);
+        type_panel(&mut p, b"c");
+        assert_eq!(p.result.take(), Some(serde_json::json!({"action": "key", "key": "copy", "index": 2})),
+            "c asks for the action on the second row");
+        // It finishes the page like any other answer (a panel that keeps drawing after its answer has gone
+        // reads keys and does nothing), and the caller re-opens it on the same row.
+        type_panel(&mut p, &[0x1b, b'[', b'B']);
+        type_panel(&mut p, b"R");
+        assert_eq!(p.result.take(), Some(serde_json::json!({"action": "key", "key": "rename", "index": 3})),
+            "Down then R: the action follows the cursor, and the letter is case-blind");
+        // A letter nobody named is still not a key.
+        type_panel(&mut p, b"z");
+        assert_eq!(p.result, None, "an unnamed letter does nothing");
+    }
+
+    // A CLICK lands on a screen row, and a row of options is not where the panel starts: the hit test
+    // walks the same plan the renderer draws (one plan, never a second copy of the layout).
+    #[test]
+    fn a_click_on_a_row_finds_the_option_that_row_is() {
+        let spec = serde_json::json!({
+            "title": "Sessions",
+            "lines": ["two here"],
+            "options": [
+                {"label": "alpha", "copy": "11111111-1111-1111-1111-111111111111"},
+                {"label": "beta", "hint": "answered", "copy": "22222222-2222-2222-2222-222222222222"},
+                {"label": "gamma"},
+            ],
+        });
+        let p = Panel::from_spec(&spec, 60, 30);
+        // Nine rows in a 30-row screen: title, blank, one line, blank, three options, blank, hint - so
+        // the first option is screen row 21 + 4 and the hint is the last one.
+        assert_eq!(p.option_at(25), Some(0), "the first option row");
+        assert_eq!(p.copy_at(26).as_deref(), Some("22222222-2222-2222-2222-222222222222"), "beta copies its id");
+        assert_eq!(p.copy_at(27), None, "a row with no copy payload copies nothing");
+        assert_eq!(p.option_at(24), None, "the blank row above the options is not one");
+        assert_eq!(p.option_at(29), None, "the hint row is not one");
     }
 
     fn type_panel_action(spec: &serde_json::Value, key: u8, expected: usize) {

@@ -276,9 +276,40 @@ end
 -- bytes) - the same pair `change/version-names-the-tree` prints, read through the ONE reader of that file
 -- (lua/core/update.lua's `installed_record`), so a release and `wa --version` cannot disagree about it.
 --
--- Recorded AT THE PAUSE and read again AT THE RELEASE: `{ tree, commit }`, either field empty when the record does not
--- name it. `tree` falls back to `commit`, which is the identity of a record written by a release install (the release
--- bootstrap writes no `lua_tree=`; scripts/deploy.sh writes it on every deploy since the Lua fast path).
+-- RECORDED AT THE PAUSE AND READ AGAIN AT THE RELEASE, and the facts are the ones `wa --version` names (25/11).
+--
+-- MEASURED on this node: `wa --version` answers `wasm-agent v0.1.2 - va1857d15 - tree 70eb209d` - the PROGRAM (the
+-- bytes' own build label) beside the TREE. The release line named only the tree, so a Lua-only install, which moves
+-- the tree and not the bytes, told a worker "this node now runs <tree>" while the program was unchanged, and a compile
+-- install said the same while the program had moved too. One of the two facts is not something a reader can check, so
+-- the pause records BOTH and the release names both.
+--
+-- The facts are the record's own, read through the one reader of installed.txt (lua/core/update.lua's
+-- `installed_record`), because that file is what a deploy writes and both sides of the comparison are about it:
+--
+--   * `program` - the bytes this install runs, in the shape `wa --version` prints first: `binary_commit=` (the commit
+--     the kept bytes are a build of - deploy.sh writes it for a fast path, which keeps an older binary, and for a
+--     prebuilt install), else `binary_release=`, else - for a record that is a full build's - `commit=` itself,
+--     because a full build's bytes ARE that commit;
+--   * `tree` - `lua_tree=`, else `commit=` (a release install writes no `lua_tree=`; scripts/deploy.sh writes it on
+--     every deploy since the Lua fast path);
+--   * `sha256` - the installed binary's digest: the fact that moves when the bytes are rebuilt for the same commit,
+--     which no commit id can show.
+--
+-- AN INTERIM RECORD IS NOT WHAT THE NODE RUNS (25/11). scripts/upgrade.sh writes `record_role=interim` while the bytes
+-- are being swapped (and a deploy killed before its record step leaves that interim record as the last word), so a
+-- pause taken inside that window would record the INCOMING commit as if the node already ran it - and the release,
+-- comparing it with the finished record, sees no movement and says "the update did not happen" after a real install,
+-- on every release that follows. That is the replay the brief names. An interim record therefore answers nil: this
+-- line cannot say what ran, and the release says exactly that instead of guessing.
+local function record_field(record, key)
+  local value = type(record) == "table" and record[key] or nil
+  if type(value) ~= "string" then return "" end
+  value = value:gsub("^%s+", ""):gsub("%s+$", "")
+  if value == "unknown" then return "" end
+  return value
+end
+
 function M.installed_identity(opts)
   opts = opts or {}
   local record = opts.record
@@ -295,11 +326,16 @@ function M.installed_identity(opts)
     if not read_ok or type(answer) ~= "table" then return nil end
     record = answer
   end
-  local commit = type(record.commit) == "string" and record.commit or ""
-  local tree = type(record.lua_tree) == "string" and record.lua_tree or ""
+  if record_field(record, "record_role") == "interim" then return nil end
+  local commit = record_field(record, "commit")
+  local tree = record_field(record, "lua_tree")
   if tree == "" then tree = commit end
-  if tree == "" and commit == "" then return nil end
-  return { tree = tree, commit = commit }
+  local program = record_field(record, "binary_commit")
+  if program == "" then program = record_field(record, "binary_release") end
+  if program == "" and record_field(record, "lua_fast_path") ~= "1" then program = commit end
+  local sha256 = record_field(record, "sha256")
+  if tree == "" and commit == "" and program == "" and sha256 == "" then return nil end
+  return { tree = tree, commit = commit, program = program, sha256 = sha256 }
 end
 
 -- Did the installed record MOVE between the pause and the release? True only for two records that both name a fact and
@@ -307,8 +343,17 @@ end
 -- "cannot tell" (one side has no record), and nil is NEVER read as installed: unknown is not yes.
 function M.install_moved(was, now)
   if type(was) ~= "table" or type(now) ~= "table" then return nil end
-  if was.tree ~= "" and now.tree ~= "" and was.tree ~= now.tree then return true end
-  if was.commit ~= "" and now.commit ~= "" and was.commit ~= now.commit then return true end
+  local function differs(key)
+    local a, b = was[key], now[key]
+    if type(a) ~= "string" or type(b) ~= "string" or a == "" or b == "" then return false end
+    return a ~= b
+  end
+  -- EVERY FACT THE INSTALL CAN MOVE (25/11): the tree (a Lua-only install), the commit (the bytes' source), the
+  -- program (a rebuild of the same commit, or a prebuilt install's own bytes) and the binary's digest (a rebuild that
+  -- moves no commit id). One that moved is an install; all equal is "the update did not happen".
+  for _, key in ipairs({ "tree", "commit", "program", "sha256" }) do
+    if differs(key) then return true end
+  end
   return false
 end
 
@@ -331,21 +376,40 @@ function M.paused_identity(session_id, opts)
   if not decoded_ok or type(record) ~= "table" then return nil end
   local tree = type(record.installed_tree) == "string" and record.installed_tree or ""
   local commit = type(record.installed_commit) == "string" and record.installed_commit or ""
-  if tree == "" and commit == "" then return nil end
-  return { tree = tree, commit = commit }
+  local program = type(record.installed_program) == "string" and record.installed_program or ""
+  local sha256 = type(record.installed_sha256) == "string" and record.installed_sha256 or ""
+  if tree == "" and commit == "" and program == "" and sha256 == "" then return nil end
+  return { tree = tree, commit = commit, program = program, sha256 = sha256 }
 end
 
--- THE INSTALLED LINE, naming the record it read (never a build label guessed off the node): the tree now, and the tree
--- the pause recorded.
+-- THE INSTALLED LINE, naming the two facts `wa --version` names - the PROGRAM and the TREE - both read from the
+-- installed record and never guessed off the node, with what the pause recorded beside them.
 function M.installed_text(was, now)
-  local function name(identity)
-    if type(identity) ~= "table" then return "unknown" end
-    if type(identity.tree) == "string" and identity.tree ~= "" then return identity.tree end
-    if type(identity.commit) == "string" and identity.commit ~= "" then return identity.commit end
-    return "unknown"
+  local NOT_RECORDED = "not recorded"
+  local function field(identity, key)
+    if type(identity) ~= "table" then return NOT_RECORDED end
+    local value = identity[key]
+    if type(value) ~= "string" or value == "" then return NOT_RECORDED end
+    return value
+  end
+  -- The rule `wa --version` prints a label by (rust/wa-host/src/build_info.rs, `display_label`): a commit label gets
+  -- a `v`, a release tag and a label already carrying one are printed as they are. Same rule as lua/core/cli_view.lua's
+  -- welcome line, so the two surfaces cannot spell one install two ways.
+  local function program(identity)
+    local value = field(identity, "program")
+    if value == NOT_RECORDED then return value end
+    if value:sub(1, 1) == "v" or value:sub(1, 5) == "node-" then return value end
+    return "v" .. value:sub(1, 12)
+  end
+  local function tree(identity)
+    local value = field(identity, "tree")
+    if value == NOT_RECORDED then value = field(identity, "commit") end
+    if value == NOT_RECORDED then return value end
+    return value:sub(1, 12)
   end
   return table.concat({
-    M.INSTALLED .. ": this node now runs " .. name(now):sub(1, 12) .. " (was " .. name(was):sub(1, 12) .. ").",
+    M.INSTALLED .. ": this node now runs program " .. program(now) .. ", tree " .. tree(now)
+      .. " (was program " .. program(was) .. ", tree " .. tree(was) .. ").",
     "The pause this turn took was for that install and it completed, so the work continues on the new build.",
     "This is the same request continuing, not a new one: verify the machine (`wa --version`) before you claim",
     "anything about what was installed.",
@@ -615,6 +679,10 @@ function M.record_pause(marker, now, session_id, user, opts)
     -- this pause was taken. Absent when the record names neither - and absent is never read as 'installed'.
     installed_tree = type(identity) == "table" and identity.tree or nil,
     installed_commit = type(identity) == "table" and identity.commit or nil,
+    -- The two facts the installed line names (25/11): the program the node ran when this pause was taken and the
+    -- digest of its bytes, so the release can say what MOVED rather than only what the tree was.
+    installed_program = type(identity) == "table" and identity.program or nil,
+    installed_sha256 = type(identity) == "table" and identity.sha256 or nil,
   }))
   if ok then
     M.note("paused", session_id, {

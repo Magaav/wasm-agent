@@ -49,11 +49,37 @@ NODE_PID=""
 # release covers this base, measured rows/20261125T034256Z) printed "line 50: TREE: unbound variable" under the skip.
 TREE=""
 cleanup() {
+  local status=$? attempt pid busy
+  # WHAT THIS ROW STARTED IS STOPPED BEFORE ITS HOME IS REMOVED (factory-small-items item 5, 25/11). MEASURED: the
+  # row's verdict printed, then `rm -rf $W` failed with "Directory not empty" - the sentinel it started (and the
+  # node under it) were still writing into the scratch home, so the row left a root behind that the next run could
+  # trip over. Stopping them is the same order the install uses: the supervisor first, then the node, then whatever
+  # else still names THIS root - never a process name (rule: a name pattern is shared by strangers), and the root
+  # is unique to this run.
+  if [ -n "${INSTALL:-}" ] && [ -x "$INSTALL/wa-sentinel" ]; then "$INSTALL/wa-sentinel" stop >/dev/null 2>&1; fi
   [ -n "$NODE_PID" ] && kill "$NODE_PID" 2>/dev/null
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    busy=0
+    for pid in $(ps -eo pid= 2>/dev/null); do
+      [ "$pid" = "$$" ] && continue
+      # The group's stderr, not each command's: a pid that exited between ps and this read makes the shell's OWN
+      # redirection fail, which `2>/dev/null` on the command does not silence - measured noise while writing this.
+      case "$({ tr '\0' '\n' < "/proc/$pid/environ"; tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null)" in
+        *"$W"*) kill -TERM "$pid" 2>/dev/null; busy=1 ;;
+      esac
+    done
+    [ "$busy" = 0 ] && break
+    sleep 1
+  done
   [ -n "$TREE" ] && git -C "$ROOT" worktree remove --force "$TREE" >/dev/null 2>&1 || true
   chmod -R u+w "$W" 2>/dev/null
-  [ -n "${INSTALL:-}" ] && [ -x "$INSTALL/wa-sentinel" ] && "$INSTALL/wa-sentinel" stop >/dev/null 2>&1
-  rm -rf "$W"
+  for attempt in 1 2 3; do rm -rf "$W" 2>/dev/null; [ -e "$W" ] || break; sleep 1; done
+  # A ROOT THAT SURVIVES IS SAID, NOT SWALLOWED: a row that leaves its scratch home behind is the defect this
+  # function just closed, and silence would let it come back.
+  if [ -e "$W" ]; then
+    echo "covering-release: the scratch root was NOT removed ($W still holds: $(ls -A "$W" 2>/dev/null | head -3 | tr '\n' ' ')); a process this row started still names it" >&2
+  fi
+  return $status
 }
 trap cleanup EXIT
 REAL_HOME="${HOME:-}"

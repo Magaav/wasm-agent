@@ -30,25 +30,41 @@ local function clock_sleep(seconds) sleeps[#sleeps + 1] = seconds; at = at + sec
 -- and answers `..._slow` with the id, exactly as `rust/wa-capabilities/src/whatsapp_query.rs` did
 -- (`ask` -> `settle` -> `seam` `..._slow`) when the component registry still said `running`.
 local calls = { local_capability = 0, remote = {} }
-local function slow_capability(op)
-  return function()
+-- The read ops share ONE capability now (`whatsapp_index`, the op travelling in the request,
+-- 2026-11-25). A stand-in installed under a per-op NAME would silently stop being the one called, so
+-- every install below asks the catalogue which capability the tool actually calls, and takes the op from
+-- the request exactly as the real door does.
+local whatsapp_door = dofile("lua/core/whatsapp.lua")
+local function install(names, factory)
+  for _, name in ipairs(names) do
+    local verb = name:gsub("^whatsapp_", "")
+    local row = whatsapp_door.by_verb[verb]
+    host[row and row.capability or name] = factory(verb)
+  end
+end
+local function op_of(request, fallback)
+  local decoded = json.decode(request)
+  return (type(decoded) == "table" and decoded.op) or fallback
+end
+local function slow_capability(fallback)
+  return function(request)
+    local op = op_of(request, fallback)
     calls.local_capability = calls.local_capability + 1
     return json.encode({ error = "whatsapp_" .. op .. "_slow", id = 42, state = "queued", retry = true,
       detail = "the wa-whatsapp component has not answered yet; the same call reads the same job" })
   end
 end
-local function answered_capability(op, body)
-  return function()
+local function answered_capability(fallback, body)
+  return function(request)
+    local op = op_of(request, fallback)
     calls.local_capability = calls.local_capability + 1
     local answer = { op = op, count = 0 }
     for key, value in pairs(body or {}) do answer[key] = value end
     return json.encode(answer)
   end
 end
-for _, name in ipairs({ "whatsapp_contacts", "whatsapp_search", "whatsapp_read", "whatsapp_reactions",
-  "whatsapp_media", "whatsapp_download", "whatsapp_backfill", "whatsapp_send_status" }) do
-  host[name] = slow_capability(name:gsub("^whatsapp_", ""))
-end
+install({ "whatsapp_contacts", "whatsapp_search", "whatsapp_read", "whatsapp_reactions",
+  "whatsapp_media", "whatsapp_download", "whatsapp_backfill", "whatsapp_send_status" }, slow_capability)
 -- This node's own registry: no `wa-whatsapp` running here.
 host.service = function() return json.encode({ { name = "wa-whatsapp", state = "stopped" } }) end
 local real_getenv = host.getenv
@@ -129,9 +145,9 @@ ok(calls.local_capability == 0 and read.served_by == "openclaw",
 env_set.WASM_AGENT_WHATSAPP_OWNER = nil
 
 -- ---- 3. The account node answers its own reads, exactly as before ----------------------------
-for _, name in ipairs({ "whatsapp_contacts", "whatsapp_read" }) do
-  host[name] = answered_capability(name:gsub("^whatsapp_", ""), { served_here = true })
-end
+install({ "whatsapp_contacts", "whatsapp_read" }, function(verb)
+  return answered_capability(verb, { served_here = true })
+end)
 host.service = function() return json.encode({ { name = "wa-whatsapp", state = "running" } }) end
 calls.remote = {}
 local local_ctx = routed_ctx({ "openclaw" }, function() error("the account node must not route to a peer") end)
@@ -141,7 +157,7 @@ ok(here.served_here == true and #calls.remote == 0,
 
 -- ---- 4. Nobody can answer: one fast refusal that names the account node ---------------------
 host.service = function() return json.encode({ { name = "wa-whatsapp", state = "stopped" } }) end
-for _, name in ipairs({ "whatsapp_contacts", "whatsapp_read" }) do host[name] = slow_capability(name:gsub("^whatsapp_", "")) end
+install({ "whatsapp_contacts", "whatsapp_read" }, slow_capability)
 local silent = routed_ctx({ "openclaw" }, function() return { error = "whatsapp_owner_unreachable", owner = "openclaw" } end)
 calls.local_capability = 0
 local refused = tools.dispatch(memory, "mcp_whatsapp_contacts", { q = "Laura" }, "master", silent)
@@ -155,15 +171,15 @@ ok(calls.local_capability == 0 and refused.retry == nil,
 -- ---- 5. Nobody can answer: one refusal, and never a local job offered as a handle -----------
 -- The capability says this node runs no component (this is the honest, serving-node answer) and the
 -- fleet names no other holder: that is one refusal that says so, with no job and no retry loop.
-for _, name in ipairs({ "whatsapp_contacts", "whatsapp_read" }) do
-  host[name] = function()
+install({ "whatsapp_contacts", "whatsapp_read" }, function()
+  return function()
     calls.local_capability = calls.local_capability + 1
     return json.encode({ ok = false, error = "whatsapp_component_absent", component = "wa-whatsapp",
       state = "stopped", effect = "none",
       note = "this node runs no wa-whatsapp component; no node in this fleet says it runs wa-whatsapp "
         .. "(set WASM_AGENT_WHATSAPP_OWNER on this node, or enable the component where the account is)" })
   end
-end
+end)
 local nowhere = { user_id = "master", role = "master", codemode_nested = true,
   remote_call = remote(function() error("no peer may be asked") end), owner_catalog = catalog({}),
   whatsapp_wait = { sleep = clock_sleep } }
@@ -179,7 +195,7 @@ ok(alone.id == nil and tostring(alone.note):find("WASM_AGENT_WHATSAPP_OWNER", 1,
 -- The last case: the capability queues anyway, and nobody in the fleet names a holder. There is
 -- nowhere to route to, so the answer stands - and it says that nothing here can settle that job, which
 -- is the trap the session fell into (three reads of the same queued id).
-for _, name in ipairs({ "whatsapp_contacts", "whatsapp_read" }) do host[name] = slow_capability(name:gsub("^whatsapp_", "")) end
+install({ "whatsapp_contacts", "whatsapp_read" }, slow_capability)
 local stuck = tools.dispatch(memory, "mcp_whatsapp_contacts", { q = "Laura" }, "master", nowhere)
 ok(stuck.error == "whatsapp_contacts_slow" and stuck.id == 42,
   "with no account node known, the local job is still named: " .. json.encode(stuck))

@@ -664,15 +664,74 @@ fn set(shared: &Shared, state: &str) {
 }
 
 /// Start a service (idempotent: a running one with the same pin is left alone).
+/// The node's own mapping from "a directory the component asked for" to "a directory the node owns".
+///
+/// A definition says `dirs: ["/downloads"]` - the guest name is the component's business - and this
+/// turns it into the grant the kernel actually applies: `<components>/<name>.<leaf>`, created here,
+/// written only to. For wa-whatsapp that is `<components>/wa-whatsapp.downloads`, the directory
+/// `whatsapp_query.rs` already owns and prunes, so the component can write a 40 MB video where the host
+/// can find it instead of pushing it through the job's progress stream (which `wa:queue` bounds at 1 MiB).
+///
+/// An entry that is already an object is left exactly as it is: `graph`'s two grants are built by its own
+/// capability (`rust/wa-capabilities/src/graph.rs`), and re-mapping them here would move a directory the
+/// node promised.
+fn resolved_dirs(component_dir: &std::path::Path, request: &Value, name: &str, manifest: &Value) -> Value {
+    let mut out = request.clone();
+    // The manifest IS the declaration of what the component needs (`capabilities.dirs`, an allow-list of
+    // guests); a definition may name more, never more than the manifest allows. Both are granted, because
+    // a component that imports `wasi:filesystem` and is given no preopen does not start at all
+    // (`wasi_import_import_not_granted`) - so a node that installs this component grants what it declares.
+    let mut guests: Vec<String> = Vec::new();
+    for source in [request.get("dirs"), manifest.get("capabilities").and_then(|c| c.get("dirs"))] {
+        for entry in source.and_then(Value::as_array).into_iter().flatten() {
+            if let Some(guest) = entry.as_str() {
+                if !guests.iter().any(|known| known == guest) { guests.push(guest.to_string()); }
+            }
+        }
+    }
+    let empty = Vec::new();
+    let named = request.get("dirs").and_then(Value::as_array).unwrap_or(&empty);
+    if guests.is_empty() && named.is_empty() { return out; }
+    let mut mapped = Vec::with_capacity(guests.len() + named.len());
+    for guest in &guests {
+        let leaf: String = guest.trim_matches('/').chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') { ch } else { '.' })
+            .take(64).collect();
+        let leaf = if leaf.is_empty() { "data".to_string() } else { leaf };
+        let host = component_dir.join(format!("{name}.{leaf}"));
+        let _ = std::fs::create_dir_all(&host);
+        mapped.push(json!({"host": host.to_string_lossy(), "guest": guest, "write": true}));
+    }
+    // An entry the node did not write is passed through exactly as it came: `graph`'s two grants are built
+    // by its own capability, and a guest this function cannot use must be refused by `Grant`, not here.
+    for entry in named { if entry.is_object() { mapped.push(entry.clone()); } }
+    out["dirs"] = Value::Array(mapped);
+    out
+}
+
+/// Start an installed service component from the NODE's own component directory.
+///
+/// This is not a separate code path: it is `start_from` with the directory the node installs into, so a test
+/// that boots a component from a scratch directory exercises exactly what the node runs.
 pub fn start(request: &Value) -> Value {
+    start_from(&crate::components::component_dir(), request)
+}
+
+/// Start an installed service component from `component_dir`.
+///
+/// The directory is a parameter because loading is where a test has to be isolated: the alternative was to
+/// swap `HOME` process-wide, which every other test in the binary shares. `start` passes the node's own.
+pub fn start_from(component_dir: &std::path::Path, request: &Value) -> Value {
     let name = request.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-    let installed = match load(&name) {
+    let installed = match crate::components::load_in(component_dir, &name) {
         Ok(installed) => installed,
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
     };
     if installed.manifest.get("kind").and_then(Value::as_str) != Some("service") {
         return json!({"ok": false, "error": "component_is_not_a_service"});
     }
+    // A definition names WHERE a component may write, never a host path (see `resolved_dirs`).
+    let request = &resolved_dirs(component_dir, request, &name, &installed.manifest);
     let grant = match Grant::from_request(request).and_then(|g| g.check(&installed.manifest).map(|_| g)) {
         Ok(grant) => grant,
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
@@ -1734,4 +1793,25 @@ mod tests {
         assert!(log.contains("no wa:kernel/drain hook in this artifact"), "{log}");
         stop(name);
     }
+    /// The definition names the guest; the node names the host, and the host is inside the node's own
+    /// components directory, created before the component ever starts.
+    #[test]
+    fn a_guest_directory_becomes_a_directory_this_node_owns() {
+        let request = json!({"name": "wa-whatsapp", "dirs": ["/downloads"]});
+        let manifest = json!({"capabilities": {"dirs": ["/downloads"]}});
+        let mapped = super::resolved_dirs(&crate::components::component_dir(), &request, "wa-whatsapp", &manifest);
+        let dirs = mapped["dirs"].as_array().expect("a list");
+        assert_eq!(dirs.len(), 1, "{mapped}");
+        assert_eq!(dirs[0]["guest"], "/downloads");
+        assert_eq!(dirs[0]["write"], true, "a directory a component asks to write in must be writable: {mapped}");
+        let host = dirs[0]["host"].as_str().expect("an absolute host path");
+        assert!(host.ends_with("wa-whatsapp.downloads"), "inside the components dir, named for the grant: {host}");
+        assert!(std::path::Path::new(host).is_absolute(), "{host}");
+        // An entry the node did not write is left alone: graph's two grants are built by its own capability.
+        let already = json!({"dirs": [{"host": "/srv/graph", "guest": "/graph/root", "write": false}]});
+        assert_eq!(super::resolved_dirs(&crate::components::component_dir(), &already, "graph", &json!({})), already);
+        // No `dirs` at all stays no `dirs`: nothing is granted by omission.
+        assert!(super::resolved_dirs(&crate::components::component_dir(), &json!({"name": "x"}), "x", &json!({})).get("dirs").is_none());
+    }
+
 }

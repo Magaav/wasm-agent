@@ -62,7 +62,7 @@ local function bounded(minimum, maximum) return { type = 'integer', minimum = mi
 -- wire shape the capability reads back.
 M.TOOLS = {
   {
-    verb = 'contacts', capability = 'whatsapp_contacts', effect = 'read',
+    verb = 'contacts', capability = 'whatsapp_index', effect = 'read',
     description = 'Which WhatsApp chat a name means. Answers from every name this node knows for a chat, best match first: the name the phone\'s address book saved for the contact (the one you typed when you saved them - case, accents and emoji do not matter, so "laura" finds "Laura ❤️"), the name the contact writes on their own messages, a business account\'s own name, a group subject when one was fetched, and the chat\'s phone number in any formatting ("+55 19 99482-7533", "5519994827533", "(19) 99482-7533"). Each candidate carries its exact JID, whether it is a person or a group, how many messages, when it was last heard from, a confidence (exact, prefix, partial), which name matched (matched) and where that name came from (matched_source: address_book, push_name, profile, contact_card, group_subject, number). One exact match also fills chat; several matches are listed as candidates and marked ambiguous, never resolved, because picking the wrong Laura is the mistake this exists to prevent. When nothing matches, index says how many chats and address-book contacts the node knows - 0 address_book means no address book has synced to it yet, which is a different fact from "nobody by that name". No query lists the chats the index knows, newest first. An older name for this question - whatsapp_contacts, mcp_whatsapp_native_lookup_self_<hash>, mcp_whatsapp_native_list_chats_<hash>, or peer_<node>__whatsapp_contacts - is refused with this one.',
     parameters = { type = 'object', properties = {
       q = { type = 'string', maxLength = 80, description = 'The name to resolve - the one you saved on your phone, part of it, or a phone number in any formatting. Omit it to list the chats the index knows.' },
@@ -71,10 +71,10 @@ M.TOOLS = {
     request = function(args) return { q = args.q, limit = args.limit } end,
     -- What a script reads from the answer (rust/components/wa-whatsapp/src/index.rs `contacts`,
     -- `candidate_json`); the connector index prints it after the arguments (lua/core/return_shapes.lua).
-    returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,truncated}',
+    returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,matched,truncated,next,limit_asked}',
   },
   {
-    verb = 'search', capability = 'whatsapp_search', effect = 'read',
+    verb = 'search', capability = 'whatsapp_index', effect = 'read',
     description = 'Search every WhatsApp message this account has indexed: text, captions, document filenames and voice-note transcripts, accent-folded, so "acao" finds "Ação" and "relatorio" finds "Relatório.pdf". Messages of every kind are indexed (text, image, video, audio, voice note, document, sticker, location, contact card, poll) and so are edits and deletions. Narrow with at least one of q, chat, kind or from; the filters combine (since/until is a time window in epoch milliseconds, seconds accepted). Every hit carries the chat name, the sender name, the time three ways (at, at_local, at_iso) and the message shape, and a long body is a pointer to whatsapp_message. The best match comes first; a search that matched more than it could return says truncated=true and matched=N. The answer says how it is sorted (order) and how fresh it is (as_of, index, last_received_s, connected); every hit carries its time and chat.',
     parameters = { type = 'object', properties = {
       q = { type = 'string', maxLength = 200, description = 'Literal text, accent-folded.' },
@@ -90,10 +90,10 @@ M.TOOLS = {
       return { q = args.q, chat = args.chat, kind = args.kind, ['from'] = args['from'], ['since'] = args['since'], ['until'] = args['until'], limit = args.limit, order = args.order }
     end,
     -- index.rs `search` + `hit_json` (a hit is `view::message` plus chat_name/score).
-    returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text}],count,matched,truncated}',
+    returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text,chat_newest_ts}],count,matched,truncated,limit_asked}',
   },
   {
-    verb = 'read', capability = 'whatsapp_read', effect = 'read',
+    verb = 'read', capability = 'whatsapp_index', effect = 'read',
     description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page. An older name for this question - whatsapp_read, mcp_whatsapp_native_read_newest_<hash>, mcp_whatsapp_native_inspect_chat_<hash>, or peer_<node>__whatsapp_read - is refused with this one, so a name from an older build still finds the tool that answers it. The answer says how fresh it is (as_of, index, pending) and whether a quiet answer is this chat or a stuck pipe (last_received_s, connected); read again in a second when pending is not empty. One person under @lid and phone is one history.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 80, description = 'An exact chat JID, or a name to resolve (ambiguous names answer with candidates).' },
@@ -105,19 +105,19 @@ M.TOOLS = {
     returns = '{header:{chat,name,type},messages:[{id,at_local,from:{own,name},text,reply_to:{id,quote}}],has_more,next_before}',
   },
   {
-    verb = 'reactions', capability = 'whatsapp_reactions', effect = 'read',
+    verb = 'reactions', capability = 'whatsapp_index', effect = 'read',
     description = 'Who reacted to one WhatsApp message, with which emoji. A reaction that was taken back is not listed; by_emoji counts what is left.',
     parameters = { type = 'object', properties = { chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 } }, required = { 'chat', 'id' }, additionalProperties = false },
     request = function(args) return { chat = args.chat, id = args.id } end,
   },
   {
-    verb = 'media', capability = 'whatsapp_media', effect = 'read',
+    verb = 'media', capability = 'whatsapp_index', effect = 'read',
     description = 'The media metadata of one indexed WhatsApp message: kind, mime, filename, size, sha256, duration, page count - or the location, contact card or poll it carries. No bytes and no media key; use whatsapp_download for the file.',
     parameters = { type = 'object', properties = { chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 } }, required = { 'chat', 'id' }, additionalProperties = false },
     request = function(args) return { chat = args.chat, id = args.id } end,
   },
   {
-    verb = 'download', capability = 'whatsapp_download', effect = 'write',
+    verb = 'download', capability = 'whatsapp_file', effect = 'write',
     description = 'Decrypt the media of one indexed WhatsApp message on the node that holds the account and answer with the file path there (mime, filename, bytes and sha256 included). The decrypted file lands in the bounded download folder of the node that holds the account, and the decrypt is bounded by max_bytes (524288 at most): a video larger than the bound answers download_too_large with its size instead of pretending; view-once and revoked media is never downloadable. Feed the path to OCR or transcription tools.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 }, max_bytes = { type = 'integer', minimum = 1, maximum = 524288 },
@@ -125,7 +125,7 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, id = args.id, max_bytes = args.max_bytes } end,
   },
   {
-    verb = 'backfill', capability = 'whatsapp_backfill', effect = 'write',
+    verb = 'backfill', capability = 'whatsapp_request', effect = 'write',
     description = 'Ask the primary phone for older WhatsApp messages, so the index covers the account history and not only the live stream. Name one exact chat JID to reach back into that conversation, or name none to ask for the chats the index already knows (at most 20, newest first). The messages arrive through the normal protocol and are indexed as history, so a later whatsapp_search finds them. This is a request to the phone, not an answer: the result is the ids and counts that were asked for, plus a note when it stopped early.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160 }, count = { type = 'integer', minimum = 1, maximum = 500 },
@@ -186,6 +186,12 @@ for _, tool in ipairs(M.TOOLS) do
   tool.name = 'mcp_whatsapp_' .. tool.verb
   M.by_verb[tool.verb] = tool
 end
+
+--- The generic doors: a capability that carries WHICH question in the request (`{op, ...args}`)
+--- instead of one row per op. `M.invoke` hands the word from this catalogue row, never from the caller's
+--- arguments, so a model cannot reach an op its tool does not name. One per effect class: reads ride the
+--- read-only door, the questions that reach the phone ride the network one.
+M.GENERIC = { whatsapp_index = true, whatsapp_request = true, whatsapp_file = true }
 
 --- The exact name one verb is offered as (`mcp_whatsapp_read`).
 function M.name(verb) local tool = M.by_verb[verb]; return tool and tool.name or nil end
@@ -800,7 +806,12 @@ function M.invoke(tool, args)
     -- pretending the account is quiet.
     return { ok = false, error = tool.name .. '_unavailable', capability = tool.capability, effect = 'none' }
   end
-  local ok, answer = pcall(capability, json.encode(tool.request(args)))
+  local request = tool.request(args)
+  -- A generic row is told WHICH question: the word comes from this catalogue row, never from the
+  -- caller's arguments, so `whatsapp_index` (every read-only op a component knows) cannot be talked
+  -- into reaching one the tool does not name.
+  if M.GENERIC[tool.capability] then request.op = tool.verb end
+  local ok, answer = pcall(capability, json.encode(request))
   if not ok then return { ok = false, error = tool.name .. '_failed', detail = tostring(answer):sub(1, 160), effect = 'none' } end
   local decode_ok, decoded = pcall(json.decode, tostring(answer or ''))
   if not decode_ok or type(decoded) ~= 'table' then
@@ -1552,6 +1563,21 @@ function M.call(name, args, ctx)
       answer.resolved_chat = { asked = args.chat, chat = lookup.chat, picked = lookup.picked }
     end
     return answer
+  end
+  -- A SEND to a chat that is a NAME is refused, and the refusal carries the candidates: the tool never
+  -- picks a recipient (a read may, a send may not), but a model told only "not an exact JID" guesses a
+  -- number - which is the mistake this answers (whatsapp-index-heals-itself P2.4). Nothing is queued, so
+  -- the one forbidden thing (a message to the wrong person) cannot happen here either.
+  if tool.verb == 'send' and type(args.chat) == 'string' and args.chat ~= '' and not args.chat:find('@', 1, true)
+      and not args.chat:match('^[%d%s%+%-%(%)]+$') then
+    local lookup = M.call('contacts', { q = args.chat, limit = 5 }, ctx)
+    local candidates = type(lookup) == 'table' and lookup.candidates or nil
+    local any = type(candidates) == 'table' and #candidates > 0
+    return { ok = false, error = any and 'whatsapp_send_chat_ambiguous' or 'whatsapp_send_chat_not_found',
+      status = any and 409 or 404, effect = 'none', asked = args.chat, candidates = candidates,
+      note = any
+        and 'a name is not a recipient: pick the chat you mean from candidates and send to its exact JID'
+        or 'no chat in the index carries that name: ask mcp_whatsapp_contacts({q}) for what it knows, or pass the exact JID' }
   end
   -- Two verbs are more than one capability call: a send queues and then waits for its outcome in the
   -- same step, and the hidden alias is that resume with no wait (operator decision, 11/11).

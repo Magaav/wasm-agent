@@ -90,7 +90,7 @@ const SSE_ARGS: usize = 6;
 /// The names the **kernel itself** answers, before the capability registry is consulted.
 ///
 /// They are about the node, not about a capability: there is no native `host.*` C function to forward
-/// them to, so unlike every other name in the bridge they cannot come from `capabilities::REGISTRY`.
+/// them to, so unlike every other name in the bridge they cannot come from `capabilities::registry()`.
 /// They cross the same import with the same value shapes, and `__names` lists them so the guest's
 /// `if host.local_tz then` reads the truth for this kernel.
 ///
@@ -626,11 +626,14 @@ impl State {
             Some(_) => return Err("local_tz_invalid_epoch: the epoch must be a whole number of seconds".to_string()),
         };
         let mut answer = self.runtime_clock(epoch)?;
-        let zone = wa_local_tz::zone_id(crate::host::resolved_env("TZ").as_deref());
-        if let Some(id) = zone.id {
+        // The identifier comes from the `tz` component (wa-capabilities/src/tz_component.rs); a node with no
+        // such artifact says so in `zone_source` instead of answering a zone it did not read.
+        let (zone_id, zone_source) = crate::tz_component::zone()
+            .unwrap_or((None, "tz_component_absent".to_string()));
+        if let Some(id) = zone_id {
             answer.push(("zone_id".to_string(), id.into_bytes()));
         }
-        answer.push(("zone_source".to_string(), zone.source.as_bytes().to_vec()));
+        answer.push(("zone_source".to_string(), zone_source.into_bytes()));
         answer.push(("epoch".to_string(), epoch.to_string().into_bytes()));
         Ok(vec![Value::StringMap(answer)])
     }
@@ -836,7 +839,7 @@ impl State {
         match name {
             // The guest's boot: which names `host.*` resolves, the shipping Lua modules, the script.
             "__names" => {
-                let mut names: Vec<&str> = crate::capabilities::REGISTRY.iter().map(|c| c.name).collect();
+                let mut names: Vec<&str> = crate::capabilities::registry().iter().map(|c| c.name).collect();
                 // The kernel's own calls cross the same import but have no registry entry (see
                 // `KERNEL_CALLS`); a guest resolves `host.<name>` from this list, so leaving them out
                 // would make `host.local_tz` read as absent in a kernel that answers it.
@@ -864,7 +867,7 @@ impl State {
                 "unsupported_in_component_v1:{name} (the interactive console reader belongs to the CLI; a \
                  --core-component run has no editor to read into)"
             )),
-            _ if !crate::capabilities::REGISTRY.iter().any(|c| c.name == name) => Err(format!("unknown_capability:{name}")),
+            _ if !crate::capabilities::registry().iter().any(|c| c.name == name) => Err(format!("unknown_capability:{name}")),
             _ => self.dispatch(name, args),
         }
     }
@@ -2368,9 +2371,10 @@ assert(tonumber(later.utc_offset_minutes) ~= nil, 'the host must answer a second
         let (sign, hours, mins) = if minutes < 0 { ("-", -minutes / 60, -minutes % 60) } else { ("+", minutes / 60, minutes % 60) };
         assert_eq!(field("utc_offset"), Some(format!("{sign}{hours:02}:{mins:02}")), "the offset text must be the minutes");
         // The identifier is the OS's, and it is this machine's: the crate reads it, the kernel answers it.
-        let zone = wa_local_tz::zone_id(crate::host::resolved_env("TZ").as_deref());
-        assert_eq!(field("zone_source"), Some(zone.source.to_string()));
-        assert_eq!(field("zone_id"), zone.id);
+        let (zone_id, zone_source) = crate::tz_component::zone()
+            .unwrap_or((None, "tz_component_absent".to_string()));
+        assert_eq!(field("zone_source"), Some(zone_source));
+        assert_eq!(field("zone_id"), zone_id);
         // The abbreviation, when this platform has one, is the C runtime's - a name and not an offset.
         if let Some(zone) = field("zone") {
             assert!(!zone.is_empty(), "an empty zone name is an absence, not a name");
@@ -2397,12 +2401,13 @@ assert(tonumber(later.utc_offset_minutes) ~= nil, 'the host must answer a second
         let native_text = native.call_string("clock_text", &[&CLOCK_EPOCH.to_string()]).expect("the native core reads its clock");
         // The identifier and its source are what the *host* adds; the guest cannot read TZ, /etc/localtime
         // or the Windows key for itself, which is why the call exists at all.
-        let zone = wa_local_tz::zone_id(crate::host::resolved_env("TZ").as_deref());
+        let (zone_id, zone_source) = crate::tz_component::zone()
+            .unwrap_or((None, "tz_component_absent".to_string()));
         let args = vec![
             CLOCK_EPOCH.to_string(),
             native_text.clone(),
-            zone.source.to_string(),
-            zone.id.clone().unwrap_or_else(|| "none".to_string()),
+            zone_source.clone(),
+            zone_id.clone().unwrap_or_else(|| "none".to_string()),
         ];
         let mut lease = pool.acquire().expect("acquire an instance");
         let (report, error) = lease.run_script_outcome(Script::source("local-tz.lua", CLOCK_GUEST), &args).expect("the guest runs");

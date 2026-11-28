@@ -1,0 +1,10 @@
+[package]
+name = "wa-files"
+version = "0.1.0"
+edition = "2021"
+
+# The pure file questions (a program's magic, its digest, a name on PATH) that decide a launch approval. A leaf
+# so the process that ADMITS a launch and the one that STARTS it cannot answer them differently.
+[dependencies]
+serde_json = "1"
+ring = "0.17"

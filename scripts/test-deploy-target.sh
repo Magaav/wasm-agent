@@ -21,6 +21,11 @@
 #
 # Hermetic: its own WASM_AGENT_HOME, install directory, repository, ledger and git config; no node, no port, no
 # model, no network, no rendezvous, no fleet. SKIP (never a pass) when a binary it needs is not built.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 # This row never reads its caller's stdin: a child that inherited it would eat a row list (see
 # scripts/test-deploy-wait.sh, 22/11).
@@ -51,11 +56,17 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
 WA="$(find_bin wa "${WA_BIN:-}" "$TARGET_DIR/release/wa" "$TARGET_DIR/debug/wa" \
   "$ROOT/rust/target/release/wa" "$ROOT/rust/target/debug/wa" "$(command -v wa 2>/dev/null || true)")" \
   || skip "no wa binary: set WA_BIN, or build rust/wa-host"
-SENTINEL="$(find_bin wa-sentinel "${WA_SENTINEL:-}" "$TARGET_DIR/release/wa-sentinel" "$TARGET_DIR/debug/wa-sentinel" \
+# THE SENTINEL THAT BELONGS TO THE NODE THIS ROW WAS HANDED (25/11, runner row 20261125T223521Z-8574): the row
+# SKIPPED in the orchestrator's row runner with "no wa-sentinel binary", because WA_BIN is the runner's installed
+# `wa` and nothing put wa-sentinel on PATH there - while that binary lives edge-to-edge with the one WA_BIN names.
+# So the sibling of WA_BIN is a candidate, after the explicit override and before the build outputs.
+SENTINEL="$(find_bin wa-sentinel "${WA_SENTINEL:-}" \
+  "${WA_BIN:+$(dirname "${WA_BIN}")/wa-sentinel}" \
+  "$TARGET_DIR/release/wa-sentinel" "$TARGET_DIR/debug/wa-sentinel" \
   "$ROOT/rust/target/release/wa-sentinel" "$ROOT/rust/target/debug/wa-sentinel" \
   "$ROOT/rust/wa-sentinel/target/release/wa-sentinel" "$ROOT/rust/wa-sentinel/target/debug/wa-sentinel" \
   "$(command -v wa-sentinel 2>/dev/null || true)")" \
-  || skip "no wa-sentinel binary: build rust/wa-sentinel"
+  || skip "no wa-sentinel binary: set WA_SENTINEL, or put it beside WA_BIN, or build rust/wa-sentinel"
 command -v git >/dev/null 2>&1 || skip "no git on this host"
 
 # A scratch directory the node's own guard accepts (scripts/lib/scratch-home.lua refuses a home inside the
@@ -137,8 +148,12 @@ says "$PAUSE" "${MAIN:0:12}" "the pause line's (target commit ...) names it"
 never "$PAUSE" "${STALE:0:12}" "and not the bundle's main"
 says "$NOPE" "${MAIN:0:12}" "the 'did not happen' line names it"
 never "$NOPE" "${STALE:0:12}" "and not the bundle's main"
-says "$RESUME" "now runs ${MAIN:0:12}" "the release line says the node now runs the commit installed.txt holds"
-says "$RESUME" "(was 111111111111)" "and names the build it replaced as the OLD one"
+# THE LINE NOW NAMES THE PROGRAM AND THE TREE (factory-small-items item 1, 25/11): the record written above is a
+# FULL build's, so its `commit=` is the bytes as well as the tree, the program is printed with the `wa --version`
+# `v`, and the record named no separate `lua_tree=` before the swap - which the line says as `not recorded`.
+# Both assertions got NARROWER (they name more), not looser: the same commit, plus the tree, plus the OLD side.
+says "$RESUME" "now runs program v${MAIN:0:12}, tree ${MAIN:0:12}" "the release line says the node now runs the commit installed.txt holds, program and tree"
+says "$RESUME" "(was program not recorded, tree 111111111111)" "and names the build it replaced as the OLD one"
 
 # ---- and the sentinel's own status, which reads the record -------------------------------------------
 status="$("$SENTINEL" status 2>&1 || true)"

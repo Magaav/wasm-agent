@@ -103,7 +103,18 @@ step "        tree: $ROOT at $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null
 step "        sha256 $(sha256sum "$SENTINEL" 2>/dev/null | cut -c1-16 || echo unknown)"
 
 # The scratch home. Nothing here may be the operator's own store (scripts/lib/scratch-home.sh).
+#
+# HOME AS WELL, NOT ONLY WASM_AGENT_HOME (28/11, P0 from the canary). MEASURED: a sentinel started by this row with only
+# WASM_AGENT_HOME set was reported as "a non-live sentinel with the live HOME/DB" - so SOMETHING in that process tree read
+# HOME, and the operator's real home was the answer it got. WASM_AGENT_HOME is the node's own override (paths.rs:12
+# prefers it), and HOME is what every other program - a shell, node, a spawned helper - falls back to. A scratch row must
+# hand over BOTH, and prove the pair with the guard that exists for it.
 mkdir -p "$HOME_DIR/.wasm-agent" || skip "cannot create a scratch home"
+[ -r "$ROOT/scripts/lib/scratch-home.sh" ] && . "$ROOT/scripts/lib/scratch-home.sh"
+if command -v wa_scratch_home_guard >/dev/null 2>&1; then
+  wa_scratch_home_guard "$HOME_DIR" || skip "$HOME_DIR is not a scratch home (it is, or contains, the operator's store)"
+fi
+export HOME="$HOME_DIR"
 export WASM_AGENT_HOME="$HOME_DIR"
 unset WASM_AGENT_RENDEZVOUS WASM_AGENT_RELAY WASM_AGENT_DB
 
@@ -509,6 +520,33 @@ fi
 want "$out" "hold-bound:" "the queue names the phase that ended it"
 want "$out" "admitted and not started" "and the holder that blocked it, by name"
 want "$out" "re-request with: wa-sentinel request deploy --expected-sha 8082b42e1111" "and how to ask again"
+
+step "a queued turn the NODE has bounded out does not hold the deploy (27/11)"
+# MEASURED (deploy-not-held-by-queued-turns): a turn admitted and not started held an install for 25 minutes, and
+# nothing bounded the TURN - so the deploy could only die at its own 900 s. The node now publishes its own queue
+# bound beside the entries and refuses an expired one by name (`queue_wait_expired`), so a sentinel that still
+# counted it as a hold would fail an install on work that can never start. This case FAILS on main.
+clear_request; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+EXPIRED_TURNS='{"ok":true,"queue":1,"operation_overdue":false,"current":null,"node_threads":[],"workers":[],"queue_sessions":{"count":1,"named":1,"truncated":false,"wait_bound_ms":120000,"entries":[{"run_id":43,"session":"9b28c30d-1111-2222-3333-444455556666","node_thread":0,"kind":"run","waited_ms":130000,"expired":true}]},"subagents":{"queued":0,"running":0,"active":0}}'
+busy_body "$EXPIRED_TURNS"
+write_request "1700000000000000007-4242-00000000000000000000" "$ASKED"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+want "$(installs)" "1" "past the bound, an expired queued turn no longer holds the node"
+unwant "$out" "has a turn admitted and not started" "and it is not the reason for a hold any more"
+if [ -f "$BOX/1700000000000000007-4242-00000000000000000000.json" ]; then
+  fail "the request is still in the box: an expired turn cannot hold it"
+else
+  ok "the request left the box"
+fi
+
+# and the SAME entry inside its bound still refuses: expiry is the node's fact, not the sentinel's optimism
+clear_request; rm -f "$INSTALLER_LOG"
+INSIDE_TURNS='{"ok":true,"queue":1,"operation_overdue":false,"current":null,"node_threads":[],"workers":[],"queue_sessions":{"count":1,"named":1,"truncated":false,"wait_bound_ms":120000,"entries":[{"run_id":44,"session":"9b28c30d-1111-2222-3333-444455556666","node_thread":0,"kind":"run","waited_ms":45000}]},"subagents":{"queued":0,"running":0,"active":0}}'
+busy_body "$INSIDE_TURNS"
+write_request "1700000000000000008-4242-00000000000000000000" "$ASKED"
+WA_DEPLOY_HOLD_BOUND=1 once_out >/dev/null 2>&1
+same "$(installs)" "0" "a queued turn inside its bound still holds the deploy"
+clear_request
 
 step "WA_DEPLOY_HOLD_BOUND=0 is the documented unbounded wait, and really is one"
 reset_box; rm -f "$INSTALLER_LOG"

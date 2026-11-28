@@ -366,4 +366,26 @@ for _, request in ipairs(admin_requests) do
 end
 check(#asked.owner_nodes == 2, 'the roster still names every owner, probe-free: ' .. tostring(#asked.owner_nodes))
 
+-- The submit handle settles without a poll loop of the caller's own (the brief's third item):
+-- `wait_for(id, wait_s)` returns the node's own word for the job as soon as it leaves the queue, and a job
+-- that never leaves answers `settled = false` with how long it waited, never a hang.
+local states = { 'taken', 'taken', 'done' }
+local asked = 0
+local real_job = stt.job
+stt.job = function(id)
+  asked = asked + 1
+  local state = states[asked] or 'done'
+  return { ok = { state = state, job = id } }
+end
+local settled = stt.wait_for(7, 5)
+check(settled.ok and settled.ok.state == 'done' and settled.settled == true,
+  'wait_for answers the settled job, not a loop the caller wrote: ' .. tostring(settled.ok and settled.ok.state))
+states = { 'taken', 'taken', 'taken', 'taken' }
+asked = 0
+local timed = stt.wait_for(8, 0.5)
+check(timed.settled == false and timed.paused_ms ~= nil,
+  'a job that never leaves comes back unsettled with what it waited, never a hang')
+check(stt.wait_for(0, 1).error == 'stt_no_job', 'and no job is refused by name')
+stt.job = real_job
+
 print('stt role ok — ' .. checks .. ' checks')

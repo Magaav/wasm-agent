@@ -99,6 +99,90 @@ fn log_lines(kind: &str, id: &str) -> Vec<String> {
         .collect()
 }
 
+/// A FAILED START IS A NAMED LINE IN sentinel.log, WITH ITS REASON AND ITS TIME (Fable 26/11, the work container).
+///
+/// MEASURED on work: two starts at 10:36Z and 18:05Z failed, their reason went to the container's stdout only, and the
+/// last "sentinel started" line in the log was from the day before - so the log the operator reads said nothing about
+/// either start, and the `wa update` that followed could only say "no sentinel watcher ownership was verified".
+#[test]
+fn a_failed_start_is_written_to_the_sentinel_log() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _scratch = Scratch::new("start-failed");
+    let failed = |kind: &str| -> Vec<String> {
+        std::fs::read_to_string(log_path()).unwrap_or_default()
+            .lines()
+            .filter(|line| line.split('\t').nth(1) == Some(kind))
+            .map(str::to_string)
+            .collect()
+    };
+    assert!(failed("start_failed").is_empty(), "nothing is claimed before a start is attempted");
+
+    let error = anyhow::anyhow!("service stop in progress; no lifecycle replay");
+    crate::note_failed_start("start", &error);
+
+    let lines = failed("start_failed");
+    assert_eq!(lines.len(), 1, "one failed start, one line: {lines:?}");
+    let fields: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(fields.len(), 4, "the same tabbed shape every audit line has: {lines:?}");
+    assert!(
+        fields[0].parse::<u64>().is_ok() && *fields.first().unwrap() != "",
+        "the line carries the time it happened, as epoch seconds: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("service stop in progress"),
+        "and the reason the start gave, so the container's log answers 'why': {lines:?}"
+    );
+
+    // Only `start` is this line's business: another verb's failure keeps its own report.
+    crate::note_failed_start("stop", &error);
+    assert_eq!(failed("start_failed").len(), 1, "a failed stop is not a failed start: {:?}", failed("start_failed"));
+}
+
+/// STATUS NAMES THE PROCESS THAT ANSWERS THIS NODE'S HOME WHEN NOTHING HOLDS ITS PORT (Fable 26/11, work).
+///
+/// MEASURED on work: `node:      down  port 8799  no process on the port` while `wa call work` was answered - an
+/// interactive `wa` had this node's home open. This starts a REAL child whose argv is `<home>/bin/wa chat --once` and
+/// whose environment carries this node's home, and requires `mesh_answer` to name it: pid and door, no guessing. The
+/// child is killed here and never adopted by anything else.
+#[test]
+fn the_mesh_line_names_the_interactive_process_with_this_home() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = Scratch::new("mesh-answer");
+    let home = std::env::var("WASM_AGENT_HOME").expect("the scratch home");
+    let bin = PathBuf::from(&home).join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    // A REAL long-lived process whose argv[0] is `<home>/bin/wa`: the copy of `sleep` is that process, because a
+    // shell script re-`exec`s and its argv would stop being `wa ...` at the first instruction - measured while writing
+    // this (the first version of the test named nothing, and the reason was `exec sleep`).
+    let door = bin.join("wa");
+    std::fs::copy("/bin/sleep", &door).expect("a long-lived binary under the door's name");
+    let mut child = std::process::Command::new(&door)
+        .args(["45"])
+        .env("WASM_AGENT_HOME", &home)
+        .spawn()
+        .expect("a live interactive door");
+    let mut answer = None;
+    for _ in 0..40 {
+        answer = crate::mesh_answer();
+        if answer.as_deref().map(|named| named.contains(&format!("pid {}", child.id()))).unwrap_or(false) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let named = answer.unwrap_or_else(|| "nothing was named".to_string());
+    assert!(
+        named.contains(&format!("pid {}", child.id())),
+        "the process holding this home is named by its pid: {named}"
+    );
+    assert!(
+        named.contains("an interactive wa, not a watcher"),
+        "and by its door, so a reader can tell it from a watcher: {named}"
+    );
+    assert!(!named.contains("wa serve"), "and never mistaken for the node itself: {named}");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = scratch;
+}
+
 /// 1. One line per (id, problem), naming the files it is missing, however many ticks go by.
 #[test]
 fn a_missing_file_is_reported_once_however_many_ticks_go_by() {

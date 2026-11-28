@@ -6,7 +6,7 @@
 //! says "the file is encrypted" fails if the sealing call is skipped.
 use crate::ops::{fixture, fixture_rich, Sink};
 use crate::*;
-use wa_whatsapp_index::keys;
+use wa_whatsapp_wire::keys;
 
 const MONTH: &str = "2026-03";
 /// A cut instant well after the month, so nothing here depends on when the test runs.

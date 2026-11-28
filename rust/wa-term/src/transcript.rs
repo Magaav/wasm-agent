@@ -47,6 +47,11 @@ const CARD_BORDER: &str = "\x1b[38;2;119;119;119m";
 /// (`lua/core/cli_view.lua` paints `48;2;68;68;68` there), so the top row and the bubble it stands
 /// for are the same band. Claude Code keeps the same row at the top of its window.
 const PIN_BAND: &str = "\x1b[38;2;255;255;255m\x1b[48;2;68;68;68m";
+/// The mark a pinned request ends with when the row shows only part of it: three literal dots, not the
+/// one-glyph ellipsis a clipped row uses (Victor, 25/11: "three dots at the end of the line"). A
+/// request that carries more than its first line, or a first line wider than the window, is cut - and a
+/// cut that says nothing reads as the whole message.
+const PIN_MARK: &str = "...";
 /// The notice row's colour: the view's warm accent, the one the footer's one-keystroke notes wear
 /// (`wa_term::terminal_editor::NOTICE`), so a message looks the same wherever it is written from.
 const NOTICE: &str = "\x1b[38;2;215;119;87m";
@@ -55,6 +60,11 @@ const PILL: &str = "\x1b[38;2;230;230;230m\x1b[48;2;58;58;58m";
 /// How long a transient notice stays on the notice row: about two seconds (Victor, 23/11 11:20Z).
 /// An ERROR is not transient: it stays until the next key, because a message that says why nothing
 /// was pasted is worth more than the row it costs.
+/// The words the copy notice's balloon carries as its title.
+pub const BALLOON_TITLE: &str = "Copied";
+/// The frame's colour, the same value `terminal_editor::PANEL` uses: one look for every balloon.
+const BALLOON_BORDER: &str = "\x1b[38;2;177;185;249m";
+
 pub const NOTICE_MS: u64 = 2000;
 
 #[derive(Default, Clone)]
@@ -151,12 +161,19 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     /// How many rows the last `view` left below the viewport (the old "N more lines" count, now the
     /// pill's "N more lines"): what has arrived while the reader was away, in rows.
     below_rows: usize,
-    /// How many rows the last `view` reserved at the top of the region (the notice, then the pinned
-    /// request): every screen row the pointer reports is one of these plus a content row.
+    /// How many rows the last `view` reserved at the top of the region (the pinned request, and
+    /// nothing else): every screen row the pointer reports is this many plus a content row. The
+    /// notice is NOT one of them - it is drawn OVER a row, so it takes no room (Victor, 26/11).
     reserved: usize,
-    /// The last `view` drew the notice row (so it is row 1 of the region).
-    notice_shown: bool,
-    /// The last `view` drew the pinned request, one row under the notice row.
+    /// Where the last `view` painted the notice, as a 0-based index into the rows it returned
+    /// (`None` = no message was showing). It is an overlay on a chat row, never a row of its own.
+    notice_row: Option<usize>,
+    /// The balloon is up, so the chat has fewer rows than it is used to. The scrollbar decision
+    /// is LOCKED while that is true: it is `total > height`, and a balloon that lowered the height
+    /// would re-wrap the whole chat at a narrower width - which moves a frozen view by a row and is
+    /// exactly the "whole conversation shifts" the notice must never cause.
+    balloon_up: bool,
+    /// The last `view` drew the pinned request, on row 1 of the region.
     pin_shown: bool,
     /// The columns the jump-to-bottom pill covered in the last `view` (1-based, inclusive), or
     /// `None` while no pill was drawn.
@@ -171,7 +188,7 @@ impl Default for Transcript {
             pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None, copy_hover: None,
             pending_card: Vec::new(), card_rows: HashMap::new(), notice: Notice::default(),
             first_row: isize::MAX, reserved: 0, below_rows: 0,
-            notice_shown: false, pin_shown: false, pill_row: None }
+            notice_row: None, balloon_up: false, pin_shown: false, pill_row: None }
     }
 }
 
@@ -634,13 +651,31 @@ impl Transcript {
         true
     }
 
-    /// The notice row as it is drawn: right-aligned, one column short of the edge, in the warm
-    /// accent - a small balloon at the top of the window. `None` = nothing to say, so the row does
-    /// not exist and the pinned request is the top row.
+    /// The message AS IT IS PAINTED: CENTRED on the region's width, `(width - len) / 2` blank cells
+    /// to its left, in the warm accent. `None` = nothing to say.
+    ///
+    /// It was right-aligned one column short of the edge until 26/11, and it was a row of its own -
+    /// which is the other thing that changed: it is painted OVER a chat row now (`view_at`), so this
+    /// string carries its own leading blanks up to the centre and nothing after it.
+    /// THE NOTICE AS A BALLOON (copied-notice-floats, Victor today): a TITLE, a DIVIDER, its own rows
+    /// - what the /nodes balloon is - instead of one line painted over a chat row. `view_at` reserves
+    /// these rows at the TOP of the region, so the chat and the pinned request move DOWN while it
+    /// shows, and the space comes back when it expires.
+    fn notice_balloon(&self, width: usize, now: std::time::Instant) -> Vec<String> {
+        let Some(text) = self.notice_text(now) else { return Vec::new() };
+        let width = width.max(1);
+        let divider = format!("{BALLOON_BORDER}{}{RESET}", "\u{2500}".repeat(width));
+        let title = format!("{BALLOON_BORDER} {} {RESET}", BALLOON_TITLE);
+        let text = clip_row(&text, width).trim_end().to_string();
+        let pad = width.saturating_sub(visible(&text)) / 2;
+        vec![divider.clone(), title, format!("{}{NOTICE}{text}{RESET}", " ".repeat(pad)), divider]
+    }
+
     fn notice_line(&self, width: usize, now: std::time::Instant) -> Option<String> {
+        let width = width.max(1);
         let text = self.notice_text(now)?;
-        let text = clip_row(&text, width.saturating_sub(1)).trim_end().to_string();
-        let pad = width.saturating_sub(visible(&text) + 1);
+        let text = clip_row(&text, width).trim_end().to_string();
+        let pad = width.saturating_sub(visible(&text)) / 2;
         Some(format!("{}{NOTICE}{text}{RESET}", " ".repeat(pad)))
     }
 
@@ -710,24 +745,41 @@ impl Transcript {
     }
 
     /// The pinned row: the prompt mark and the request's first line, on the band the chat draws the
-    /// reader's own turn on. The caller clips it to the window with an ellipsis.
-    fn pin_line(&self, index: usize) -> String {
-        let text = self.blocks.get(index)
-            .and_then(|block| block.lines.iter().find(|line| !line.trim().is_empty()))
-            .map(|line| crate::selection::plain(line))
+    /// reader's own turn on - then three dots whenever the row is not the whole request.
+    ///
+    /// WHY THE MARK IS HERE. The pin is one row by construction (it must never reflow the chat under
+    /// it), so a request of several lines was drawn as its first line and nothing said the rest was
+    /// there: the reader read a message that ended cleanly in the middle of a sentence (25/11). The
+    /// row now ends with three dots when the request carries more than one line, and when the first
+    /// line is itself wider than the window - the two ways this row can show part of a message - so a
+    /// cut is always visible. It stays inside the window: the room for the mark is reserved BEFORE
+    /// the text is cut, never after.
+    fn pin_row(&self, index: usize, width: usize) -> String {
+        let lines: Vec<String> = self.blocks.get(index)
+            .map(|block| block.lines.iter()
+                .map(|line| crate::selection::plain(line).trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect())
             .unwrap_or_default();
-        let text = text.trim();
-        format!("{PIN_BAND}{text}\x1b[K{RESET}")
+        let more = lines.len() > 1;
+        let text = lines.first().cloned().unwrap_or_default();
+        let room = width.saturating_sub(PIN_MARK.len());
+        let too_wide = visible(&text) > room;
+        if !more && !too_wide { return format!("{PIN_BAND}{text}\x1b[K{RESET}") }
+        // A window narrower than the mark itself: the mark is all there is room for, cut to it.
+        if width <= PIN_MARK.len() { return format!("{PIN_BAND}{}\x1b[K{RESET}", cut_cells(PIN_MARK, width)) }
+        format!("{PIN_BAND}{}{PIN_MARK}\x1b[K{RESET}", cut_cells(&text, room))
     }
 
     /// Whether the pointer at `(row, col)` is on the pinned request: a press there scrolls to it.
     pub fn on_pin(&self, row: usize) -> bool {
-        self.pin_shown && row == 1 + usize::from(self.notice_shown)
+        self.pin_shown && row == 1
     }
 
-    /// Whether the pointer is on the notice row: a press there takes the message away now.
+    /// Whether the pointer is on the row the message is painted over: a press there takes the
+    /// message away now. The chat under it does not move for it, so the row is the chat's own.
     pub fn on_notice(&self, row: usize) -> bool {
-        self.notice_shown && row == 1
+        self.notice_row.is_some_and(|at| row == at + 1)
     }
 
     /// Whether the pointer is on the jump-to-bottom pill (its own cells only: the rest of that row
@@ -963,13 +1015,22 @@ impl Transcript {
         self.view_at(width, height, std::time::Instant::now())
     }
 
-    /// The same at a stated instant - the notice row's clock, so a test can age a message without
-    /// sleeping. The rows reserved at the top are rows OF the region, not rows drawn over it: the
-    /// chat is that much shorter, and every row below them keeps its own place in the chat.
+    /// The same at a stated instant - the notice's clock, so a test can age a message without
+    /// sleeping.
+    ///
+    /// The PINNED ROW is reserved: it is a row OF the region, and the chat is that much shorter.
+    /// The NOTICE is not: it is painted OVER the region's top row (row 1, or row 1 under the pinned
+    /// request), so no row of the chat is lost or moved for it (Victor, 26/11 - scrolled up, a copy
+    /// used to shift the whole conversation down a row for two seconds, twice per copy).
     pub fn view_at(&mut self, width: usize, height: usize, now: std::time::Instant) -> Vec<String> {
         let (width, height) = (width.max(1), height.max(1));
-        let notice_row = self.notice_line(width, now);
-        let notice_rows = usize::from(notice_row.is_some());
+        // THE NOTICE TAKES ITS OWN ROWS (Victor today): a balloon at the TOP of the region -
+        // title, dividers, the words - so the chat and the pinned request move DOWN while it
+        // shows, and the space comes back when it expires. Never more than half the region, so a
+        // short window still keeps a chat to look at.
+        let balloon = { let rows = self.notice_balloon(width, now);
+            if rows.len() <= height / 2 { rows } else { Vec::new() } };
+        let balloon_rows = balloon.len();
         // The chat is drawn first, with whatever the notice row takes; the pin is then decided from
         // the rows that pass ACTUALLY drew (`first_row`), not from this frame's height. A decision
         // that depended on the height would flip as soon as the row it reserves changed the height it
@@ -978,30 +1039,35 @@ impl Transcript {
         // The rows the last frame gave the pin: the first pass is drawn with them, so a frame that
         // keeps its rows is painted once.
         let expected = self.pin_shown;
-        let mut reserved = notice_rows + usize::from(expected);
+        self.balloon_up = balloon_rows > 0;
+        let mut reserved = balloon_rows + usize::from(expected);
         let mut shown = self.paint(width, height.saturating_sub(reserved).max(1), reserved);
         let rows = height.saturating_sub(reserved).max(1);
         let pin = if rows >= 2 {
             let first = self.pin_first(width, rows);
             self.pinned_block(width, first)
-                // Clipped with an ellipsis, one row, never wider than the window (a very long or
-                // multi-line request is one row of the reader's own words).
-                .map(|index| clip_row(&self.pin_line(index), width))
+                // One row, never wider than the window, ending in three dots when it is not the
+                // whole request (a very long or multi-line request is one row of the reader's own
+                // words, and the dots are what say so).
+                .map(|index| self.pin_row(index, width))
         } else { None };
         // A frame that keeps the rows it had paints ONCE: the second pass is only for the frame in
         // which the pinned row appears or goes, and that is a change of state, not a per-frame cost.
         if pin.is_some() != expected {
-            reserved = notice_rows + usize::from(pin.is_some());
+            // THE BALLOON'S ROWS STAY RESERVED HERE. This pass exists for the frame in which the pin
+            // appears or goes, and it used to recompute the reservation from the pin alone - which
+            // dropped the balloon's rows for that frame, drew the chat over them and left
+            // `self.reserved` (what a press is measured against) one balloon short.
+            reserved = balloon_rows + usize::from(pin.is_some());
             shown = self.paint(width, height.saturating_sub(reserved).max(1), reserved);
         }
         let mut top: Vec<String> = Vec::new();
-        if let Some(row) = notice_row { top.push(row); }
         if let Some(row) = pin { top.push(row); }
         top.truncate(height.saturating_sub(1).min(top.len()));
-        let reserved = top.len();
+        // The chat begins BELOW the balloon and the pin, so that is what a press is measured against.
+        let reserved = top.len() + balloon_rows;
         self.reserved = reserved;
-        self.notice_shown = reserved >= 1 && notice_rows == 1;
-        self.pin_shown = reserved >= 1 + usize::from(self.notice_shown);
+        self.pin_shown = !top.is_empty();
         // The way back: the reader is not following the newest output, so a pill says so on the
         // region's last row and answers a press and the key. It never reaches the row below it.
         self.pill_row = None;
@@ -1027,7 +1093,11 @@ impl Transcript {
                 self.pill_row = Some(span);
             }
         }
-        let mut view = top;
+        // THE BALLOON'S ROWS COME FIRST, above the pin and the chat: that is what pushes them down,
+        // and giving the rows back when it expires is what moves them up again.
+        self.notice_row = if balloon_rows > 0 { Some(0) } else { None };
+        let mut view = balloon;
+        view.extend(top);
         view.extend(shown);
         view
     }
@@ -1051,7 +1121,9 @@ impl Transcript {
         } && width > 1;
         let mut text_width = (if self.bar { width - 1 } else { width }).max(1);
         let mut total = self.total_rows(text_width);
-        let want = wanted(self.scrollbar, total);
+        // While the balloon takes rows the bar keeps the state it had: the chat must not re-wrap for a
+        // message that is about to go away.
+        let want = if self.balloon_up { self.bar } else { wanted(self.scrollbar, total) };
         if want != self.bar {
             self.bar = want;
             text_width = (if want { width - 1 } else { width }).max(1);
@@ -1606,6 +1678,21 @@ fn wrap_band(cells: &[(String, char, usize)], width: usize, fill: &str) -> Vec<S
 /// new tail could add a row - which moved every row above and below it, the bounce Victor reported on
 /// 19/11. Clipped, the row is one row whatever it says, and the full output still lands in the block
 /// when the call settles.
+/// A plain row cut to `width` display cells, with nothing added: the caller owns the mark that says
+/// the row was cut (the pinned request ends in three literal dots, `pin_row`). Cut by CELLS, never at a
+/// space, so a wide glyph is not split and the row can never come out one cell wider than asked.
+fn cut_cells(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cells = cell_width_of(ch);
+        if used + cells > width { break }
+        out.push(ch);
+        used += cells;
+    }
+    out
+}
+
 fn clip_row(line: &str, width: usize) -> String {
     let width = width.max(1);
     if width == 1 { return wrap_rows(line, 1).remove(0).chars().next().map(String::from).unwrap_or_default(); }
@@ -1638,6 +1725,36 @@ fn pill_row(row: &str, text: &str, text_width: usize) -> (String, (usize, usize)
     let from = used + 1;
     out.push_str(&format!("{PILL}{pill}{RESET}\x1b[K"));
     (out, (from, used + cells))
+}
+
+/// `text` painted OVER `row` from cell `start`: the row's own cells stay everywhere the message
+/// does not reach, escapes and all, and the covered cells are the message's.
+///
+/// This is how the notice floats (Victor, 26/11): a message drawn over the chat instead of taking a
+/// row of it, so nothing on the screen moves - not when it appears, not when it goes.
+fn over(row: &str, start: usize, text: &str) -> String {
+    let end = start + visible(text);
+    let (cells, _) = cells_of(row);
+    let mut out = String::new();
+    let mut used = 0usize;
+    let mut placed = false;
+    for (esc, ch, width) in cells.iter() {
+        if !placed && used + width <= start { out.push_str(esc); out.push(*ch); used += width; continue }
+        if !placed {
+            for _ in used..start { out.push(' ') }
+            out.push_str(text);
+            placed = true;
+        }
+        // Inside the message's cells the chat's own character is dropped; past it, it is copied with
+        // the escape sequence that introduces it.
+        if used >= end { out.push_str(esc); out.push(*ch) }
+        used += width;
+    }
+    if !placed {
+        for _ in used..start { out.push(' ') }
+        out.push_str(text);
+    }
+    out
 }
 
 /// Follow the SGR state through `esc` (escape sequences only): a reset clears it, colours add up.
@@ -1787,6 +1904,40 @@ fn icon_at_band_end(row: &str, width: usize) -> Option<(String, usize)> {
     let column = width.saturating_sub(1).max(1);
     Some((format!("{row}\u{1b}[{column}G{COPY_ICON}"), width))
 }
+
+#[cfg(test)]
+mod notice_balloon_tests {
+    use super::*;
+
+    /// THE BALLOON IS A BALLOON (copied-notice-floats, Victor today): a title, dividers, its own rows.
+    /// It is drawn, not painted over a chat row, so what it takes it also RESERVES - which is the next
+    /// test; this one is about its own shape.
+    #[test]
+    fn the_notice_is_a_balloon_with_a_title_and_dividers() {
+        let mut t = Transcript::default();
+        let now = std::time::Instant::now();
+        assert!(t.notice_balloon(40, now).is_empty(), "no notice, no rows");
+        t.notice("Copied 12 characters", now, false);
+        let rows = t.notice_balloon(40, now);
+        assert_eq!(rows.len(), 4, "divider, title, the words, divider: {rows:?}");
+        let plain = |s: &String| s.replace(RESET, "");
+        assert!(plain(&rows[1]).contains(BALLOON_TITLE), "the title is there: {:?}", plain(&rows[1]));
+        assert_eq!(visible(&plain(&rows[0])), 40, "the dividers span the width");
+        assert_eq!(visible(&plain(&rows[3])), 40);
+        // Centred to within a cell: left pad = (width - len) / 2.
+        // The row is `<spaces><colour><words><reset>`: the padding comes FIRST and the words after the
+        // colour escape, so each is measured on its own side (counting the escape as spaces is how the
+        // first version of this test got the arithmetic wrong).
+        let raw = plain(&rows[2]);
+        let pad = raw.len() - raw.trim_start().len();
+        let words = visible(raw.trim_start().rsplit('m').next().unwrap_or("").trim_end());
+        assert_eq!(pad, (40 - words) / 2, "centred on its row: pad {pad}, words {words}");
+        // And it goes when its time is up, with nothing else to reset.
+        let later = now + std::time::Duration::from_millis(NOTICE_MS + 50);
+        assert!(t.notice_balloon(40, later).is_empty(), "the rows come back on their own");
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -2994,7 +3145,7 @@ mod tests {
     // messages". The status row is his to keep: a message never takes it.
 
     /// A session with two turns: a request, the answer under it, and the same again.
-    fn two_turns() -> Transcript {
+    pub(crate) fn two_turns() -> Transcript {
         let mut t = plain(Transcript::default());
         // A little chat above the first turn, so that turn can scroll off the top as well.
         t.block(false); for n in 0..4 { t.write(&format!("welcome {n}\n")); }
@@ -3011,7 +3162,7 @@ mod tests {
     /// Two frames. The pinned request is decided from the LAST DRAWN frame (`Transcript::view_at`,
     /// which is what keeps it from flipping with the height of the row it reserves), so a test that
     /// wants the settled picture draws once to establish where the view is and once to read it.
-    fn settled(t: &mut Transcript, width: usize, height: usize) -> Vec<String> {
+    pub(crate) fn settled(t: &mut Transcript, width: usize, height: usize) -> Vec<String> {
         let _ = t.view(width, height);
         t.view(width, height)
     }
@@ -3027,6 +3178,39 @@ mod tests {
         assert!(view.last().unwrap().contains("answer two 11"),
             "and the answer is still the last row: {view:?}");
     }
+
+    /// A request of several lines is ONE row up there by construction, so the rest of it used to
+    /// disappear without a sign: the reader read a sentence that ended cleanly halfway. It now ends
+    /// with three literal dots (Victor, 25/11), and a one-line request that fits still ends with
+    /// nothing - the mark means "there is more", so it may not be decoration.
+    #[test]
+    fn a_pinned_request_longer_than_one_line_ends_in_three_dots() {
+        let mut long = plain(Transcript::default());
+        long.block(false); for n in 0..4 { long.write(&format!("welcome {n}\n")); }
+        long.block(false);
+        long.write_marked("\u{276f} a question that runs on\nand carries a second line\n\n", true);
+        long.block(false); for n in 0..12 { long.write(&format!("answer {n}\n")); }
+        let view = settled(&mut long, 40, 8);
+        let text = crate::selection::plain(&view[0]);
+        assert!(is_pin(&view[0]) && text.contains("a question that runs on"), "{view:?}");
+        assert!(text.ends_with(PIN_MARK),
+            "a request that carries more than one line ends in three dots: {text:?}");
+        assert!(!text.contains('\u{2026}'),
+            "three literal dots, not the one-glyph ellipsis a clipped row uses: {text:?}");
+        assert!(visible(&view[0]) <= 40, "and the row stays inside the window: {}", visible(&view[0]));
+        assert!(!view[0].contains("second line"), "one row, never the rest of the message: {view:?}");
+
+        let mut short = plain(Transcript::default());
+        short.block(false); for n in 0..4 { short.write(&format!("welcome {n}\n")); }
+        short.block(false); short.write_marked("\u{276f} short question\n\n", true);
+        short.block(false); for n in 0..12 { short.write(&format!("answer {n}\n")); }
+        let short_view = settled(&mut short, 40, 8);
+        let short_text = crate::selection::plain(&short_view[0]);
+        assert!(is_pin(&short_view[0]) && short_text.contains("short question"), "{short_view:?}");
+        assert!(!short_text.ends_with(PIN_MARK),
+            "a one-line request that fits is whole, so it carries no dots: {short_text:?}");
+    }
+
 
     /// The row under the pinned request is the chat's OWN row: the region is one row shorter, not
     /// overdrawn (the brief). The proof is exact: the same chat with no request mark draws the same
@@ -3084,29 +3268,122 @@ mod tests {
         let view = settled(&mut t, 40, 8);
         assert!(is_pin(&view[0]), "{view:?}");
         assert!(visible(&view[0]) <= 40, "the row never overflows its window: {view:?}");
-        assert!(view[0].contains("\u{2026}"), "and says so with an ellipsis: {view:?}");
+        // The mark changed on 25/11: three literal dots, not the one glyph (Victor: "three dots at the
+        // end of the line"). The row still says it was cut, and it is still one row inside the window.
+        assert!(crate::selection::plain(&view[0]).ends_with(PIN_MARK),
+            "and says so with three dots: {view:?}");
+        assert!(!view[0].contains("\u{2026}"), "not the one-glyph ellipsis: {view:?}");
         assert!(!is_pin(&view[1]), "one row, never two: {view:?}");
     }
 
+    /// Where a message starts in a drawn row, in cells: the row's own text with the escapes taken
+    /// off, asked for the INDEX of `text`. That is the left pad, which is what "centred" means here.
+    fn column_of(row: &str, text: &str) -> Option<usize> {
+        crate::selection::plain(row).find(text)
+    }
+
+    /// The rows that differ between two frames, by index.
+    fn moved(before: &[String], during: &[String]) -> Vec<usize> {
+        (0..before.len().max(during.len()))
+            .filter(|at| before.get(*at) != during.get(*at))
+            .collect()
+    }
+
     #[test]
-    fn the_notice_sits_above_the_pinned_request_and_goes_after_its_time() {
+    fn the_notice_balloon_sits_above_the_pin_and_pushes_the_chat_down() {
+        // Victor, 26/11: scrolled up out of the bottom, a copy shifted the WHOLE conversation down a
+        // row for two seconds and back - twice per copy. The message is an overlay now: nothing on
+        // the screen moves for it, before, during or after.
         let mut t = two_turns();
+        t.page(4); // scrolled up: the second request is above the viewport and pins
+        let before = settled(&mut t, 40, 10);
+        assert!(is_pin(&before[0]), "the request pins on the top row: {before:?}");
+
         let now = std::time::Instant::now();
-        assert!(t.notice("Copied 12 characters", now, false), "a copy says so on the notice row");
-        let _ = t.view_at(40, 8, now);
-        let view = t.view_at(40, 8, now);
-        assert!(view[0].contains("Copied 12 characters") && !is_pin(&view[0]),
-            "the notice is the top row, and not on the band: {view:?}");
-        assert!(is_pin(&view[1]) && view[1].contains("second question"),
-            "the pinned request is one row under it: {view:?}");
-        assert!(!view.iter().any(|row| row.contains("Copied") && is_pin(row)), "{view:?}");
-        // Two seconds later the message is gone and the pinned request is the top row again.
+        assert!(t.notice("Copied 12 characters", now, false), "a copy says so");
+        let during = t.view_at(40, 10, now);
+        assert_eq!(during.len(), before.len(), "the region keeps its rows: {during:?}");
+        assert!(during[0].contains("\u{2500}"), "a divider on top: {during:?}");
+        assert!(during[1].contains(BALLOON_TITLE), "the title under it: {during:?}");
+        assert!(during[2].contains("Copied 12 characters"), "the words: {during:?}");
+        assert!(during[3].contains("\u{2500}"), "and a divider under them: {during:?}");
+        assert!(is_pin(&during[4]), "the pinned request is PUSHED DOWN, not moved away: {during:?}");
+        assert_eq!(during[4], before[0], "and it is the same bytes: {during:?}");
+        assert_eq!(during[8], before[4], "the chat moved down by the balloon's rows: {during:?}");
+
+        // Two seconds later: the message is gone and the frame is the one from before it, byte for byte.
         let later = now + std::time::Duration::from_millis(NOTICE_MS + 50);
-        let view = t.view_at(40, 8, later);
-        assert!(!view.iter().any(|row| row.contains("Copied")), "the message's time is up: {view:?}");
-        assert!(is_pin(&view[0]), "and the pinned request is the top row: {view:?}");
+        let after = t.view_at(40, 10, later);
+        assert_eq!(after, before, "the frame after it is the frame before it: {after:?}");
         assert!(t.expire_notice(later), "the caller is told to take it away");
         assert_eq!(t.notice_text(later), None, "and it is gone from the state");
+    }
+
+    #[test]
+    fn the_notice_balloon_sits_at_the_top_at_the_bottom_too() {
+        // The case that looked right before (following the newest output): it still must not move,
+        // and the newest line is still the last row.
+        let mut t = plain(Transcript::default());
+        t.block(false);
+        for n in 0..20 { t.write(&format!("answer {n}\n")); }
+        let before = settled(&mut t, 40, 8);
+        assert!(before.last().expect("rows").contains("answer 19"), "{before:?}");
+        let now = std::time::Instant::now();
+        assert!(t.notice("Copied 4 characters", now, false));
+        let during = t.view_at(40, 8, now);
+        assert!(during[0].contains("\u{2500}"), "the balloon's divider: {during:?}");
+        assert!(during[2].contains("Copied 4 characters"), "its words: {during:?}");
+        assert!(during.last().expect("rows").contains("answer 19"),
+            "and the newest line is still the last row: {during:?}");
+        let later = now + std::time::Duration::from_millis(NOTICE_MS + 50);
+        assert_eq!(t.view_at(40, 8, later), before, "and it goes back to the same frame: {later:?}");
+    }
+
+    #[test]
+    fn the_notice_is_centred_on_its_row() {
+        let mut t = plain(Transcript::default());
+        t.block(false);
+        for n in 0..20 { t.write(&format!("answer {n}\n")); }
+        let now = std::time::Instant::now();
+        assert!(t.notice("Copied 12 characters", now, false));
+        let view = t.view_at(40, 8, now);
+        let start = column_of(&view[2], "Copied 12 characters").expect("the words are the balloon's third row");
+        let expected = (40 - visible("Copied 12 characters")) / 2;
+        assert!((start as isize - expected as isize).abs() <= 1,
+            "left pad is (width - len) / 2 = {expected} cells, within one: {start} in {:?}", view[2]);
+        assert!(start > 1, "it is not against the left edge: {:?}", view[2]);
+    }
+
+    #[test]
+    fn a_press_on_a_copy_icon_is_unchanged_while_the_notice_balloon_shows() {
+        let mut t = Transcript::default();
+        fenced(&mut t);
+        // ENOUGH BELOW THE FENCE THAT ITS ICON STAYS ON SCREEN while the balloon takes its rows at the
+        // top: this row asks WHAT a press lands on, not what happens when the chat is clipped.
+        t.block(false);
+        for n in 0..6 { t.write(&format!("below {n}\n")); }
+        let before = t.view(60, 20);
+        let icon = |rows: &[String]| rows.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).expect("the icon's row");
+        let row = icon(&before);
+        assert_eq!(t.copy_at(row + 1, 1).as_deref(), Some("print('hi')\nreturn 1"), "the icon copies before");
+
+        let now = std::time::Instant::now();
+        assert!(t.notice("Copied 18 characters", now, false));
+        let during = t.view_at(60, 20, now);
+        assert!(during[2].contains("Copied 18 characters"), "{during:?}");
+        // WHERE THE ICON IS, read from the frame rather than computed from an offset: the balloon
+        // changes the chat's region, and a following view loses its top rows rather than moving
+        // everything by a constant. What must hold is the reader's experience: the row that SHOWS the
+        // icon, pressed, copies that icon's text.
+        let moved = icon(&during);
+        // A FOLLOWING VIEW IS ANCHORED AT THE BOTTOM: the balloon takes its rows from the blank space
+        // above the chat, not from the reader's place in it, so the icon is exactly where it was and a
+        // press on that row still copies it. (A frozen view is the other case: there the balloon pushes
+        // the chat down, which the test above pins.)
+        assert_eq!(moved, row, "the icon does not move for the balloon: {during:?}");
+        assert_eq!(t.copy_at(moved + 1, 1).as_deref(), Some("print('hi')\nreturn 1"),
+            "a press on that row copies it, during the balloon as before: {during:?}");
+        assert_eq!(during[moved], before[row], "and it is the same icon: {during:?}");
     }
 
     #[test]
@@ -3119,7 +3396,8 @@ mod tests {
             "an error does not time out: it waits for a key");
         assert!(!t.expire_notice(long_after), "nothing takes it away on its own");
         let view = t.view_at(40, 8, long_after);
-        assert!(view[0].contains("no clipboard tool answered"), "{view:?}");
+        assert!(view[2].contains("no clipboard tool answered"),
+            "a sticky message is the same balloon, and it stays: {view:?}");
         assert!(t.clear_notice(), "the next key clears it");
         assert!(!view.is_empty() && t.notice_text(long_after).is_none());
     }

@@ -148,6 +148,9 @@ ROOT=$1; BIN=$2; ROW=$3; WORKDIR=$4
 FAST_BIN=$BIN; FAST_ROOT=$ROOT/lua; FAST_WORK=$WORKDIR; FAST_COMPONENT_SOURCE=
 FAST_COMPONENT_NAMES=; WA_FAST_CLEARED=
 export FAST_BIN FAST_ROOT FAST_WORK FAST_COMPONENT_SOURCE FAST_COMPONENT_NAMES WA_FAST_CLEARED
+# THE MACHINE'S LOAD IS PINNED IN THIS FIXTURE (27/11): the row budget scales with it (see
+# `wa_fast_row_seconds`), and these cases are about the watchdog mechanism, not about the box. Without this# the 3 s hang case became "within 6s" on a busy node and the assertion went red for the machine.
+export WA_FAST_ROW_LOAD=1
 home="$WORKDIR/h.1"; mkdir -p "$home"
 lua_run "$ROW" "$home"
 DRIVE
@@ -310,7 +313,17 @@ fi
 
 grep -q 'timeout 120 "$FAST_BIN"' scripts/fast.sh scripts/lib/fast-row-exec.sh && fail 'a Lua row still runs under a bare timeout, so a hung row leaves its children behind'
 
-grep -q 'wa_fast_row_exec "${WA_FAST_ROW_SECONDS:-120}"' scripts/lib/fast-row-exec.sh || fail 'lua_run does not run its row through wa_fast_row_exec (scripts/lib/fast-row-exec.sh)'
+grep -q 'wa_fast_row_exec "$(wa_fast_row_seconds)"' scripts/lib/fast-row-exec.sh || fail 'lua_run does not run its row through wa_fast_row_exec (scripts/lib/fast-row-exec.sh)'
+# THE BUDGET TRACKS THE LOAD (27/11): a row that takes 30 s idle was killed at 120 s on a node at load 34,
+# so the seconds scale with the load the node reports and are clamped. Pinned here because the arithmetic is
+# the whole of it: 1x idle, ceil(load/4) above that, never past 8x, and a base override is still honoured.
+(. scripts/lib/fast-row-exec.sh
+ [ "$(WA_FAST_ROW_LOAD=1 wa_fast_row_seconds)" = 120 ] || fail 'an idle machine gives the 120 s base'
+ [ "$(WA_FAST_ROW_LOAD=12 wa_fast_row_seconds)" = 360 ] || fail 'load 12 gives 3x'
+ [ "$(WA_FAST_ROW_LOAD=34.42 wa_fast_row_seconds)" = 960 ] || fail 'load 34 is clamped at 8x'
+ [ "$(WA_FAST_ROW_LOAD=xyz wa_fast_row_seconds)" = 120 ] || fail 'an unreadable load falls back to the base'
+ [ "$(WA_FAST_ROW_SECONDS=60 WA_FAST_ROW_LOAD=34 wa_fast_row_seconds)" = 480 ] || fail 'WA_FAST_ROW_SECONDS still sets the base')
+
 grep -q 'scripts/lib/fast-row-exec.sh' scripts/fast.sh || fail 'scripts/fast.sh does not source scripts/lib/fast-row-exec.sh, so the row path it runs is not the one tested here'
 
 grep -q 'then kind=hung' scripts/fast.sh || fail 'scripts/fast.sh never classifies a row as hung'

@@ -40,7 +40,21 @@ core="${AGENT_CORE:-$ROOT/rust/components/agent-core/target/wasm32-wasip2/releas
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 bin="$(native "$bin")"; core="$(native "$core")"; root_native="$(native "$ROOT")"
 work="$(mktemp -d "${TMPDIR:-/tmp}/wa-parity-XXXXXX")"
-trap '[ "$keep" = 1 ] || rm -rf "$work"' EXIT
+# STOP WHAT IT STARTS (orchestrator, 28/11). This row runs the node once per script per mode - around two
+# hundred node runs - and every node with no rendezvous spawns a wa-operations-supervisor of its own per home.
+# The supervisor outlives the node by design, so one run of this row left a supervisor per script behind: a
+# worker measured 388 orphans after running it, all with a rendezvous under this row's own scratch root. The
+# supervisors whose rendezvous names a home under $work are this row's, and they go with it.
+reap() {
+  if [ "$keep" != 1 ]; then
+    for pid in $(ps -eo pid,cmd 2>/dev/null | grep 'wa-operations-supervisor' | grep -v grep \
+        | grep -F -- "--rendezvous $work" | awk '{print $1}'); do
+      kill "$pid" 2>/dev/null || true
+    done
+    rm -rf "$work"
+  fi
+}
+trap reap EXIT
 
 # The row set is the runner's own inventory (scripts/lib/fast-rows.sh, wa_fast_row_candidates), so this
 # harness cannot drift from scripts/fast.sh about which rows exist.

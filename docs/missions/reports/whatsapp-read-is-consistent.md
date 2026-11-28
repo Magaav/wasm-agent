@@ -426,3 +426,53 @@ For `HANDOVER.md`, under the WhatsApp section:
     non-zero `lag_ms` mean the component has records it has not written yet; `pending` names them.
 
 For `FACTORY.md`, nothing: the factory's scripts are untouched by this branch.
+
+# Follow-up (27/11): the answer names its job, and the cross-process row measured as out of reach
+
+This section is a NEW branch (`change/whatsapp-read-consistent-proved`, off origin/main 334aeae7), not a
+rewrite of the review above. The queue item came back with "do only what is left", and after measuring the
+item against main, six of its seven demands were already there (as_of/as_of_regressed, catching_up, in_history,
+the transcript words, both id forms, the acceptance cells). The seventh was this report's own admitted gap: no
+cross-process reproduction.
+
+Correction to the section above: it cites `75bdd7b9` for the queue fix. That commit is NOT in main's history
+(it predates the revert `6cbcc72e`). The content is `1f51b78e` ("queue: an in-flight dedupe claim stops
+answering when the job settles", an ancestor of main), re-applied in `33f1eeec`.
+
+## The product change: `job`, the queue id that produced the answer
+
+A settled answer carried no way to say WHICH job gave it, so a fresh read and a replayed one were
+indistinguishable from outside the process - the reason the 23/11 bug could not be told apart from three
+honest reads by anything but the numbers inside them, and the reason the cross-process row had no observable.
+`settle` now adds `job` to every answer it returns: the settled document, a refusal the component settled,
+and a dead/expired refusal. The slow path already named the same id (it is the handle `wait(op)` continues).
+
+Tests (`cargo test -p wa-capabilities --lib whatsapp_query::` -> 25 passed, 0 failed):
+- `the_answer_names_the_job_that_answered_it` - the continuation names the job, the component's document
+  crosses unchanged beside it, an identical call afterwards is a NEW id (the claim was released at settle),
+  and a refusal names its job too.
+- `the_op_named_as_data_answers_the_same_bytes_as_the_typed_op` - sharpened, not loosened: it compared the
+  tool answer with the component's raw document and now compares with that document PLUS the one field the
+  component cannot know.
+
+## The cross-process row: measured as blocked, with the exact missing piece
+
+What I tried, in order: `host.whatsapp_read` exists and is the product path, so two real `wa` processes over
+one scratch HOME is cheap (`host.whatsapp_read`, `host.whatsapp_search`, ... are on the Lua host). What is
+missing is a SETTLER: without a worker the job stays pending, both processes see the same in-flight id, and
+that is correct behaviour on both sides - a row built on it would pass on the base and prove nothing.
+
+The only settler for a `whatsapp.query` job is the wa-whatsapp component service. Measured on this node:
+`wa services list` answers "no service components are stored on this node", with the pinned bytes copied into
+a scratch HOME as well - so no scratch node can start that worker without a component INSTALL (the deploy's
+own definition), and running the row against the account node is forbidden. That is the whole obstacle; it is
+one fixture (a scratch node with the component definition installed) away from being closable.
+
+## Texts to approve
+
+1. The read/search answer gains one field: `job` - the queue id that produced this answer. Two identical
+   calls answered by one id are one answer; answered by two ids they are two reads of the index.
+
+## What is not claimed
+- No behavioural cross-process row exists (blocked above). The semantics are proven in-process.
+- openclaw was not touched: the field would show there today only after a deploy.
