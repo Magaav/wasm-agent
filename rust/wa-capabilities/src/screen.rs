@@ -729,6 +729,19 @@ struct Inner {
     pending: bool,
 }
 
+
+/// The wire as a `Document` seam: what `wa:terminal` is served from.
+///
+/// `Remote` is thread-local (`RefCell`), and the seam's verbs are async and need `Send`, so the client is CREATED
+/// on the worker thread by `channel_document` - it never crosses a thread boundary, and this file keeps its
+/// threading. One owner of the wire (law 17).
+pub fn document(explicit: Option<std::path::PathBuf>) -> crate::terminal_seam::ProtoDocument {
+    crate::terminal_seam::channel_document(move || {
+        let remote = Remote::new(explicit);
+        Box::new(move |method, args| remote.call(method, args).map_err(|failure| failure.to_string()))
+    })
+}
+
 impl Remote {
     fn new(explicit: Option<std::path::PathBuf>) -> Self {
         Remote {
