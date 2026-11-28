@@ -23,7 +23,10 @@ M.MAX_FIELD = 4000
 
 -- The three fields, in the order the envelope asks for them. Kept here so the store, the reader and a
 -- test name the same three things.
-M.FIELDS = { "hurt", "buys", "focus" }
+-- tool and cost join the three originals (27/11, turn-note-is-lean): the lean block asks the model for what it
+-- touched and what it cost, and buys/focus stay optional. OLD notes carry no tool/cost and keep parsing: a missing
+-- heading is simply an empty field, and the columns default to ''.
+M.FIELDS = { "tool", "cost", "hurt", "buys", "focus" }
 
 local deps = {}
 local function dep(name)
@@ -53,7 +56,10 @@ end
 -- The note's own parse, by heading. Deliberately simpler than turnfeed's grouping: this answers the
 -- three fields of one note, never whether two notes are about the same thing.
 local HEADINGS = {
+  { key = "tool", label = "tool" },
+  { key = "cost", label = "cost" },
   { key = "hurt", label = "what hurt" },
+  { key = "hurt", label = "hurt" },
   { key = "buys", label = "what it buys" },
   { key = "focus", label = "focus" },
 }
@@ -133,7 +139,7 @@ end
 
 function M.split(content)
   local text = type(content) == "string" and content or ""
-  local blocks, fields = {}, { hurt = {}, buys = {}, focus = {} }
+  local blocks, fields = {}, { tool = {}, cost = {}, hurt = {}, buys = {}, focus = {} }
   local order = {}
   local spans = fence_spans(text)
   local search = 1
@@ -173,11 +179,13 @@ function M.split(content)
       if flat ~= "" then fields.hurt[1] = flat end
     end
     note = {
+      tool = trim(table.concat(fields.tool, " ")),
+      cost = trim(table.concat(fields.cost, " ")),
       hurt = trim(table.concat(fields.hurt, " ")),
       buys = trim(table.concat(fields.buys, " ")),
       focus = trim(table.concat(fields.focus, " ")),
     }
-    if note.hurt == "" and note.buys == "" and note.focus == "" then note = nil end
+    if note.tool == "" and note.cost == "" and note.hurt == "" and note.buys == "" and note.focus == "" then note = nil end
     for _, key in ipairs(M.FIELDS) do
       if note and #note[key] > M.MAX_FIELD then note[key] = note[key]:sub(1, M.MAX_FIELD) end
     end
@@ -199,6 +207,8 @@ local SCHEMA = {
     build TEXT NOT NULL DEFAULT '',
     mode TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL DEFAULT '',
+    cost TEXT NOT NULL DEFAULT '',
     hurts TEXT NOT NULL DEFAULT '',
     buys TEXT NOT NULL DEFAULT '',
     focus TEXT NOT NULL DEFAULT '',
@@ -225,6 +235,13 @@ end
 function M.setup()
   if ready then return true end
   for _, statement in ipairs(SCHEMA) do sql("sql_exec", statement, {}) end
+  -- A JOURNAL THAT ALREADY EXISTS gains the two columns (27/11). Old rows are untouched: the defaults are '', so a
+  -- note written before this change reads back exactly as it was written, and /turns keeps answering for both shapes.
+  -- The ALTER is attempted and its failure ignored ON PURPOSE - a fresh table already has the columns, and a store
+  -- that refuses DDL must not stop the journal from reading.
+  for _, column in ipairs({ "tool", "cost" }) do
+    pcall(sql, "sql_exec", [[ALTER TABLE turn_notes ADD COLUMN ]] .. column .. [[ TEXT NOT NULL DEFAULT '']], {})
+  end
   ready = true
   return true
 end
@@ -302,17 +319,34 @@ function M.record(note, ctx)
   if type(note) ~= "table" then return nil, "turn_note_missing" end
   local ok, id = pcall(function()
     M.setup()
+    -- NOT TWICE IN ONE SESSION FOR THE SAME CAUSE (27/11, turn-note-is-lean item c). A model that hits the same wall
+    -- twice in a session wrote the same note twice, and the feed then counted one friction as two. The key is
+    -- (session, tool, hurt): the SAME cause in the SAME session is journalled once, and the second attempt is
+    -- answered by name instead of being silently dropped. A different cause, or the same cause in another session,
+    -- still records.
+    local tool = tostring(note.tool or "")
+    local hurt = tostring(note.hurt or "")
+    if hurt ~= "" then
+      local seen = sql("sql_query", [[SELECT id FROM turn_notes WHERE session_id=? AND tool=? AND hurts=? LIMIT 1]],
+        { tostring(ctx.session_id or ""), tool, hurt })
+      local rows = seen.rows or seen
+      if type(rows) == "table" and #rows > 0 then return nil, "turn_note_duplicate" end
+    end
     local row_id = host.uuid()
     sql("sql_exec", [[INSERT INTO turn_notes(id,session_id,run_id,message_id,mission,build,mode,model,
-        hurts,buys,focus,block,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)]], {
+        tool,cost,hurts,buys,focus,block,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)]], {
       row_id, tostring(ctx.session_id or ""), tostring(ctx.run_id or ""), tostring(ctx.message_id or ""),
       tostring(ctx.mission or ""), tostring(ctx.build or ""), tostring(ctx.mode or ""),
-      tostring(ctx.model or ""), tostring(note.hurt or ""), tostring(note.buys or ""),
+      tostring(ctx.model or ""), tostring(note.tool or ""), tostring(note.cost or ""),
+      tostring(note.hurt or ""), tostring(note.buys or ""),
       tostring(note.focus or ""), tostring(ctx.block or ""), host.now(),
     })
     return row_id
   end)
   if not ok then return nil, "turn_journal_store: " .. tostring(id) end
+  -- The pcall carries the duplicate answer out as its VALUE, not as an error: it is a fact about the note, not a store
+  -- failure.
+  if id == nil then return nil, "turn_note_duplicate" end
   return id
 end
 
