@@ -99,7 +99,7 @@ wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 # caller has to name an op locally. That mirror is the one place the two can drift (28/11: `backfill` was
 # called read-only here and the call went to the wrong door), so the crate is a dev-dependency: the tests
 # compare the two tables and nothing else may use it.
-wa-whatsapp-index = { path = "../wa-whatsapp-index" }
+wa-whatsapp-index = { path = "../components/wa-whatsapp/index" }
 wat = "1"
 # `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and no configuration
 # declared it, so `cargo test -p wa-capabilities` did not compile on main itself. A path
