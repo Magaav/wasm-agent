@@ -165,7 +165,7 @@ rc=$?
 grep -q 'SEQSTEP 1 convert' "$OUT" && ok 'step 1 convert (the real versions-adopt)' || fail 'step 1 never ran'
 grep -q 'SEQSTEP 2 stage' "$OUT" && ok 'step 2 stage (the real upgrade.sh)' || fail 'step 2 never ran'
 grep -q 'lua_part_signed_ok' "$OUT" && ok 'the node verified the part signature (release verify)' \
-  || fail "the part was not accepted; the sequence said: $(tail -3 "$OUT" | tr "/\n/" " ")"
+  || fail "step 2 did not stage; the deploy log says: $(tail -3 "$INSTALL/deploy-upgrade.log")"
 grep -q 'lua_part_filled' "$OUT" && ok 'and the part filled the lua-core member' || fail 'the part did not fill the member'
 grep -q 'SEQSTEP 3 seal and point' "$OUT" && ok 'step 3 seal and point (the real version-install.sh)' || fail 'step 3 never ran'
 grep -q 'SEQSTEP 4 restart through the pointer' "$OUT" && ok 'step 4 restart through the pointer (the real upgrade.sh)' || fail 'step 4 never ran'
