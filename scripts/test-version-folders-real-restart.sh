@@ -36,7 +36,15 @@ BASE="${WA_ROW_SCRATCH_ROOT:-${HOME}/.cache/wa-row}"
 case "$BASE" in */.wasm-agent|*/.wasm-agent/*) BASE=/tmp ;; esac
 S=$(mktemp -d "$BASE/wa-vfrestart-XXXXXX") || { echo 'FAIL: no scratch' >&2; exit 2; }
 cleanup() {
-  "$S/install/wa-sentinel" stop >/dev/null 2>&1; "$S/install/wa-sentinel" stop >/dev/null 2>&1
+  # THE WATCHER IS KILLED BY PID: `stop` asks, and a watcher that is already confused does not answer - which is exactly
+  # how one run's watcher survived into the next run and made its `status` hang (measured: 2 green runs, then hangs).
+  timeout 5 "$S/install/wa-sentinel" stop >/dev/null 2>&1
+  for pid_file in "$S"/home/.wasm-agent/sentinel/sentinel.pid "$HOME"/.wasm-agent/sentinel/sentinel.pid; do
+    [ -f "$pid_file" ] || continue
+    pid="$(cat "$pid_file" 2>/dev/null)"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kill "$pid" 2>/dev/null; sleep 0.2; kill -9 "$pid" 2>/dev/null
+  done
   test_release_vault_stop >/dev/null 2>&1
   # THE SENTINEL WRITES AS IT EXITS, so one rm can leave a directory behind and print an error after a green run.
   chmod -R u+w "$S" 2>/dev/null
@@ -75,15 +83,15 @@ ok 'the part is signed (scratch vault)'
     "$(wc -c < "$S/lua-core.tar.gz" | tr -d ' ')" "$HOST_INT"; } > "$S/lua.lock"
 
 export WA_SHARE_ROOT="$S/share" WA_SENTINEL_SUPERVISOR=none WA_PORT="${WA_PORT:-8919}"
-"$INSTALL/wa-sentinel" start >"$S/sentinel.log" 2>&1 || true
+timeout 30 "$INSTALL/wa-sentinel" start >"$S/sentinel.log" 2>&1 || true
 echo "  diag: sentinel start exit=$? log=[$(head -2 "$S/sentinel.log" | tr "\n" " ")]" || fail "the sentinel did not start: $(tail -2 "$S/sentinel.log")"
 # IT COMES UP A MOMENT AFTER start RETURNS: an immediate status read says down (measured), so the row waits.
 for _ in $(seq 1 20); do
-  "$INSTALL/wa-sentinel" status 2>&1 | grep -qE '^ *sentinel: *up' && break
+  timeout 10 "$INSTALL/wa-sentinel" status 2>&1 | grep -qE '^ *sentinel: *up' && break
   sleep 0.5
 done
 # THE STATUS IS PRINTED, NOT SWALLOWED: `grep -q` hid the one line that explains a failure six hypotheses deep.
-SENT_STATE="$("$INSTALL/wa-sentinel" status 2>&1)"
+SENT_STATE="$(timeout 10 "$INSTALL/wa-sentinel" status 2>&1)"
 printf '  sentinel status: %s\n' "$(printf '%s' "$SENT_STATE" | tr '\n' ' ' | cut -c1-170)"
 printf '%s\n' "$SENT_STATE" | grep -qE '^ *sentinel: *up' || fail 'the sentinel is not up'
 ok 'the real sentinel supervises the scratch node'
