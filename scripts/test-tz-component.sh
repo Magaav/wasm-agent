@@ -21,7 +21,10 @@ cd "$(dirname "$0")/.."
 ROOT=$PWD
 bin=${WA_BIN:-$ROOT/rust/target/release/wa}
 core=${WA_CORE:-$ROOT/rust/components/agent-core/target/wasm32-wasip2/release/agent_core.wasm}
-tz=${WA_TZ:-$HOME/.wasm-agent/components/tz.wasm}
+# The artifact: an explicit WA_TZ, else the directory the FACTORY builds into (fast.sh sets
+# WA_COMPONENTS_DIR/FAST_COMPONENT_SOURCE), else the node's own component directory.
+tz_dir=${WA_COMPONENTS_DIR:-${FAST_COMPONENT_SOURCE:-$HOME/.wasm-agent/components}}
+tz=${WA_TZ:-$tz_dir/tz.wasm}
 fail=0
 say() { printf '%s\n' "$*"; }
 [ -x "$bin" ] || { say "tz-component: no wa at $bin (set WA_BIN)"; exit 1; }

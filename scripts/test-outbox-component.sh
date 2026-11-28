@@ -15,7 +15,10 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 bin=${WA_BIN:-$ROOT/rust/target/release/wa}
-comp=${WA_OUTBOX:-$HOME/.wasm-agent/components/outbox.wasm}
+# The artifact: an explicit WA_OUTBOX, else the directory the FACTORY builds into (fast.sh sets
+# WA_COMPONENTS_DIR/FAST_COMPONENT_SOURCE), else the node's own component directory.
+comp_dir=${WA_COMPONENTS_DIR:-${FAST_COMPONENT_SOURCE:-$HOME/.wasm-agent/components}}
+comp=${WA_OUTBOX:-$comp_dir/outbox.wasm}
 fail=0
 say() { printf '%s\n' "$*"; }
 [ -x "$bin" ] || { say "outbox-component: no wa at $bin (set WA_BIN)"; exit 1; }
