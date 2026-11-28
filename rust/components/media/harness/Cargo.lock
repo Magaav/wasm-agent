@@ -712,6 +712,7 @@ name = "media-probe"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "tokio",
  "wasmtime",
  "wasmtime-wasi",
 ]

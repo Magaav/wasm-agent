@@ -16,3 +16,4 @@ anyhow = "1"
 # Component be compiled from bytes; without it the API has no `Component::new` at all.
 wasmtime = { version = "50", default-features = false, features = ["component-model", "runtime", "std", "cranelift", "anyhow"] }
 wasmtime-wasi = "50"
+tokio = { version = "1", features = ["rt"] }
