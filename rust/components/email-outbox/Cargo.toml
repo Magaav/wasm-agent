@@ -1,0 +1,24 @@
+[package]
+name = "email-outbox"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The email-send contract as a WASI component (everything-is-a-component, row 14).
+#
+# `rust/wa-email-outbox` is the part both ends of the email queue must agree on: what a mailbox is, which
+# recipients a request may carry, the limits on subject/body/attachments, the payload, its dedupe key, the
+# policy target the spend is accounted against, and the outcome a worker reports. The HOST used it to
+# validate and enqueue a send (`wa-capabilities/src/email_send.rs`) and the `wa-email` COMPONENT uses it to
+# decide and send - so a change to either end rebuilt the node. It is pure (no fs, no net, no clock it does
+# not receive), which is what makes it a component.
+[workspace]
+
+[dependencies]
+wa-email-outbox = { path = "../../wa-email-outbox" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

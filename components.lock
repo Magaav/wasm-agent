@@ -355,3 +355,9 @@ outbox 3674c717e9c9ec2d64e2723b66aed603acbc5d1855f6aa343a3f943bf87bca44 232613
 # left: `archive_host` in the kernel answers the two imports, and the path-bound ops (`list`, `cut`, `restore`,
 # `expire`) work in a directory the host preopens.
 whatsapp-archive 5b97f67a357b67ec05a5eefcb3ba9af70ab1f897b619b246cbea3c221e9e01b6 792016
+# 28/11 first pin of email-outbox (change/everything-is-a-component, row 14): the email-send contract - what a
+# `cargo tree -p wa-host` no longer lists `wa-email-outbox`; the host asks this for
+email-outbox 1aeed47e2e035f5b9fd0f3aaaa71f25a40f732cad0f003589d104575197d5a05 220091
+# 28/11 first pin of email-index (change/everything-is-a-component, row 14): the email-query contract - the
+# crate, so a change to either end rebuilt the node. `cargo tree -p wa-host` no longer lists `wa-email-index`;
+email-index 7c41a91aed440e1507504f3f7f0fa55a9df0f4381f358dc95f40dc31b0aa252e 209085

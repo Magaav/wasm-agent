@@ -19,8 +19,7 @@
 //! audit record. The payload is the text's only home (the queue's kv, until the job is settled and
 //! reaped), and the policy target is the recipients' digest (`wa_email_outbox::audit_target`).
 use serde_json::{json, Value};
-use wa_email_outbox as outbox;
-use wa_email_outbox::Request as OutboxRequest;
+use crate::email_outbox_component as outbox;
 use wa_queue::{EnqueueRequest, JobId, Queue};
 
 /// The component name the queue namespace belongs to: one queue, two ends, one owner.
@@ -71,38 +70,42 @@ fn send(request: &Value) -> Value {
     let attachments = match request.get("attachments") {
         Some(Value::Array(items)) => items
             .iter()
-            .map(|item| outbox::Attachment {
-                filename: item.get("filename").and_then(Value::as_str).unwrap_or_default().to_string(),
-                mime: item.get("mime").and_then(Value::as_str).unwrap_or_default().to_string(),
+            .map(|item| json!({
+                "filename": item.get("filename").and_then(Value::as_str).unwrap_or_default(),
+                "mime": item.get("mime").and_then(Value::as_str).unwrap_or_default(),
                 // Attachment bytes are base64 in the request, exactly as they travel in the payload.
-                bytes: item
+                // The contract rebuilds the bytes; hex is how they cross the component boundary.
+                "bytes_hex": item
                     .get("bytes")
                     .and_then(Value::as_str)
                     .map(|encoded| {
                         use base64::Engine as _;
-                        base64::engine::general_purpose::STANDARD.decode(encoded).unwrap_or_default()
+                        let raw = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap_or_default();
+                        raw.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
                     })
                     .unwrap_or_default(),
-            })
+            }))
             .collect(),
         _ => Vec::new(),
     };
-    let outbox_request = OutboxRequest {
-        to: list("to"),
-        cc: list("cc"),
-        subject: text("subject").unwrap_or_default(),
-        body: text("body").unwrap_or_default(),
-        in_reply_to: text("in_reply_to").filter(|id| !id.is_empty()),
-        attachments,
-    };
-    let verified = match outbox_request.validate() {
+    // The request is DESCRIBED here and DECIDED by the component: which mailboxes it names, what it may
+    // carry, the bytes the queue gets, its dedupe key, the target it is accounted against.
+    let outbox_request = json!({
+        "to": list("to"),
+        "cc": list("cc"),
+        "subject": text("subject").unwrap_or_default(),
+        "body": text("body").unwrap_or_default(),
+        "in_reply_to": text("in_reply_to").filter(|id| !id.is_empty()),
+        "attachments": attachments,
+    });
+    let verified = match outbox::validate(outbox_request) {
         Ok(verified) => verified,
         Err(refusal) => return json!({"ok": false, "error": refusal.error(), "detail": refusal.detail, "effect": "none"}),
     };
 
     // Governance first: nothing reaches the queue for a request the node refuses, so a spent budget
     // leaves no job behind for the component to discover.
-    let target = outbox::audit_target(&verified.recipients());
+    let target = verified.audit_target.clone();
     let decision = wa_governance::node_policy::check(COMPONENT, CAPABILITY, Some(&target));
     if !decision.is_allow() {
         let mut answer = json!({
@@ -122,19 +125,19 @@ fn send(request: &Value) -> Value {
     }
 
     match queue().enqueue(
-        EnqueueRequest::new(outbox::QUEUE, outbox_request.encode())
-            .fresh_for(outbox::FRESH_MS)
-            .max_attempts(outbox::MAX_ATTEMPTS)
-            .dedupe(outbox_request.dedupe_key()),
+        EnqueueRequest::new(&verified.queue, verified.request.clone())
+            .fresh_for(verified.fresh_ms)
+            .max_attempts(verified.max_attempts)
+            .dedupe(verified.dedupe.clone()),
     ) {
         Ok(enqueued) => json!({
             "ok": true,
             "id": enqueued.id.0,
             "state": "queued",
-            "queue": outbox::QUEUE,
+            "queue": verified.queue.clone(),
             "deduped": enqueued.dedupe_hit,
-            "fresh_for_ms": outbox::FRESH_MS,
-            "recipients": verified.recipients().len(),
+            "fresh_for_ms": verified.fresh_ms,
+            "recipients": verified.recipients,
             "note": "queued: the wa-email component sends it; read the outcome with email_send_status",
         }),
         Err(error) => {
@@ -159,7 +162,7 @@ fn status(request: &Value) -> Value {
             return json!({"ok": false, "error": "email_send_status_failed", "detail": error.to_string().chars().take(160).collect::<String>()})
         }
     };
-    if job.queue != outbox::QUEUE {
+    if job.queue != outbox::queue() {
         return json!({"ok": false, "error": "email_send_unknown_id", "id": id, "effect": "none"});
     }
     outbox::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref())
@@ -168,9 +171,9 @@ fn status(request: &Value) -> Value {
 /// Counts per state, for a test and for a future status tool.
 #[allow(dead_code)]
 pub fn counts() -> Value {
-    match queue().stats(outbox::QUEUE) {
+    match queue().stats(&outbox::queue()) {
         Ok(stats) => json!({
-            "queue": outbox::QUEUE,
+            "queue": outbox::queue(),
             "ready": stats.ready,
             "leased": stats.leased,
             "done": stats.done,
@@ -193,7 +196,7 @@ mod tests {
             (json!({"to": ["ana"], "subject": "s", "body": "b"}), "email_send_bad_to"),
             (json!({"to": ["Ana <ana@example.com>"], "subject": "s", "body": "b"}), "email_send_bad_to"),
             (json!({"to": ["ana@example.com"], "subject": "a\r\nBcc: x@y.z", "body": "b"}), "email_send_bad_subject"),
-            (json!({"to": ["ana@example.com"], "subject": "s", "body": "x".repeat(outbox::MAX_BODY + 1)}), "email_send_body_too_long"),
+            (json!({"to": ["ana@example.com"], "subject": "s", "body": "x".repeat(wa_email_outbox::MAX_BODY + 1)}), "email_send_body_too_long"),
             (json!({"to": ["ana@example.com"], "cc": ["nope"], "subject": "s", "body": "b"}), "email_send_bad_cc"),
         ] {
             let answer = send(&request);
@@ -215,13 +218,13 @@ mod tests {
             "body": "Segue.",
             "attachments": [{"filename": "fatura.txt", "mime": "text/plain", "bytes": base64::engine::general_purpose::STANDARD.encode(b"fatura 42")}]
         });
-        let decoded = OutboxRequest {
+        let decoded = wa_email_outbox::Request {
             to: vec!["ana@example.com".into()],
             cc: Vec::new(),
             subject: "Relatório".into(),
             body: "Segue.".into(),
             in_reply_to: None,
-            attachments: vec![outbox::Attachment {
+            attachments: vec![wa_email_outbox::Attachment {
                 filename: "fatura.txt".into(),
                 mime: "text/plain".into(),
                 bytes: b"fatura 42".to_vec(),
@@ -229,7 +232,7 @@ mod tests {
         };
         assert!(decoded.validate().is_ok());
         // The same shape the tool sends decodes to the same request (checked through the public seam).
-        assert_eq!(OutboxRequest::decode(&decoded.encode()).unwrap().subject, request["subject"].as_str().unwrap());
+        assert_eq!(wa_email_outbox::Request::decode(&decoded.encode()).unwrap().subject, request["subject"].as_str().unwrap());
     }
 
     #[test]

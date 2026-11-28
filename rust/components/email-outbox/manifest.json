@@ -1,0 +1,12 @@
+{
+  "name": "email-outbox",
+  "kind": "mcp",
+  "needs_wasi_sdk": false,
+  "description": "The email-send contract: mailbox parsing, the recipients and limits a request may carry, its payload and dedupe key, the policy target and the outcome a worker reports",
+  "capabilities": {
+    "env": [],
+    "file_env": [],
+    "net": [],
+    "dirs": []
+  }
+}

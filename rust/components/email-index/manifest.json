@@ -1,0 +1,12 @@
+{
+  "name": "email-index",
+  "kind": "mcp",
+  "needs_wasi_sdk": false,
+  "description": "The email-query contract: the three ops, the fields a request may carry, which of them make it valid, and the words a refusal uses",
+  "capabilities": {
+    "env": [],
+    "file_env": [],
+    "net": [],
+    "dirs": []
+  }
+}
