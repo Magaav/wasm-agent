@@ -1,0 +1,196 @@
+/// `wa:provider` v0.1.0 - THE PROVIDER-MODULE CONTRACT (claude-inside-wa, split A; Victor 28/11).
+///
+/// WHAT A PROVIDER IS, as one module a node can install, update and remove WITHOUT recompiling the host:
+/// an ACCOUNT (a credential in the vault), a LOGIN FLOW (the steps a reader walks in /login), a MODEL LIST,
+/// and the CALL (a request in, a stream of events out). `/login` and `/model` are one component because
+/// accounts and models belong together: a model id means nothing without the account that reaches it, and a
+/// login is finished by choosing a model.
+///
+/// WHY A CONTRACT AND NOT "opencode-go, moved". Part B builds the Anthropic module against this file and
+/// changes nothing here; a second provider must fit without touching the first. Every constant a provider
+/// needs (an endpoint, a header, a model id) belongs to ITS module, named there and sourced there - never
+/// here, where it would become everybody's.
+///
+/// THE RULES THIS FILE KEEPS (and the lint that holds them, scripts/lint-wit-async.mjs):
+///   * every export is ASYNC and answers a future or a stream - a login and a model call both wait on a
+///     network, and a sync interface would hide that wait in the caller;
+///   * the CALL is a stream, because that is what carries backpressure for a model's output;
+///   * NO SECRETS CROSS THIS BOUNDARY. An account is an id and a label; the credential lives in the vault
+///     (`wa:vault`) and a module asks the kernel for it, so a token can never be printed by a caller that
+///     merely lists accounts.
+package wa:provider@0.1.0;
+
+/// One signed-in account, as /login lists it. `id` is the module's own stable name for this account (what
+/// /model is asked with), `label` is what a reader reads, and `kind` says which door it is.
+record account {
+    id: string,
+    /// What /login shows, e.g. "Anthropic (Claude subscription)".
+    label: string,
+    /// "subscription" | "api-key" | "local" - named, not inferred: a reader must be able to tell a
+    /// subscription from a metered key before a run spends money.
+    kind: string,
+    /// The account a call would use when /model is not told otherwise. Exactly one account per module is the
+    /// default; a module with several says which.
+    default: bool,
+}
+
+/// One model a provider offers, as /model lists it.
+record model {
+    /// The identifier the CALL takes, verbatim (never a display name): providers disagree about case and
+    /// separators, so this is passed through untouched.
+    id: string,
+    /// What /model shows in its column.
+    label: string,
+    /// The context window in tokens, when the provider publishes it; 0 when it does not.
+    context: u32,
+}
+
+/// One step of a login flow, as /login paints it. A flow is a sequence of these: the reader is asked
+/// something (a browser, a code, a choice) and the flow answers the next step until it is done.
+variant login-step {
+    /// Open this URL; the provider will send the reader back. `instructions` is shown beside it.
+    open-url(open-url),
+    /// Type what the provider gave you (a code, a token, a confirmation number).
+    prompt(prompt),
+    /// Pick one of these (an organization, a workspace, a model to start with).
+    choose(choose),
+    /// The account exists now. /login can list it and /model can ask for its models.
+    done(string),
+    /// The step failed, in one sentence a reader can act on.
+    failed(string),
+}
+
+record open-url {
+    url: string,
+    instructions: string,
+}
+
+record prompt {
+    /// What to ask for, e.g. "Paste the code Anthropic showed you".
+    message: string,
+    /// Hide what the reader types (a secret) rather than echoing it.
+    secret: bool,
+}
+
+record choose {
+    message: string,
+    options: list<string>,
+}
+
+/// One message in the conversation, in the shape every provider accepts. Roles are named rather than
+/// positional so a provider that needs a separate system turn can carry one.
+variant role {
+    system,
+    user,
+    assistant,
+    tool,
+}
+
+record message {
+    role: role,
+    /// The text. A provider that speaks content blocks converts it; the contract stays text so a caller
+    /// does not learn one provider's block syntax.
+    text: string,
+}
+
+/// A model call: an account, a model, the conversation, and the ceiling the caller will accept.
+record call-request {
+    account: string,
+    model: string,
+    messages: list<message>,
+    /// The most tokens the answer may occupy. A provider that cannot honour it refuses by name rather than
+    /// silently spending more.
+    max-output-tokens: u32,
+    /// Ask for a temperature only where the provider takes one: omitted means "the provider's own choice".
+    temperature: option<f32>,
+}
+
+/// What a call streams back. The LAST event is always `finished` or `failed`, so a caller can tell a
+/// truncated stream from a complete one.
+variant event {
+    /// A piece of the answer, appended in order.
+    delta(string),
+    /// The provider asked for a tool. `arguments` is the provider's own JSON text, unparsed.
+    tool-call(tool-call),
+    /// What this call used, when the provider reports it (tokens and, where it publishes one, its price).
+    usage(usage),
+    /// The call ended: why it stopped, and how many events it took.
+    finished(finished),
+    /// The call failed, in one sentence naming the stage that broke.
+    failed(string),
+}
+
+record tool-call {
+    name: string,
+    arguments: string,
+}
+
+record usage {
+    input-tokens: u64,
+    output-tokens: u64,
+    /// The provider's own list price for this call in micro-dollars, when it publishes one; 0 when it does
+    /// not (a subscription publishes none).
+    list-cost-micros: u64,
+}
+
+record finished {
+    /// "stop" | "length" | "tool-calls" | "refused" - the provider's reason, normalised to these four.
+    reason: string,
+}
+
+/// The failure a provider names. A code a caller matches, and a sentence a reader can act on.
+variant error {
+    /// No account with that id is signed in.
+    unknown-account(string),
+    /// The account's credential is gone or refused: /login is the fix, and the sentence says so.
+    not-signed-in(string),
+    /// The provider refused this model for this account.
+    unknown-model(string),
+    /// The provider answered a failure. `stage` is where in the flow it broke (connect, http, decode,
+    /// stream), and `detail` is the provider's own words, bounded.
+    provider-failed(provider-failure),
+    /// This module cannot do what was asked (a capability it does not have), named.
+    unsupported(string),
+}
+
+record provider-failure {
+    stage: string,
+    detail: string,
+}
+
+/// THE INTERFACE EVERY PROVIDER MODULE EXPORTS. One instance per module; the account is always named, so a
+/// node with two accounts of the same provider needs no second module.
+interface provider-module {
+    /// The accounts this module can list right now (empty when nobody has signed in).
+    list-accounts: async func() -> future<result<list<account>, error>>;
+
+    /// Start a login. Answers the first step; a reader who cancels leaves nothing behind.
+    begin-login: async func(hint: option<string>) -> future<result<login-step, error>>;
+
+    /// Carry a login one step: the reader's answer (a code, a choice) goes in, the next step comes out.
+    /// `session` is the module's own handle for this flow; the CALLER never inspects it.
+    continue-login: async func(session: string, input: string) -> future<result<login-step, error>>;
+
+    /// Forget an account: the module drops its reference and the vault entry goes with it.
+    sign-out: async func(account: string) -> future<result<_, error>>;
+
+    /// The models this account can call.
+    list-models: async func(account: string) -> future<result<list<model>, error>>;
+
+    /// Call a model and stream what it says. Backpressure is the stream's: a caller that stops reading
+    /// stops the call, and the module must not buffer without bound.
+    call-model: async func(request: call-request) -> future<result<stream<event>, error>>;
+}
+
+/// The contract's own world. It is deliberately NOT a service world: a published package that `include`s
+/// `wa:kernel/service-component@0.2.0` has to vendor that contract in `wit/provider/deps/`, and a copy of the
+/// kernel in every contract is the drift scripts/gen-wit-deps.lua exists to prevent. A provider COMPONENT
+/// composes the two in its own world:
+///
+///     world anthropic {
+///         include wa:kernel/service-component@0.2.0;
+///         export wa:provider/provider-module;
+///     }
+world provider {
+    export provider-module;
+}
