@@ -26,6 +26,9 @@ grep -q 'waiting for the suite lock' "$loop" || fail 'the loop waits for the sui
 # AND THE TERM MESSAGE MUST READ AS A WHOLE SENTENCE, whatever was running: the first live firing printed
 # "<sha>  NO VERDICT after 0s: this loop was TERMINATED (SIGTERM) while - a unit restart ..." with an empty sha.
 grep -q 'between tips - no tip was being graded' "$loop" || fail 'a SIGTERM between tips leaves the trap message half-written'
+# AND THE TIP MUST BE CLAIMED BEFORE ANY RESOLUTION: measured 02:48Z, a restart during a 15-minute resolution was
+# reported as "between tips", because TIP_SHA was only set once the binary existed. Resolution is grading.
+awk '/rev-parse origin\/main/ { seen=1; next } seen && /TIP_SHA="\$N"/ { claimed=1 } END { exit !claimed }' "$loop"   || fail 'the tip is not claimed right after main is read, so a restart during resolution reads as "between tips"' 
 grep -q 'what="while grading' "$loop" || fail 'the trap does not say what it was grading'
 grep -q 'fuser' "$loop" || fail 'the lock-wait line does not name the holder' 
 
