@@ -52,6 +52,19 @@ fn tools() -> Value {
             }}
         },
         {
+            "name": "constants",
+            "description": "The queue name and the two limits every enqueue of this contract uses.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "status",
+            "description": "One job's state in the contract's own words: queued, sent with a message id, or failed with its reason.",
+            "inputSchema": {"type": "object", "required": ["id", "state"], "properties": {
+                "id": {"type": "integer"}, "state": {"type": "string"}, "attempts": {"type": "integer"},
+                "result_hex": {"type": "string"}, "last_error": {"type": "string"}
+            }}
+        },
+        {
             "name": "outcome",
             "description": "Read the outcome a worker reported for one job ('sent, here is its message id'), or say the payload is not one.",
             "inputSchema": {"type": "object", "required": ["payload_hex"], "properties": {"payload_hex": {"type": "string"}}}
@@ -94,6 +107,19 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
                     "note": outcome.note, "in_history": outcome.in_history})),
                 None => Ok(json!({"ok": false, "code": "not_an_outcome"})),
             }
+        }
+        "constants" => Ok(json!({
+            "queue": outbox::QUEUE, "fresh_ms": outbox::FRESH_MS, "max_attempts": outbox::MAX_ATTEMPTS,
+        })),
+        "status" => {
+            // `wa-whatsapp-outbox::status` is the sentence a caller reads about one job: here it is
+            // built where the contract lives, so the host cannot word it differently.
+            let id = args.get("id").and_then(Value::as_u64).unwrap_or_default();
+            let state = args.get("state").and_then(Value::as_str).unwrap_or("");
+            let attempts = args.get("attempts").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let result = args.get("result_hex").and_then(Value::as_str).and_then(unhex);
+            let last_error = args.get("last_error").and_then(Value::as_str);
+            Ok(outbox::status(id, state, attempts, result.as_deref(), last_error))
         }
         other => Err(format!("unknown_tool:{other}")),
     }
