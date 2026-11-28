@@ -158,6 +158,23 @@ mod rows {
         assert!(link(&mut linker).is_err(), "the same interface must not be granted twice");
     }
 
+
+    /// ROW: a node that installed no document says so BY NAME, rather than behaving like an empty terminal. The code
+    /// `terminal_document_absent` is what an operator greps for, so a row pins it - the refusal is the contract, not
+    /// the absence.
+    #[test]
+    fn a_missing_document_is_refused_by_name() {
+        match missing() {
+            Fault::Refused(reason) => assert!(
+                reason.starts_with("terminal_document_absent"),
+                "the refusal must lead with its code, got: {reason}"
+            ),
+            other => panic!("a missing document must be a refusal, got {other:?}"),
+        }
+        // And the lookup really is empty when nothing installed one: this row runs before any install in this binary.
+        assert!(with_document(|document| document.dirty()).is_none(), "no document must be installed in this test binary");
+    }
+
     /// ROW: the document seam answers in the program's own terms - a heading lands where the program says it did,
     /// a rewrite of a line that does not exist is a refusal rather than a silent nothing, and `dirty` follows the
     /// writes. This is the shape `wa-term-proto` carries, tested without the program.
