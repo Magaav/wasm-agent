@@ -3,6 +3,29 @@
 wa hosts its own factory (Victor 27/11). This directory is the live factory's home **in the product repo**, so a
 change to it is reviewed, tested and landed like any other code - not edited in place on a running node.
 
+## The factory runs from a clone of this repo (27/11)
+
+A service runs `<clone>/factory/<script>.sh`, where the clone is this repository's clone following `origin/main`, never a
+hand copy. `factory/clone.sh` creates or refreshes it and `factory/units.sh` writes the units:
+
+```
+ExecStartPre=%h/wasm-agent/factory-clone/factory/clone.sh --refresh --quiet
+ExecStart=/usr/bin/bash %h/wasm-agent/factory-clone/factory/<script>.sh
+```
+
+WHY, measured 27/11: the health loop ran `~/Work/missions/_orch/health-loop.sh`, a copy. Queues #123 and #142 landed on
+main and changed nothing for three hours, because the loop that judges a landing was executing code from the day the copy
+was made - and that copy differs from `factory/health-loop.sh` today. The row
+`scripts/test-factory-runs-from-a-clone.mjs` names any unit that still runs a hand copy (`factory/units-baseline.txt`
+records the ten that do, each with its reason), so a stale service is visible instead of silent.
+
+```
+factory/
+  clone.sh             create/refresh the clone that services run from (--refresh is the units' ExecStartPre)
+  units.sh             write the user units from that clone (dry by default, --apply to install)
+  units-baseline.txt   the units still on a hand copy today, one reason each
+```
+
 ## How it works now, and what this directory is
 
 The scripts that run today live in `~/Work/missions/_orch/` and are started by `~/.config/systemd/user/orch-*`
