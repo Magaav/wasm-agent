@@ -311,6 +311,172 @@ pub fn audio(
     }
 }
 
+
+// -----------------------------------------------------------------------------------------------------------
+// The capability itself: `wa:kernel/media@0.2.0`, served to a component whose world imports it.
+// -----------------------------------------------------------------------------------------------------------
+
+use crate::service_components_v2::State;
+use wa_governance::node_telemetry::HostCallGuard;
+use wa_grant_policy::Decision;
+use wasmtime::component::Accessor;
+
+use kernel_media::wa::kernel::types::Error as KError;
+
+/// The kernel interface has no resource of its own, so its plain `Host` trait is empty - the generated
+/// linker still asks for it beside `HostWithStore`, exactly as the websocket and vision bindings do.
+impl kernel_media::wa::kernel::media::Host for State {}
+
+/// Ask the node policy before the decoder does anything, the way `vision.read` does. The capability is
+/// `media.read` for a probe and `media.write` for the two operations that produce a file - writing is a
+/// different question from reading, and an operator may well answer them differently.
+fn gate(name: &str, capability: &str) -> Result<(), KError> {
+    match wa_governance::node_policy::check(name, capability, None) {
+        Decision::Allow => Ok(()),
+        Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => Err(KError::Again),
+        other => Err(KError::Refused(other.reason_str().to_string())),
+    }
+}
+
+/// Why a media call could not answer, in the guest's vocabulary.
+fn refusal(reason: String) -> KError {
+    // A caller that hit the tick budget is told to come back; anything else is this component's own failure
+    // and carries the word (`outside_the_grant`, `no_such_grant`, `digest_mismatch`, `refused:...`).
+    if reason.contains("interrupt") {
+        KError::Again
+    } else {
+        KError::Failed(reason)
+    }
+}
+
+/// The engine and the component, loaded once per call through the node's compiled cache: `load` verifies the
+/// pin, so the bytes served are the bytes that were installed.
+fn call_probe(dirs: &[crate::components::DirGrant], guest_path: &str, host_path: &std::path::Path)
+    -> Result<kernel_media::wa::kernel::media::Description, String>
+{
+    let engine = crate::service_components_v2::engine().map_err(|error| format!("engine:{error}"))?;
+    let component = load(&engine, "media")?;
+    let description = probe(&engine, &component, dirs, guest_path, host_path)?;
+    Ok(kernel_media::wa::kernel::media::Description {
+        duration_ms: description.duration_ms,
+        format: description.format,
+        streams: description
+            .streams
+            .into_iter()
+            .map(|(kind, codec, width, height)| kernel_media::wa::kernel::media::MediaStream {
+                kind,
+                codec,
+                width,
+                height,
+                sample_rate: 0,
+                channels: 0,
+            })
+            .collect(),
+        has_audio: description.has_audio,
+        elapsed_ms: 0,
+    })
+}
+
+impl kernel_media::wa::kernel::media::HostWithStore<State> for State {
+    /// `probe(path)`: what the container is. Reads only, and writes nothing.
+    async fn probe(
+        accessor: &Accessor<State, Self>,
+        path: String,
+    ) -> Result<kernel_media::wa::kernel::media::Description, KError> {
+        let name = crate::service_components_v2::who(accessor);
+        let mut call = HostCallGuard::start(&name, "media.probe");
+        let dirs = accessor.with(|mut access| access.get().dirs.clone());
+        let out = async {
+            gate(&name, "media.read")?;
+            let host_path = host_path_for(&path, &dirs).map_err(|error| refusal(error.to_string()))?;
+            call_probe(&dirs, &path, &host_path).map_err(refusal)
+        }
+        .await;
+        call.outcome(&out);
+        out
+    }
+
+    /// `frames(path, moments, max-pixels, out-dir)`: stills written into the granted directory.
+    async fn frames(
+        accessor: &Accessor<State, Self>,
+        path: String,
+        moments_ms: Vec<u64>,
+        max_pixels: u32,
+        out_dir: String,
+    ) -> Result<Vec<kernel_media::wa::kernel::media::Still>, KError> {
+        let name = crate::service_components_v2::who(accessor);
+        let mut call = HostCallGuard::start(&name, "media.frames");
+        let dirs = accessor.with(|mut access| access.get().dirs.clone());
+        let out = async {
+            gate(&name, "media.write")?;
+            let host_path = host_path_for(&path, &dirs).map_err(|error| refusal(error.to_string()))?;
+            let engine = crate::service_components_v2::engine().map_err(|error| refusal(format!("engine:{error}")))?;
+            let component = load(&engine, "media").map_err(refusal)?;
+            let stills = frames(&engine, &component, &dirs, &path, &host_path, &moments_ms, max_pixels, &out_dir)
+                .map_err(refusal)?;
+            Ok(stills
+                .into_iter()
+                .map(|(at_ms, file)| kernel_media::wa::kernel::media::Still {
+                    at_ms,
+                    path: file.host_path.display().to_string(),
+                    bytes: file.bytes,
+                    sha256: file.sha256,
+                })
+                .collect())
+        }
+        .await;
+        call.outcome(&out);
+        out
+    }
+
+    /// `audio(path, sample-rate, channels, out-dir)`: the track as WAV, written into the granted directory.
+    async fn audio(
+        accessor: &Accessor<State, Self>,
+        path: String,
+        sample_rate: u32,
+        channels: u32,
+        out_dir: String,
+    ) -> Result<kernel_media::wa::kernel::media::Track, KError> {
+        let name = crate::service_components_v2::who(accessor);
+        let mut call = HostCallGuard::start(&name, "media.audio");
+        let dirs = accessor.with(|mut access| access.get().dirs.clone());
+        let out = async {
+            gate(&name, "media.write")?;
+            let host_path = host_path_for(&path, &dirs).map_err(|error| refusal(error.to_string()))?;
+            let engine = crate::service_components_v2::engine().map_err(|error| refusal(format!("engine:{error}")))?;
+            let component = load(&engine, "media").map_err(refusal)?;
+            let (file, duration_ms) =
+                audio(&engine, &component, &dirs, &path, &host_path, sample_rate, channels, &out_dir)
+                    .map_err(refusal)?;
+            Ok(kernel_media::wa::kernel::media::Track {
+                path: file.host_path.display().to_string(),
+                bytes: file.bytes,
+                sha256: file.sha256,
+                duration_ms,
+                elapsed_ms: 0,
+            })
+        }
+        .await;
+        call.outcome(&out);
+        out
+    }
+}
+
+/// NOT CALLED YET, and the reason is measured, not stylistic.
+///
+/// Adding this to the 0.2 runner's linker broke seven `service_io::tls_anchor_tests` - they failed with a missing
+/// fixture (`server.pem`) while `origin/main` runs the same nine green. Unlinking restored them (190 passed, the
+/// same 3 pre-existing selfloop failures). So linking an interface no guest imports yet is not a no-op here, and
+/// the cause is not understood; it gets linked when a `service-media` guest exists to exercise it and the cause
+/// has been found, not before.
+///
+/// Link `wa:kernel/media` into a service linker. Called by the 0.2 runner only; a component whose world does
+/// not import the interface simply never calls it, and one that does gets the capability in its own type -
+/// which is the same shape `vision_host::link` has, for the same reason.
+pub fn link(linker: &mut wasmtime::component::Linker<State>) -> wasmtime::Result<()> {
+    kernel_media::wa::kernel::media::add_to_linker::<State, State>(linker, |state| state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
