@@ -605,7 +605,22 @@ gate_run bash scripts/test-publish-shared-commit.sh                   # a publis
 gate_run bash scripts/test-bootstrap-gate.sh                          # the release-install path honours its override
 WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-build-info.sh  # the bytes answer for themselves (--build-info)
 WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-ancestry-window.sh  # the window reaches the previous release, and its floor is named
-WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-publish-from-ancestry.sh  # a --from publish names the floor it verifies, and never dies on it
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-publish-from-ancestry.sh
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-publish-builds-the-program.sh
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-deploy-behind-tip.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-fast-cargo-lock.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-fast-report-assertions.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-no-stray-root-files.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-peer-update-installs.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-release-completeness-403.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-rows-cost.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-runner-reports.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-supervisor-ships.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-update-binding-first-second.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-update-channel-row.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-update-prefers-the-bundle.sh  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-version-folders-real-upgrade.sh
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-tmp-cleanliness.sh  # the suite's own hygiene: no row roots a temp family at a literal /tmp, and tmp_low is refused by name (~30 s)  # wired from the orphan sweep (27/11): passes in seconds and guards something no other row does  # the publisher BUILDS wa-term for every target (stub toolchains; 2 s)  # a --from publish names the floor it verifies, and never dies on it
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
