@@ -889,6 +889,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         // The OCR reader (`wa:kernel/vision`): served to whoever imports it, never required of a
         // guest (`docs/WHATSAPP-OCR.md`).
         crate::vision_host::link(&mut linker),
+        crate::media_host::link(&mut linker),
         wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
         // The cooperative hot swap (`wit/kernel-v2/kernel.wit`, `interface drain`): linked for
@@ -1137,6 +1138,7 @@ mod tests {
             wa::kernel::http::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
             crate::vision_host::link(&mut linker),
+        crate::media_host::link(&mut linker),
             wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
             drain_signal::wa::kernel::drain::add_to_linker::<State, State>(&mut linker, |s| s),
