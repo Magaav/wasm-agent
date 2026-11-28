@@ -1300,6 +1300,9 @@ check operation-status-waits env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scri
 # wct-query.sql as its after-measurement, and the file was never in the tree. The row checks the query exists,
 # parses, still counts the four numbers the before was taken with, and answers a real 1-day window.
 check wct-query bash scripts/test-wct-query.sh
+# THE WAITING QUERY ANSWERS A SHORT WINDOW TOO (28/11): the mission after is a question about hours, and two defects
+# were found by asking it (a repeated cursor is the end of the ledger; a fractional day broke the header).
+check wct-waiting bash scripts/test-wct-waiting.sh
 # THE RESET TIME HAS TO SURVIVE THE PANEL (/status, Victor 27/11): a limits row is measured at the room a console
 # panel really gives (PANEL_ROOM cells after the box chrome) and must still say when it resets - the text is the LAST
 # field on the row, so it is the first thing a narrow panel cuts.
