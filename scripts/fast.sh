@@ -533,7 +533,11 @@ export -f record_row first_error_of
 # reason, which crosses the seam in `done-event.error` - a host-side record field. A node whose binary
 # predates it answers the suite with one named SKIP and returns in full once that node is installed;
 # nothing about the comparison is narrowed while it waits (scripts/test-codemode-component.lua).
-FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode svc-echo}
+FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode svc-echo tz outbox}
+# `tz` and `outbox` (28/11, everything-is-a-component) are the two components whose ROWS fail when the
+# artifact is absent - scripts/test-tz-component.sh and scripts/test-outbox-component.sh assert that a node
+# with no such component answers "absent" rather than answering in-process, which is the whole point of the
+# move. Without them in this list those rows have nothing to build and would report the failure as a red.
 # `svc-echo` (11/11) is the service-component fixture: `scripts/test-services-cli.lua` runs the whole
 # start/status/stop/enable/disable lifecycle through the operator's `wa services` door, and it used to be
 # a row whose lifecycle half silently skipped because no service artifact was ever built for it. The
