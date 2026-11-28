@@ -118,4 +118,66 @@ else
   esac
 fi
 
+# 11-13. THE PIN AND THE SIGNATURE ARE ONE GATE (slice 2, dark). The pin says WHICH bytes; the signature says WHO.
+# A lock that names an artifact nobody signed is a lock a node would install blind, so the pinned part is signed
+# here with the repository's own test signer (scripts/lib/release-fixture-sign.py, the same signer and the same keys
+# scripts/test-lua-part-signature.sh uses) and the gate is judged in both directions. Skipped BY NAME when there is
+# no host binary to verify with - a skip is not a pass, and the row says so.
+if [ -n "${WA_BIN:-}" ] && [ -x "${WA_BIN}" ]; then
+  export WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt"
+  sig_dir=$WORK/signed
+  mkdir -p "$sig_dir"
+  cp "$part" "$sig_dir/lua-core-part.tar.gz"
+  sign_out=$(python3 scripts/lib/release-fixture-sign.py "$sig_dir" 2>&1) || fail "could not sign the pinned part: $sign_out"
+  if out=$(wa_lua_part_verify_signed "$sig_dir/lua-core-part.tar.gz" "$WA_BIN" 2>&1); then
+    checks=$((checks+1)); echo "ok 11: the pinned part, signed by a trusted key, passes the signature gate"
+  else
+    fail "the_signed_pinned_part_was_refused: $out"
+  fi
+  plain=$WORK/plain
+  mkdir -p "$plain" && cp "$part" "$plain/lua-core-part.tar.gz"
+  if out=$(wa_lua_part_verify_signed "$plain/lua-core-part.tar.gz" "$WA_BIN" 2>&1); then
+    fail 'an_unsigned_pinned_part_was_accepted'
+  else
+    case "$out" in
+      *lua_part_unsigned*) checks=$((checks+1)); echo "ok 12: an unsigned part beside the pin is refused by name" ;;
+      *) fail "an_unsigned_part_was_refused_without_a_name: $out" ;;
+    esac
+  fi
+  untrusted=$WORK/untrusted
+  mkdir -p "$untrusted" && cp "$part" "$untrusted/lua-core-part.tar.gz"
+  python3 scripts/lib/release-fixture-sign.py "$untrusted" --key B >/dev/null 2>&1 || fail 'could not sign with the untrusted key'
+  if out=$(wa_lua_part_verify_signed "$untrusted/lua-core-part.tar.gz" "$WA_BIN" 2>&1); then
+    fail 'a_part_signed_by_an_untrusted_key_was_accepted'
+  else
+    case "$out" in
+      *lua_part_signed_by_untrusted_key*) checks=$((checks+1)); echo "ok 13: a part signed by a key this node does not carry is refused by name" ;;
+      *) fail "an_untrusted_part_was_refused_without_a_name: $out" ;;
+    esac
+  fi
+else
+  printf 'skipped 11-13: no WA_BIN (a host binary) - the signature gate is judged by scripts/test-lua-part-signature.sh in the gate\n'
+fi
+
+# 14. THE WHOLE PATH A NODE TAKES, end to end and dark: nothing held -> the decision asks for the pin -> the part
+# that arrived is verified against the lock -> fill puts it in a directory -> the tree is THERE and its interface is
+# the host's. This is the sequence a real fetch would drive (items 2 and 3), judged in one place so the pieces cannot
+# agree with each other only apart.
+fresh=$WORK/node
+mkdir -p "$fresh"
+decision=$(wa_lua_part_fetch_decision "$LOCK" '') || fail 'the decision refused a first install'
+[ "$decision" = "lua-core $pin_sha $pin_bytes" ] || fail "a first install asked for the wrong part: $decision"
+out=$(wa_lua_part_verify_file "$part" "$LOCK" 2>&1) || fail "the fetched part did not verify: $out"
+# The fill path takes FOUR positional values: part, lock, destination, host interface. The project record before me
+# left one out and the function answered with the empty fifth slot instead of a sentence - so the call is written out
+# here rather than abbreviated.
+# FIVE values, not four: part, lock, destination, host interface, and THE VERIFIER PROGRAM (the host that will run
+# the part - passed in, never looked up on PATH). The signature is checked first inside the fill, which is why this
+# row signup above is not decoration.
+signed_part="$sig_dir/lua-core-part.tar.gz"
+[ -f "$signed_part" ] || fail 'no signed part to fill with (run with WA_BIN to sign it)'
+out=$(wa_lua_part_fill "$signed_part" "$LOCK" "$fresh/lua-core" "$pin_iface" "$WA_BIN" 2>&1) || fail "fill refused the pinned part: $out"
+[ -f "$fresh/lua-core/lua/core/init.lua" ] || fail 'the filled tree has no lua/core/init.lua'
+checks=$((checks+1)); echo "ok 14: a first install goes decision -> verify -> fill and lands the pinned tree"
+
 printf 'release lock pin ok (%s checks)\n' "$checks"
