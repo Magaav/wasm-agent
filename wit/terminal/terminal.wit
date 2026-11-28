@@ -1,9 +1,13 @@
-/// wa:terminal@0.1.0 - the terminal seam as an async contract.
+/// wa:terminal@0.1.0 - the terminal seam, as the DOCUMENT it actually is.
 ///
-/// `wa-term` is 14,154 lines reached from the host as an in-process crate (`rust/wa-term/src/lib.rs:1`), so a change
-/// to it rebuilds the node's binary. This is the world that lets it be a component: one world per surface, and the
-/// shape the law asks for - work that takes time is a `future`, output that keeps coming is a `stream` (a
-/// terminal's output IS a stream), and dropping the handle cancels interest rather than leaving a reader behind.
+/// `wa-term` left this binary already: the node reaches it over `wa-term-proto` (`wa-capabilities/Cargo.toml:23`,
+/// "wa-term is NOT needed"). What that program owns is a document - the transcript the node paints - and its own
+/// dispatcher names the verbs (`rust/wa-term/src/session.rs:56`): write, block, code_block, head, rewrite,
+/// pin_toggle. This world is those verbs and nothing invented on top of them.
+///
+/// A PTY is NOT here on purpose (law 17, one owner each): spawning a process and streaming its output is the
+/// operations runner's job and is `wa:process`'s subject. A first draft of this file modelled a pty - open, write,
+/// resize, events - and no provider could have honoured it.
 package wa:terminal@0.1.0;
 
 interface types {
@@ -13,47 +17,40 @@ interface types {
         closed,
         failed(string),
     }
-
-    record size {
-        columns: u16,
-        rows: u16,
-    }
-
-    /// One thing that happened in the surface: bytes arrived, the window changed shape, or the session ended.
-    variant event {
-        data(list<u8>),
-        resized(size),
-        closed(option<u32>),
-    }
 }
 
-/// One terminal session. Its output is a stream because that is what a terminal produces: an unbounded sequence of
-/// chunks that only ends when the session does.
-interface session {
-    use types.{error, size, event};
+/// The transcript as a component: one document per session, the verbs the program answers.
+interface document {
+    use types.{error};
 
-    resource surface {
-        /// Open a surface at `size`. Suspends while the surface is created; a refusal names why (no tty, no grant).
-        open: static async func(size: size, title: string) -> result<surface, error>;
+    /// Append text to the transcript.
+    write: async func(text: string) -> result<_, error>;
 
-        /// Write bytes to the surface. Suspends when the consumer is behind, so a writer cannot outrun a slow
-        /// reader and no bytes are dropped on the floor.
-        write: async func(data: list<u8>) -> result<u64, error>;
+    /// Open or close a block around what follows.
+    block: async func(open: bool) -> result<_, error>;
 
-        /// What the surface produces, in order, until it closes. Reading suspends the guest when there is nothing
-        /// ready; a reader that stops reading suspends the producer (backpressure, declared not assumed).
-        events: func() -> stream<event>;
+    /// Mark a fenced code block.
+    code-block: async func() -> result<_, error>;
 
-        /// Ask for a new shape. The next `event.resized` carries what the surface actually became, which is not
-        /// always what was asked for.
-        resize: async func(size: size) -> result<size, error>;
+    /// Write a heading; the answer is the line it landed on, as the program counts lines.
+    head: async func(text: string) -> result<u32, error>;
 
-        /// End the session. The stream ends after this, with `event.closed`.
-        close: async func() -> result<_, error>;
-    }
+    /// Replace one line.
+    rewrite: async func(line: u32, text: string) -> result<u32, error>;
+
+    /// Pin or unpin the current block; `none` when there is nothing to pin.
+    pin-toggle: async func() -> result<option<bool>, error>;
+
+    /// Whether the document changed since the last frame - the flag the wire already carries.
+    dirty: func() -> bool;
 }
 
-/// A guest that DRAWS a surface imports `session`; the host serves it. The guest owns bytes, the host owns the tty.
+/// What a component imports to paint the node's transcript.
 world terminal-client {
-    import session;
+    import document;
+}
+
+/// What a component-side provider would export (the node provider speaks `wa-term-proto` instead).
+world terminal-provider {
+    export document;
 }
