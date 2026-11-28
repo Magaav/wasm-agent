@@ -8,6 +8,11 @@
 #
 # The suite itself is faked: this row is about WHICH COMMIT is checked out and stamped into the report, not about the
 # rows inside it.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT

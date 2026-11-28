@@ -34,6 +34,11 @@
 #      and upgrade.sh's Linux default were two other directories, the unit's process could not bind :8799
 #      (`os error 98`, held by a stray node) and exited 0, and the deploy reported success. The answers live
 #      in scripts/lib/service-target.sh, which is the one expression this project has for that question.
+# INHERITED GIT VARIABLES ARE NOT THIS INSTALLER'S (25/11, item 7 of installer-refuses-a-target): a deploy or
+# an upgrade started from a shell that carries GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (a git hook hands them to every
+# child) would resolve somebody else's repository as its ROOT. scripts/lib/git-env.sh is the one owner; the clear
+# runs before this script's FIRST git call, which the row scripts/test-installer-clears-git-env.sh asserts.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh" && wa_git_isolate
 set -uo pipefail
 
 # Refuse before even source/target resolution when the non-login shell lacks its tools.
