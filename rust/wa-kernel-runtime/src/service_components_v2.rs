@@ -1527,4 +1527,73 @@ mod tests {
         let engine = engine().expect("engine");
         assert!(engine.precompile_component(b"\0asm\x0d\0\x01\0not a component").is_err());
     }
+
+    /// `wa:kernel/media`, end to end through the runner and a real guest.
+    ///
+    /// The guest is `svc-media` (`rust/components/svc-media`): it asks the capability to describe a file, take two
+    /// stills and extract the track, then asks for a path that walks out of its grant. Everything asserted here is
+    /// read from ITS LOG, not from a return value - a kernel that answered correctly and told the guest something
+    /// else would pass a return-value test and fail this one.
+    // IGNORED, with the two reasons measured rather than guessed:
+    //
+    //  1. the runner panics inside the guest with "Cannot start a runtime from within a runtime":
+    //     media_host's entry points use wasmtime's SYNC api, and a `HostWithStore` call already runs on the
+    //     node's runtime, so instantiating the media component there blocks a thread that is driving the async
+    //     guest. The fix is async entry points (instantiate_async + awaiting the call), not a bigger stack.
+    //  2. `[policy] svc-media wasi.filesystem -> deny(no_policy)`: the fixture needs the same policy entry the
+    //     other wasi-probe fixtures get before it can read its granted directory at all.
+    //
+    // Both are real work, neither is a mystery; the test is written so the day they are fixed it proves the
+    // capability end to end: probe, two stills, a track, and a path outside the grant refused.
+    #[ignore = "needs async media_host entry points and a policy entry for the fixture"]
+    #[test]
+    fn fixture_media_describes_stills_tracks_and_refuses_a_path_outside_the_grant() {
+        use crate::services::{logs, start, status, stop, support};
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `media` beside `svc-media`: the capability is the installed component, and `install` copies both into
+        // the directory the runner resolves WA_COMPONENTS_DIR to.
+        if support::install("v2-media", &["svc-media", "media"]).is_none() {
+            eprintln!("skipped: svc-media/media fixtures not installed (WA_TEST_SERVICE_DIR)");
+            return;
+        }
+        let Ok(clip) = std::env::var("WA_MEDIA_TEST_FILE") else {
+            eprintln!("skipped: set WA_MEDIA_TEST_FILE to a container to run this");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("wa-media-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let inside = root.join("in");
+        let outside = root.join("out");
+        std::fs::create_dir_all(&inside).expect("in dir");
+        std::fs::create_dir_all(&outside).expect("out dir");
+        std::fs::copy(&clip, inside.join("clip.mp4")).expect("copy the clip into the grant");
+
+        let started = start(&serde_json::json!({
+            "name": "svc-media",
+            "dirs": [
+                {"host": inside.display().to_string(), "guest": "/in"},
+                {"host": outside.display().to_string(), "guest": "/out", "write": true},
+            ],
+        }));
+        assert_eq!(started["ok"], serde_json::json!(true), "start: {started}");
+
+        let log = support::wait_for_log("svc-media", "media refused=", std::time::Duration::from_secs(180));
+        let stopped = stop("svc-media");
+        let _ = status(None);
+        let _ = logs("svc-media", 16 << 10);
+
+        assert!(log.contains("media probe=mov"), "the container is a mov: {log}");
+        assert!(log.contains("media stills=2 bytes="), "two stills were written: {log}");
+        assert!(log.contains("media audio bytes="), "the track was written: {log}");
+        assert!(
+            log.contains("media refused=") && !log.contains("refused=NOT-REFUSED"),
+            "a path outside the grant is refused, not resolved: {log}"
+        );
+        // The stills and the track are on disk in the granted directory, not merely reported.
+        let written = std::fs::read_dir(&outside).expect("out dir").count();
+        assert!(written >= 3, "two stills and a track are in the out-dir, found {written}: {log}");
+        assert_eq!(stopped["ok"], serde_json::json!(true), "stop: {stopped}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }
