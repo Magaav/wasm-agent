@@ -160,6 +160,10 @@ while true; do
   # budget"). A budget 1.6x a normal run is not a watchdog, it is a coin flip: the tip gets an honest "hit its
   # budget" line and no verdict. 3600 s is 2.4x the measured run, which leaves room for a loaded node without letting a
   # truly hung suite sit for an hour and a half.
+  # TWO NUMBERS, ONE LOOP, and they are not the same question (28/11): SUITE_BUDGET bounds how long ONE health run may
+  # take (3600 s), while the refresh at the top of this iteration decides which BYTES that run uses. A landing is
+  # therefore picked up within one budget, never mid-run - and if the clone cannot be refreshed, the line the helper
+  # writes ("factory: refresh failed, still running ...") is what says so instead of a silent stale loop.
   SUITE_BUDGET=${WA_HEALTH_SUITE_SECONDS:-3600}
   # THE TIP THIS LOOP CLAIMED IS THE TIP THAT MUST BE GRADED (28/11): without --sha the suite graded the
 # checkout's local main, which lags, and the verdict named a commit nobody had measured.
