@@ -139,19 +139,6 @@ function M.watcher_line(opts)
   opts = opts or {}
   local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
   local config = opts.config or M.config_path()
-  local raw = ""
-  if type(reader) == "function" then raw = tostring(reader(config .. "/sentinel/sentinel.pid") or "") end
-  local pid = raw:match("^%s*(%d+)")
-  local alive = false
-  if pid then
-    if type(opts.alive) == "function" then alive = opts.alive(tonumber(pid)) == true
-    else
-      -- The same probe every other "is that process there" in this tree uses: `kill -0` reads without signalling.
-      local ok, answer = pcall(host.exec, "kill -0 " .. pid .. " 2>/dev/null", "", 20)
-      alive = ok and type(answer) == "table" and tonumber(answer.code) == 0
-    end
-  end
-  if alive then return "watcher   running (pid " .. pid .. ")" end
   local sentinel = opts.sentinel
   if sentinel == nil then
     local ok, update = pcall(dofile, "lua/core/update.lua")
@@ -161,7 +148,47 @@ function M.watcher_line(opts)
     end
     sentinel = sentinel or "wa-sentinel"
   end
-  return "watcher   not running - start it: " .. sentinel .. " start"
+  local not_running = "watcher   not running - start it: " .. sentinel .. " start"
+
+  -- ASK THE OWNER (law 17, 28/11). MEASURED on the live laptop: `wa status` said "watcher not running" while
+  -- `wa-sentinel status` said "sentinel: up watching (pid 2121399)" and the unit was active - two answers to one
+  -- question. The cause was not a stale pid file: this function probed with `host.exec("kill -0 N")`, and host.exec
+  -- returns a JSON STRING, so `answer.code` was never read and the probe could only ever answer "not running".
+  -- The sentinel is the owner of that fact (it also knows about the systemd supervisor), so in production the line
+  -- comes from its own answer. The test seams below are kept and take precedence: a row must not need a real sentinel.
+  if type(opts.alive) ~= "function" and opts.read_file == nil then
+    local ok, raw = pcall(host.exec, sentinel .. " status", "", 30)
+    local text = ""
+    if ok and type(raw) == "string" then
+      local decoded_ok, decoded = pcall(function() return json.decode(raw) end)
+      if decoded_ok and type(decoded) == "table" then text = tostring(decoded.stdout or "") .. tostring(decoded.stderr or "")
+      else text = raw end
+    end
+    local up_pid = text:match("sentinel:%s+up[^\n]-%(pid%s+(%d+)%)")
+    if up_pid then return "watcher   running (pid " .. up_pid .. ")" end
+    if text:match("sentinel:%s+down") then return not_running end
+    -- The owner could not be asked (no binary, no answer): fall through to the pid file, and say nothing it cannot know.
+  end
+
+  local raw = ""
+  if type(reader) == "function" then raw = tostring(reader(config .. "/sentinel/sentinel.pid") or "") end
+  local pid = raw:match("^%s*(%d+)")
+  local alive = false
+  if pid then
+    if type(opts.alive) == "function" then alive = opts.alive(tonumber(pid)) == true
+    else
+      -- `kill -0` reads without signalling, and host.exec answers a JSON string: decode it before reading `code`.
+      local ok, answer = pcall(host.exec, "kill -0 " .. pid, "", 20)
+      local code = nil
+      if ok and type(answer) == "string" then
+        local decoded_ok, decoded = pcall(function() return json.decode(answer) end)
+        if decoded_ok and type(decoded) == "table" then code = tonumber(decoded.code) end
+      elseif ok and type(answer) == "table" then code = tonumber(answer.code) end
+      alive = code == 0
+    end
+  end
+  if alive then return "watcher   running (pid " .. pid .. ")" end
+  return not_running
 end
 
 -- Ordered: identity first, then what would break a turn, then the paths.
