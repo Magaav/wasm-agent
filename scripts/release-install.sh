@@ -72,14 +72,18 @@ if [ -n "$COVER_COMMIT" ]; then
   esac
   [ "${#COVER_COMMIT}" = 40 ] || fail "cover_commit_invalid: \"$COVER_COMMIT\" is not a full 40-hex commit id"
   [ "$COVER_COMMIT" != "$COMMIT" ] || fail "cover_commit_pointless: --cover-commit names $COMMIT itself; ask for it as the release commit"
-  # A COVER ON A TREE-LESS NODE IS DECIDED BY TWO DIGESTS, one of which this node cannot compute. Refusing here
-  # rather than after the download says which fact is missing instead of leaving it to the installer one step
-  # later (scripts/upgrade.sh owns the comparison itself - release_cover_lua_mismatch).
-  case "$LUA_INPUTS" in
-    '') fail "release_cover_lua_unknown: a cover runs its binary's embedded Lua, and this node has no tree to compute the Lua-tree digest of $COMMIT from - pass --lua-inputs <sha256> (wa_lua_tree_digest <tree> $COMMIT), or install a release named for $COMMIT itself" ;;
-    *[!0-9a-f]*) fail "release_cover_lua_unknown: --lua-inputs \"$LUA_INPUTS\" is not a sha256 hex digest" ;;
-  esac
-  [ "${#LUA_INPUTS}" = 64 ] || fail "release_cover_lua_unknown: --lua-inputs must be 64 hex characters (a wa_lua_tree_digest), got ${#LUA_INPUTS}"
+  # A COVER NEEDS NO FLAG (decision 28/11): the manifest these bytes were verified against names the Lua they
+  # embed, and that is the value the installer hands to upgrade.sh and records.
+  # A STATED DIGEST IS ONLY AN OVERRIDE AND MUST AGREE WITH THE RELEASE (decision 28/11): the manifest that was
+  # just verified is the owner of "which Lua do these bytes embed", so a flag that disagrees is refused here rather
+  # than silently losing to one side or the other.
+  if [ -n "$LUA_INPUTS" ]; then
+    case "$LUA_INPUTS" in
+      *[!0-9a-f]*) fail "release_cover_lua_unknown: --lua-inputs \"$LUA_INPUTS\" is not a sha256 hex digest" ;;
+    esac
+    [ "${#LUA_INPUTS}" = 64 ] || fail "release_cover_lua_unknown: --lua-inputs must be 64 hex characters (a wa_lua_tree_digest), got ${#LUA_INPUTS}"
+  fi
+  LUA_STATED="$LUA_INPUTS"
 fi
 
 UPGRADE="$INSTALL/scripts/upgrade.sh"
@@ -115,6 +119,19 @@ SOURCE_SHORT="${SOURCE_COMMIT:0:12}"
 CANDIDATE="$DIR/wa-$TRIPLE-$SOURCE_SHORT"
 [ -f "$CANDIDATE" ] || fail "release_binary_missing: $CANDIDATE is not in the verified release directory"
 [ -f "$DIR/SHA256SUMS" ] || fail "release_sums_missing: $DIR carries no SHA256SUMS, so upgrade.sh cannot verify the candidate"
+
+# THE LUA TREE THESE BYTES EMBED, FROM THE MANIFEST THAT WAS JUST VERIFIED (decision 28/11). The cut writes it
+# (scripts/publish-node-binaries.sh:474, lua_inputs=, inside the signed manifest), so a cover on a tree-less node
+# needs no flag at all; a release that does not say is refused by name instead of installed on a promise, and an
+# override that disagrees with it is refused too.
+MANIFEST_LUA="$(sed -n 's/^lua_inputs=//p' "$DIR/node-$SOURCE_SHORT.manifest" 2>/dev/null | head -1 | tr -d '[:space:]')"
+if [ -z "$MANIFEST_LUA" ]; then
+  fail "release_cover_lua_unrecorded: $DIR/node-$SOURCE_SHORT.manifest names no lua_inputs row, so the Lua these bytes embed cannot be compared or recorded; republish this release with the current publisher"
+fi
+if [ -n "${LUA_STATED:-}" ] && [ "$LUA_STATED" != "$MANIFEST_LUA" ]; then
+  fail "release_cover_lua_mismatch: --lua-inputs names Lua tree $LUA_STATED and the verified manifest of these bytes names $MANIFEST_LUA; the release decides, so name the same tree or drop the flag"
+fi
+LUA_INPUTS="$MANIFEST_LUA"
 
 # THE RUNTIME NAMES, BESIDE THE BINARY BEFORE upgrade.sh SEES IT (decision 27/11). upgrade.sh resolves its
 # siblings by the name `wa` uses at runtime: dirname of the binary it is handed, then a plain wa-term /

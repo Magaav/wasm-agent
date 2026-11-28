@@ -282,12 +282,14 @@ door() { # <channel> <args...> -> the door's own output
 out="$(door "$EMPTY_CHANNEL" "$C_LUA")"; rc=$?
 ok "$([ "$rc" = 2 ] && echo 1 || echo 0)" "a tree-less node asked for a commit nothing publishes is refused (rc $rc, expected 2)" "$(printf '%s' "$out" | tail -2)"
 ok "$(says "$out" 'release_cover_needed' && echo 1 || echo 0)" 'by name: release_cover_needed' "$(printf '%s' "$out" | tail -2)"
-ok "$(says "$out" '--cover-commit' && echo 1 || echo 0)" 'and it names the two facts the caller must pass'
-ok "$(says "$out" '--lua-inputs' && echo 1 || echo 0)" '...both of them'
+ok "$(says "$out" '--cover-commit' && echo 1 || echo 0)" 'and it names the fact the caller must pass; the Lua digest is no longer one of them'
 
+# A COVER NEEDS NO FLAG (decision 28/11): the release the node verified names the Lua it embeds, so the door
+# stops refusing up front and hands the child the manifest's own value. What must NOT appear is a Lua-gate
+# refusal - the child may still refuse for its own reasons (the fixture binary cannot answer its identity),
+# and that is exactly the point: the gate that used to fire first is gone.
 out="$(door "$EMPTY_CHANNEL" "$C_LUA" --cover-commit "$C_BASE")"; rc=$?
-ok "$([ "$rc" = 2 ] && echo 1 || echo 0)" "a cover named without the target's Lua digest is refused before anything is downloaded (rc $rc)" "$(printf '%s' "$out" | tail -2)"
-ok "$(says "$out" 'release_cover_lua_unknown' && echo 1 || echo 0)" 'by name: release_cover_lua_unknown' "$(printf '%s' "$out" | tail -2)"
+ok "$(says "$out" 'release_cover_lua_unknown' && echo 0 || echo 1)" "a cover with no flag is no longer refused by the Lua gate (rc $rc)" "$(printf '%s' "$out" | tail -2)"
 
 out="$(door "$EMPTY_CHANNEL" "$C_BASE" --cover-commit "$C_BASE" --lua-inputs "$BASE_DIGEST")"; rc=$?
 ok "$(says "$out" 'cover_commit_pointless' && echo 1 || echo 0)" 'a cover that names the commit itself is refused instead of silently used' "$(printf '%s' "$out" | tail -2)"
