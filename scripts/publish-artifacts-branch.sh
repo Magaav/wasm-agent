@@ -119,6 +119,36 @@ for triple in $TRIPLES; do
     ASSETS="$ASSETS $name"
     ROWS="$ROWS$want_sha  $want_bytes  $name"$'\n'
   done
+  # THE SUPERVISOR IS A PAYLOAD TOO when the manifest pins it (nine columns): it was the one member this loop did
+
+  # not know about, so the transport shipped three payloads while the publisher summed four and the row that reads
+
+  # the commit counted six rows for five files (measured). Law 17: the pin decides, not a spelling here.
+
+  if sup_pin="$(wa_node_manifest_supervisor "$MANIFEST" "$triple")"; then
+
+    for pair in "wa-operations-supervisor-$triple-$SHORT:${sup_pin% *}:${sup_pin#* }"; do
+
+      name="${pair%%:*}"; rest="${pair#*:}"; want_sha="${rest%%:*}"; want_bytes="${rest##*:}"
+
+      file="$OUT/$name"
+
+      [ -f "$file" ] || fail "binary_missing: $file" 2
+
+      actual="$(wa_node_sha256 "$file")" || fail 'sha256_tool_missing' 7
+
+      [ "$actual" = "$want_sha" ] || fail "artifact_not_pinned: $name is $actual, the manifest pins $want_sha" 5
+
+      [ "$(wc -c < "$file" | tr -d '[:space:]')" = "$want_bytes" ] || fail "artifact_not_pinned: $name is not $want_bytes bytes" 5
+
+      ASSETS="$ASSETS $name"
+
+      ROWS="$ROWS$want_sha  $want_bytes  $name"$'\n'
+
+    done
+
+  fi
+
 done
 ASSETS="$ASSETS node-$SHORT.manifest"
 [ -f "$MANIFEST" ] || fail "manifest_missing: $MANIFEST" 2

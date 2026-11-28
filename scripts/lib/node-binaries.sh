@@ -409,6 +409,36 @@ wa_node_manifest_program() {
   printf '%s\n' "$line"
 }
 
+# <manifest> <triple> -> "<wa-operations-supervisor sha256> <bytes>" for the row that names it; 2 no manifest,
+
+# 3 a row that does not pin it (a release published before the two trailing columns existed). Same shape as
+
+# wa_node_manifest_program, and the same rule: opt-in by the manifest, never by the loader.
+
+wa_node_manifest_supervisor() {
+
+  local manifest="$1" triple="$2" line
+
+  [ -f "$manifest" ] || return 2
+
+  line="$(awk -v want="$triple" '
+
+    /^[[:space:]]*(#|$)/ {next}
+
+    index($1, "=") {next}
+
+    $1 == want && $8 ~ /^[0-9a-f]+$/ && $9 ~ /^[0-9]+$/ {print $8, $9; found = 1; exit}
+
+    END {exit !found}
+
+  ' "$manifest")" || return 3
+
+  [ -n "$line" ] || return 3
+
+  printf '%s\n' "$line"
+
+}
+
 wa_node_binary_shape() {
   local file="$1" magic machine
   [ -f "$file" ] || { printf 'missing\n'; return 2; }
