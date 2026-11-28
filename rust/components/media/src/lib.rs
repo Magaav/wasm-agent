@@ -44,7 +44,7 @@ fn error_code(value: i32) -> String {
 struct Component;
 
 impl exports::wa::media::probe::Guest for Component {
-    fn describe(
+    async fn describe(
         source: wa::media::types::File,
     ) -> Result<exports::wa::media::probe::Description, wa::media::types::Error> {
         let started = Instant::now();
@@ -136,7 +136,7 @@ impl exports::wa::media::probe::Guest for Component {
 }
 
 impl exports::wa::media::frames::Guest for Component {
-    fn take(
+    async fn take(
         request: exports::wa::media::frames::Request,
     ) -> Result<Vec<exports::wa::media::frames::Still>, wa::media::types::Error> {
         let source = CString::new(request.source.path.clone()).map_err(|_| {
@@ -208,7 +208,7 @@ impl exports::wa::media::frames::Guest for Component {
 }
 
 impl exports::wa::media::audio::Guest for Component {
-    fn extract(
+    async fn extract(
         request: exports::wa::media::audio::Request,
     ) -> Result<exports::wa::media::audio::Track, wa::media::types::Error> {
         let started = Instant::now();

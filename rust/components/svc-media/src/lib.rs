@@ -22,7 +22,7 @@ fn line(text: &str) {
 
 impl exports::wa::kernel::service::Guest for Service {
     async fn run(_config: String) -> Result<(), String> {
-        // The runner grants this fixture two directories: `/in` (read-only, holding the clip) and `/out`
+        // The runner grants this fixture two directories: `/in` (read-only, holding the clip) and `/media-out`
         // (writable, where the stills and the track go). The names are the test's, not the component's.
         match media::probe("/in/clip.mp4".to_string()).await {
             Ok(description) => {
