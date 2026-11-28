@@ -14,6 +14,9 @@ set -uo pipefail
 M=$HOME/Work/missions; H=$M/HANDOVER.md; C=$HOME/wasm-agent/checkout
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib/main-binary.sh"
+# ONE VERDICT PER TIP (28/11, Victor): every tip ends in exactly one line - green, red, or NO VERDICT with a named reason
+# - and a killed suite names its killer. The shapes live in this lib so the loop has no path that prints nothing.
+. "$HERE/lib/health-verdict.sh"
 
 # WHICH COPY OF THE FACTORY IS RUNNING (28/11). MEASURED: every tip printed "NOT GRADED" for hours after the fix had
 # LANDED, because this loop runs from a copy under _orch that is swapped by hand between landings (factory/MAP.md) and
@@ -51,6 +54,18 @@ if [ -n "$FACTORY_NOTE" ]; then
 fi
 G="env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C $C"
 GREEN=$(cat $M/_orch/health-green 2>/dev/null); KNOWN=" $(cat $M/_orch/health-known 2>/dev/null) "
+# A UNIT RESTART IS THE MOST COMMON KILLER, AND IT USED TO BE INVISIBLE. systemd stops the unit with SIGTERM to the
+# whole cgroup; the loop died mid-suite and the handover kept a "grading ... - resolving" line with no verdict, which
+# read as "stuck" for 30+ minutes. This trap writes what happened, with the elapsed time, before the process goes.
+TIP_STARTED=0; TIP_SHA=""
+wa_health_on_term() {
+  local took=$(($(date +%s) - TIP_STARTED))
+  [ "$TIP_STARTED" -gt 0 ] 2>/dev/null || took=0
+  echo "$(date -u +%H:%MZ) orch(health): ${TIP_SHA:0:8} NO VERDICT after ${took}s: this loop was TERMINATED (SIGTERM) while${TIP_SHA:+ grading $TIP_SHA} - a unit restart or an explicit kill ended the run" >> $H
+  exit 143
+}
+trap wa_health_on_term TERM INT
+
 while true; do
   $G fetch -q origin; N=$($G rev-parse origin/main)
   if [ "$N" = "$(cat $M/_orch/health-last 2>/dev/null)" ]; then sleep 300; continue; fi
@@ -89,7 +104,17 @@ while true; do
   # The lib that produced that binary, named: a grading line is evidence only if a reader can tell WHICH factory said it.
   echo "$(date -u +%H:%MZ) orch(health): factory lib $(stat -c %y "$HERE/lib/main-binary.sh" 2>/dev/null | cut -d. -f1)${FACTORY_NOTE:+  [$FACTORY_NOTE]}" >> $H
   export WA_BIN
-  bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1
+  TIP_SHA="$N"; TIP_STARTED=$(date +%s)
+  SUITE_BUDGET=${WA_HEALTH_SUITE_SECONDS:-2400}
+  timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1; RC=$?
+  TOOK=$(( $(date +%s) - TIP_STARTED ))
+  # ONE LINE, ALWAYS. When the suite did not produce a readable verdict - killed, out of space, lock, budget - the reason
+  # is named here instead of leaving the "resolving" line as the last word for half an hour.
+  if [ "$RC" != 0 ] || ! jq -e . $M/main-health.json >/dev/null 2>&1; then
+    echo "$(date -u +%H:%MZ) orch(health): $(wa_health_verdict_line "$N" "$RC" "$TOOK" "$M/_orch/health-loop-run.out" "$M/main-health.json" "$SUITE_BUDGET")" >> $H
+    TIP_STARTED=0
+    sleep 300; continue
+  fi
   S=$(jq -r .sha $M/main-health.json); echo $S > $M/_orch/health-last
   R=$(jq -r '.failed[]?.row' $M/main-health.json | sort -u)
   STILL=""; for r in $R; do
@@ -100,11 +125,12 @@ while true; do
     else STILL="$STILL$r "; fi
   done
   if [ -z "$STILL" ]; then echo $S > $M/_orch/health-green; GREEN=$S
-    echo "$(date -u +%H:%MZ) orch(health): ${S:0:8} $(jq -r '"\(.counts.passed)/\(.counts.checks)"' $M/main-health.json) green (reds rerun green: $(echo $R))" >> $H
+    echo "$(date -u +%H:%MZ) orch(health): ${S:0:8} $(jq -r '"\(.counts.passed)/\(.counts.checks)"' $M/main-health.json) green (${TOOK}s; reds rerun green: $(echo $R))" >> $H
   else
     P=$M/_orch/REVERT-PROPOSAL-${S:0:8}.txt
     { echo "new red on ${S:0:8} (still red alone): $STILL"; echo "last green: ${GREEN:0:8}"; echo "landings since:"; $G log --first-parent --format='%h %s' ${GREEN:-$S~1}..$S; } > $P
-    echo "$(date -u +%H:%MZ) orch(health): NEW RED on ${S:0:8}: $STILL -> $P (attribute + propose revert)" >> $H
+    echo "$(date -u +%H:%MZ) orch(health): NEW RED on ${S:0:8} after ${TOOK}s: $STILL -> $P (attribute + propose revert)" >> $H
   fi
+  TIP_STARTED=0
   sleep 60
 done
