@@ -221,3 +221,24 @@ pub fn observe_owned_child(id: &str, pid: u32, owner: &str) -> Result<Value, Str
 pub fn beat_age_ms() -> Option<u64> {
     call("beat_age", &json!({})).ok().and_then(|value| value["beat_age_ms"].as_u64())
 }
+
+/// The process world's runner: the supervisor seam, offered to `wa:process`.
+///
+/// `wa-kernel-runtime` owns the world and cannot reach this crate, so the node hands it over at startup and the
+/// world asks here for every spawn and every record read - one owner of the supervisor (law 17).
+pub struct SupervisorRunner;
+
+impl wa_kernel_runtime::process_world::Runner for SupervisorRunner {
+    fn foreground(
+        &self,
+        program: &str,
+        line: &str,
+        context: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        foreground(program, "-c", line, "/", 300, context, None)
+    }
+
+    fn call(&self, method: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        call(method, &args)
+    }
+}

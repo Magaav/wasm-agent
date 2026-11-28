@@ -107,7 +107,7 @@ pub struct Recognition {
 
 pub struct State {
     wasi: WasiCtx,
-    table: ResourceTable,
+    pub(crate) table: ResourceTable,
     limits: StoreLimits,
     net: Vec<String>,
     shared: Arc<Shared>,
@@ -890,6 +890,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         // guest (`docs/WHATSAPP-OCR.md`).
         crate::vision_host::link(&mut linker),
         crate::terminal_host::link(&mut linker),
+        crate::process_world::link(&mut linker),
         crate::media_host::link(&mut linker),
         wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
@@ -1140,6 +1141,7 @@ mod tests {
             wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
             crate::vision_host::link(&mut linker),
         crate::terminal_host::link(&mut linker),
+        crate::process_world::link(&mut linker),
         crate::media_host::link(&mut linker),
             wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),

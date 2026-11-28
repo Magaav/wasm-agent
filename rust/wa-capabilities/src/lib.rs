@@ -42,7 +42,6 @@ pub use wa_disk as disk;
 pub mod operations;
 /// `wa:process@0.1.0` served by this node: a component spawns and waits on a child through the SAME
 /// manager the `bash` tool uses. See wit/process/process.wit.
-pub mod process_host;
 pub mod file_search;
 /// `host.features` (docs/FEATURES.md): the one door the Lua gates ask "is this feature on, and which
 /// path is live" through. The rule lives in `wa-features`; this crate only routes to it.
