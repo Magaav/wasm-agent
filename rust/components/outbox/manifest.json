@@ -1,0 +1,12 @@
+{
+  "name": "outbox",
+  "kind": "mcp",
+  "needs_wasi_sdk": false,
+  "description": "The explicit-send contract: exact-JID acceptance, the request payload and its dedupe key, and the outcome a worker reports",
+  "capabilities": {
+    "env": [],
+    "file_env": [],
+    "net": [],
+    "dirs": []
+  }
+}
