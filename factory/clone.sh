@@ -15,6 +15,24 @@ set -uo pipefail
 
 CLONE="${WA_FACTORY_CLONE:-$HOME/wasm-agent/factory-clone}"
 REMOTE="${WA_FACTORY_REMOTE:-origin}"
+# The URL to clone FROM, and where it comes from, in this order (27/11: run from ~/Work/missions/_orch - outside any repo -
+# the first version failed with "no origin to copy"):
+#   1. WA_FACTORY_REMOTE_URL, an operator's explicit answer;
+#   2. the canonical checkout's own origin (~/wasm-agent/checkout by default, WA_CANONICAL overrides);
+#   3. the origin of any existing clone we can find.
+# A local path works as a URL for `git clone`, so a machine with the canonical tree and no network can still make a clone.
+resolve_url() {
+  if [ -n "${WA_FACTORY_REMOTE_URL:-}" ]; then echo "$WA_FACTORY_REMOTE_URL"; return 0; fi
+  local canonical="${WA_CANONICAL:-$HOME/wasm-agent/checkout}"
+  for candidate in "$canonical" "$HOME/wasm-agent/q-clone"; do
+    if [ -d "$candidate/.git" ]; then
+      url=$(git -C "$candidate" remote get-url origin 2>/dev/null) && [ -n "$url" ] && { echo "$url"; return 0; }
+      # a checkout with no origin of its own: clone from the directory itself
+      echo "$candidate"; return 0
+    fi
+  done
+  return 1
+}
 BRANCH="${WA_FACTORY_BRANCH:-main}"
 QUIET=0
 for arg in "$@"; do
@@ -36,12 +54,14 @@ say() { [ "$QUIET" = 1 ] || echo "factory clone: $*"; }
 if [ ! -d "$CLONE/.git" ]; then
   say "no clone at $CLONE; creating it from $REMOTE"
   mkdir -p "$(dirname "$CLONE")" || exit 1
-  git clone --quiet --branch "$BRANCH" "$REMOTE" "$CLONE" 2>/dev/null || {
-    # `origin` is an SSH alias in this fleet; fall back to the canonical repo's own URL when the alias is not resolvable here.
-    url=$(git -C "$(dirname "$0")/.." remote get-url origin 2>/dev/null) || {
-      echo "factory clone: cannot clone - no $REMOTE and no origin to copy" >&2; exit 1; }
+  if ! git clone --quiet --branch "$BRANCH" "$REMOTE" "$CLONE" 2>/dev/null; then
+    url=$(resolve_url) || {
+      echo "factory clone: cannot clone - no '$REMOTE' here and no canonical checkout to copy (set WA_FACTORY_REMOTE_URL)" >&2
+      exit 1
+    }
+    say "cloning from $url instead of '$REMOTE'"
     git clone --quiet --branch "$BRANCH" "$url" "$CLONE" || exit 1
-  }
+  fi
 fi
 
 [ "$QUIET" = 1 ] || say "following $REMOTE/$BRANCH in $CLONE"

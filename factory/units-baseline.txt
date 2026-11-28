@@ -4,9 +4,6 @@
 orch-canary.service	still runs ~/Work/missions/_orch/canary.sh; units.sh --apply replaces it
 orch-daily.service	still runs ~/Work/missions/_orch/daily-line.sh; units.sh --apply replaces it
 orch-disk.service	still runs ~/Work/missions/_orch/disk-watch.sh; units.sh --apply replaces it
-orch-health-loop.service	THE ONE THAT COST THREE HOURS (queues #123/#142 landed and changed nothing): still runs the _orch copy, which differs from factory/health-loop.sh today
-orch-paused-watchdog.service	still runs ~/Work/missions/_orch/paused-watchdog.sh; units.sh --apply replaces it
-orch-quarantine-watch.service	still runs ~/Work/missions/_orch/quarantine-watch.sh; units.sh --apply replaces it
 orch-slots5.service	still runs ~/Work/missions/_orch/slots5.sh; units.sh --apply replaces it
 orch-snapshot.service	still runs ~/Work/missions/_orch/reboot-snapshot.sh; units.sh --apply replaces it
 orch-throughput.service	still runs ~/Work/missions/_orch/throughput-watch.sh; units.sh --apply replaces it
