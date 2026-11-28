@@ -819,6 +819,9 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     echo 'set -uo pipefail'
     echo "INSTALL_DIR=\"$rec_install\""
     echo 'COMMIT=deadbee'                 # deliberately short: a prebuilt record must NOT name this
+    # THE 40-HEX OF THE TREE THIS DEPLOY INSTALLED: the block reads COMMIT_FULL for a covering prebuilt record,
+    # and without it the record falls to commit=unknown and refuses - which is what this row was reporting.
+    echo "COMMIT_FULL=$HEAD_SHA"
     echo 'BRANCH=main'
     echo 'DIRTY=0'
     echo 'HASH=nodehash'
@@ -841,9 +844,9 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     # the REAL wa_same_commit out of scripts/lib/commit-id.sh - stubbing that one made the block refuse a commit
     # it had just accepted ("reports commit X but this deploy meant to install X"). Measured standalone first.
     echo 'note() { echo "note: $*"; }'
-    echo 'post_swap_problem() { :; }'
-    echo 'wa_build_info() { echo "commit=$BINARY_COMMIT"; }'
-    echo 'wa_build_field() { case "$2" in commit) echo "$BINARY_COMMIT";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
+    echo 'post_swap_problem() { echo "note: $*" >&2; }'
+    echo 'wa_build_info() { echo "commit=${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}"; }'
+    echo 'wa_build_field() { case "$2" in commit) echo "${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
     echo 'wa_compiled_inputs_digest() { echo deadbeef; }'
     echo 'wa_node_binary_reuse() { return 1; }'
     echo 'wa_running_identity() { :; }'
