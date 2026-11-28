@@ -20,6 +20,25 @@ local ctx = { session_id = sid, user_id = 'master' }; policy.pin(memory, 'master
 local checks = 0
 local function check(ok, message) assert(ok, message); checks = checks + 1 end
 local function dispatch(name, args) return tools.dispatch(memory, name, args, 'master', ctx) end
+-- THE BUDGET HAS ONE OWNER (law 17, and the operator's rule): lua/core/codemode_pending.lua's DEFAULT_WAIT_S with its
+-- MAX_WAIT_S ceiling. This row refuses a second budget in tools.lua and refuses an environment override in product code.
+local pending = dofile('lua/core/codemode_pending.lua')
+check(pending.clamp_wait_s(nil) == pending.DEFAULT_WAIT_S,
+  'a caller that asks for no wait does not get the owner default: ' .. tostring(pending.clamp_wait_s(nil)))
+check(pending.clamp_wait_s(1e9) == pending.MAX_WAIT_S,
+  'the owner ceiling does not bind: ' .. tostring(pending.clamp_wait_s(1e9)))
+check(pending.clamp_wait_s(0) == 0, 'a zero wait is not honoured as zero')
+local tools_src = ''
+do
+  local f = io.open('lua/core/tools.lua', 'r')
+  if f then tools_src = f:read('*a') or ''; f:close() end
+end
+check(tools_src ~= '', 'could not read lua/core/tools.lua to check for a second budget')
+check(not tools_src:find('WA_OPERATION_STATUS_WAIT_MS', 1, true),
+  'tools.lua reads a wait budget from the environment - product code has no env override')
+check(tools_src:find('pending.wait_for_settle', 1, true) ~= nil,
+  'tools.lua does not spend the owner budget through pending.wait_for_settle')
+
 local function now_ms() return host.monotonic_ms and host.monotonic_ms() or (os.time() * 1000) end
 
 -- 1) A RUNNING OPERATION IS WAITED FOR: 2 s of sleep, a status with no wait_ms, and the answer is the settled record.
