@@ -18,7 +18,15 @@ Consequence that should be said out loud: `release.lock` pins a digest of `lua/`
 
 ## 3. What is in the branch
 
-- **`release.lock`** (new): one line, `lua-core ffd4b9f7e3e9707709e40c15bced328968b155509240a9ca0ca89764780b9c09 1740007 interface=8a0b442e...`. Not `components.lock` on purpose: `scripts/publish-components.sh` looks for `<name>.wasm` for every pinned name, so a `lua-core` line there fails `component_missing` - the q#119 class fixed for `vision` on 27/11.
+- **NO PIN ON MAIN** (design changed 28/11 after the read): a pin of the Lua tree belongs to the RELEASE
+  CUT, not to main. Main carried one for a day and it needed re-pinning by hand after every landing that
+  touched `lua/` - three times - so between landings main was "pin stale" by definition, and every re-pin
+  raced whatever else was landing. `release.lock` is therefore DELETED; `scripts/lua-part-publish.sh` writes
+  the line at cut time, and the row judges two states: no pin -> the publisher must produce a well-formed
+  line for THIS tree that names the bytes it just wrote; pin present -> it must be this tree build, as before.
+  Both states measured, 17 checks each. When a pin does exist it is NOT `components.lock`: that lock is the
+  webassembly bundle's, and `scripts/publish-components.sh` looks for `<name>.wasm` for every pinned name, so a
+  `lua-core` line there fails `component_missing` - the q#119 class fixed for `vision` on 27/11.
 - **`scripts/test-release-lock-pin.sh`** (new, 15 checks, seconds, registered in `scripts/test.sh` as `WA_BIN="$BIN" gate_run ...`): the pin parses; a FRESH build of this tree is the pinned bytes; the verifier accepts it; one changed byte is refused (`lua_part_digest_mismatch`); the part declares the host's interface; a foreign interface is refused (`lua_part_interface_mismatch`); a node holding the pinned part asks for no download; one holding another asks for exactly the pin; a first install asks for it; a malformed held digest is refused; the pinned part signed by a trusted key passes the signature gate; unsigned is refused (`lua_part_unsigned`); an untrusted key is refused (`lua_part_signed_by_untrusted_key`); the whole install path runs in order (decision -> verify -> fill -> tree present); and the publisher prints exactly the pinned line.
 - **`scripts/lua-part-publish.sh`** (new): the producer a release calls - stage, build, `SHA256SUMS`, sign, print the lock line. It prints the line `release.lock` carries, which is judged rather than trusted.
   It has **NO default signing key**: with `WA_RELEASE_KEYS` unset it refuses
