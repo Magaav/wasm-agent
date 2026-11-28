@@ -56,6 +56,21 @@ end
 function M.providers()
   local vaulted_go = vault.base("opencode-go")
   return {
+    -- THE OFFICIAL CLAUDE CLI AS A ROUTE (mission claude-inside-wa, part B, route 1). It speaks no HTTP: wa spawns
+    -- `claude -p --output-format stream-json --verbose` and maps its stream (lua/core/claude_cli.lua). The
+    -- credential is the CLI's own, in the operator's home - this route never sees a token, holds none, and has
+    -- nothing to print. `base_url` and `api_key` are deliberately absent: there is no endpoint to call and no key
+    -- to send.
+    {
+      id = "claude-cli",
+      label = "Anthropic (Claude subscription, via the official CLI)",
+      transport = "claude-cli",
+      models = { "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" },
+      key_less = true,
+      base_url = "claude-cli:",
+      default_model = "claude-sonnet-4-5",
+      api_key = "cli-owned",
+    },
     {
       id = "opencode-go",
       label = "OpenCode Go",
@@ -1605,6 +1620,9 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
   local settings = M.settings()
   local provider = M.active()
+  if provider.transport == "claude-cli" then
+    return M.claude_cli_complete(provider, model or settings.model, messages, tools)
+  end
   local body = { model = model or settings.model, messages = messages }
   -- Servability comes first, before `request_options`, the URL, the headers and the ledger
   -- span exist: a model this route cannot serve is refused here, so no bytes leave and no
@@ -1994,6 +2012,61 @@ function M.empty_reply_reason(result)
   end
   return string.format(
     "the provider returned an empty message with no tool call and no text (%s)", where)
+end
+
+-- ONE TURN THROUGH THE OFFICIAL CLI (route `claude-cli`).
+--
+-- WHAT IS FAITHFUL: the conversation text reaches the model exactly as wa assembled it (system prompt, then the
+-- turns, then the latest user message), the answer comes back as `content`, and usage/cost come from the CLI's own
+-- `result` event. WHAT IS NOT, and is therefore REFUSED BY NAME rather than silently dropped: wa's tool schemas
+-- cannot be handed to a CLI that has its own tools, so a request carrying tools is answered with
+-- `claude_cli_tools_unsupported` instead of a turn in which the model quietly cannot act. When the CLI route grows
+-- tool support (MCP or an agent loop), this is the function that changes.
+function M.claude_cli_complete(provider, model, messages, tools)
+  if tools and #tools > 0 then
+    error("claude_cli_tools_unsupported: the claude-cli route carries no tool schemas yet; ask for a turn without tools, or pick an HTTP provider", 0)
+  end
+  local claude = dofile("lua/core/claude_cli.lua")
+  local bin = env("WASM_AGENT_CLAUDE_BIN")
+  if bin == nil or bin == "" then
+    local h = io.popen("command -v claude 2>/dev/null")
+    bin = h and (h:read("*l") or "") or ""
+    if h then h:close() end
+  end
+  local prompt = {}
+  for _, message in ipairs(messages or {}) do
+    local role = message.role or "user"
+    local text = message.content
+    if type(text) == "table" then
+      local parts = {}
+      for _, part in ipairs(text) do
+        if type(part) == "table" and part.type == "text" then parts[#parts + 1] = part.text or "" end
+      end
+      text = table.concat(parts, "\n")
+    end
+    if type(text) == "string" and text ~= "" then
+      prompt[#prompt + 1] = (role == "assistant" and "Assistant: " or (role == "system" and "" or "User: ")) .. text
+    end
+  end
+  local out, why = claude.complete(bin, table.concat(prompt, "\n\n"), model)
+  if not out then error(why, 0) end
+  return {
+    content = out.text or "",
+    commentary = "",
+    reasoning = out.thinking or "",
+    finish_reason = (out.result and out.result.stop_reason) or "end_turn",
+    tool_calls = {},
+    usage = {
+      prompt_tokens = out.result and out.result.input_tokens or 0,
+      completion_tokens = out.result and out.result.output_tokens or 0,
+      cache_read_input_tokens = out.result and out.result.cache_read or 0,
+      cache_creation_input_tokens = out.result and out.result.cache_write or 0,
+    },
+    model = model,
+    serving_response_model = model,
+    request_id = out.session_id,
+    route = "claude-cli",
+  }
 end
 
 return M
