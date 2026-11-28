@@ -156,6 +156,7 @@ function M.run(opts)
     -- there is nothing to count.
     lines[1] = "  undo: " .. lines[1]:sub(5)
   end
+  pcall(function() dofile('lua/core/feature_record.lua').real('undo', { detail = 'undone' }) end)
   return { ok = true, category = "undone", lines = lines }
 end
 

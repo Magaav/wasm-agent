@@ -259,6 +259,15 @@ function M.record(name, ok, opts)
     slot.last_ok_at = at
     slot.last_ok_source = tostring(opts.source or 'record')
     slot.last_ok_detail = opts.detail and tostring(opts.detail) or nil
+    -- WHICH KIND OF SUCCESS (features-real-traffic-hooks). One timestamp cannot answer the question the
+    -- mission exists for: a feature whose CANARY passes every night and which nobody has really used for a
+    -- week is broken for its user and green on the page. So a real use and a canary run are kept in their own
+    -- fields, and the page shows both. 'canary' is the only synthetic source; anything else is real use.
+    if slot.last_ok_source == 'canary' then
+      slot.last_canary_at = at
+    else
+      slot.last_real_at = at
+    end
   else
     slot.last_fail_at = at
     slot.last_fail_stage = tostring(opts.stage or 'unknown_stage')
@@ -283,14 +292,36 @@ function M.verdict(row, entry, now)
     return 'failing', string.format('last failed at %s (stage %s)%s', M.iso(entry.last_fail_at), tostring(entry.last_fail_stage or 'unknown'),
       entry.last_ok_at and ('; last worked ' .. M.iso(entry.last_ok_at)) or '; it has never worked')
   end
+  -- A GREEN ROW CAN BE CARRIED BY THE CANARY ALONE (features-real-traffic-hooks, item 2). Say which half is
+  -- doing the work: real use inside the bound, or a passing canary beside a real use that is older than it.
+  local real_at = tonumber(entry.last_real_at)
+  local canary_at = tonumber(entry.last_canary_at)
+  local aged = function(at) local age_now = now - at; if age_now < 0 then age_now = 0 end return M.age(age_now) end
+  local real_note
+  if real_at then
+    if now - real_at > row.stale_after_s then
+      real_note = string.format('real use %s ago, past the %s bound', aged(real_at), M.span(row.stale_after_s))
+    else
+      real_note = 'real use ' .. aged(real_at) .. ' ago'
+    end
+  else
+    real_note = 'no real use recorded'
+  end
+  if canary_at then
+    -- 'just now ago' is the sentence a reader trips on: M.age already answers an adverb.
+    local canary_age = aged(canary_at)
+    real_note = real_note .. (canary_age == 'just now' and '; canary just now'
+      or string.format('; canary %s ago', canary_age))
+  end
   local age = now - (tonumber(entry.last_ok_at) or now)
   if age < 0 then age = 0 end
   if age > row.stale_after_s then
-    return 'stale', string.format('last worked %s ago (%s), past its bound of %s', M.age(age), M.iso(entry.last_ok_at), M.span(row.stale_after_s))
+    return 'stale', string.format('last worked %s ago (%s), past its bound of %s; %s', M.age(age), M.iso(entry.last_ok_at), M.span(row.stale_after_s), real_note)
   end
   -- 'just now' is already an adverb: 'last worked just now ago' is the kind of sentence a reader trips on.
   local when = M.age(age)
-  return 'working', when == 'just now' and 'last worked just now' or string.format('last worked %s ago', when)
+  local base = when == 'just now' and 'last worked just now' or string.format('last worked %s ago', when)
+  return 'working', base .. '; ' .. real_note
 end
 
 -- Every feature, its row, its entry and its verdict, in registry order. 'applies' decides between a
@@ -313,6 +344,8 @@ function M.report(now)
       applies = applies, verdict = verdict, detail = detail,
       last_ok_at = entry and tonumber(entry.last_ok_at) or nil,
       last_ok_source = entry and entry.last_ok_source or nil,
+      last_real_at = entry and tonumber(entry.last_real_at) or nil,
+      last_canary_at = entry and tonumber(entry.last_canary_at) or nil,
       last_fail_at = entry and tonumber(entry.last_fail_at) or nil,
       last_fail_stage = entry and entry.last_fail_stage or nil,
     }
@@ -351,8 +384,12 @@ function M.lines(now)
     -- this mission is against (Fable, 23/11). A canary-sourced time is therefore labelled; a hook's is not.
     local last = item.last_ok_at and M.iso(item.last_ok_at) or 'never'
     local kind = item.last_ok_source == 'canary' and '  [canary]' or ''
-    out[#out + 1] = string.format('  %-' .. width .. 's  %-9s  last worked: %s%s  (%s)',
-      item.name, item.verdict, last, kind, item.detail)
+    -- REAL OR CANARY, BOTH NAMED (features-real-traffic-hooks): 'real 3m ago   canary 12m ago'. A feature
+    -- whose canary passes while nobody has used it for a week must not read as working.
+    local real_part = item.last_real_at and ('real ' .. M.age(now - item.last_real_at)) or 'real never'
+    local canary_part = item.last_canary_at and ('canary ' .. M.age(now - item.last_canary_at)) or 'canary never'
+    out[#out + 1] = string.format('  %-' .. width .. 's  %-9s  last worked: %s%s  %s  %s  (%s)',
+      item.name, item.verdict, last, kind, real_part, canary_part, item.detail)
   end
   return out
 end

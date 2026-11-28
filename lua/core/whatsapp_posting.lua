@@ -212,6 +212,12 @@ function M.parse_health(log)
           notices_unmatched = tonumber(line:match('unmatched=(%d+)') or '') or 0,
           last_notice = line:match('last_notice=(%S+)'),
           last_unmatched = line:match('last_unmatched=(%S+)'),
+          -- THE DAY'S COUNT (features-real-traffic-hooks, deletion-notices row): the bound is per day
+          -- (UNMATCHED_PER_DAY = 5), so a total alone cannot say whether it was crossed today. nil when the
+          -- component is older than this field - a zero would read as "nothing today", which is the false
+          -- comfort the row exists to prevent.
+          unmatched_today = tonumber(line:match('unmatched_today=(%d+)') or '') or nil,
+          notices_day = tonumber(line:match(' day=(%-?%d+)') or '') or nil,
         }
       end
     end

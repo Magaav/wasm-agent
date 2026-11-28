@@ -85,6 +85,12 @@ function M.call(mcp, method, args, ctx)
       if data.ok == nil then data.ok = true end -- a structured result with no error is a success; the SDK does not set it
       data.evidence = answer.evidence
       if answer.ok == false then data.ok = false; data.mcp_outcome = answer.outcome end
+      -- REAL USE (features-real-traffic-hooks): a mailbox READ that came back is the mail feature working for
+      -- its user. A write is a different path and is not counted here; the hook is debounced and wrapped, so
+      -- it costs at most one timestamp a minute and can never turn a working read into a failure.
+      if data.ok and not M.is_write(method) then
+        pcall(function() dofile('lua/core/feature_record.lua').real('mail', { detail = tostring(method) }) end)
+      end
       return data
     end
   end
