@@ -158,6 +158,37 @@ impl Document for ProtoDocument {
     }
 }
 
+
+/// A `Document` whose wire is owned by ONE worker thread.
+///
+/// The node's terminal client is thread-local (`Rc`/`RefCell`, `screen.rs:813` `exchange`), while this seam must be
+/// `Send` for the host's async verbs. So the client is CREATED on the worker (`open` runs there, not on the caller's
+/// thread) and every call crosses an mpsc channel: one owner of the wire, and `screen.rs` keeps its threading.
+pub fn channel_document<F>(open: F) -> ProtoDocument
+where
+    F: FnOnce() -> Box<dyn FnMut(&str, serde_json::Value) -> Result<serde_json::Value, String>> + Send + 'static,
+{
+    use std::sync::mpsc;
+
+    type Request = (String, serde_json::Value, mpsc::Sender<Result<serde_json::Value, String>>);
+    let (requests, incoming) = mpsc::channel::<Request>();
+
+    std::thread::spawn(move || {
+        let mut call = open();
+        while let Ok((method, args, reply)) = incoming.recv() {
+            let _ = reply.send(call(&method, args));
+        }
+    });
+
+    ProtoDocument::new(Box::new(move |method, args| {
+        let (reply, answer) = mpsc::channel();
+        requests
+            .send((method.to_string(), args, reply))
+            .map_err(|_| "the terminal worker is gone".to_string())?;
+        answer.recv().map_err(|_| "the terminal worker is gone".to_string())?
+    }))
+}
+
 #[cfg(test)]
 mod rows {
     use super::*;
@@ -236,6 +267,36 @@ mod rows {
         // The dirty flag follows the writes and is cleared by asking.
         assert!(document.dirty());
         assert!(!document.dirty());
+    }
+
+
+    /// ROW: the channel keeps ONE owner of the wire. The client is created on the worker thread (never on the
+    /// caller's), calls cross the channel, and a document built that way answers like any other. This is the shape
+    /// the node will use, because `screen.rs`'s client cannot be `Send`.
+    #[test]
+    fn a_channel_document_keeps_the_wire_on_one_thread() {
+        use std::sync::{Arc, Mutex};
+
+        let caller_thread = std::thread::current().id();
+        let worker_thread: Arc<Mutex<Option<std::thread::ThreadId>>> = Arc::new(Mutex::new(None));
+        let recorded = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        let seen = worker_thread.clone();
+        let log = recorded.clone();
+        let mut document = channel_document(move || {
+            *seen.lock().unwrap() = Some(std::thread::current().id());
+            Box::new(move |method, _args| {
+                log.lock().unwrap().push(method.to_string());
+                Ok(serde_json::json!(7))
+            })
+        });
+
+        document.write("hello").unwrap();
+        assert_eq!(document.head("title").unwrap(), 7);
+
+        let worker = worker_thread.lock().unwrap().expect("the worker must have started");
+        assert_ne!(worker, caller_thread, "the client must be created on the worker thread, not the caller's");
+        assert_eq!(*recorded.lock().unwrap(), vec!["write", "head"]);
     }
 
     /// ROW: the document seam answers in the program's own terms - a heading lands where the program says it did,
