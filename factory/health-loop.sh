@@ -64,6 +64,11 @@ while true; do
   # and `WA_BIN=$(wa_main_binary ...)` runs it in a subshell, so the export died and every graded line read
   # "with unknown" - measured 00:53Z on a tip that WAS graded: "grading 242e69c4 with unknown (pinned/.../wa)".
   # The binary goes to a file and is read back, so the step survives in this shell, where the line is written.
+  # SAY THAT A GRADING IS UNDER WAY (28/11). Resolving a binary takes from seconds to fifteen minutes (a cold build),
+  # and until it answers the handover is SILENT - measured 01:23Z to 01:30Z: a build was running for the tip and the
+  # only way to know was `ps`. A reader must not have to inspect processes to tell "working" from "stuck": the first
+  # line says the grading started and on what, the second one says what answered.
+  echo "$(date -u +%H:%MZ) orch(health): grading ${N:0:8} - resolving a binary of this tip (its own bundle, else one covering its compiled inputs, else waiting for its publish)" >> $H
   WA_BIN=""
   if ! wa_main_binary "$N" > "$M/_orch/health-binary.out" 2> "$M/_orch/health-binary.err"; then
     echo "$(date -u +%H:%MZ) orch(health): NOT GRADED for ${N:0:8}: no binary of main's own (the installed one is not used)" >> $H
