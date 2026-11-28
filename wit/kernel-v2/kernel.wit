@@ -422,6 +422,16 @@ world wasi-probe-fs {
     export service;
 }
 
+/// Fixture: `wa:kernel/media@0.2.0` (the ffmpeg capability). One world per interface family, so the fixture's
+/// component type names exactly the imports its test grants - and `export service` is what makes it runnable by
+/// the service runner at all, alongside the log and lifecycle every fixture takes.
+world wasi-probe-media {
+    import log;
+    import lifecycle;
+    import media;
+    export service;
+}
+
 /// Fixture: `wasi:sockets/{types,ip-name-lookup}@0.3.0` (tier B, grant `net`).
 world wasi-probe-net {
     import log;

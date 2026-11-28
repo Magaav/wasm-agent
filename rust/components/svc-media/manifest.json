@@ -1,0 +1,8 @@
+{
+  "name": "svc-media",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Fixture (wa:kernel@0.2): asks the media capability to describe, still and re-track the file its grant points at, and logs what it was told - and that a path outside the grant is refused",
+  "capabilities": {},
+  "limits": {"memory_mb": 64}
+}
