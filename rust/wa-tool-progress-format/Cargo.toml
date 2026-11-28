@@ -1,0 +1,11 @@
+[package]
+name = "wa-tool-progress-format"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The drawing of a progress row: a function of facts and numbers only. No env, no filesystem, no
+# clock - the caller passes `now`. The crate that writes and reads the live files depends on this
+# one, so a formatting change never rebuilds a writer and a writer never decides what a row says.
+[dependencies]
+serde_json = "1"
