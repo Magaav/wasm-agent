@@ -64,6 +64,42 @@ M.LOOK_WAIT_S = 1
 -- read THESE two fields - a change to either reaches all three with no other edit, and a script can never
 -- be talked into a longer pause than a call's own wait by mixing them.
 M.MAX_WAIT_S = 300
+
+-- ONE OWNER FOR "HOW LONG MAY THIS WAIT" (law 17, 28/11). The clamp below used to exist only inline where the shared
+-- wait computed its budget; a status of a running operation needs the SAME rule, so it is named once, here, and both
+-- callers use it. Nothing outside this file may write a wait budget of its own, and nothing reads one from the
+-- environment: a product that lets an env var set a wait has two owners again.
+function M.clamp_wait_s(seconds)
+  if seconds == nil then return M.DEFAULT_WAIT_S end
+  seconds = tonumber(seconds)
+  if seconds == nil then return M.DEFAULT_WAIT_S end
+  return math.max(0, math.min(M.MAX_WAIT_S, seconds))
+end
+
+-- Wait for ONE operation to settle inside the shared budget, and return its record.
+--
+-- <call> is the caller's own dispatch (it carries the session; a bare host.operation answers operation_not_yours),
+-- <wait_s> is optional - nil means this file's default and any value is clamped by this file's ceiling.
+-- Returns the last record it saw, or nil when the budget was zero. The caller reports what it got, so an operation
+-- that outlives the budget still yields an honest answer.
+function M.wait_for_settle(call, id, wait_s)
+  local budget_ms = math.floor(M.clamp_wait_s(wait_s) * 1000)
+  if budget_ms <= 0 then return nil end
+  local function now() return host.monotonic_ms and host.monotonic_ms() or (os.time() * 1000) end
+  local deadline = now() + budget_ms
+  local answer = nil
+  while true do
+    local left = deadline - now()
+    if left <= 0 then break end
+    local slice = math.min(1000, math.max(1, left))
+    local decoded = call({ action = "wait", id = id, wait_ms = slice, tool = "operation" })
+    if type(decoded) ~= "table" or decoded.error ~= nil then break end
+    answer = decoded
+    local st = tostring(decoded.state or "")
+    if decoded.settled == true or (st ~= "running" and st ~= "accepted" and st ~= "pending" and st ~= "queued") then break end
+  end
+  return answer
+end
 M.PAUSE_MS_MAX = 5000
 -- Reserved for the answer itself, the delivery into the guest and the script's return: a wait that
 -- spent the script's last millisecond would answer a handle nobody could read.

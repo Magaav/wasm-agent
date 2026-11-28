@@ -1289,6 +1289,9 @@ check health-verdict bash scripts/test-health-verdict.sh
 # A FORGOTTEN SWAP IS A LINE, NOT AN AFTERNOON (28/11): the loop runs a copy under _orch that a human swaps, and a
 # stale lib made every tip print NOT GRADED while the fix sat landed in main. This row exercises the self-check.
 check health-swap-visible bash scripts/test-health-swap-visible.sh
+# A STATUS OF A RUNNING OPERATION WAITS (28/11, waiting-costs-no-turns): measured 30 ms before, so a session spent a whole
+# model turn per poll; the ledger says 131 of 35,172 rounds over 7 days were exactly that.
+check operation-status-waits env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-operation-status-waits.lua" "$bin" --db "$work/operation-status-waits.db"
 # THE REPORT CITED A QUERY THAT DID NOT EXIST (27/11): docs/missions/reports/waiting-costs-no-turns.md names
 # wct-query.sql as its after-measurement, and the file was never in the tree. The row checks the query exists,
 # parses, still counts the four numbers the before was taken with, and answers a real 1-day window.

@@ -2065,6 +2065,30 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     local answer = json.decode(raw)
+    -- A STATUS OF A RUNNING OPERATION WAITS, IT DOES NOT SNAP (28/11, waiting-costs-no-turns).
+    -- MEASURED: `status wait_ms=5000` on a running operation answered in 30 ms and ignored the budget, while `wait`
+    -- on the same operation blocked 2.75 s until it settled, so knowing how a long job was doing cost one WHOLE MODEL
+    -- TURN per look (ledger, 2 days: 59 of 6,917 rounds; 0.92% of tokens).
+    --
+    -- NO BUDGET IS WRITTEN HERE (law 17). "How long may this wait" has one owner - lua/core/codemode_pending.lua,
+    -- DEFAULT_WAIT_S with its MAX_WAIT_S ceiling - and this branch spends that owner's budget through its waiter. The
+    -- caller's own wait_ms is passed through and clamped by the owner; nothing is read from the environment, because a
+    -- product whose wait can be set by an env var has two owners again.
+    do
+      local act = tostring(args.action or "")
+      local state = type(answer) == "table" and tostring(answer.state or "") or ""
+      local running = (state == "running" or state == "accepted" or state == "pending" or state == "queued")
+      local opid = answer.operation_id or args.id
+      if act == "status" and running and opid then
+        local pending = dofile("lua/core/codemode_pending.lua")
+        local asked_s = tonumber(args.wait_ms)
+        if asked_s ~= nil then asked_s = asked_s / 1000 end
+        local settled = pending.wait_for_settle(function(step)
+          return M.dispatch(memory, "operation", step, role, ctx)
+        end, opid, asked_s)
+        if type(settled) == "table" and settled.error == nil then answer = settled end
+      end
+    end
     -- A command that just SETTLED may have removed a file this run wrote: the record is where the
     -- card's lines come from (announce_gone above). One flag read per recorded file per poll, and only
     -- after a settle, so the display costs a reader nothing until there is something to show.
