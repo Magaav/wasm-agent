@@ -50,30 +50,42 @@ compile **once**, hash **once**, and run the body three times; editing the modul
 runs the new body. That is the brief's test for (a), and it fails on main by construction — there is no cache
 there and `DOFILE_COMPILES` does not exist.
 
-## (b) The double open on a `run` call - not measured, but the ground is cleared
+## (b) The double open on a `run` call - MEASURED, cause narrowed to the caller
 
-I did not get a measurement, so I am not claiming a fix. What I did get is the build and one ruled-out cause.
+One `run` call for a trivial script (`return 1+1`), with a code-mode artifact installed in a scratch home and an
+env-gated trace at the seam (`WA_CODEMODE_TRACE_OPENS`), opened the component **twice**:
 
-THE SUPPORTED BUILD WORKS HERE, and that was the blocker: the prepared, verified asset directory is the
-checkout's `.git/codemode-assets/pi-1.2.0-quickjs-3.6.2/`, and `node scripts/codemode-build.mjs build <tree>`
-resolves it from Git metadata and builds a binary that carries code mode (here
-`~/.wasm-agent/build/target/wt-idle-<hash>/release/wa`, sha256 `80385dae...`, with the embedded VM checker run).
-My first attempts failed because they bypassed that script with a bare `cargo build`, which has no assets and
-refuses; `WA_CODEMODE_ALLOW_EMPTY=1` is only for artifacts not meant to run code mode.
+    open A, advance A, open B, advance B, finish B, advance A, finish A
 
-ONE CANDIDATE CAUSE IS OUT. `wa_kernel_runtime::sandbox_host::available()` is what the router asks before it
-routes a script, and it hashes the artifact and returns - it does not instantiate. So the second open per call
-is not the availability probe. The run surface then goes through `dispatch("open"|"advance"|"finish")`
-(`sandbox_host.rs`) and the Lua policy around it (`lua/core/agent.lua`, `codemode_policy.lua`).
+Two DIFFERENT sessions (`2b4795d8…` and `884d2a69…`), so this is not one loop retrying - two loops ran,
+interleaved. That reproduces the 23/11 count of two opens per call, and it is measured, not inferred.
 
-AND THE LAYERS UNDER IT OPEN ONCE. `lua/core/codemode.lua:973` is the loop's single
-`seam({op='open',...})` per script, and `sandbox_host::dispatch` opens once per open op. So the 23/11 count of
-two opens per run call comes from neither of those layers opening twice: it comes from the CALLER. That is the
-narrowing this report can offer - "who calls the loop twice" - and it is a question a driven turn answers and a
-code read cannot.
-WHAT COUNTING OPENS STILL NEEDS: a real turn with a provider, because the `run` tool is driven by the agent
-loop and a scratch node has no model. The seam reports every open itself (`{"op":"open","elapsed_ms":…}`), so
-the count is one hook away once a turn can run - the binary to run it with now exists.
+WHERE IT COMES FROM. A traceback at the loop entry (`debug.traceback` in `component_run`) shows both
+invocations arriving from the same place: `lua/core/codemode.lua:1478`, the `pcall(component_run, ...)` inside
+`run_script`, called from `run_script` (`:1363`) which `M.run` calls once (`:1500`). The loop has a single call
+site, and so does `run_script`. So the second loop is not the loop and not its parent: the TOOL CALL is
+dispatched twice. That is one level above where the 23/11 report stopped looking.
+
+AND ONE SUSPECT IS OUT: `sandbox_host::available()` - what the router asks before routing - hashes the artifact
+and does not instantiate, so the availability probe is not the second open.
+
+ONE LEVEL HIGHER, MEASURED: a traceback at `M.run` (`codemode.lua:1493`) shows BOTH invocations arriving from
+`lua/core/tools.lua:3416` - the `pcall(dispatch, ...)` inside `M.dispatch`. So the tool call reaches
+`M.dispatch` twice: the agent loop dispatches the same `run` call twice, and each dispatch drives a whole
+script (two sessions, as the trace shows). The seam, the loop and `run_script` are each entered once per
+dispatch; the duplication is in the dispatcher's caller.
+NOT FIXED, deliberately. Which of the two dispatches is redundant decides what to delete, and that is a
+behaviour question about the agent loop (a preview pass? a re-dispatch after a yielded `advance`?), not a
+performance one; getting it wrong drops a tool call. The next probe is a traceback at `M.run` and at
+tools.lua's
+`run`/`codemode` branch - the traces this change adds (`WA_CODEMODE_TRACE_OPENS`) name the caller in one run.
+
+THE BUILD, for whoever runs it: the prepared asset directory is the checkout's
+`.git/codemode-assets/pi-1.2.0-quickjs-3.6.2/`, and `node scripts/codemode-build.mjs build <tree>` resolves it
+from Git metadata (here `~/.wasm-agent/build/target/wt-idle-<hash>/release/wa`). A plain `cargo build` refuses
+without assets; `WA_CODEMODE_ALLOW_EMPTY=1` is for artifacts not meant to run code mode. The component itself
+goes into the scratch home with `WA_COMPONENTS_DIR=<scratch>/home/.wasm-agent/components bash
+scripts/build-components.sh codemode` - without it the node falls back to the native loop and nothing opens.
 ## (c) A warm QuickJS instance or snapshot — skipped, with the reason
 
 Skipped deliberately. Code mode runs **model-authored code**, and the surface in front of it is exactly the

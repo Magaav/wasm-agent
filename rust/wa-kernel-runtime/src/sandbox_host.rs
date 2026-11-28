@@ -578,6 +578,17 @@ pub fn call_with(config: &Config, request: &Value) -> Value {
     };
     answer["op"] = json!(op);
     answer["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+    // A trace, because counting the opens a call makes is otherwise invisible: the guest's own `open()` is
+    // 15-21 ms of QuickJS boot, and the 23/11 measurement counted two of them for one `run` call (40 opens for
+    // 20 calls) without being able to say where the second came from. Behind an env var so nothing pays for it.
+    if std::env::var_os("WA_CODEMODE_TRACE_OPENS").is_some() {
+        let session = request.get("session").and_then(Value::as_str).unwrap_or("-");
+        eprintln!(
+            "[codemode] op={op} session={session} elapsed_ms={} ok={}",
+            answer["elapsed_ms"],
+            answer["ok"],
+        );
+    }
     answer
 }
 
