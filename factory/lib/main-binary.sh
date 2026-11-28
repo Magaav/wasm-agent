@@ -37,10 +37,25 @@ wa_main_binary_release() { # <sha> <root> <stage>
   mkdir -p "$stage" 2>/dev/null || true
   out=$(wa_node_binary_source_resolve "$root" "$sha" "$triple" "$stage" 2>/dev/null) || out=""
   dir=$(printf '%s\n' "$out" | head -1)
+  # WHICH BUNDLE ANSWERED. The resolver says so itself (`release_commit=`), and it is the publish's own answer to
+  # "is this tip covered": wa_node_release_digest_search matches this tree's compiled-inputs digest against the
+  # published manifests, so a release that comes back here IS an ancestor whose compiled inputs are the tip's. Law 17:
+  # that answer is reused, never recomputed. It travels on stdout with the path because the driver captures stdout in
+  # a subshell, where an export would die (measured: the step said `build` while a release had answered).
+  local relcommit
+  relcommit=$(printf '%s\n' "$out" | sed -n 's/^release_commit=//p' | head -1)
+  # WHICH BUNDLE ANSWERED, carried out of here so the caller's line names it (28/11). The resolver already knows
+  # whether it handed back the tip's own published bundle or an ANCESTOR whose compiled inputs cover the tip
+  # (wa_node_release_digest_search: it matches this tree's compiled-inputs digest against the published manifests,
+  # which is the publish's own "covered by" answer - law 17, not a second opinion computed here). Before this it
+  # was thrown away: every line said release-covering-commit and nobody could tell which release graded the tip.
   [ -n "$dir" ] || { echo "wa_main_binary: the resolver named no release for ${sha:0:12}" >&2; return 1; }
   local f
   for f in "$dir/wa" "$dir/wa-$triple-${sha:0:12}" "$dir"/wa-"$triple"-*; do
-    [ -x "$f" ] && { printf '%s\n' "$f"; return 0; }
+    [ -x "$f" ] || continue
+    printf '%s\n' "$f"
+    [ -n "$relcommit" ] && printf 'release_commit=%s\n' "$relcommit"
+    return 0
   done
   echo "wa_main_binary: the resolver's dir $dir holds no binary of ${sha:0:12}" >&2
   return 1
@@ -190,6 +205,45 @@ wa_main_binary_pin() { # <binary> <sha> <target> [root] -> prints the path of th
   return 1
 }
 
+# THE TIP'S PUBLISH IS NOT LATE, IT IS YOUNGER THAN THE LOOP (28/11, Victor). A tip lands, the loop looks within
+# minutes, and the publish for that tip takes 6-10 minutes - so "the tip's own bundle" almost NEVER exists at the
+# moment of the look, and refusing there means refusing every tip forever. MEASURED 00:32Z and 00:37Z: NOT GRADED on
+# every tip even though node-663e11d08d1d was published and complete.
+#
+# So the third answer is not a refusal, it is WAITING: the resolver is asked again until the publish settles, bounded
+# by WA_MAIN_PUBLISH_WAIT_SECONDS (default 600 - one publish's worth, measured 6-10 min) and polled every
+# WA_MAIN_PUBLISH_POLL_SECONDS (default 30). Each retry goes through the SAME resolver, so it answers with the tip's
+# own bundle when that appears and with a covering ancestor bundle in the meantime - the two answers the order asks
+# for, in one place, with no second implementation to drift.
+wa_main_binary_settle() { # <sha> <root> <stage>  -> the resolver's dir, and WA_MAIN_BINARY_WAITED
+  local sha=$1 root=$2 stage=$3 bound=${WA_MAIN_PUBLISH_WAIT_SECONDS:-600} poll=${WA_MAIN_PUBLISH_POLL_SECONDS:-30}
+  local out waited=0
+  case "$bound" in ''|*[!0-9]*) bound=600 ;; esac
+  case "$poll" in ''|*[!0-9]*) poll=30 ;; esac
+  [ "$poll" -gt 0 ] || poll=1
+  while [ "$waited" -lt "$bound" ]; do
+    sleep "$poll"
+    waited=$((waited + poll))
+    if out=$(wa_main_binary_release "$sha" "$root" "$stage" 2>/dev/null) && [ -n "$out" ]; then
+      printf '%s\nwaited=%s\n' "$out" "$waited"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The step string a health line carries: WHICH KIND of binary, AND WHICH BUNDLE. A reader must be able to tell the
+# tip's own publish from an ancestor that covers it, or a green line proves the wrong thing.
+wa_main_binary_step_for() { # <path> <commit> <prefix>
+  local path=$1 commit=${2:-} prefix=${3:-} whose
+  if [ -z "$commit" ]; then printf '%s\n' "${prefix}build"; return 0; fi
+  case "$path" in
+    *"${commit:0:12}"*) whose="release-this-commit" ;;
+    *) whose="release-covering-commit" ;;
+  esac
+  printf '%s\n' "${prefix}${whose}@${commit:0:12}"
+}
+
 wa_main_binary() { # <sha> [release-stage] [target-dir] [repo-root]
   local sha=${1:?usage: wa_main_binary <sha> [release-stage] [target-dir] [repo-root]}
   local stage=${2:-$HOME/.wasm-agent/health-releases}
@@ -204,14 +258,24 @@ wa_main_binary() { # <sha> [release-stage] [target-dir] [repo-root]
     rm -f "$rerr"
     # WHICH STEP ANSWERED, said by the lib that knows (28/11). The caller writes it on its health line, so a tip that
     # was graded from a PUBLISHED bundle is never read as tip that did not need one.
-    case "$out" in
-      *"${sha:0:12}"*) WA_MAIN_BINARY_STEP="release-this-commit" ;;
-      *) WA_MAIN_BINARY_STEP="release-covering-commit" ;;
-    esac
+    local path commit
+    path=$(printf '%s\n' "$out" | head -1)
+    commit=$(printf '%s\n' "$out" | sed -n 's/^release_commit=//p' | head -1)
+    WA_MAIN_BINARY_STEP=$(wa_main_binary_step_for "$path" "$commit")
     export WA_MAIN_BINARY_STEP
-    wa_main_binary_pin "$out" "$sha" "$target" "$root"; return $?
+    wa_main_binary_pin "$path" "$sha" "$target" "$root"; return $?
   fi
   why_release=$(tail -1 "$rerr" 2>/dev/null); rm -f "$rerr"
+  # (3) THE PUBLISH IS PROBABLY STILL IN FLIGHT: wait for it before paying for a build or refusing.
+  if out=$(wa_main_binary_settle "$sha" "$root" "$stage"); then
+    local spath scommit swaited
+    spath=$(printf '%s\n' "$out" | head -1)
+    scommit=$(printf '%s\n' "$out" | sed -n 's/^release_commit=//p' | head -1)
+    swaited=$(printf '%s\n' "$out" | sed -n 's/^waited=//p' | head -1)
+    WA_MAIN_BINARY_STEP=$(wa_main_binary_step_for "$spath" "$scommit" "waited-${swaited:-0}s-")
+    export WA_MAIN_BINARY_STEP
+    wa_main_binary_pin "$spath" "$sha" "$target" "$root"; return $?
+  fi
   if out=$(wa_main_binary_build "$sha" "$root" "$target"); then
     WA_MAIN_BINARY_STEP="build"
     export WA_MAIN_BINARY_STEP
