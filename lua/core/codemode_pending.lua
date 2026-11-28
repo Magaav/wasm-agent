@@ -444,7 +444,13 @@ local function operation_call(dispatch, action, args)
 end
 
 local function snapshot(dispatch, op)
-  return operation_call(dispatch, "status", { action = "status", id = op })
+  -- A PLAIN SNAPSHOT, ON DEMAND (29/11). A status of a RUNNING operation now blocks up to wait_ms (default 5 s) so a
+  -- model's look replaces N polls - but this call is the PENDING LAYER's own read, and the layer already owns the wait:
+  -- it spends the caller's wait_s in slices in `operation_poll`. Without wait_ms=0 every `wait_s: 0` call burned the
+  -- 5 s default inside its first snapshot, so a script that started work and resumed it got a SETTLED record instead of
+  -- a handle (`wait` was then called with no op), and three rows on main were red for it. One budget, one owner (law 17):
+  -- the tool waits for a model, the layer waits for a script.
+  return operation_call(dispatch, "status", { action = "status", id = op, wait_ms = 0 })
 end
 
 local function tail(dispatch, op, state)
