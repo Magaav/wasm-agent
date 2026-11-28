@@ -81,8 +81,12 @@ release="$WORK/release"
 mkdir -p "$release"
 mkelf "$release/wa-$X64-$SHORT" 3e
 mkelf "$release/wa-sentinel-$X64-$SHORT" 3e
+mkelf "$release/wa-term-$X64-$SHORT" 3e
+mkelf "$release/wa-operations-supervisor-$X64-$SHORT" 3e
 xsha="$(wa_node_sha256 "$release/wa-$X64-$SHORT")"; xbytes="$(wc -c < "$release/wa-$X64-$SHORT" | tr -d '[:space:]')"
 ssha="$(wa_node_sha256 "$release/wa-sentinel-$X64-$SHORT")"; sbytes="$(wc -c < "$release/wa-sentinel-$X64-$SHORT" | tr -d '[:space:]')"
+tsha="$(wa_node_sha256 "$release/wa-term-$X64-$SHORT")"; tbytes="$(wc -c < "$release/wa-term-$X64-$SHORT" | tr -d '[:space:]')"
+usha="$(wa_node_sha256 "$release/wa-operations-supervisor-$X64-$SHORT")"; ubytes="$(wc -c < "$release/wa-operations-supervisor-$X64-$SHORT" | tr -d '[:space:]')"
 cat > "$release/node-$SHORT.manifest" <<MANIFEST
 schema=wasm-agent-node-binaries/1
 source_commit=$COMMIT
@@ -92,8 +96,8 @@ zig_version=fixture
 glibc_floor=2.31
 codemode=embedded
 built_utc=2026-11-06T00:00:00Z
-# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes
-$X64 $xsha $xbytes $ssha $sbytes
+# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes
+$X64 $xsha $xbytes $ssha $sbytes $tsha $tbytes $usha $ubytes
 MANIFEST
 sign_release "$release"
 
@@ -248,6 +252,9 @@ contains "$out" "the build refused to start" "the refusal carries the floor's ow
 # --- an operator's directory, and the staging the deploy does ----------------------------------------
 explicit="$WORK/explicit"; mkdir -p "$explicit"
 mkelf "$explicit/wa" 3e; mkelf "$explicit/wa-sentinel" 3e
+# The whole bundle: the member list is one place (wa-sentinel, wa-term, wa-operations-supervisor), so an
+# operator directory that carries only wa and wa-sentinel cannot be staged - the deploy refuses it by name.
+mkelf "$explicit/wa-term" 3e; mkelf "$explicit/wa-operations-supervisor" 3e
 i="$(fresh explicit)"
 out="$(WA_DEPLOY_BINARY_SOURCE="$explicit" WA_NODE_TARGET="$X64" wa_node_binaries_prepare "$ROOT" "$COMMIT" "$WORK/stage-explicit" "$i" 2>&1)"
 expect_status 0 "$?" "WA_DEPLOY_BINARY_SOURCE stages"
@@ -291,6 +298,8 @@ mkbytes() { wc -c < "$1" | tr -d '[:space:]'; }
 head_release="$WORK/head-release"; mkdir -p "$head_release"
 mkelf "$head_release/wa-$X64-$HEAD_SHORT" 3e
 mkelf "$head_release/wa-sentinel-$X64-$HEAD_SHORT" 3e
+mkelf "$head_release/wa-term-$X64-$HEAD_SHORT" 3e
+mkelf "$head_release/wa-operations-supervisor-$X64-$HEAD_SHORT" 3e
 cat > "$head_release/node-$HEAD_SHORT.manifest" <<MANIFEST
 schema=wasm-agent-node-binaries/1
 source_commit=$HEAD_SHA
@@ -432,6 +441,8 @@ mk_release() { # a `-` digest writes a manifest with no compiled_inputs row (an 
   dir="$base/node-$short"; mkdir -p "$dir"
   mkelf "$dir/wa-$X64-$short" 3e
   mkelf "$dir/wa-sentinel-$X64-$short" 3e
+  mkelf "$dir/wa-term-$X64-$short" 3e
+  mkelf "$dir/wa-operations-supervisor-$X64-$short" 3e
   wa="$dir/wa-$X64-$short"; sentinel="$dir/wa-sentinel-$X64-$short"
   {
     printf 'schema=wasm-agent-node-binaries/1\nsource_commit=%s\n' "$commit"
