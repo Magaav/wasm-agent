@@ -56,21 +56,6 @@ end
 function M.providers()
   local vaulted_go = vault.base("opencode-go")
   return {
-    -- THE OFFICIAL CLAUDE CLI AS A ROUTE (mission claude-inside-wa, part B, route 1). It speaks no HTTP: wa spawns
-    -- `claude -p --output-format stream-json --verbose` and maps its stream (lua/core/claude_cli.lua). The
-    -- credential is the CLI's own, in the operator's home - this route never sees a token, holds none, and has
-    -- nothing to print. `base_url` and `api_key` are deliberately absent: there is no endpoint to call and no key
-    -- to send.
-    {
-      id = "claude-cli",
-      label = "Anthropic (Claude subscription, via the official CLI)",
-      transport = "claude-cli",
-      models = { "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" },
-      key_less = true,
-      base_url = "claude-cli:",
-      default_model = "claude-sonnet-4-5",
-      api_key = "cli-owned",
-    },
     {
       id = "opencode-go",
       label = "OpenCode Go",
@@ -108,6 +93,21 @@ function M.providers()
       -- packages/ai/catalog/providers/anthropic.ts:18 MODELS_55, and :23 claude-fable-5-2).
       models = { "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2" },
       default_model = "claude-sonnet-5-5",
+    },
+    -- THE OFFICIAL CLAUDE CLI AS A ROUTE (mission claude-inside-wa, part B, route 1). It speaks no HTTP: wa spawns
+    -- `claude -p --output-format stream-json --verbose` and maps its stream (lua/core/claude_cli.lua). The
+    -- credential is the CLI's own, in the operator's home - this route never sees a token, holds none, and has
+    -- nothing to print. `base_url` and `api_key` are deliberately absent: there is no endpoint to call and no key
+    -- to send.
+    {
+      id = "claude-cli",
+      label = "Anthropic (Claude subscription, via the official CLI)",
+      transport = "claude-cli",
+      models = { "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" },
+      key_less = true,
+      base_url = "claude-cli:",
+      default_model = "claude-sonnet-4-5",
+      api_key = "cli-owned",
     },
   }
 end
@@ -665,7 +665,8 @@ end
 function M.attribution_gaps()
   local gaps = {}
   for _, provider in ipairs(M.providers()) do
-    if not M.attribution_rule(provider) then
+    -- The claude-cli route spawns the official CLI and sends no HTTP request, so it has no headers to decide.
+    if provider.transport ~= "claude-cli" and not M.attribution_rule(provider) then
       gaps[#gaps + 1] = tostring(provider.id) .. " -> " ..
         tostring(base_host(provider.base_url) or provider.base_url)
     end
