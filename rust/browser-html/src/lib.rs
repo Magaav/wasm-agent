@@ -535,6 +535,31 @@ mod tests {
     }
 
 
+    /// The budget the report asks for, measured rather than proposed: how long the READER takes on a page of the
+    /// size the product actually serves (a calendar day, ~8 KB of markup, the shape read/tree see).
+    #[test]
+    fn ms_to_first_read_on_a_page_the_size_the_product_serves() {
+        let mut one_day = String::from("<html><body><h1>Dia 3</h1><ul>");
+        for i in 0..40 {
+            one_day.push_str(&format!("<li><a href=\"/e/{i}\">Evento {i}</a> 09:{i:02} - Reuniao</li>"));
+        }
+        one_day.push_str("</ul><table>");
+        for i in 0..20 {
+            one_day.push_str(&format!("<tr><td>Hora</td><td>Conta {i}</td><td>R$ {i}0,00</td></tr>"));
+        }
+        one_day.push_str("</table></body></html>");
+        let bytes = one_day.len();
+        let reps = 200_u32;
+        let start = std::time::Instant::now();
+        for _ in 0..reps {
+            let _ = crate::parse(&one_day).unwrap();
+        }
+        let per = start.elapsed().as_secs_f64() / f64::from(reps);
+        let lines = crate::read(&one_day).unwrap().lines().count();
+        eprintln!("ms_to_first_read: {:.3} ms per page ({bytes} bytes, {lines} lines of text)", per * 1000.0);
+        assert!(per < 0.050, "a page this size must parse in well under 50 ms, took {:.3} ms", per * 1000.0);
+    }
+
     #[test]
     fn a_submit_input_is_named_by_its_value_and_a_text_field_is_not() {
         let page = r#"<form action="/f"><input type="submit" value="Entrar"><input name="q" value="conteudo"></form>"#;
