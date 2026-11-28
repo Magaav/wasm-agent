@@ -10,6 +10,7 @@
 # directory's lib/) names the published bundle for the tip, or the tree's own build of it, or builds one in
 # its own target dir; it never returns the installed binary, and when it can name none the loop SAYS SO and
 # does not grade.
+. "$(cd "$(dirname "$0")" && pwd)/lib/refresh-self.sh"   # refresh the clone between iterations (factory/lib/refresh-self.sh)
 set -uo pipefail
 M=$HOME/Work/missions; H=$M/HANDOVER.md; C=$HOME/wasm-agent/checkout
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -36,6 +37,7 @@ fi
 G="env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C $C"
 GREEN=$(cat $M/_orch/health-green 2>/dev/null); KNOWN=" $(cat $M/_orch/health-known 2>/dev/null) "
 while true; do
+  wa_factory_refresh_self "$0" "$@"
   $G fetch -q origin; N=$($G rev-parse origin/main)
   if [ "$N" = "$(cat $M/_orch/health-last 2>/dev/null)" ]; then sleep 300; continue; fi
   # A COLD STAGE NEEDS MORE THAN THE DEFAULT BOUND (28/11: every tip NOT GRADED while c1fcda27 WAS published).

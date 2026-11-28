@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(cd "$(dirname "${WA_FACTORY_ORIG:-$0}")" && pwd)/lib/refresh-self.sh"   # refresh the clone between iterations
 # FACTORY RE-EXEC (orchestrator 23/11, Fable): run from a private copy, so an edit to this file can't break a run already started.
 if [ "${WA_FACTORY_COPY:-}" != "$$" ]; then _c=$(mktemp "$HOME/Work/missions/_orch/run-copies/$(basename "$0").XXXXXX") && cp "$0" "$_c" && WA_FACTORY_COPY=$$ WA_FACTORY_ORIG="$0" exec bash "$_c" "$@"; fi
 unset WA_FACTORY_COPY; case "$0" in */_orch/run-copies/*) trap 'rm -f -- "$0"' EXIT;; esac
@@ -17,6 +18,7 @@ live() {
 }
 active() { { live; systemctl --user list-units 'mission-*' --state=active --no-legend | awk '{print $1}' | sed -E 's/^mission-//; s/(-r[0-9]*)?\.service$//'; } | sort -u | wc -l; }
 for n in "${next[@]}"; do
+  wa_factory_refresh_self
   while [ "$(active)" -ge "$(cat $M/_orch/max-workers 2>/dev/null || echo 5)" ] || [ "$(cut -d. -f1 /proc/loadavg)" -ge 14 ] \
      || ! wa-sentinel status 2>/dev/null | grep -qE 'requests: *0 waiting' \
      || systemctl --user list-units 'wa-deploy-*' --state=active --no-legend | grep -q .; do sleep 60; done
