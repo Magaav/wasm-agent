@@ -365,4 +365,4 @@ email-index 7c41a91aed440e1507504f3f7f0fa55a9df0f4381f358dc95f40dc31b0aa252e 209
 # 28/11 first pin of browser (agent-browser-from-scratch stage 1): a page as text and as an accessibility-style
 # tree (wit/browser), with no layout, no rendering, no script and no socket. The `open` verb - HTTP through
 # the host sockets with a cookie jar and a per-site allow-list - is the second half and is NOT in this artifact.
-browser 45f5002faf54474212a48e746f325f6ca90607dc409ff6ad44dc625aa79a5a71 110954
+browser 80102552b5f53496a061dfccb034c2294b3e9fb1bbb2ea2b2959e313cc936243 110958
