@@ -26,6 +26,18 @@ wasmtime::component::bindgen!({
     world: "media-service",
 });
 
+/// The KERNEL-side contract (`wa:kernel/media@0.2.0`), generated from the package the runner links. A component
+/// that wants media declares `world service-media` - the same shape the image reader uses with
+/// `service-vision` - and the runner serves it from here. Generating these bindings is also what proves the
+/// interface parses; the `Host` impl and its linker call land with the runner wiring, and nothing is served
+/// until they do.
+pub mod kernel_media {
+    wasmtime::component::bindgen!({
+        path: "../../wit/kernel-v2",
+        world: "service-media",
+    });
+}
+
 /// Load the INSTALLED component by name - `components::load` verifies its bytes against the pin beside it,
 /// and `service_components_v2::compiled` compiles it through the node's cache, so a second call costs nothing.
 /// A caller that named a path instead would bypass the pin, which is the one thing installation exists for.
