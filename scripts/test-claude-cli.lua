@@ -18,6 +18,22 @@ eq(table.concat(argv, ' '), '-p --output-format stream-json --verbose --model cl
 eq(argv[1] ~= 'hello', true, 'the prompt is not on the command line')
 eq(table.concat(claude.command(nil), ' '), '-p --output-format stream-json --verbose', 'argv without a model')
 
+-- 1b. A TURN's argv: wa's MCP server, ONLY our tool, the CLI's own tools named as denied, and the session.
+local turn = claude.command('claude-sonnet-4-5', {
+  mcp_config = '/tmp/wa-run.json',
+  allowed = 'mcp__wa__run',
+  disallowed = 'Bash,Read,Write,Edit,Task,WebFetch,WebSearch',
+  session_id = 'sess-1',
+})
+local joined = table.concat(turn, ' ')
+eq(joined:find('%-%-mcp%-config /tmp/wa%-run%.json') ~= nil, true, 'mcp-config in argv')
+eq(joined:find('%-%-allowedTools mcp__wa__run') ~= nil, true, 'only our tool allowed')
+eq(joined:find('%-%-disallowedTools Bash') ~= nil, true, 'the CLI own tools are denied by name')
+eq(joined:find('%-%-session%-id sess%-1') ~= nil, true, 'first call starts the session')
+local resumed = claude.command('m', { session_id = 'sess-1', resume = true })
+eq(table.concat(resumed, ' '):find('%-%-resume sess%-1') ~= nil, true, 'a later turn resumes it')
+eq(joined:find('%-%-system%-prompt') == nil, true, 'no partial system prompt is ever passed')
+
 -- 2. The events, exactly as observed.
 eq(claude.event('{"type":"system","subtype":"init","session_id":"s1","tools":["Bash"]}').kind, 'init', 'init')
 eq(claude.event('{"type":"system","subtype":"init","session_id":"s1"}').session_id, 's1', 'init session')

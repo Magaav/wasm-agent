@@ -24,11 +24,37 @@ M.FLAGS = {
 
 -- The argv for one call. The prompt goes on STDIN, never on the command line: a prompt is conversation content and
 -- `ps` is world-readable.
-function M.command(model)
+-- The argv for one call. `opts` carries what a TURN needs and a bare call does not:
+--   opts.mcp_config  - the JSON file describing wa's own `run` MCP server (scripts/wa-mcp-run.mjs)
+--   opts.allowed     - the ONLY tools the CLI may use (ours); the CLI's own set is disabled
+--   opts.disallowed  - the CLI's own tools, named so the restriction is visible in the argv, not implied
+--   opts.session_id  - the CLI session this turn belongs to (one wa turn = one CLI call)
+--   opts.resume      - continue that session instead of starting it
+-- `--system-prompt` is NOT passed here: wa builds its system prompt by concatenation across modules
+-- (lua/core/prompt_sections.lua, agent.lua), and passing a partial sentence would change what the model reads.
+-- Until the assembled text is available as one value, the route refuses a turn rather than paraphrasing it.
+function M.command(model, opts)
+  opts = opts or {}
   local argv = { M.FLAGS.print, M.FLAGS.output_format, M.FLAGS.stream_json, M.FLAGS.verbose }
   if model and model ~= "" then
     argv[#argv + 1] = M.FLAGS.model
     argv[#argv + 1] = model
+  end
+  if opts.mcp_config then
+    argv[#argv + 1] = "--mcp-config"
+    argv[#argv + 1] = opts.mcp_config
+  end
+  if opts.allowed then
+    argv[#argv + 1] = "--allowedTools"
+    argv[#argv + 1] = opts.allowed
+  end
+  if opts.disallowed then
+    argv[#argv + 1] = "--disallowedTools"
+    argv[#argv + 1] = opts.disallowed
+  end
+  if opts.session_id then
+    argv[#argv + 1] = opts.resume and "--resume" or "--session-id"
+    argv[#argv + 1] = opts.session_id
   end
   return argv
 end
