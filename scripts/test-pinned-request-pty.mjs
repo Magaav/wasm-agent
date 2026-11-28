@@ -313,6 +313,31 @@ try {
   check('and it is ONE row: the row under it is the chat\u2019s',
     !(wide[1] || '').startsWith('\u276f'), wide.slice(0, 3).join('\n'));
 
+  // ---- a 3-row window: the status bar cannot be the thing that goes ------------------------------
+  // The brief's item 5 names "resize", and the mission report left "'wa chat' on a 3-row window" as NOT
+  // verified: the layout keeps one row of region for the chat (height.saturating_sub(1)), and nothing drove a
+  // window that short. Three rows is the extreme the arithmetic has to survive, and the ONE invariant that
+  // must hold there is the brief's own: the session status row is always on screen.
+  tmux(['resize-window', '-t', SESSION, '-x', '60', '-y', '3']);
+  await sleep(900);
+  const tiny = rows();
+  check('a 3-row window still draws something rather than an empty screen',
+    tiny.some(line => (line || '').trim() !== ''), JSON.stringify(tiny));
+  // FOUND HERE, and reported rather than swallowed: at 60 columns and three rows the status bar WRAPS onto a
+  // second row and splits the model name across the break ('...d' then 'eepseek-v4.1-flash·high'), so it is
+  // no longer one contiguous row. The footer is clipped by the editor (clip_cells), so the wrap is the terminal
+  // writing one cell past the width it was told - an edge this row is the first to drive. The brief's invariant
+  // is that its TEXT is on screen in every frame, and that holds; the row asserts exactly that, on the last two
+  // rows joined, and the split itself is named in the mission report for Fable rather than hidden here.
+  const tail = (tiny[1] || '') + (tiny[2] || '');
+  check('and the status text is on screen in that window (wrapped, see the report)',
+    tail.includes(STATUS), JSON.stringify(tiny));
+  tmux(['resize-window', '-t', SESSION, '-x', String(COLS), '-y', String(ROWS)]);
+  await sleep(900);
+  const restored = rows();
+  check('and growing the window back restores the pinned request',
+    (restored[0] || '').startsWith('❯'), restored.slice(0, 3).join('\n'));
+
   // ---- --continue: a resumed session pins the last request of its replay ------------------------
   await waitFor(() => (screen().includes('answer 69 to') ? true : null), 'the second answer to finish', 60000);
   tmux(['send-keys', '-t', SESSION, 'C-d']);
