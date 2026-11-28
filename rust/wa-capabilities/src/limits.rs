@@ -443,31 +443,39 @@ pub fn bar(percent: f64, width: usize) -> String {
     text
 }
 
-/// Lua's status.resets, in its words: ` resets in 2.4h`, ` resets now`, or the raw value.
-pub fn resets(value: Option<&Value>, now: u64) -> String {
-    let Some(value) = value else { return String::new() };
+/// Lua's status.countdown, in the same words (Victor, 28/11): `28d 02h 08m 01s`, `02h 08m 01s`, `08m 01s`, `08s`.
+/// Zero-padded hh/mm/ss, days never padded, and the largest unit that is not zero starts the string.
+pub fn countdown(seconds: u64) -> String {
+    let (d, rest) = (seconds / 86400, seconds % 86400);
+    let (h, rest) = (rest / 3600, rest % 3600);
+    let (m, s) = (rest / 60, rest % 60);
+    if d > 0 { return format!("{d}d {h:02}h {m:02}m {s:02}s") }
+    if h > 0 { return format!("{h:02}h {m:02}m {s:02}s") }
+    if m > 0 { return format!("{m:02}m {s:02}s") }
+    format!("{s:02}s")
+}
+
+/// WHEN THE WINDOW RESETS, from a number or an ISO timestamp WITH OR WITHOUT FRACTIONAL SECONDS.
+///
+/// The fraction is what broke the panel: `2026-11-28T13:25:55.000Z` did not parse here either, so the row printed
+/// the raw string - the exact line Victor read on 28/11. A value that still cannot be read answers None, and the
+/// caller says "unknown" in words instead of printing a timestamp nobody asked for.
+pub fn reset_at(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
     let at = match value {
         Value::Number(number) => number.as_f64(),
         Value::String(text) => iso_seconds(text),
         _ => None,
-    };
-    let Some(mut at) = at else {
-        return match value {
-            Value::String(text) if !text.is_empty() => format!(" resets {text}"),
-            _ => String::new(),
-        };
-    };
-    if at > 1e12 { at /= 1000.0; }
-    let left = at - now as f64;
-    if left <= 0.0 { return " resets now".to_string() }
-    if left < 3600.0 { return format!(" resets in {}m", (left / 60.0).ceil() as u64) }
-    if left < 172800.0 { return format!(" resets in {:.1}h", left / 3600.0) }
-    format!(" resets in {:.1}d", left / 86400.0)
+    }?;
+    Some(if at > 1e12 { at / 1000.0 } else { at })
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` as epoch seconds (the only shape the provider sends).
 fn iso_seconds(text: &str) -> Option<f64> {
+    // THE FRACTION GOES FIRST (28/11): a provider that sends `.000Z` must not defeat the parser and print a
+    // raw timestamp in a countdown column.
     let text = text.trim().trim_end_matches('Z');
+    let text = match text.split_once('.') { Some((head, _)) => head, None => text };
     let (date, time) = text.split_once('T')?;
     let mut d = date.split('-');
     let (year, month, day) = (d.next()?.parse::<i64>().ok()?, d.next()?.parse::<i64>().ok()?, d.next()?.parse::<i64>().ok()?);
@@ -496,8 +504,14 @@ pub fn row_texts(provider: &str, now: u64) -> Vec<String> {
         // THE SAME ROW LUA BUILDS, CELL FOR CELL (status.M.limit_rows): a 16-cell bar and the reset time as the
         // last field, so the row is 43 cells and still inside a narrow panel's room (52). At a 24-cell bar it
         // measured 53 and the console cut the reset off - the one part of the row a reader cannot infer.
-        rows.push(format!("  {:<3} {} {:>3.0}%  {}", label, bar(percent, 16), percent,
-            resets(entry.get("resetsAt"), now).trim()).trim_end().to_string());
+        // THE SAME ROW LUA BUILDS (status.M.limit_block): no left indent, the window and its bar on the left,
+        // the COUNTDOWN on the right. The old row carried "resets in 3.0h" and began with two spaces.
+        let countdown = match reset_at(entry.get("resetsAt")) {
+            Some(at) if at - now as f64 > 0.0 => countdown((at - now as f64) as u64),
+            Some(_) => "now".to_string(),
+            None => "unknown".to_string(),
+        };
+        rows.push(format!("{:<3} {} {:>3.0}%  {}", label, bar(percent, 16), percent, countdown));
         shown += 1;
     }
     if shown == 0 {

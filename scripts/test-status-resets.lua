@@ -33,10 +33,16 @@ if type(status.limit_rows) ~= 'function' then
   print('status resets FAILED: there is no named builder for a limits row')
   return
 end
-local rows = status.limit_rows({ rolling = { percent = 4, resetsAt = os.time() + 10800 } }, {})
-check(type(rows) == 'table' and #rows == 1, 'one window makes one row: ' .. tostring(rows and #rows))
-local row = rows[1]
-check(row:find('resets in', 1, true) ~= nil, 'the row names when it resets: ' .. tostring(row))
+-- TWO COLUMNS (Victor, 28/11): the words 'resets in' are the second column's HEADER now, and each row carries a
+-- countdown. The always-drawn assertion below still holds: the countdown is the last thing on the row, so cutting
+-- the row must not cut it.
+local block = status.limit_block({ rolling = { percent = 4, resetsAt = os.time() + 10800 } }, { title = 'p  (in use)' })
+check(type(block) == 'table' and #block == 2, 'one window makes a header and a row: ' .. tostring(block and #block))
+check(block[1]:find('resets in', 1, true) ~= nil, 'the header names the second column: ' .. tostring(block[1]))
+local row = block[2]
+check(row:sub(-1) == 's' or row:find('now', 1, true) ~= nil or row:find('unknown', 1, true) ~= nil,
+  'the row ends with a countdown: ' .. tostring(row))
+check(row:find('resets in', 1, true) == nil, 'and does not repeat the header words: ' .. tostring(row))
 
 -- THE ASSERTION THAT WAS MISSING: the row still says it AFTER the panel cuts it to the room it has.
 local function clip(text, room)
@@ -49,7 +55,7 @@ local function clip(text, room)
   return table.concat(out) .. '\226\128\166'
 end
 local drawn = clip(row, PANEL_ROOM)
-check(drawn:find('resets', 1, true) ~= nil,
+check(cells(row) <= PANEL_ROOM or drawn:find('unknown', 1, true) ~= nil or drawn:find('%d%s*$') ~= nil,
   string.format('a limits row (%d cells) still names its reset after the panel cuts it to %d: %s',
     cells(row), PANEL_ROOM, tostring(drawn)))
 
