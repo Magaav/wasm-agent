@@ -26,11 +26,51 @@ trap 'rm -rf "$WORK"' EXIT
 fail() { printf 'FAIL test-release-lock-pin: %s\n' "$*" >&2; exit 1; }
 checks=0
 
-[ -f "$LOCK" ] || fail 'release_lock_missing'
-pin_sha=$(wa_lua_part_lock_value "$LOCK" lua-core sha256) || fail 'pin_has_no_sha256'
-pin_bytes=$(wa_lua_part_lock_value "$LOCK" lua-core bytes) || fail 'pin_has_no_bytes'
-pin_iface=$(wa_lua_part_lock_value "$LOCK" lua-core interface) || fail 'pin_has_no_interface'
-checks=$((checks+1)); echo "ok 1: lua-core pinned, ${pin_bytes} bytes, interface=${pin_iface:0:12}…"
+# No pin file is a VALID state on main (design, 28/11): the pin belongs to the release cut, written by the publisher. The row judges both states below; only a present-but-wrong pin is a failure.
+# 1. WHERE THE PIN COMES FROM (design, 28/11, the read): a pin of the LUA TREE belongs to the RELEASE CUT, not to
+# main. Main carried one for a day and it had to be re-pinned by hand after every landing that touched lua/ - three
+# times - so between those landings main's pin was stale by definition, and each re-pin raced whatever else was
+# landing. The publisher writes the pin at cut time; main carries none.
+#
+# So this row judges two states, and says which one it is in:
+#   * main carries NO release.lock   -> the publisher must produce a well-formed line for this tree, and that line
+#                                       must name the bytes it just wrote (the pin a cut would carry);
+#   * a release.lock IS present       -> it must be this tree's build (a cut tree, or a branch testing one), and the
+#                                       rest of this row judges it against the publisher exactly as before.
+mode=no-pin
+if [ -f "$LOCK" ]; then
+  mode=pin
+  pin_sha=$(wa_lua_part_lock_value "$LOCK" lua-core sha256) || fail 'pin_has_no_sha256'
+  pin_bytes=$(wa_lua_part_lock_value "$LOCK" lua-core bytes) || fail 'pin_has_no_bytes'
+  pin_iface=$(wa_lua_part_lock_value "$LOCK" lua-core interface) || fail 'pin_has_no_interface'
+  checks=$((checks+1)); echo "ok 1: release.lock pins lua-core, ${pin_bytes} bytes, interface=${pin_iface:0:12}…"
+else
+  [ -n "${WA_BIN:-}" ] && [ -x "${WA_BIN:-}" ] || { printf 'skipped: main carries no pin and no WA_BIN was given, so no interface can be read to make one\n'; exit 0; }
+  pin_iface=$("$WA_BIN" --interface 2>/dev/null | head -1)
+  [ "${#pin_iface}" = 64 ] || fail "the host answered no interface digest: '${pin_iface}'"
+  pin_dir=$WORK/pin
+  mkdir -p "$pin_dir"
+  pubtext=$(WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt" bash scripts/lua-part-publish.sh \
+    --tree "$ROOT" --interface "$pin_iface" --commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" --out "$pin_dir" 2>&1) || fail "the publisher produced no pin: $pubtext"
+  # The lock line is the one line that STARTS with the part name; the publisher also reports what it signed, and
+  # taking its last line picked a sentence instead of the pin (measured the first time this branch ran without a
+  # lock on main).
+  line=$(printf '%s\n' "$pubtext" | grep -m1 '^lua-core ' || true)
+  case "$line" in
+    lua-core\ *) : ;;
+    *) fail "the publisher's line is not a lock line: $line" ;;
+  esac
+  pin_sha=$(printf '%s' "$line" | awk '{print $2}')
+  pin_bytes=$(printf '%s' "$line" | awk '{print $3}')
+  built=$(sha256sum < "$(ls "$pin_dir"/lua-core-*.tar.gz | head -1)" | awk '{print $1}')
+  [ "$pin_sha" = "$built" ] || fail "the pin the cut would carry is not the bytes it wrote: line $pin_sha, file $built"
+  # Every check below reads a LOCK FILE, so the pin the cut would carry is written to one in the scratch dir and
+  # the row carries on against it. That keeps one code path: what is judged is always "a lock file, and the tree
+  # it names", whether that file ships on main (it does not) or is produced at cut time (it is).
+  printf 'lua-core %s %s interface=%s\n' "$pin_sha" "$pin_bytes" "$pin_iface" > "$WORK/derived.lock"
+  LOCK="$WORK/derived.lock"
+  checks=$((checks+1)); echo "ok 1: main carries NO pin; the publisher writes one for this tree (${pin_bytes} bytes, interface=${pin_iface:0:12}…)"
+fi
 
 # 2. THE PIN IS THIS TREE'S BUILD.
 interface_arg=${WA_INTERFACE_OVERRIDE:-$pin_iface}
