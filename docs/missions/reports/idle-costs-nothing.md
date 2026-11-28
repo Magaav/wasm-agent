@@ -66,6 +66,11 @@ routes a script, and it hashes the artifact and returns - it does not instantiat
 is not the availability probe. The run surface then goes through `dispatch("open"|"advance"|"finish")`
 (`sandbox_host.rs`) and the Lua policy around it (`lua/core/agent.lua`, `codemode_policy.lua`).
 
+AND THE LAYERS UNDER IT OPEN ONCE. `lua/core/codemode.lua:973` is the loop's single
+`seam({op='open',...})` per script, and `sandbox_host::dispatch` opens once per open op. So the 23/11 count of
+two opens per run call comes from neither of those layers opening twice: it comes from the CALLER. That is the
+narrowing this report can offer - "who calls the loop twice" - and it is a question a driven turn answers and a
+code read cannot.
 WHAT COUNTING OPENS STILL NEEDS: a real turn with a provider, because the `run` tool is driven by the agent
 loop and a scratch node has no model. The seam reports every open itself (`{"op":"open","elapsed_ms":…}`), so
 the count is one hook away once a turn can run - the binary to run it with now exists.
