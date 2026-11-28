@@ -37,7 +37,14 @@ build_companion() { # <bin name> <target dir>
   command -v cargo >/dev/null 2>&1 || return 1
   # A VIRTUAL WORKSPACE NEEDS THE PACKAGE NAMED: `cargo build --bin X` from rust/ refuses, so the crate is named
   # explicitly. Measured: without -p the build failed and the row SKIPped a third time.
-  ( cd "$root/rust" && timeout 900 cargo build --release -p "$bin" --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
+  # TWO SHAPES, TRIED IN ORDER: wa-operations-supervisor is a WORKSPACE MEMBER (-p works); wa-sentinel is its OWN crate
+  # under rust/wa-sentinel and `-p` cannot name it at all (measured: "package ID specification `wa-sentinel` did not match
+  # any packages"). A row that assumes one shape SKIPs on the other, four times in a row.
+  if [ -f "$root/rust/$bin/Cargo.toml" ]; then
+    ( cd "$root/rust/$bin" && timeout 900 cargo build --release --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
+  else
+    ( cd "$root/rust" && timeout 900 cargo build --release -p "$bin" --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
+  fi
   [ -x "$dir/$bin" ]
 }
 WA_DIR="$(dirname "$WA_BIN")"
