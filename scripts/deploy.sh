@@ -179,6 +179,12 @@ sentinel_restart() {
 # this says what the *deploy* did, so a woken run reads one small file instead of re-deriving the answer
 # from installed.txt, deploy.log, hashes and the sentinel status. `fail` writes it too, so a refusal is a
 # result and not only a log line.
+# DOES THIS DEPLOY HOLD THE RUNNING-STATE RECORD? (25/11, item 6 of installer-refuses-a-target): a deploy that was
+# refused before it wrote that record - deploy_alive_held, the deploy lock, a preflight refusal - must NOT rewrite
+# the shared deploy-result.json, because the follower of the FIRST deploy reads it by timestamp and would call a
+# running install "failed". 1 = this deploy may write the shared result; 0 = it writes only its own request and the log.
+HOLDS_ALIVE=0
+
 write_result() { # ok detail [verdict] [problems]
   case "$REQUEST_ID" in *[!a-zA-Z0-9-]*) REQUEST_ID="" ;; esac
   _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
@@ -192,10 +198,14 @@ write_result() { # ok detail [verdict] [problems]
   # a file written by an older deploy has no verdict, and then ok means what it always meant.
   local verdict="${3:-}" problems="${4:-0}"
   [ -n "$verdict" ] || { [ "$1" = true ] && verdict=installed || verdict=failed; }
+  # THE SHARED RESULT BELONGS TO THE DEPLOY THAT HOLDS THE RECORD (25/11, item 6): a refusal that never touched the
+  # install writes its own request's result and a log line, never this file.
+  if [ "${HOLDS_ALIVE:-1}" = 1 ]; then
   printf '{"verdict":"%s","problems":%s,"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s","phases":%s}\n' \
     "$verdict" "$problems" "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
     "${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-}}" "$(_esc "$2")" "$(_esc "$REASON")" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_esc "$REQUEST_ID")" "$(_esc "$EXPECTED_SHA")" "$(wa_phases_json)" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
+  fi
   if [ -n "$REQUEST_ID" ]; then
     mkdir -p "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID"
     cp "$INSTALL_DIR/deploy-result.json" "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID/result.json" 2>/dev/null || true
@@ -504,6 +514,10 @@ SOURCE_ROOT="$ROOT"
 # none of which touches the network, and before the first thing that does (0e, the components question).
 # A LIVE HOLDER'S FILE IS NEVER TAKEN OVER, and the trap below clears only our own: a second deploy that is turned
 # away must not release the sessions the first one is holding.
+if ! command -v wa_deploy_alive_write >/dev/null 2>&1; then
+  # no record mechanism: nothing can be "held" here, so this deploy writes the shared result as it always did
+  HOLDS_ALIVE=1
+fi
 if command -v wa_deploy_alive_write >/dev/null 2>&1; then
   # A REFUSAL IS NOT SWALLOWED (25/11, measured in the runner: rows/20261125T044552Z). The 2>/dev/null here hid
   # refused(deploy_alive_held) and the deploy then walked on - through the pin check, to a fail that cleared the
@@ -511,6 +525,7 @@ if command -v wa_deploy_alive_write >/dev/null 2>&1; then
   _alive_err="${TMPDIR:-/tmp}/deploy-alive.$$.err"
   if wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" 2>"$_alive_err"; then
     rm -f "$_alive_err"
+    HOLDS_ALIVE=1
     note "deploy: running state written (pid $$)"
   else
     _alive_rc=$?
@@ -518,12 +533,18 @@ if command -v wa_deploy_alive_write >/dev/null 2>&1; then
     rm -f "$_alive_err"
     case "$_alive_msg" in
       "refused(deploy_alive_held)"*)
+        # A REFUSED DEPLOY DOES NOT OWN THE RECORD (25/11, item 6): the deploy that IS running holds it, and this one
+        # must not rewrite the result its follower is reading.
+        HOLDS_ALIVE=0
         # A REFUSAL BEFORE ANYTHING WAS TOUCHED IS A PRE-SWAP REFUSAL (25/11, Fable's fix 2): it used to exit 3
         # with problems=1, and exit 3 now MEANS "installed, with problems" - a lie about a deploy that never
         # touched the node. fail() is the pre-swap path: exit 1, problems 0, the same four writes as every other.
         fail "$_alive_msg"
         ;;
     esac
+    # NO RECORD MECHANISM IS NOT A CONFLICT (25/11): with no `wa_deploy_alive_write` there is no running-state record
+    # to own, so the shared result keeps being written exactly as before.
+    HOLDS_ALIVE=1
     note "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
   fi
 fi
