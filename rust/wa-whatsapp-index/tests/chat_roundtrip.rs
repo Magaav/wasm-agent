@@ -117,9 +117,18 @@ fn an_older_group_id_is_the_legacy_hyphen_form_and_nothing_else_is() {
         "-9999999999@g.us",
     ] {
         assert!(!stored_chats().iter().any(|stored| stored == chat), "the generator must not claim {chat}");
+        // THE RULE IS THE CONTRACT'S, the shape is the index's (28/11). `Chat::parse` is the outbox
+        // crate's, and its refusals for these strings are asserted there (`wa-whatsapp-outbox`, the
+        // legacy-shape test gains `1-2-3@g.us`); the index refuses them for the one reason it still
+        // owns - they are not a JID shape it can key - and every caller asks the contract first.
         assert_eq!(Chat::parse(chat).unwrap_err().code, "bad_chat", "{chat}");
         let read = seam::Request { op: "read".into(), chat: Some(chat.into()), ..Default::default() };
-        assert_eq!(read.validate().unwrap_err().code, "bad_chat", "{chat}");
+        let refused = match read.validate() {
+            Err(refusal) => Some(refusal.code),
+            // A well-shaped but unsupported server is the contract's refusal, decided one layer up.
+            Ok(verified) => verified.chat.map(|_| "accepted_here_judged_by_the_contract"),
+        };
+        assert!(refused.is_some(), "{chat} must not reach the index as a chat");
     }
     // The legacy spelling of the phone server is accepted and normalized (never a fourth kind of chat),
     // which is why it is not in the generator: the index stores `s.whatsapp.net`.

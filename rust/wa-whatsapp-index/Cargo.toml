@@ -13,12 +13,14 @@ publish = false
 [dependencies]
 # The exact-JID rule is the outbox's: a chat a query names is validated by the same code the send path
 # uses, so "exact JID" means one thing on this node.
-wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+# The tests assert the CONTRACT's rules (wa-whatsapp-outbox::Chat) beside the index's shape check; the
+# library itself no longer names that crate (28/11), which is what took it out of the node.
+wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 # The round-trip test drives the real queue the node serves to components (`wa:queue` over
 # `rust/wa-queue`), so "enqueue -> component answers -> done", dedupe and expiry are measured against
 # the queue's own semantics instead of a model of them.
