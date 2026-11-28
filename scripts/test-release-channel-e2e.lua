@@ -50,7 +50,27 @@ local stub_bin = stub_dir .. "/bin"
 local gh_state = stub_dir .. "/gh"
 local build_root = home .. "/.wasm-agent/build/target"
 local cargo_dir = stub_dir .. "/cargo-target"
-local real_node = must("command -v node")
+-- THE REAL NODE, NOT A SHIM THAT WANTS TO INSTALL ITSELF. Measured 28/11 on this node: `command -v node` is
+-- ~/.local/share/mise/shims/node, and this row runs the step under a SCRATCH HOME - so the shim looked for a node in
+-- the scratch mise data dir, found none, said "mise by @jdx - installing 1 tool", and the build died offline while
+-- reporting only build_failed. A shim is a launcher, not the tool. Asking mise (`mise which node`) was tried first and
+-- was NOT enough: the value this row captured was still the shim. So the tool is found the way a shell would find it,
+-- skipping the directories that hold launchers: the first executable on PATH outside a mise shim/command-wrapper dir.
+local function real_tool(name)
+  local found = must("command -v " .. name)
+  local script = [[
+set -f
+for d in $(printf %s "$PATH" | tr : " "); do
+  case "$d" in *mise/shims*|*mise/command-wrappers*) continue ;; esac
+  [ -x "$d/@NAME@" ] && { printf %s "$d/@NAME@"; exit 0; }
+done
+exit 1
+]]
+  local scan = must((script:gsub("@NAME@", name)))
+  if scan ~= "" then return scan end
+  return found
+end
+local real_node = real_tool("node")
 must("rm -rf '" .. stub_dir .. "' && mkdir -p '" .. stub_bin .. "' '" .. gh_state .. "' '" .. build_root .. "' '" .. cargo_dir .. "'",
   "the row's stand-in directory")
 -- THE FAKE GITHUB is the shared one (scripts/lib/fake-gh.sh): one fake, judged by two rows.
