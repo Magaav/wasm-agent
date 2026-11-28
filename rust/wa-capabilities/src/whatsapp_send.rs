@@ -281,7 +281,7 @@ const WORKER: &str = "wa-whatsapp";
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use wa_whatsapp_outbox::Decision;
+    use wa_whatsapp_outbox::{self as outbox, Decision, Request as OutboxRequest};
 
     /// The capability the rule is written under (`node_policy::check_whatsapp_send` names it; the
     /// tests here write a policy file with it, so a rename has to be made in one place).
