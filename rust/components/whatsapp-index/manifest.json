@@ -1,0 +1,12 @@
+{
+  "name": "whatsapp-index",
+  "kind": "mcp",
+  "needs_wasi_sdk": false,
+  "description": "The WhatsApp query contract: the op list, what a request may carry, which arguments make one valid, and the words a refusal and an answer use",
+  "capabilities": {
+    "env": [],
+    "file_env": [],
+    "net": [],
+    "dirs": []
+  }
+}
