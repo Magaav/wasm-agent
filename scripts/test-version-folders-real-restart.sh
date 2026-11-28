@@ -35,7 +35,9 @@ build_companion() { # <bin name> <target dir>
   root="$(cd "$(dirname "$0")/.." && pwd)"
   [ -f "$root/rust/Cargo.toml" ] || return 1
   command -v cargo >/dev/null 2>&1 || return 1
-  ( cd "$root/rust" && timeout 900 cargo build --release --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
+  # A VIRTUAL WORKSPACE NEEDS THE PACKAGE NAMED: `cargo build --bin X` from rust/ refuses, so the crate is named
+  # explicitly. Measured: without -p the build failed and the row SKIPped a third time.
+  ( cd "$root/rust" && timeout 900 cargo build --release -p "$bin" --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
   [ -x "$dir/$bin" ]
 }
 WA_DIR="$(dirname "$WA_BIN")"
