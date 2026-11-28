@@ -114,6 +114,20 @@ CANDIDATE="$DIR/wa-$TRIPLE-$SOURCE_SHORT"
 [ -f "$CANDIDATE" ] || fail "release_binary_missing: $CANDIDATE is not in the verified release directory"
 [ -f "$DIR/SHA256SUMS" ] || fail "release_sums_missing: $DIR carries no SHA256SUMS, so upgrade.sh cannot verify the candidate"
 
+# THE RUNTIME NAMES, BESIDE THE BINARY BEFORE upgrade.sh SEES IT (decision 27/11). upgrade.sh resolves its
+# siblings by the name `wa` uses at runtime: dirname of the binary it is handed, then a plain wa-term /
+# wa-operations-supervisor (scripts/upgrade.sh:168-185). A release directory holds the SUFFIXED asset names,
+# so without this a cover install refuses term_program_missing for a set it has just verified and signature-
+# checked - measured: every cover install ended in release_install: upgrade_refused. The names are copies of
+# the bytes already verified in $DIR; upgrade.sh keeps ONE naming rule and nothing here renames an asset.
+for _member in wa-term wa-operations-supervisor; do
+  _src="$DIR/$_member-$TRIPLE-$SOURCE_SHORT"
+  [ -f "$_src" ] || continue
+  cp -f "$_src" "$DIR/$_member" || fail "release_stage_failed: $DIR/$_member could not be staged beside $CANDIDATE"
+  chmod +x "$DIR/$_member" 2>/dev/null || true
+done
+unset _member _src
+
 say "upgrading: bash scripts/upgrade.sh $CANDIDATE --release $DIR"
 # THE TWO FACTS THE INSTALLER CANNOT COMPUTE ON A TREE-LESS NODE, handed to the one place that judges a cover
 # (scripts/upgrade.sh: release_cover_lua_unknown / _unrecorded / _mismatch). WA_UPGRADE_REQUESTED_COMMIT is the

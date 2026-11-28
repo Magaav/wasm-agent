@@ -2426,12 +2426,6 @@ record_installed() {
     printf 'policy_warnings=%s\n' "$(printf '%s' "$WA_POLICY_WARNINGS" | tr '\r\n' '  ')" >> "$record_tmp" \
       || fail "node installed, but the policy warning line could not be written"
   fi
-  # REFUSE BEFORE THE MOVE (measured): the unknown-commit check below ran AFTER this mv, so the record it
-  # refused had already replaced the good one - the refusal said "refusing to write a record" while the
-  # file on disk was exactly that record. The temp file is removed here so a refusal leaves no trace.
-  case "${record_commit:-}" in
-    ''|unknown) rm -f "$record_tmp"; fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
-  esac
   mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
     || fail "node installed, but installed.txt could not be committed atomically"
   # A record nobody can act on is worse than no record: `unknown` is exactly what a staleness check reads
@@ -2440,7 +2434,11 @@ record_installed() {
   local recorded_commit
   recorded_commit="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
   case "$recorded_commit" in
-    ''|unknown) fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
+    # RECORDED, NOT REFUSED (review 27/11): this step is reached AFTER the swap and deploy.sh's own rule is a
+    # refusal BEFORE it and a recorded problem after it - a fail here leaves the new bytes running under the
+    # interim record, the state that rule exists to prevent. The why is already on the record (record_id_why)
+    # from the non-40-hex path above; this line names the consequence for a reader.
+    ''|unknown) post_swap_problem "recording: installed.txt names commit=unknown, which a staleness check reads as nothing to do" ;;
   esac
 }
 # EXPORTED: upgrade.sh runs as a CHILD process (bash "$UPGRADE") and its staging path calls this writer,

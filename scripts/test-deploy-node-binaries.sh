@@ -871,11 +871,14 @@ contains "$record" "binary_source_commit=$HEAD_SHA" "the record names the source
 contains "$record" "sentinel_sha256=sentinelhash" "the record still names the installed supervisor's hash"
 if printf '%s' "$record" | grep -q '^commit=deadbee$'; then fail "the record named the short id instead of the 40-hex commit"; fi
 ok
-# A prebuilt record whose commit is not a 40-hex id is refused, and the record that was already there stands.
-out="$(run_record abc1234)"
-expect_status 3 "$?" "the record step for a prebuilt install with a short commit"
-contains "$out" "not a 40-hex commit id" "the refusal says what a prebuilt record must name"
-contains "$(cat "$rec_install/installed.txt")" "commit=$HEAD_SHA" "the refused write did not replace the good record"
+# A prebuilt record whose commit is not a 40-hex id is NOT refused here: the step is reached AFTER the swap
+# (deploy.sh rule 24/11 - a refusal before it, a recorded problem after it), so it records commit=unknown with
+# record_id_why beside it, which is what a later reader needs to know it cannot act on this record.
+out="$(SWAPPED_RECORD=1 run_record abc1234)"
+expect_status 0 "$?" "the record step, AFTER the swap, for a prebuilt install with a short commit"
+contains "$out" "not a 40-hex commit id" "the recorded problem says what a prebuilt record must name"
+contains "$(cat "$rec_install/installed.txt")" "record_id_why=commit=abc1234 is not a 40-hex commit id" "...and the record carries the why"
+contains "$(cat "$rec_install/installed.txt")" "commit=unknown" "...with commit= recorded as unknown, never guessed"
 
 # --- installed.txt for a DIGEST-FALLBACK install (job relmatch) ---------------------------------------
 # A docs-only commit is installed from an older commit's release: the record then has to name BOTH - the
