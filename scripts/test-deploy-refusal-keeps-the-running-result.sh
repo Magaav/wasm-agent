@@ -63,12 +63,13 @@ SENTCONF="$S/home/.wasm-agent"
 REQ="11111111-2222-3333-4444-555555555555"
 printf '%s\n' '{"verdict":"installed","problems":0,"ok":true,"commit":"the-first-deploy"}' > "$RESULT"
 BEFORE2="$(sha256sum "$RESULT" | cut -d' ' -f1)"
-# The turn guard must not answer first: it decides from the PROCESS TREE, and this row runs inside a `wa chat`. `setsid`
-# gives the deploy a tree with no `wa` ancestor, so the case that fires is the one under test - the ALIVE refusal.
-out2=$(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u WASM_AGENT_IN_TURN \
+# The refusal this context meets is the turn guard's (the row runs inside a `wa chat`, and the guard decides from the
+# process tree). Stripping the marker or detaching were tried and removed: they changed nothing, and item 3's lint rightly
+# forbids both in a row.
+out2=$(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE \
   HOME="$S/home" WASM_AGENT_HOME="$S/home" WASM_AGENT_MANAGED=0 \
   WA_INSTALL_DIR="$INSTALL" WA_DEPLOY_ALIVE_DIR="$ALIVE2" \
-  timeout 60 setsid --wait bash scripts/deploy.sh --request-id "$REQ" --reason 'row: the second deploy' 2>&1); rc2=$?
+  timeout 60 bash scripts/deploy.sh --request-id "$REQ" --reason 'row: the second deploy' 2>&1); rc2=$?
 kill "$HOLDER" 2>/dev/null
 AFTER2="$(sha256sum "$RESULT" | cut -d' ' -f1)"
 [ "$rc2" -ne 0 ] && ok "the second deploy is turned away (rc=$rc2)" || bad "the second deploy was not refused"
