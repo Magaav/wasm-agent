@@ -1,14 +1,16 @@
-//! Run the media component on a real file and print what its probe answers.
+//! Run the media component on a real file and print what its operations answer.
 //!
 //! WHY THIS EXISTS: this node has no component runner (no wasmtime binary, no wasm-tools, no jco), so the only
-//! way to check that `probe.describe` really reads a container - rather than merely compiling - is to be the
-//! host. It is deliberately small and argument-driven so it can be pointed at any component build and any
-//! media file:
+//! way to check that `probe`/`frames`/`audio` really read and write a container - rather than merely compile -
+//! is to be the host. It is deliberately small and argument-driven:
 //!
-//!   media-probe <component.wasm> <media-file>
+//!   media-probe <component.wasm> <media-file> [out-dir]
 //!
-//! The file is handed to the guest through a preopened directory (`/work`), because a component has no path
-//! of its own: that is the same grant the kernel runtime makes when it starts one.
+//! The file is handed to the guest through a preopened directory (`/media`), and the out-dir as `/media-out`,
+//! because a component has no path of its own: that is the same grant the kernel runtime makes.
+//!
+//! THE CALLS ARE ASYNC because the component's contract is (`async func`): a sync call against an async-lifted
+//! export answers "cannot synchronously call an async-lifted export". A current-thread runtime drives them.
 
 use anyhow::Result;
 use wasmtime::component::{Component, Linker, ResourceTable};
@@ -37,41 +39,40 @@ fn main() -> Result<()> {
         eprintln!("usage: media-probe <component.wasm> <media-file> [out-dir]");
         std::process::exit(2);
     };
-    // A third argument turns the run into the frames check: the directory is granted WRITABLE at /out, which
-    // is the only way a component can produce a file (it has no path of its own).
     let out_dir = args.next();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(run(component_path, media_path, out_dir))
+}
+
+async fn run(component_path: String, media_path: String, out_dir: Option<String>) -> Result<()> {
     let media_path = std::path::Path::new(&media_path)
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("cannot read {media_path}: {error}"))?;
     let directory = media_path.parent().expect("a file has a parent").to_path_buf();
-    let name = media_path
-        .file_name()
-        .expect("a file has a name")
-        .to_string_lossy()
-        .into_owned();
+    let name = media_path.file_name().expect("a file has a name").to_string_lossy().into_owned();
     let bytes = std::fs::read(&media_path)?;
 
     let engine = Engine::default();
     let component = Component::from_file(&engine, &component_path)?;
     let mut linker: Linker<Host> = Linker::new(&engine);
-    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
     let mut builder = WasiCtxBuilder::new();
     builder.inherit_stderr();
     builder.preopened_dir(&directory, "/media", FsPerms::ReadOnly)?;
     if let Some(out_dir) = &out_dir {
-        builder.preopened_dir(out_dir, "/out", FsPerms::ReadWrite)?;
+        builder.preopened_dir(out_dir, "/media-out", FsPerms::ReadWrite)?;
     }
     let mut store = Store::new(&engine, Host { ctx: builder.build(), table: ResourceTable::new() });
 
-    let bindings = MediaService::instantiate(&mut store, &component, &linker)?;
+    let bindings = MediaService::instantiate_async(&mut store, &component, &linker).await?;
     let source = wa::media::types::File {
         path: format!("/media/{name}"),
         bytes: bytes.len() as u64,
-        // The probe does not consult the digest in this slice (the host verifies it after a write).
         sha256: String::new(),
         mime: String::new(),
     };
+
     if out_dir.is_some() {
         let request = exports::wa::media::frames::Request {
             source: source.clone(),
@@ -80,15 +81,24 @@ fn main() -> Result<()> {
                 exports::wa::media::frames::Moment { at_ms: 5000, scene: false },
             ],
             max_pixels: 640 * 360,
-            out_dir: "/out".to_string(),
+            out_dir: "/media-out".to_string(),
         };
-        match bindings.wa_media_frames().call_take(&mut store, &request)? {
+        let stills = store
+            .run_concurrent(async move |store| bindings.wa_media_frames().call_take(store, request).await)
+            .await?;
+        // Two levels: the async-lifted call answers with the CALL's outcome, and inside it the guest's own
+        // result. Both are unwrapped here, and a guest refusal is reported rather than panicked on.
+        let stills = match stills {
+            Ok(inner) => inner,
+            Err(error) => {
+                eprintln!("frames: call failed: {error}");
+                std::process::exit(1);
+            }
+        };
+        match stills {
             Ok(stills) => {
                 for still in stills {
-                    println!(
-                        "still:       {} ms -> {} ({} bytes, {})",
-                        still.at_ms, still.image.path, still.image.bytes, still.image.sha256
-                    );
+                    println!("still:       {} ms -> {} ({} bytes)", still.at_ms, still.image.path, still.image.bytes);
                 }
             }
             Err(error) => {
@@ -96,26 +106,19 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        let audio = exports::wa::media::audio::Request {
-            source: source.clone(),
-            sample_rate: 16_000,
-            channels: 1,
-            out_dir: "/out".to_string(),
-        };
-        match bindings.wa_media_audio().call_extract(&mut store, &audio)? {
-            Ok(track) => println!(
-                "audio:       {} ({} bytes, {} ms, {} ms elapsed, {})",
-                track.audio.path, track.audio.bytes, track.duration_ms, track.elapsed_ms, track.audio.sha256
-            ),
-            Err(error) => {
-                eprintln!("audio refused: {error:?}");
-                std::process::exit(1);
-            }
-        }
         return Ok(());
     }
 
-    let description = bindings.wa_media_probe().call_describe(&mut store, &source)?;
+    let answer = store
+        .run_concurrent(async move |store| bindings.wa_media_probe().call_describe(store, source).await)
+        .await?;
+    let description = match answer {
+        Ok(inner) => inner,
+        Err(error) => {
+            eprintln!("probe: call failed: {error}");
+            std::process::exit(1);
+        }
+    };
     match description {
         Ok(description) => {
             println!("format:      {}", description.format);
@@ -124,10 +127,7 @@ fn main() -> Result<()> {
             println!("has-audio:   {}", description.has_audio);
             println!("elapsed-ms:  {}", description.elapsed_ms);
             for stream in &description.streams {
-                println!(
-                    "stream:      {} {} {}x{}",
-                    stream.kind, stream.codec, stream.width, stream.height
-                );
+                println!("stream:      {} {} {}x{}", stream.kind, stream.codec, stream.width, stream.height);
             }
             Ok(())
         }
