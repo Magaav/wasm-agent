@@ -105,18 +105,22 @@ UNIT
 # must still install. A refusal is named (`linger_failed` / `linger_unavailable`) so it is a fact in the deploy log and
 # not a silence, and the caller prints it.
 wa_sentinel_unit_linger() {
-  local loginctl_bin="${WA_SENTINEL_UNIT_LOGINCTL:-loginctl}"
   local user="${USER:-$(id -un 2>/dev/null)}" out
   [ -n "$user" ] || { printf 'sentinel_unit: linger_unknown_user\n' >&2; return 5; }
-  if ! command -v "$loginctl_bin" >/dev/null 2>&1; then
-    printf 'sentinel_unit: linger_unavailable: no %s on PATH, so the user manager will not start at boot\n' "$loginctl_bin" >&2
+  if ! command -v loginctl >/dev/null 2>&1; then
+    printf 'sentinel_unit: linger_unavailable: no loginctl on PATH, so the user manager will not start at boot; run: loginctl enable-linger %s\n' "$user" >&2
     return 5
   fi
-  case "$("$loginctl_bin" show-user "$user" -p Linger --value 2>/dev/null)" in
+  case "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" in
     yes) printf 'linger_unchanged\n'; return 0 ;;
   esac
-  if ! out="$("$loginctl_bin" enable-linger "$user" 2>&1)"; then
-    printf 'sentinel_unit: linger_failed: %s\n' "$(printf '%s' "$out" | tr '\r\n' '  ')" >&2
+  # --no-ask-password, ALWAYS (29/11, Victor: "polkit password prompts all morning from a row"). A test or a deploy
+  # that runs this must never be able to put a password dialog on the operator's screen: without the flag polkit
+  # asks, and an unattended run blocks on a prompt nobody is looking at. A refusal is NAMED with the one command an
+  # operator can run - never retried here, never escalated with sudo.
+  if ! out="$(loginctl enable-linger --no-ask-password "$user" 2>&1)"; then
+    printf 'sentinel_unit: linger_failed: %s; the node will start at boot only after: loginctl enable-linger %s\n' \
+      "$(printf '%s' "$out" | tr '\r\n' '  ')" "$user" >&2
     return 5
   fi
   printf 'linger_enabled\n'
@@ -129,7 +133,7 @@ wa_sentinel_unit_linger() {
 # (which decides from who owns the watcher's role and asks the manager itself). A deploy that restarted
 # the unit here would be a second answer to "who owns the watcher".
 #
-# Prints one line per action on stdout (`unit_written`, `unit_unchanged`, `unit_enabled`), and refuses by
+# Prints one line per action on stdout (`unit_written`, `unit_unchanged`, `unit_enabled`, `linger_*`), and refuses by
 # name on stderr with a non-zero status: `sentinel_unit: no_user_manager` / `unit_write_failed: <path>` /
 # `daemon_reload_failed` / `enable_failed`. Every systemctl call goes through WA_SENTINEL_UNIT_SYSTEMCTL
 # (default `systemctl`) so a fixture can watch the calls instead of asking a real manager.

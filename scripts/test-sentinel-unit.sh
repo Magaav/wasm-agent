@@ -146,10 +146,22 @@ out="$(wa_sentinel_unit_ensure "$PREFIX" "$CONFIG/env" 8799 8800 1 "$UNIT_PATH" 
 # lingering, so a reboot with nobody at the keyboard started nothing - the container incident's symptom on a host.
 case "$out" in *linger_enabled*) ;; *) fail "the installer did not ask for lingering, so the unit starts only after a login: [$out]" ;; esac
 case "$(cat "$STUB_LOG")" in *"loginctl enable-linger"*) ;; *) fail 'loginctl enable-linger was never called' ;; esac
+# NEVER A PROMPT (29/11, Victor: "polkit password prompts all morning from a row"). The call carries
+# --no-ask-password, so an unattended deploy or row cannot put a dialog on the operator's screen.
+case "$(cat "$STUB_LOG")" in
+  *"loginctl enable-linger --no-ask-password"*) ;;
+  *) fail 'enable-linger was called WITHOUT --no-ask-password, so polkit may prompt an unattended run' ;;
+esac
+
 out="$(STUB_LINGER=yes wa_sentinel_unit_ensure "$PREFIX" "$CONFIG/env" 8799 8800 1 "$UNIT_PATH" 2>&1)" || fail "ensure with an already-lingering user failed: $out"
 case "$out" in *linger_unchanged*) ;; *) fail "an already-lingering user was not recognised: [$out]" ;; esac
 out="$(STUB_LINGER_FAIL=1 wa_sentinel_unit_ensure "$PREFIX" "$CONFIG/env" 8799 8800 1 "$UNIT_PATH" 2>&1)" || fail 'a refused linger made the whole install fail, and the unit is still the fix'
 case "$out" in *linger_failed*) ;; *) fail "a refused linger was not named: [$out]" ;; esac
+case "$out" in
+  *"loginctl enable-linger "*) ;;
+  *) fail "a refused linger did not tell the operator the one command to run: [$out]" ;;
+esac
+case "$out" in *sudo*) fail "a refused linger suggested sudo, which this installer never does: [$out]" ;; esac
 contains "$out" 'unit_unchanged' 'the same bytes are not rewritten'
 
 # ---- 4. the refusals, each by name --------------------------------------------------------------------

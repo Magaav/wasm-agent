@@ -38,10 +38,37 @@ wa_scratch_home_guard "$home" || exit 2
 mkdir -p "$home/.wasm-agent/sentinel"
 pidfile=$home/.wasm-agent/sentinel/sentinel.pid
 sleeper=
+# NOTHING OF OURS OUTLIVES THE ROW (canary 29/11): a stop is a request, and a watcher that is still draining keeps a
+# process alive with a scratch home - harmless to the node but exactly what a canary finds and kills. So the pids this
+# row's own pid files named are waited for, then killed if they are still there, and only if they are not the shape a
+# real watcher has (no row here may kill the unit's watcher).
+kill_watchers() {
+  # EVERY watcher this row started is one whose HOME or WASM_AGENT_HOME points INSIDE $work - the os level fact that
+  # identifies our own, whatever pid file it wrote. A pid file is not enough: the watcher that outlived the last run had
+  # HOME=$work/user-home and a per-case WASM_AGENT_HOME, so neither glob below named it. Nothing outside $work is
+  # eligible, so the unit's own watcher can never be touched by this function.
+  local p pid env_line home agent pid_file waited
+  for p in $(pgrep -f 'wa-sentinel' 2>/dev/null); do
+    env_line=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null)
+    home=$(printf '%s\n' "$env_line" | sed -n 's/^HOME=//p' | head -1)
+    agent=$(printf '%s\n' "$env_line" | sed -n 's/^WASM_AGENT_HOME=//p' | head -1)
+    case "$home$agent" in
+      *"$work"*) ;;
+      *) continue ;;
+    esac
+    waited=0
+    while [ $waited -lt 5 ] && kill -0 "$p" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
+    if kill -0 "$p" 2>/dev/null; then
+      kill "$p" 2>/dev/null && echo "sentinel row: killed its own leftover watcher $p" >&2
+    fi
+  done
+  return 0
+}
 fail() { echo "sentinel-boot-reachable: $1" >&2; echo "--- start said: ${out:-}" >&2; exit 1; }
 ask() { env -u WASM_AGENT_IN_TURN WASM_AGENT_HOME=$home WA_SENTINEL_SUPERVISOR=none timeout 30 "$bin" "$@" 2>&1; }
 cleanup() {
   ask stop >/dev/null 2>&1
+  kill_watchers
   [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null
   rm -rf "$work"
 }
