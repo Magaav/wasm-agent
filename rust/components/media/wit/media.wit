@@ -50,6 +50,10 @@ interface frames {
         source: file,
         moments: list<moment>,
         max-pixels: u32,
+        // The directory the host granted for output, as a guest path (`/out`). The component writes inside
+        // it and answers paths under it; the host refuses a returned path that escapes it. Explicit rather
+        // than a hidden convention, because a convention the host cannot check is not a grant.
+        out-dir: string,
     }
     record still {
         at-ms: u64,

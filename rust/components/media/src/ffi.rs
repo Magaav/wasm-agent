@@ -47,4 +47,12 @@ extern "C" {
     pub fn wa_stream_height(context: *mut AVFormatContext, index: c_uint) -> c_int;
     pub fn wa_format_name(context: *mut AVFormatContext) -> *const c_char;
     pub fn wa_duration_us(context: *mut AVFormatContext) -> i64;
+
+    /// Seek, decode, scale and encode ONE still to `out_path` (native/ffmpeg_frames.c).
+    pub fn wa_write_frame(
+        path: *const c_char,
+        moment_ms: i64,
+        max_pixels: c_int,
+        out_path: *const c_char,
+    ) -> c_int;
 }

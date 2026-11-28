@@ -34,9 +34,12 @@ impl WasiView for Host {
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let (Some(component_path), Some(media_path)) = (args.next(), args.next()) else {
-        eprintln!("usage: media-probe <component.wasm> <media-file>");
+        eprintln!("usage: media-probe <component.wasm> <media-file> [out-dir]");
         std::process::exit(2);
     };
+    // A third argument turns the run into the frames check: the directory is granted WRITABLE at /out, which
+    // is the only way a component can produce a file (it has no path of its own).
+    let out_dir = args.next();
     let media_path = std::path::Path::new(&media_path)
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("cannot read {media_path}: {error}"))?;
@@ -56,6 +59,9 @@ fn main() -> Result<()> {
     let mut builder = WasiCtxBuilder::new();
     builder.inherit_stderr();
     builder.preopened_dir(&directory, "/media", FsPerms::ReadOnly)?;
+    if let Some(out_dir) = &out_dir {
+        builder.preopened_dir(out_dir, "/out", FsPerms::ReadWrite)?;
+    }
     let mut store = Store::new(&engine, Host { ctx: builder.build(), table: ResourceTable::new() });
 
     let bindings = MediaService::instantiate(&mut store, &component, &linker)?;
@@ -66,6 +72,33 @@ fn main() -> Result<()> {
         sha256: String::new(),
         mime: String::new(),
     };
+    if out_dir.is_some() {
+        let request = exports::wa::media::frames::Request {
+            source: source.clone(),
+            moments: vec![
+                exports::wa::media::frames::Moment { at_ms: 1000, scene: false },
+                exports::wa::media::frames::Moment { at_ms: 5000, scene: false },
+            ],
+            max_pixels: 640 * 360,
+            out_dir: "/out".to_string(),
+        };
+        match bindings.wa_media_frames().call_take(&mut store, &request)? {
+            Ok(stills) => {
+                for still in stills {
+                    println!(
+                        "still:       {} ms -> {} ({} bytes, {})",
+                        still.at_ms, still.image.path, still.image.bytes, still.image.sha256
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("frames refused: {error:?}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     let description = bindings.wa_media_probe().call_describe(&mut store, &source)?;
     match description {
         Ok(description) => {

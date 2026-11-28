@@ -107,6 +107,7 @@ libavcodec/parser.c
 libavcodec/parsers.c
 libavcodec/pcm.c
 libavcodec/pixblockdsp.c
+libavcodec/pnmenc.c
 libavcodec/profiles.c
 libavcodec/qsv_api.c
 libavcodec/ratecontrol.c
