@@ -419,12 +419,35 @@ local added_contrast = contrast(palette.toolDiffAdded, palette.toolDiffAddedBand
 local removed_contrast = contrast(palette.toolDiffRemoved, palette.toolDiffRemovedBand)
 ok(added_contrast >= 4.5, string.format("an added line reads on its band (%.1f:1, WCAG AA needs 4.5)", added_contrast))
 ok(removed_contrast >= 4.5, string.format("a removed line reads on its band (%.1f:1)", removed_contrast))
+-- MEASURED 27/11 in a real pty: the row's own role cleared its band, but a COMMENT inside an added line
+-- (syntaxComment, the darkest colour a body row carries) reached only 4.30:1, and the line number and
+-- +/- marker were drawn in the border role at 3.20:1. So the rule is not "the role reads": every
+-- colour that can appear ON a band must clear WCAG AA for text, and the frame's own glyph is the only
+-- one held to the 3:1 a non-text element needs (scripts/test-diff-card-contrast-pty.mjs measures the
+-- same thing on the screen a terminal actually received).
+local ON_A_BAND = { "toolDiffAdded", "toolDiffRemoved", "syntaxComment", "syntaxKeyword",
+  "syntaxString", "syntaxNumber", "syntaxFunction", "syntaxType" }
+for _, band in ipairs({ "toolDiffAddedBand", "toolDiffRemovedBand" }) do
+  for _, role in ipairs(ON_A_BAND) do
+    if palette[role] and palette[band] then
+      local got = contrast(palette[role], palette[band])
+      ok(got >= 4.5, string.format("%s reads on %s (%.2f:1, WCAG AA needs 4.5)", role, band, got))
+    end
+  end
+end
+
 local live_changed = table.concat(view_lib.diff_block({ path = coded.path, before = coded.before,
   after = coded.after }, 80, true) or {}, "\n")
-ok(live_changed:find("\27[48;2;18;48;28m", 1, true) ~= nil, "a live added row draws the band behind its code")
-ok(not live_changed:find("\27[38;2;18;48;28m", 1, true),
+-- The band's own sequence, READ FROM THE PALETTE rather than written here twice: a palette change must
+-- not be able to disagree with this row.
+local function band_seq(hex)
+  return "\27[48;2;" .. tonumber(hex:sub(1, 2), 16) .. ";" .. tonumber(hex:sub(3, 4), 16) .. ";"
+    .. tonumber(hex:sub(5, 6), 16) .. "m"
+end
+ok(live_changed:find(band_seq(palette.toolDiffAddedBand), 1, true) ~= nil, "a live added row draws the band behind its code")
+ok(not live_changed:find("\27[38;2;" .. palette.toolDiffAddedBand:gsub("(%x%x)", function(h) return tonumber(h, 16) .. ";" end):gsub(";$", "") .. "m", 1, true),
   "and never paints its TEXT with the band's own colour (the unreadable row of the screenshot)")
-ok(live_changed:find("\27[48;2;58;22;32m", 1, true) ~= nil, "a live removed row draws its own band behind its code")
+ok(live_changed:find(band_seq(palette.toolDiffRemovedBand), 1, true) ~= nil, "a live removed row draws its own band behind its code")
 ok(not live_changed:find("\27[38;2;58;22;32m", 1, true),
   "and never paints its text with the removed band's colour either")
 
