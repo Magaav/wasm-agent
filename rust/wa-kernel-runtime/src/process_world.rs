@@ -436,6 +436,53 @@ mod rows {
         }
     }
 
+
+    /// ROW: a real component that imports `wa:process/child` LINKS and instantiates when the world is granted. The
+    /// fixture is built in the test (its own target dir), granted WASI and the process world, and instantiated
+    /// ASYNC - this store is `component-model-async`, so the sync call is refused.
+    #[test]
+    fn a_granted_guest_links_against_the_process_world() {
+        fn block_on<F: std::future::Future>(future: F) -> F::Output {
+            struct Noop;
+            impl std::task::Wake for Noop {
+                fn wake(self: Arc<Self>) {}
+            }
+            let waker = std::task::Waker::from(Arc::new(Noop));
+            let mut cx = std::task::Context::from_waker(&waker);
+            let mut future = Box::pin(future);
+            loop {
+                match future.as_mut().poll(&mut cx) {
+                    std::task::Poll::Ready(value) => return value,
+                    std::task::Poll::Pending => std::thread::yield_now(),
+                }
+            }
+        }
+
+        let fixture = std::path::Path::new("../components/test-process-child");
+        assert!(fixture.is_dir(), "the fixture crate must exist");
+        let target = std::env::temp_dir().join("wa-process-fixture-target");
+        let built = std::process::Command::new("cargo")
+            .current_dir(fixture)
+            .env("CARGO_TARGET_DIR", &target)
+            .args(["build", "--offline", "--target", "wasm32-wasip2", "--release"])
+            .output()
+            .expect("cargo must run");
+        assert!(built.status.success(), "the fixture must build: {}", String::from_utf8_lossy(&built.stderr));
+
+        let artifact = target.join("wasm32-wasip2/release/test_process_child.wasm");
+        let engine = wasmtime::Engine::default();
+        let component = wasmtime::component::Component::from_file(&engine, &artifact)
+            .expect("the fixture must load as a component");
+
+        let mut linker = wasmtime::component::Linker::<State>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("WASI must link");
+        link(&mut linker).expect("the process world must be grantable");
+        let mut store = wasmtime::Store::new(&engine, crate::service_components_v2::state_for_tests("wa-process-guest"));
+
+        block_on(linker.instantiate_async(&mut store, &component))
+            .unwrap_or_else(|error| panic!("a granted guest must instantiate: {error:?}"));
+    }
+
     /// ROW: the world is GRANTED by the runner, beside terminal and vision.
     #[test]
     fn the_runner_grants_the_process_world() {
