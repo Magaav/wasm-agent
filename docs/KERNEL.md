@@ -1437,3 +1437,41 @@ follows the three layers:
   watchdog loses nothing: the CLI/UI reconnect and the thread continues (seamless update).
 
 See `docs/MEMORY.md`, "The memory seam", for the manifest shape, the flags and the gap in the journal.
+
+### `wa:process` and `wa:terminal` as granted worlds (28/11, worker wasm-agent)
+
+The terminal-and-operations brief asked for two surfaces to stop being crates the host calls in-process. Both are
+worlds now, and both live where every other granted world lives - one home, no new crate:
+
+| world | host | what it serves |
+| --- | --- | --- |
+| `wa:process@0.1.0` | `rust/wa-kernel-runtime/src/process_world.rs` | a child process: `spawn`, `wait` (a `future` that settles once), `stdout`/`stderr` as streams, `stop` |
+| `wa:terminal@0.1.0` | `rust/wa-kernel-runtime/src/terminal_host.rs` | the DOCUMENT the node paints: `write`, `block`, `code-block`, `head`, `rewrite`, `pin-toggle`, `dirty` |
+
+Each module exposes `link(&mut linker)`, called from `service_components_v2.rs` beside `vision_host::link` and the
+rest. The provider is injected, because the kernel runtime owns the world while the node owns the thing behind it:
+`wa-host` installs `terminal_host::install(screen::document(None))` and `process_world::install(SupervisorRunner)`
+at startup (the same place it hands the runtime its policy and facts). A node that installs nothing answers with a
+NAME - `terminal_document_absent`, `process_runner_absent` - rather than an empty terminal or a silently idle child,
+and a row holds each promise.
+
+Two decisions worth keeping:
+
+- **the terminal world is a document, not a pty.** The first draft modelled `open`/`write`/`resize`/`events`, but
+  `wa-term`'s own dispatcher (`rust/wa-term/src/session.rs`) answers `write`, `block`, `code_block`, `head`,
+  `rewrite`, `pin_toggle` - a document - and no provider could have honoured the pty shape. A pty is the operations
+  runner's job and is `wa:process`'s subject (law 17, one owner each).
+- **the wire is owned by one thread.** The node's terminal client is thread-local (`Remote` holds a `RefCell`), so
+  `channel_document` CREATES it on a worker thread and every call crosses an mpsc channel. The seam stays `Send`
+  without lock-wrapping the client or relaxing `Send` on the world.
+
+Rows: `process_world` 7 (wait settles with the exit; grant refused without the runner; grant accepted with it; quoting
+round-trip; record content; stream order; a real fixture guest linking), `terminal_host` 5 (verbs answer in the
+program's terms; the adapter speaks the program's method names; one owner of the wire; the runner grants the
+interface; a missing document is refused by name).
+
+Lessons that cost rounds and are worth not repeating: a `component-model-async` store REFUSES `Linker::instantiate`
+(use `instantiate_async` with a `block_on`); a `wasip2` guest imports `wasi:cli`/`wasi:io/poll` even when it never
+calls them; `Access::as_context_mut` needs `use wasmtime::AsContextMut` in scope; a SECOND `impl HasData for State`
+breaks type inference in other hosts, not just its own module; and `State`'s fields are private to
+`service_components_v2`, so a test-side constructor must live there (the crate has two types named `State`).
