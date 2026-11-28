@@ -964,6 +964,7 @@ WA_BIN="$bin" check features-registry node scripts/check-features-registry.mjs
 # verb with NO `--db` and NO lua root, from a directory that is not a checkout, against the same
 # binary every other check row here uses.
 WA_BIN="$bin" check features-canary-installed bash scripts/test-features-canary-installed.sh
+WA_BIN="$bin" check tz-component bash scripts/test-tz-component.sh
 if command -v node >/dev/null 2>&1; then
   # Which binary the rows run (11/11): the tree's own and named in the first line, or a named refusal.
   # A lane whose rows graded the canonical checkout's node instead of its own tree was green and wrong.

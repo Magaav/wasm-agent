@@ -2435,7 +2435,6 @@ dependencies = [
  "wa-kernel-runtime",
  "wa-keystore",
  "wa-kv",
- "wa-local-tz",
  "wa-mesh",
  "wa-operation",
  "wa-operations-runner",

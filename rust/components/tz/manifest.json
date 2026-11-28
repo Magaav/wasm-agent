@@ -1,0 +1,12 @@
+{
+  "name": "tz",
+  "kind": "mcp",
+  "needs_wasi_sdk": false,
+  "description": "This node's own time-zone identifier: TZ, /etc/localtime and /etc/timezone, with the word saying which answered",
+  "capabilities": {
+    "env": ["TZ"],
+    "file_env": [],
+    "net": [],
+    "dirs": ["/etc"]
+  }
+}

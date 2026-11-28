@@ -332,3 +332,10 @@ wa-whatsapp b92137035ff30b79e654047e450b335283fd22e2c9f5922796c65a7ccfcf44b6 895
 # rust/wa-kernel-runtime/src/vision_host.rs stays the fallback until the flip after round 2. Built by
 # cargo build --release --target wasm32-wasip2 in rust/components/vision.
 vision 5577e2ca25ab72c52c7317628b3e9218ce0ce869a1c1b13d0c6f63f08233ce56 3642503
+# 28/11 first pin of tz (change/everything-is-a-component): the node's own time-zone identifier becomes a
+# component. rust/wa-local-tz was linked into `wa` for one function with one call site (the guest's
+# host.local_tz), so a change to how the OS zone is read rebuilt the whole node. The component decides from
+# TZ, /etc/localtime and /etc/timezone (the kernel mounts /etc read-only, manifest.json), one tool `zone`
+# answering {id, source}; the seam is rust/wa-capabilities/src/tz_component.rs and the library is built only
+# for this target now, as wa-graph is for graph.
+tz 6bcbe3543793625d0da9de931d636e5c38c85c1a884f16a4b7b85227aa6ecaa0 160247
