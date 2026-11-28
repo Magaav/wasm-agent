@@ -15,6 +15,14 @@
 --
 -- Costs about 1 s: no child process, no network, no peer (a peer call here would be an external effect).
 if not host then error("this test runs under the node (WA_SCRIPT), not plain Lua") end
+-- It writes state (a mail search and a contacts read each queue a job in this home), so it takes the same
+-- guard as every other row that does: a home outside the suite's scratch root is refused by name.
+local home_guard = dofile("scripts/lib/test-home-guard.lua")
+local test_home = os.getenv("WASM_AGENT_HOME") or ""
+local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
+local guard_reason = home_guard.reason({ home = test_home, scratch = scratch_root })
+if guard_reason then error("this test writes state: it refuses to run (" .. guard_reason .. ")") end
+
 local refusal = dofile("lua/core/refusal.lua")
 local feature_health = dofile("lua/core/feature_health.lua")
 
@@ -66,6 +74,26 @@ local mail_note = type(mail_decoded) == 'table'
 check(#mail_note > 20, "a mail search with no connector says something, got: " .. mail_text:sub(1, 200))
 contains(mail_note, 'connector', "the note names the connector as the thing that is not answering")
 contains(mail_note, 'mcp_google_imap', "and names what to use instead")
+
+-- 3. WHATSAPP, WITH NO COMPONENT (the dependency removed: this scratch home runs no wa-whatsapp). A contacts
+--    read answers a NAMED error plus a detail that says the component has not answered, and says it is worth
+--    retrying - so a user's "who is this" does not look like "no such contact". Measured on this node with no
+--    component: error=whatsapp_contacts_slow, state=queued, retry=true.
+local wa_ok, wa_answer = pcall(host.whatsapp_contacts, '{"q":"canary","limit":1}')
+check(wa_ok, "whatsapp_contacts answers instead of raising: " .. tostring(wa_answer))
+local wa = wa_answer
+if type(wa) == 'string' then
+  local ok_json, parsed = pcall(dofile('lua/vendor/json.lua').decode, wa)
+  if ok_json and type(parsed) == 'table' then wa = parsed end
+end
+check(type(wa) == 'table', "the answer is a document, got: " .. tostring(wa_answer):sub(1, 160))
+local wa_error = tostring(wa.error or '')
+local wa_detail = tostring(wa.note or wa.detail or '')
+check(wa_error ~= '', "the failure carries a code, not an empty answer")
+check(wa_error:find('slow', 1, true) ~= nil or wa_error:find('component', 1, true) ~= nil,
+  "the code names a slow/missing component, got: " .. wa_error)
+contains(wa_detail, 'wa-whatsapp component', "the detail names the component that has not answered")
+check(wa.retry == true, "it says the same call can be retried rather than that the data does not exist")
 
 -- 2. EVERY FEATURE'S REFUSAL HAS WORDS. The vocabulary every tool refusal crosses (lua/core/refusal.lua) must
 --    render a sentence and a fix for the codes a feature emits - the shape fallback covers a code nobody has
