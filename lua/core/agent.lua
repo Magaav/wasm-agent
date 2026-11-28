@@ -4215,9 +4215,18 @@ function M:run_body(text, images)
                 self.stop_notice = script_said
               end
             end
+            -- THE SCRIPT'S OWN ANSWER WINS (28/11): when the pending layer already said what went with the run
+            -- (`still running: sleep 30 (op ...)`, written by the script's own stop path), that is the more
+            -- specific sentence and this coarse `stopped 1: bash` must not overwrite it.
             if said ~= nil then
-              if type(dispatch_ctx) == 'table' then dispatch_ctx.stop_notice = said end
-              self.stop_notice = said
+              local already = (type(dispatch_ctx) == 'table' and dispatch_ctx.stop_notice) or self.stop_notice
+              -- Only the sentence about work LEFT RUNNING outranks this one; a stale note from an earlier step must
+              -- not swallow the stop of this one (measured 28/11: the bash stop line disappeared when any earlier
+              -- note was enough to block it).
+              if type(already) ~= 'string' or not already:find('still running', 1, true) then
+                if type(dispatch_ctx) == 'table' then dispatch_ctx.stop_notice = said end
+                self.stop_notice = said
+              end
             end
           end)
         end

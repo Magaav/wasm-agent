@@ -1141,13 +1141,17 @@ stop_work = function(dispatch, opts, record, state)
   end
   local after = stop_seconds(state, record)
   local where = record.node ~= nil and (" on " .. tostring(record.node)) or ""
-  local name = command or ("op " .. tostring(record.op))
+  -- NOT "op op-..." (28/11): a record whose command could not be looked up is named by its op id ONCE.
+  local name = command or tostring(record.op)
   local span = after ~= nil and (", after " .. tostring(after) .. " s") or ""
   local note, observed, confirmed = nil, state, false
   if record.detached == true then
     -- NOTHING IS STOPPED: this call was left running on purpose when it was started, so it is not the
     -- turn's to end. The answer names it instead of pretending it went with the run.
-    note = "still running: " .. name .. span .. " (op " .. tostring(record.op) .. where
+    -- THE WORK ITSELF IS NAMED (28/11): the command this record carries, or its op id if it never had one -
+    -- never a sentence that says `op` twice (`still running: op op-...`), which is what the reader got.
+    note = "still running: " .. tostring(record.command or record.op) .. span
+      .. " (op " .. tostring(record.op) .. where
       .. "), left alone because it was started detached (wait_s:0, or the operation tool)"
   else
     -- A record names its FAMILY in `kind`: a `bash` record IS the operation family (M.EXECUTORS["bash"]
@@ -1440,6 +1444,11 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     if started.op and started.register then
       index.ops[started.op] = { op = started.op, tool = name, kind = executor.kind, scope = scope,
         started_at = started_at, state = "running", reported = false, node = started.node,
+        -- THE WORK ITS OWN NAME (28/11): a stop that leaves this running says `still running: sleep 30 (op ...)`, and
+        -- the command was never carried onto the record, so the answer could only say `op op-...`. The name is the
+        -- caller's own, taken at the moment it was given.
+        command = type(params) == "table" and type(params.command) == "string" and params.command ~= ""
+          and params.command or nil,
         -- Started by the `operation` tool: the caller asked for work that outlives the call, so a
         -- stop leaves it running and says so.
         detached = true }
