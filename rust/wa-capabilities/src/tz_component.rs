@@ -20,11 +20,23 @@ const COMPONENT: &str = "tz";
 /// The zone this node is in, as `{id, source}`: `id` absent means the OS holds no name.
 pub fn zone() -> Option<(Option<String>, String)> {
     let tz = crate::host::resolved_env("TZ");
-    static CACHE: OnceLock<Mutex<Option<(Option<String>, String, Option<String>)>>> = OnceLock::new();
+    // THE CACHE IS KEYED ON WHAT THE NODE WOULD RUN, not only on TZ (28/11). A cache keyed on the
+    // environment alone makes a component SWAP invisible: the decision is "one download, one swap, no
+    // restart" (everything-is-a-component, (iii)), and a seam that answered from memory would keep the old
+    // zone after a new artifact landed. The pin file is the identity the loader itself checks
+    // (`components::load` refuses bytes that do not match it), so reading it is both the cheapest and the
+    // truest key: a swap changes the pin, and the next call asks the new component.
+    let pin = std::fs::read_to_string(
+        wa_kernel_runtime::components::component_dir().join("tz.wasm.sha256"),
+    )
+    .ok()
+    .and_then(|text| text.split_whitespace().next().map(str::to_string));
+    static CACHE: OnceLock<Mutex<Option<(Option<String>, String, Option<String>, Option<String>)>>> =
+        OnceLock::new();
     let cell = CACHE.get_or_init(|| Mutex::new(None));
     if let Ok(held) = cell.lock() {
-        if let Some((id, source, cached_tz)) = held.as_ref() {
-            if *cached_tz == tz {
+        if let Some((id, source, cached_tz, cached_pin)) = held.as_ref() {
+            if *cached_tz == tz && *cached_pin == pin {
                 return Some((id.clone(), source.clone()));
             }
         }
@@ -47,7 +59,7 @@ pub fn zone() -> Option<(Option<String>, String)> {
     let id = result["id"].as_str().map(str::to_string);
     let source = result["source"].as_str().unwrap_or("tz_component_no_source").to_string();
     if let Ok(mut held) = cell.lock() {
-        *held = Some((id.clone(), source.clone(), tz));
+        *held = Some((id.clone(), source.clone(), tz, pin.clone()));
     }
     Some((id, source))
 }
