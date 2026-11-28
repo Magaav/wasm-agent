@@ -209,11 +209,78 @@ impl exports::wa::media::frames::Guest for Component {
 
 impl exports::wa::media::audio::Guest for Component {
     fn extract(
-        _request: exports::wa::media::audio::Request,
+        request: exports::wa::media::audio::Request,
     ) -> Result<exports::wa::media::audio::Track, wa::media::types::Error> {
-        Err(wa::media::types::Error::Again(
-            "audio is not implemented in this slice; its measurement is in the report and it is the next operation to wire".to_string(),
-        ))
+        let started = Instant::now();
+        let source = CString::new(request.source.path.clone()).map_err(|_| {
+            wa::media::types::Error::Failure(failure(
+                "bad_path",
+                "the file path has a NUL in it".to_string(),
+            ))
+        })?;
+        if request.out_dir.is_empty() {
+            return Err(wa::media::types::Error::Failure(failure(
+                "no_out_dir",
+                "the request names no out-dir; the host grants the directory the track goes in".to_string(),
+            )));
+        }
+        if request.sample_rate == 0 || request.channels == 0 {
+            return Err(wa::media::types::Error::Failure(failure(
+                "bad_audio_shape",
+                format!(
+                    "a track needs a sample rate and a channel count (asked for {} Hz, {} channels)",
+                    request.sample_rate, request.channels
+                ),
+            )));
+        }
+        let out_path = format!(
+            "{}/track-{}Hz-{}ch.wav",
+            request.out_dir.trim_end_matches('/'),
+            request.sample_rate,
+            request.channels
+        );
+        let out = CString::new(out_path.clone()).map_err(|_| {
+            wa::media::types::Error::Failure(failure("bad_path", "the destination has a NUL".to_string()))
+        })?;
+        let mut samples: i64 = 0;
+        let status = unsafe {
+            ffi::wa_write_audio(
+                source.as_ptr(),
+                request.sample_rate as i32,
+                request.channels as i32,
+                out.as_ptr(),
+                &mut samples,
+            )
+        };
+        if status < 0 {
+            return Err(wa::media::types::Error::Failure(failure(
+                "audio_failed",
+                format!("the audio track could not be written (averror {})", error_code(status)),
+            )));
+        }
+        // Read back what is on disk: the size and digest are the host's to check, and reporting an intention
+        // instead of the file would hide the disagreement that check exists for.
+        let bytes = std::fs::read(&out_path).map_err(|error| {
+            wa::media::types::Error::Failure(failure(
+                "write_lost",
+                format!("the track was written but cannot be read back: {error}"),
+            ))
+        })?;
+        let duration_ms = if request.sample_rate > 0 {
+            (samples.max(0) as u64 * 1000) / request.sample_rate as u64
+        } else {
+            0
+        };
+        Ok(exports::wa::media::audio::Track {
+            audio: wa::media::types::File {
+                path: out_path,
+                bytes: bytes.len() as u64,
+                sha256: sha256::hex(&bytes),
+                mime: "audio/wav".to_string(),
+            },
+            duration_ms,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
     }
 }
 

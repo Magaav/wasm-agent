@@ -66,3 +66,24 @@ in one commit. `wa:media@0.1.0` carries `probe.describe`, `frames.take` and `aud
    a vendored build with a reproducible recipe), and rows on fixtures.
 4. The WhatsApp side: a video indexed like a voice note (audio -> stt, frames -> vision), calling the vision
    component that codemode-seam-leaves-the-host is building - not duplicating it.
+
+## The component, as built
+
+`rust/components/media` implements all three operations against ffmpeg built from the vendored sources, and
+`rust/components/media/harness` runs it (this node has no component runner):
+
+    media-probe <component.wasm> <media-file> [out-dir]
+
+Measured on the same 30 s 720p clip, through the component boundary:
+
+* **probe** - format `mov`, duration 30000 ms, video h264 1280x720, audio aac, has-audio, **5 ms**.
+* **frames**, moments 1000 and 5000 ms at max-pixels 640x360 - two PPM stills of 685 227 bytes each, 638x358,
+  and the digests the component reports match `sha256sum` on the written files byte for byte.
+* **audio**, 16 kHz mono - a 917 398-byte WAV, 28666 ms, **123 ms** elapsed, digest matching `sha256sum`.
+
+The audio track is 28666 ms where the container says 30000: that is the AAC stream's own length (encoder delay
+and padding), not a truncation - the decoded sample count is what the component reports.
+
+Two decisions the code now records rather than hides: stills are **PPM** (the mjpeg trap above is unresolved),
+and every operation that writes a file takes an `out-dir` in its request - a component writes where it was
+granted, and an empty `out-dir` is refused (`no_out_dir`) instead of guessed.

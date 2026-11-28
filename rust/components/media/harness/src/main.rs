@@ -96,6 +96,22 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        let audio = exports::wa::media::audio::Request {
+            source: source.clone(),
+            sample_rate: 16_000,
+            channels: 1,
+            out_dir: "/out".to_string(),
+        };
+        match bindings.wa_media_audio().call_extract(&mut store, &audio)? {
+            Ok(track) => println!(
+                "audio:       {} ({} bytes, {} ms, {} ms elapsed, {})",
+                track.audio.path, track.audio.bytes, track.duration_ms, track.elapsed_ms, track.audio.sha256
+            ),
+            Err(error) => {
+                eprintln!("audio refused: {error:?}");
+                std::process::exit(1);
+            }
+        }
         return Ok(());
     }
 

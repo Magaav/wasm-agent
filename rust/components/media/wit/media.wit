@@ -68,6 +68,8 @@ interface audio {
         source: file,
         sample-rate: u32,
         channels: u32,
+        // The directory the host granted for output, exactly as frames names it.
+        out-dir: string,
     }
     record track {
         audio: file,

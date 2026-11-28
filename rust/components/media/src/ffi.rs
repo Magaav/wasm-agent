@@ -55,4 +55,14 @@ extern "C" {
         max_pixels: c_int,
         out_path: *const c_char,
     ) -> c_int;
+
+    /// Decode the audio track and write it as WAV at `sample_rate`/`channels`
+    /// (native/ffmpeg_audio.c); `samples_out` receives the frames written.
+    pub fn wa_write_audio(
+        path: *const c_char,
+        sample_rate: c_int,
+        channels: c_int,
+        out_path: *const c_char,
+        samples_out: *mut i64,
+    ) -> c_int;
 }
