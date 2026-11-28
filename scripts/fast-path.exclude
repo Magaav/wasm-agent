@@ -75,3 +75,4 @@ scripts/test-workspace-root-recovery.lua  # lua error: [string "scripts/test-wor
 # the install and fails 8 of 10 (land242 gate). Run where test.sh runs it.
 scripts/test-update-treeless.lua
 scripts/test-status-limits-security.lua  # the interpreter half of scripts/test-status-limits-security.mjs: the wrapper owns the listeners, the scratch HOME and the key it sets; run bare it fails 7 of 11 by design. Wired in scripts/fast.sh + scripts/test.sh as the .mjs pair.
+scripts/test-whatsapp-registry.lua  # needs the whatsapp-index component in the home (it asks the real door) and the queue it answers on; wired into scripts/test.sh instead
