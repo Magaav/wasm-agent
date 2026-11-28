@@ -467,3 +467,92 @@ not this branch's to do, and `main-health` measures that row on main with main's
   `git ls-remote`). The commits were removed with `git reset --mixed 46d1ee99` - that is the pre-rebase name of `fb6ca151` - (no stash, nothing lost), and the
   call now passes `repo` with the reason in a comment. `must` without a cwd runs in the node's working
   directory - the fixture helper must always name its repository.
+
+
+---
+
+# Round 2 (28/11): what was already here, and the one thing that was not
+
+The queue item was re-issued on 28/11. Round 1 (above) landed its jobs; this round checked each of them against
+`origin/main` instead of against the item's date, and found one live defect that round 1 could not see because it
+developed the row and ran it by hand from a shell that had a real `node` first on PATH.
+
+
+Queue item taken: `_queue/release-linux-reads-the-receipt.md` -> `.taken-wasm-agent` (28/11).
+
+## The short version
+
+Seven of the item's eight jobs are ALREADY IN MAIN, landed by the rounds that followed release F - I verified each by
+reading the landed file and by running its row, not by trusting the item's date. The eighth (the end-to-end row) existed
+and was RED on this node, but for a reason nobody had named: the row captured `node` as a mise SHIM and then ran the step
+under a scratch HOME, so the shim tried to install node, died offline, and the failure surfaced three layers away as
+`linux_channel_build_failed`. That is what this change fixes.
+
+## Job by job
+
+1. **Re-measure the failure.** Done: the row is red on main here (`release-channel-e2e FAILED (exit 1)`), and the cause
+   is NOT the one the item predicted. `scripts/release-linux.sh` already reads the build receipt (job 2), and the
+   receipt was correct; the row's own stand-in plumbing was what failed.
+2. **The receipt owns `wa`'s path.** Already in main: `scripts/release-linux.sh:141-163` runs the build, then holds the
+   receipt to this release through `scripts/lib/build-receipt.mjs` (`--commit`, `--tree`, `--target`, `--root`), takes
+   `binary=`/`binary_sha256=` from its fields, refuses `build_receipt_no_binary` / `build_receipt_binary_absent` /
+   `build_binary_changed` by name, and never guesses a target directory. The comment there cites release F by id.
+3. **A test that runs the channel step end to end.** Exists: `scripts/test-release-channel-e2e.sh` (driver) and
+   `scripts/test-release-channel-e2e.lua` (the stand-ins: a stub `codemode-build.mjs` that writes a receipt of the real
+   shape and a real executable at the path the receipt names, `scripts/lib/fake-gh.sh` for the upload, a scratch vault
+   for the signature). WIRED: `scripts/fast.sh:1175` (`check release-channel ...`) and the release gate at
+   `scripts/test.sh:3193` (`gate_run ...`, Linux only). This change makes it green on a host whose node is a mise shim.
+4. **The operator procedure.** See the HANDOVER proposal below.
+5. **Nothing the model reads changes.** True: no capability line, no tool description, no prompt doc is touched here.
+6. **`wa <verb> --help` runs nothing.** Already in main: `lua/core/cli_help.lua` (the ACTING list, `M.asked`, the
+   delegate exceptions) and the row that enumerates every acting verb, `scripts/test-cli-help.sh`; wired at
+   `scripts/fast.sh:1169` and the gate at `scripts/test.sh:3190`.
+7. **A channel published by hand is recorded as by-hand.** Already in main: `wa land mark <step> --by-hand --who <name>
+   --why <text> --evidence <file>` (`lua/core/land.lua`, the `mark` verb's flag list) and the speed board reads it
+   (`scripts/speed-board.sh:200-210`, "by hand" instead of "not a finished release"); row:
+   `scripts/test-speed-board.lua:187-210`, which builds a scratch journal rather than editing F's.
+8. **A quick landing that touches a description runs the description rows.** Already in main: `M.DESCRIPTION_PATHS`
+   (`lua/core/land.lua:4864`) and `M.DESCRIPTION_CHECKS` (host-return-docs, prompt-tool-names, prompt-docs), with the
+   measurement that produced it (7df9dc7f, main-health 5956ae15) written in the comment above them.
+
+## What was broken, measured
+
+The end-to-end row reported `linux_channel_build_failed: linux-channel: build_failed: scripts/release-linux.sh --target
+x86_64-unknown-linux-musl`. Read step by step:
+
+- `build-x64.log` had two lines: the step's own "building wa ..." and `mise by @jdx - installing 1 tool`.
+- A trace of the step (`BASH_XTRACEFD`) showed the failure at `release-linux.sh:154`, the `node ... build-receipt.mjs`
+  call, whose stderr becomes `wa-host.refusal` - so `fail` printed mise's sentence as the refusal.
+- A logged stub showed the row had handed the stub `WA_REAL_NODE=/home/victor/.local/share/mise/shims/node`: the row's
+  `command -v node` had found a SHIM, and the shim, run under the row's scratch HOME, went looking for a node to install.
+- `mise which node` was tried first as the fix and was NOT enough - the captured value was still the shim - so the row
+  now scans PATH and skips `mise/shims` and `mise/command-wrappers`.
+
+Measured, same tree, clean worktree: before `release-channel-e2e FAILED (exit 1)`; after `release-channel-e2e ok
+(20 checks)`, with `WA_REAL_NODE=/usr/bin/node`.
+
+## What I could not verify
+
+- The CROSS BUILD itself never runs here: this host has no zig, and mise cannot install one offline. The row stands in for
+  `codemode-build.mjs` (receipt + executable), which is the part the item's job 3 asked a row to stand in for, but a real
+  cross-compile of `wa` for x86_64-unknown-linux-musl on this machine is still unverified, before and after this change.
+- The narrowed suite run of `test-speed-board.lua`, `test-cli-help.sh` and `test-release-channel-e2e.sh` through
+  `scripts/fast.sh` was QUEUED behind another worker's suite on this node's lock for the whole round; the channel row was
+  measured directly (above, green), the other two were not re-run here. They are green in the gate on main as of this tree
+  - that is their last measurement, not mine.
+
+## HANDOVER proposal (propose, never write)
+
+Replace the channel step's line in the operator procedure with the resume that actually works - a run stopped by
+`--until publish` cannot be resumed without naming the boundary again (`land.lua`, `resume_of_stopped_at_until`):
+
+```
+wa release cut --run <id> --resume --no-deploy --signer local --until linux
+```
+
+Reason, measured on release F: a plain `--resume` of a run stopped at `--until publish` is refused by design.
+
+## FACTORY rule 12
+
+No release was cut, no real gh release touched, no fleet update, nothing on a live peer. Everything above ran in scratch
+worktrees and scratch homes under /tmp.
