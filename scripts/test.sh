@@ -538,6 +538,7 @@ else
 fi
 # `wa update requests` and its sweep, driven through the VERB the operator types, on a scratch home
 # (update-requests-settle, item 3 end to end; orphan-tests, 27/11).
+WA_BIN="$BIN" gate_run bash scripts/test-piped-start.sh                              # the path every worker takes: first line through a pipe
 WA_BIN="$BIN" gate_run bash scripts/test-update-requests-cli.sh
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
 # fail() IN TWO HALVES (25/11, Fable's A, B, C): main own body before the swap, and the same four writes with a
