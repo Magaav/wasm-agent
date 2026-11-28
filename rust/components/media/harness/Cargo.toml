@@ -1,0 +1,18 @@
+[package]
+name = "media-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Not a component: this is the host that RUNS the component beside it. It lives under the component's
+# directory so the pair is obvious, and it has its own workspace so `scripts/build-components.sh` (which
+# builds `rust/components/*`) never mistakes it for one.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+# wasmtime with default features OFF: the offline registry on this node has no fxprof-processed-profile
+# (a default feature) and no tokio-macros, and nothing here needs async. `cranelift` is what lets a
+# Component be compiled from bytes; without it the API has no `Component::new` at all.
+wasmtime = { version = "50", default-features = false, features = ["component-model", "runtime", "std", "cranelift", "anyhow"] }
+wasmtime-wasi = "50"
