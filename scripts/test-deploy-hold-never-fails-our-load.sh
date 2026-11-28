@@ -31,6 +31,8 @@ SENTINEL="${WA_SENTINEL_BIN:-}"
 command -v node >/dev/null 2>&1 || { echo "deploy-hold: SKIP (node is not on PATH)" >&2; exit 0; }
 
 S="$(mktemp -d "${TMPDIR:-/tmp}/wa-deploy-hold.XXXXXX")"
+
+
 cleanup() { [ "${KEEP:-0}" = 1 ] && { echo "deploy-hold: fixture kept at $S" >&2; return; }; kill "${STUB:-}" "${WATCH:-}" 2>/dev/null; wait "${STUB:-}" 2>/dev/null; chmod -R u+w "$S" 2>/dev/null; rm -rf "$S"; }
 trap cleanup EXIT
 PORT="$(( 20000 + ($$ % 20000) ))"
@@ -39,6 +41,18 @@ ok()  { checks=$((checks+1)); printf '  ok   %s\n' "$*"; }
 bad() { checks=$((checks+1)); failed=$((failed+1)); printf '  FAIL %s\n' "$*"; }
 
 # ---- the stub node: busy, with three sessions whose only queued work is a child completion ---------------------------------
+# ---- the managers are STUBS: nothing in this row may reach a real systemd (28/11) ----------------------------------
+mkdir -p "$S/bin" "$S/manager-calls"
+for tool in systemd-run systemctl; do
+  cat > "$S/bin/$tool" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "$tool \$*" >> "$S/manager-calls/calls.txt"
+exit 0
+STUB
+  chmod +x "$S/bin/$tool"
+done
+ok "systemd-run and systemctl are recording stubs on PATH (no real manager can be reached)"
+
 cat > "$S/health.mjs" <<'NODE'
 import http from 'node:http';
 const port = Number(process.argv[2]);
@@ -70,7 +84,7 @@ ok "a stub node answers /health with three sessions whose queued work is a child
 # ---- the sentinel, on its own home, with a five-second bound --------------------------------------------------------
 mkdir -p "$S/home" "$S/missions"
 env -u WA_VAULT -u WA_PROVIDER -u OPENAI_API_KEY \
-  HOME="$S/home" WASM_AGENT_HOME="$S/home" WASM_AGENT_MANAGED=0 WASM_AGENT_PORT="$PORT" \
+  PATH="$S/bin:$PATH" HOME="$S/home" WASM_AGENT_HOME="$S/home" WASM_AGENT_MANAGED=0 WASM_AGENT_PORT="$PORT" \
   WA_DEPLOY_HOLD_BOUND=5 WA_SENTINEL_SUPERVISOR=test \
   "$SENTINEL" watch >"$S/sentinel.log" 2>&1 & WATCH=$!
 sleep 2
@@ -78,13 +92,16 @@ kill -0 "$WATCH" 2>/dev/null || { echo "deploy-hold: SKIP (the sentinel did not 
 ok "the sentinel runs on a scratch home with WA_DEPLOY_HOLD_BOUND=5"
 
 # ---- one request of our own, then watch it past the bound ---------------------------------------------------------
-env HOME="$S/home" WASM_AGENT_HOME="$S/home" WASM_AGENT_PORT="$PORT" "$SENTINEL" request deploy --reason 'deploy-hold row' >/dev/null 2>&1 || true
+env PATH="$S/bin:$PATH" HOME="$S/home" WASM_AGENT_HOME="$S/home" WASM_AGENT_PORT="$PORT" "$SENTINEL" request deploy --reason 'deploy-hold row' >/dev/null 2>&1 || true
 # THE NODE PAUSED these sessions for the coming deploy - the measured mutual wait. Without the pause record the same
 # /health shape is just three sessions working, and failing the request would be correct; with it, their only activity is
 # the queued child completion and the install cannot hurt them.
 mkdir -p "$S/home/.wasm-agent/deploy-paused"
 for session in 11111111-1111-1111-1111-111111111111 22222222-2222-2222-2222-222222222222 33333333-3333-3333-3333-333333333333; do
-  printf '{"session":"%s","since":%s,"reason":"deploy-hold row"}\n' "$session" "$(date +%s)" > "$S/home/.wasm-agent/deploy-paused/$session.json"
+  # `since` must be at or after the moment the request was queued: `paused_since` ignores a record that predates it (that
+  # is how a pause belonging to the PREVIOUS deploy is treated), and a record written in the same second as the request is
+  # a coin flip. One second of slack, measured 28/11 when the same shape passed or failed on that coin.
+  printf '{"session":"%s","since":%s,"reason":"deploy-hold row"}\n' "$session" "$(( $(date +%s) + 1 ))" > "$S/home/.wasm-agent/deploy-paused/$session.json"
 done
 ok "three sessions recorded a pause FOR THIS request (written after it was queued)"
 
@@ -110,5 +127,18 @@ else
 fi
 
 kill "$WATCH" 2>/dev/null; wait "$WATCH" 2>/dev/null
+
+# THE ARGV RULE (28/11): a non-root sentinel must never build a system-manager command, because on a desktop that is
+# polkit - a password prompt per attempt - and a granted prompt runs the deploy AS ROOT.
+if [ "$(id -u)" != 0 ] && [ -f "$S/manager-calls/calls.txt" ]; then
+  if grep -E '^systemd-run ' "$S/manager-calls/calls.txt" | grep -vq -- '--user'; then
+    bad "a systemd-run argv without --user was built by a non-root sentinel: $(grep -E '^systemd-run ' "$S/manager-calls/calls.txt" | grep -v -- '--user' | head -1)"
+  else
+    ok "every systemd-run argv carried --user (a non-root sentinel can never ask the system manager)"
+  fi
+else
+  ok "no systemd-run argv reached a manager at all"
+fi
+
 if [ "$failed" -gt 0 ]; then echo "deploy-hold: FAILED ($checks checks, $failed failed)"; exit 1; fi
 echo "deploy-hold ok ($checks checks)"

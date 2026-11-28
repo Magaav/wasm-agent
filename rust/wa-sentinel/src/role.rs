@@ -353,6 +353,9 @@ pub(crate) fn deploy_unit_command(
     user: bool,
     supervisor: &str,
 ) -> Vec<String> {
+    // THE ARGV ITSELF CANNOT REACH THE SYSTEM MANAGER FROM A NON-ROOT PROCESS (28/11): forcing it here as well as in
+    // `start_deploy_unit` means no caller - present or future - can build an argv that asks polkit for a password.
+    let user = user || current_uid() != Some(0);
     let mut command = vec!["systemd-run".to_string()];
     if user {
         command.push("--user".to_string());
@@ -460,6 +463,12 @@ pub(crate) fn start_deploy_unit(
     user: bool,
     supervisor: &str,
 ) -> Result<String> {
+    // A NON-ROOT SENTINEL NEVER ASKS THE SYSTEM MANAGER (28/11). It used to try `systemd-run` without `--user`
+    // first and fall back only after a privilege refusal - which, on a desktop, means POLKIT: three password
+    // prompts in two minutes (09:07, 09:09, 09:10 BRT) and, when the operator typed it, `deploy.sh` ran AS ROOT
+    // (`User=` empty) and left root-owned files in the test's scratch directory. A non-root process asks ITS OWN
+    // user manager or runs the deploy as its own child; the system manager is chosen only by uid 0.
+    let user = user || current_uid() != Some(0);
     let command = deploy_unit_command(name, capture, interpreter, args, user, supervisor);
     // Non-blocking by design, so this only proves the manager accepted the unit; the capture file is the
     // evidence of what the script then did, and `systemctl status <name>` of how it ended.
