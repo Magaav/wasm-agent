@@ -22,6 +22,8 @@ wa_health_verdict_reason() {
     # process that lost it. That word plus the command it names is the best evidence available of WHO ended it.
     why=$(grep -m1 -o 'Terminated.*' "$out" 2>/dev/null | cut -c1-140)
     if [ -z "$why" ]; then why=$(grep -m1 -i '^Killed.*\|Out of memory\|No space left' "$out" 2>/dev/null | cut -c1-140); fi
+    # A SUITE THAT NEVER STARTED BECAUSE THE LOCK WAS TAKEN is its own named reason - it is a wait, not a hang.
+    if [ -z "$why" ]; then why=$(grep -m1 -i 'suite lock\|flock: \|lock is held' "$out" 2>/dev/null | cut -c1-140); fi
   fi
   case "$rc" in
     124) why="the suite hit its ${budget}s budget${why:+; last output: $why}" ;;
