@@ -313,10 +313,72 @@ world service-drain {
 
 /// The OCR reader alone, for the runner that binds it beside `service-component`: the service world
 /// does not require `vision` (a world's imports are obligations), so a guest opts in by importing
+/// `wa:kernel/media@0.2.0`: ffmpeg as a capability, for components that have to look inside a container.
+///
+/// WHY IT TAKES PATHS AND NOT BYTES. The interface this replaces in spirit (`vision.read` above) takes the
+/// image as `list<u8>`, which is fine for a screenshot and fatal for a video: the whole point of moving media
+/// out of the host is that the bytes are never carried through a message, a queue entry or an answer. So every
+/// argument here is a GUEST PATH inside a directory the caller was granted, and every answer is a path plus the
+/// size and digest the kernel has already recomputed from the disk - a component reading this answer never
+/// needs the bytes to trust it.
+///
+/// The caller's grant is the permission: a path outside it is refused, not resolved. `probe` reads what it is
+/// given, `frames` and `audio` write into `out-dir`, which must itself be a granted directory.
+interface media {
+    use types.{error};
+
+    /// `stream` is a WIT keyword (as the component's own contract found once already), so the record is named
+    /// around it.
+    record media-stream {
+        kind: string,
+        codec: string,
+        width: u32,
+        height: u32,
+        sample-rate: u32,
+        channels: u32,
+    }
+    record description {
+        duration-ms: u64,
+        format: string,
+        streams: list<media-stream>,
+        has-audio: bool,
+        elapsed-ms: u64,
+    }
+    record still {
+        at-ms: u64,
+        /// Guest path of the written file, inside the granted out-dir.
+        path: string,
+        bytes: u64,
+        sha256: string,
+    }
+    record track {
+        path: string,
+        bytes: u64,
+        sha256: string,
+        duration-ms: u64,
+        elapsed-ms: u64,
+    }
+
+    /// What the container is: format, duration and one entry per stream. Writes nothing.
+    probe: async func(path: string) -> result<description, error>;
+    /// Stills at the given moments, PPM, scaled to fit `max-pixels`, written into `out-dir`.
+    frames: async func(path: string, moments-ms: list<u64>, max-pixels: u32, out-dir: string)
+        -> result<list<still>, error>;
+    /// The audio track as WAV at the requested rate and channel count, written into `out-dir`.
+    audio: async func(path: string, sample-rate: u32, channels: u32, out-dir: string)
+        -> result<track, error>;
+}
+
 /// `wa:kernel/vision@0.2.0` and the kernel links the interface from here
 /// (`rust/wa-kernel-runtime/src/vision_host.rs`).
 world service-vision {
     import vision;
+}
+
+/// A guest that imports `wa:kernel/media@0.2.0`. Additive on purpose: no existing world gains the import, so
+/// nothing that compiles today changes shape because media exists.
+world service-media {
+    import media;
 }
 
 // ---- fixture worlds ----------------------------------------------------------------------------
