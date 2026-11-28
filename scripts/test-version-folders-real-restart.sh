@@ -25,6 +25,22 @@ WA_BIN="${WA_TEST_BINARY:-${WA_BIN:-${HOME}/.local/bin/wa}}"
 # THE SENTINEL AND THE SUPERVISOR ARE LOOKED FOR BESIDE WA_BIN FIRST: a build tree keeps the three together, and the
 # runner's target directory is the only place they can be for a commit that is not installed.
 SENTINEL="${WA_SENTINEL_BINARY:-$(dirname "$WA_BIN")/wa-sentinel}"
+# THE ROW BUILDS WHAT IT NEEDS FROM ITS OWN COMMIT. The runner builds `wa` for the requested commit and nothing else, so
+# asking it for wa-sentinel and wa-operations-supervisor can only SKIP (measured twice). Both live in this repository, and
+# CARGO_TARGET_DIR is already pointed at the mission target, so the three end up beside each other exactly as a release
+# install lays them out.
+build_companion() { # <bin name> <target dir>
+  local bin="$1" dir="$2" root
+  [ -x "$dir/$bin" ] && return 0
+  root="$(cd "$(dirname "$0")/.." && pwd)"
+  [ -f "$root/rust/Cargo.toml" ] || return 1
+  command -v cargo >/dev/null 2>&1 || return 1
+  ( cd "$root/rust" && timeout 900 cargo build --release --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
+  [ -x "$dir/$bin" ]
+}
+WA_DIR="$(dirname "$WA_BIN")"
+build_companion wa-sentinel "$WA_DIR" || true
+build_companion wa-operations-supervisor "$WA_DIR" || true
 [ -x "$SENTINEL" ] || SENTINEL="${HOME}/.local/bin/wa-sentinel"
 SUPERVISOR="${WA_SUPERVISOR_BINARY:-}"
 if [ ! -x "$SUPERVISOR" ]; then
