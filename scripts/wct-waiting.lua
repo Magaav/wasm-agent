@@ -116,7 +116,16 @@ for run_id, run in pairs(runs) do
       for _, call in ipairs(slot.calls) do
         if call:sub(1, 10) ~= 'operation:' then only_operation = false break end
       end
-      local repeat_of_previous = (previous_signature ~= nil and signature == previous_signature)
+      -- A REPEAT IS A WAIT ONLY FOR A TOOL THAT CAN WAIT (28/11). MEASURED: with the rule applied to every tool, the
+      -- only "waiting rounds" after the fix were repeats of `run` - the same codemode script called again (my own
+      -- measurement runs) - which are work repeated, not a session waiting. operation and bash are the tools whose repeat
+      -- is a poll; everything else repeating is a habit or a retry, and counting it inflated the number that this mission
+      -- is judged by.
+      local waits_when_repeated = false
+      for _, call in ipairs(slot.calls) do
+        if call:sub(1, 10) == 'operation:' or call:sub(1, 5) == 'bash:' then waits_when_repeated = true break end
+      end
+      local repeat_of_previous = waits_when_repeated and previous_signature ~= nil and signature == previous_signature
       previous_signature = signature
       total_rounds = total_rounds + 1
       local cost = slot.in_tokens + slot.out_tokens
