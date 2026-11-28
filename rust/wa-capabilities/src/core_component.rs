@@ -2406,8 +2406,8 @@ assert(tonumber(later.utc_offset_minutes) ~= nil, 'the host must answer a second
         let args = vec![
             CLOCK_EPOCH.to_string(),
             native_text.clone(),
-            zone.source.to_string(),
-            zone.id.clone().unwrap_or_else(|| "none".to_string()),
+            zone_source.clone(),
+            zone_id.clone().unwrap_or_else(|| "none".to_string()),
         ];
         let mut lease = pool.acquire().expect("acquire an instance");
         let (report, error) = lease.run_script_outcome(Script::source("local-tz.lua", CLOCK_GUEST), &args).expect("the guest runs");

@@ -150,7 +150,10 @@ impl wa::process::child::HostProcessWithStore<Host> for Host {
             Ok(job) => job.operation.clone(),
             Err(_) => return Err(wasmtime::Error::msg("process handle gone")),
         };
-        let source = OutputStream::new(Box::new(RecordOutput { operation, served: false }));
+        let source = OutputStream::new(Box::new(RecordOutput::new(
+            operation,
+            Box::new(|method, args| crate::operations::call(method, &args)),
+        )));
         StreamReader::new(access.as_context_mut(), source)
     }
 
@@ -159,7 +162,10 @@ impl wa::process::child::HostProcessWithStore<Host> for Host {
             Ok(job) => job.operation.clone(),
             Err(_) => return Err(wasmtime::Error::msg("process handle gone")),
         };
-        let source = OutputStream::new(Box::new(RecordOutput { operation, served: false }));
+        let source = OutputStream::new(Box::new(RecordOutput::new(
+            operation,
+            Box::new(|method, args| crate::operations::call(method, &args)),
+        )));
         StreamReader::new(access.as_context_mut(), source)
     }
 }
@@ -247,7 +253,19 @@ impl StreamProducer<Host> for OutputStream {
 /// small - reading a live record in slices needs the supervisor and belongs to the node, not to this seam.
 pub struct RecordOutput {
     operation: Arc<Mutex<Option<String>>>,
+    /// The call, injected: the host passes `operations::call`, a test passes a fake. The same seam the terminal
+    /// adapter uses, so the content path is a unit test and not a live supervisor.
+    call: Box<dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send>,
     served: bool,
+}
+
+impl RecordOutput {
+    pub fn new(
+        operation: Arc<Mutex<Option<String>>>,
+        call: Box<dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send>,
+    ) -> RecordOutput {
+        RecordOutput { operation, call, served: false }
+    }
 }
 
 impl OutputSource for RecordOutput {
@@ -257,7 +275,7 @@ impl OutputSource for RecordOutput {
         }
         self.served = true;
         let id = self.operation.lock().ok()?.clone()?;
-        let answer = crate::operations::call("read", &serde_json::json!({"id": id})).ok()?;
+        let answer = (self.call)("read", serde_json::json!({"id": id})).ok()?;
         answer
             .get("output")
             .and_then(|value| value.as_str())
@@ -457,6 +475,33 @@ mod rows {
         // An empty child yields nothing and ends cleanly rather than stalling.
         let empty = Fake { chunks: Vec::new() };
         assert!(collect(Box::new(empty)).is_empty());
+    }
+
+
+    /// ROW: the bytes the guest sees in `stdout` come from the operation's RECORD, and the record is asked for the
+    /// right process. A fake call stands in for the supervisor, so the content path is asserted without a node.
+    #[test]
+    fn output_content_comes_from_the_record() {
+        use std::sync::{Arc, Mutex};
+
+        let asked: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = asked.clone();
+        let operation = Arc::new(Mutex::new(Some("op-42".to_string())));
+
+        let source = RecordOutput::new(
+            operation,
+            Box::new(move |method, args| {
+                recorded.lock().unwrap().push((method.to_string(), args));
+                Ok(serde_json::json!({"output": "hello from the record\n"}))
+            }),
+        );
+
+        assert_eq!(collect(Box::new(source)), b"hello from the record\n".to_vec());
+
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "the record is read once, not on every poll");
+        assert_eq!(asked[0].0, "read");
+        assert_eq!(asked[0].1, serde_json::json!({"id": "op-42"}), "the record must be the child's own");
     }
 
     /// ROW: an argument with a space or a quote reaches the program as ONE argument - asserted by running a real
