@@ -835,6 +835,20 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     echo "BINARY_COMMIT=$bcommit"
     echo "BINARY_SOURCE_COMMIT=$scommit"
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
+    # THE BLOCK'S OWN DEPENDENCIES. It runs OUT of deploy.sh here, so nothing deploy.sh sources or defines is
+    # present: a build-info reader (wa_build_info / wa_build_field, whose FIELD is the SECOND argument), a note
+    # printer, a post-swap reporter, the compiled-inputs digest, the reuse probe, the running-identity probe, and
+    # the REAL wa_same_commit out of scripts/lib/commit-id.sh - stubbing that one made the block refuse a commit
+    # it had just accepted ("reports commit X but this deploy meant to install X"). Measured standalone first.
+    echo 'note() { echo "note: $*"; }'
+    echo 'post_swap_problem() { :; }'
+    echo 'wa_build_info() { echo "commit=$BINARY_COMMIT"; }'
+    echo 'wa_build_field() { case "$2" in commit) echo "$BINARY_COMMIT";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
+    echo 'wa_compiled_inputs_digest() { echo deadbeef; }'
+    echo 'wa_node_binary_reuse() { return 1; }'
+    echo 'wa_running_identity() { :; }'
+    echo "ROOT=\"$ROOT\""
+    echo ". \"$ROOT/scripts/lib/commit-id.sh\""
     cat "$RECORD_BLOCK"
     echo 'record_installed'
   } > "$WORK/run-record.sh"
