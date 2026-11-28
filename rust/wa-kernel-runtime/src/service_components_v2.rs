@@ -124,6 +124,10 @@ pub struct State {
     /// object), for `wa:kernel/config` (`wasi_ext_host.rs`). `None` means the interface is not
     /// linked; a value is data, not a capability - every read is `config.read`.
     pub(crate) config: Option<String>,
+    /// The directories this component was granted, kept beside the preopens they became. `wa:kernel/media`
+    /// takes guest paths and has to answer in host paths: the grant is the only thing that can map one to the
+    /// other, and a path it cannot map is refused (`outside_the_grant` / `no_such_grant`), never resolved.
+    pub(crate) dirs: Vec<crate::components::DirGrant>,
     /// The instance token (`name#generation`): the subject this instance's queue grants and bus
     /// subscriptions are keyed by, so a replacement can revoke them without touching the winner.
     pub(crate) instance: String,
@@ -841,6 +845,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         stt,
         ocr,
         config: scope.config.clone(),
+        dirs: grant.dirs.clone(),
         instance: crate::services::instance_token(shared, &installed.name),
         name: installed.name.clone(),
     };
@@ -1150,6 +1155,7 @@ mod tests {
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new().memory_size(256 << 20).build(),
             net: Vec::new(),
+            dirs: Vec::new(),
             shared: Arc::new(Shared::default()),
             kv: GuestKv::new(KvStore::new(None)),
             log: None,
