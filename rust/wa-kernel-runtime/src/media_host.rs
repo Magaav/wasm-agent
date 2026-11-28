@@ -19,7 +19,7 @@ use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::components::{Grant, DirGrant};
+use crate::components::DirGrant;
 
 wasmtime::component::bindgen!({
     path: "../components/media/wit",
@@ -153,9 +153,9 @@ pub fn verify_file(
 const EPOCH_TICKS: u64 = 4;
 
 /// Build the store the component runs in, from the grant: the directories it may touch, and nothing else.
-fn store(engine: &Engine, grant: &Grant) -> Result<Store<Host>, String> {
+fn store(engine: &Engine, dirs: &[DirGrant]) -> Result<Store<Host>, String> {
     let mut builder = WasiCtxBuilder::new();
-    for dir in &grant.dirs {
+    for dir in dirs {
         let perms = if dir.write { FsPerms::ReadWrite } else { FsPerms::ReadOnly };
         builder
             .preopened_dir(&dir.host, &dir.guest, perms)
@@ -188,12 +188,12 @@ pub struct Description {
 pub fn probe(
     engine: &Engine,
     component: &Component,
-    grant: &Grant,
+    dirs: &[DirGrant],
     guest_source: &str,
     host_source: &Path,
 ) -> Result<Description, String> {
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
-    let mut store = store(engine, grant)?;
+    let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;
     let bindings = MediaService::instantiate(&mut store, component, &linker)
         .map_err(|error| format!("instantiate:{error}"))?;
@@ -226,7 +226,7 @@ pub fn probe(
 pub fn frames(
     engine: &Engine,
     component: &Component,
-    grant: &Grant,
+    dirs: &[DirGrant],
     guest_source: &str,
     host_source: &Path,
     moments_ms: &[u64],
@@ -234,7 +234,7 @@ pub fn frames(
     guest_out: &str,
 ) -> Result<Vec<(u64, VerifiedFile)>, String> {
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
-    let mut store = store(engine, grant)?;
+    let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;
     let bindings = MediaService::instantiate(&mut store, component, &linker)
         .map_err(|error| format!("instantiate:{error}"))?;
@@ -260,7 +260,7 @@ pub fn frames(
         Ok(stills) => {
             let mut verified = Vec::new();
             for still in stills {
-                let file = verify_file(&still.image.path, still.image.bytes, &still.image.sha256, &grant.dirs)
+                let file = verify_file(&still.image.path, still.image.bytes, &still.image.sha256, dirs)
                     .map_err(|error| error.to_string())?;
                 verified.push((still.at_ms, file));
             }
@@ -274,7 +274,7 @@ pub fn frames(
 pub fn audio(
     engine: &Engine,
     component: &Component,
-    grant: &Grant,
+    dirs: &[DirGrant],
     guest_source: &str,
     host_source: &Path,
     sample_rate: u32,
@@ -282,7 +282,7 @@ pub fn audio(
     guest_out: &str,
 ) -> Result<(VerifiedFile, u64), String> {
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
-    let mut store = store(engine, grant)?;
+    let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;
     let bindings = MediaService::instantiate(&mut store, component, &linker)
         .map_err(|error| format!("instantiate:{error}"))?;
@@ -303,7 +303,7 @@ pub fn audio(
         .map_err(|error| format!("call:{error}"))?;
     match answer {
         Ok(track) => {
-            let file = verify_file(&track.audio.path, track.audio.bytes, &track.audio.sha256, &grant.dirs)
+            let file = verify_file(&track.audio.path, track.audio.bytes, &track.audio.sha256, dirs)
                 .map_err(|error| error.to_string())?;
             Ok((file, track.duration_ms))
         }
@@ -367,20 +367,14 @@ mod tests {
         });
         std::fs::create_dir_all(&out).expect("out dir");
         let source = Path::new(&file);
-        let grant = Grant {
-            env: Default::default(),
-            file_env: Default::default(),
-            net: Vec::new(),
-            config: None,
-            dirs: vec![
+        let dirs = vec![
                 DirGrant {
                     host: source.parent().expect("parent").display().to_string(),
                     guest: "/media".to_string(),
                     write: false,
                 },
-                DirGrant { host: out.clone(), guest: "/out".to_string(), write: true },
-            ],
-        };
+            DirGrant { host: out.clone(), guest: "/out".to_string(), write: true },
+        ];
         let engine = crate::service_components_v2::engine().expect("engine");
         // The installed component, pin verified - the same bytes the node would run, not a path from the shell.
         let component = match std::env::var("WA_MEDIA_TEST_COMPONENT") {
@@ -389,16 +383,16 @@ mod tests {
         };
         let guest_source = format!("/media/{}", source.file_name().expect("name").to_string_lossy());
 
-        let description = probe(&engine, &component, &grant, &guest_source, source).expect("probe");
+        let description = probe(&engine, &component, &dirs, &guest_source, source).expect("probe");
         assert!(!description.format.is_empty(), "a container has a name");
         assert!(!description.streams.is_empty(), "and at least one stream");
 
-        let stills = frames(&engine, &component, &grant, &guest_source, source, &[1000], 640 * 360, "/out")
+        let stills = frames(&engine, &component, &dirs, &guest_source, source, &[1000], 640 * 360, "/out")
             .expect("frames");
         assert_eq!(stills.len(), 1);
         assert_eq!(stills[0].1.bytes, std::fs::metadata(&stills[0].1.host_path).unwrap().len());
 
-        let (track, duration_ms) = audio(&engine, &component, &grant, &guest_source, source, 16_000, 1, "/out")
+        let (track, duration_ms) = audio(&engine, &component, &dirs, &guest_source, source, 16_000, 1, "/out")
             .expect("audio");
         assert!(track.bytes > 0);
         assert!(duration_ms > 0, "a track has a length");
