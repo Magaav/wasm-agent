@@ -389,7 +389,7 @@ wa_fast_keep_failed_logs() {
   # One file that answers "what failed" without opening a log per row.
   : > "$dir/failures.txt" 2>/dev/null || true
   while IFS= read -r log; do
-    { wa_fast_row_failure_line "$log"; last_line_of "$log"; } | while IFS= read -r named; do
+    { wa_fast_row_failure_lines "$log"; last_line_of "$log"; } | while IFS= read -r named; do
       [ -n "$named" ] && printf '%s: %s\n' "$(basename "$log")" "$named"
     done >> "$dir/failures.txt" 2>/dev/null || true
   done < <(wa_fast_row_logs ${failed_rows:-} | awk '!seen[$0]++')
@@ -411,7 +411,17 @@ wa_fast_row_failure_line() { # <log>
   [ -n "$line" ] || line=$(first_error_of "$log")
   printf '%s' "$line" | cut -c1-300
 }
-export -f wa_fast_row_failure_line wa_fast_row_logs 2>/dev/null || true
+# EVERY line the row marked as a failure, not the first one (refusals-that-help (g)): a row stops at its
+# first assertion, so `-m1` names the first assertion in the file rather than the one the test was written
+# for, and a suite that prints one line per case is reduced to one of them. Deduplicated, and bounded so a
+# looping row cannot flood the report.
+wa_fast_row_failure_lines() { # <log> [max]
+  local log=$1 max=${2:-8}
+  [ -s "$log" ] || return 0
+  grep -aE '^(FAIL|FAILED|not ok)( |:|$)|^[A-Za-z0-9_.-]+: FAILED|assertion failed|lua error:|AssertionError|panicked at' "$log" 2>/dev/null \
+    | tr '\t' ' ' | awk '!seen[$0]++' | head -n "$max" | cut -c1-300
+}
+export -f wa_fast_row_failure_line wa_fast_row_failure_lines wa_fast_row_logs 2>/dev/null || true
 trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
@@ -697,6 +707,33 @@ envleft=$(awk -F'\t' '$1!=0 && $5=="environment"' "$work/lua.tsv" | wc -l)
 [ -n "$timings" ] && cp "$work/lua.tsv" "$timings" 2>/dev/null || true
 ran=$((ran + lua_total)); fails=$((fails + lua_fail));
 awk -F'\t' '$1!=0{ if ($5=="hung") printf "FAIL lua %s (hung): %s\n",$3,$4; else if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
+# refusals-that-help (e): the one line above names the row and its first error. A mission then re-runs the
+# row by hand to learn the rest, so each failed row also gets: EVERY assertion the row printed (not the
+# first, not the last), the log this run kept for it, and whether the verdict is the first attempt or a
+# retry (a row the machine refused once and then ran is a different fact from one that ran and failed).
+awk -F'\t' '$1!=0 && $5!="hung" && $5!="environment" {print $3}' "$work/lua.tsv" | while IFS= read -r failed_row; do
+  [ -n "$failed_row" ] || continue
+  log="$work/logs/$(basename "$failed_row").log"
+  retrylog="$work/logs/$(basename "$failed_row").retry.log"
+  attempts="1 (first run)"
+  [ -f "$retrylog" ] && attempts="2 (the first attempt was refused by the machine: see .retry.log)"
+  echo "fast:   $failed_row"
+  echo "fast:     attempt: $attempts"
+  if [ -f "$log" ]; then
+    echo "fast:     log: $log"
+    wa_fast_row_failure_lines "$log" 5 | while IFS= read -r line; do
+      echo "fast:     failed: $(printf '%s' "$line" | cut -c1-200)"
+    done
+    n=$(wa_fast_row_failure_lines "$log" 100 | grep -c . )
+    [ "${n:-0}" -gt 5 ] && echo "fast:     ($n matching lines in the log; the five above are the first)"
+  else
+    echo "fast:     log: (none kept at $log)"
+  fi
+done
+
+# Which tree and which binary produced the verdicts below: a report that cannot say this is not a report
+# (refusals-that-help (e)). The binary is the one every Lua row in this run was given.
+echo "fast: tree $(git rev-parse --short HEAD 2>/dev/null || echo unknown) binary ${FAST_LUA_BIN:-${WA_BIN:-unknown}}"
 echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(wa_fast_row_skips | grep -c . ) excluded: scripts/fast-path.exclude)"
 [ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
 # A hung row is neither a pass nor a verdict on the code, and it is counted apart from both: its process
