@@ -333,6 +333,11 @@ fn main() {
         }
         std::process::exit(build_info::contains_command(&asked));
     }
+
+    // `wa:terminal` is granted by the kernel runtime (the home every other world lives in), but the document it
+    // paints through is THIS binary's client - the kernel runtime cannot reach it. Install it before anything can
+    // import the world; a node that skipped this would answer `terminal_document_absent` instead of painting.
+    wa_kernel_runtime::terminal_host::install(Box::new(wa_capabilities::screen::document(None)));
     // `wa dev` before anything that touches the node. It builds and runs a component crate from its
     // own `.wa-dev/` directory, so it needs no database, no graph, no Lua tree, and - since it is a
     // development loop - no node environment file either: a dev run must not pick up a node's
