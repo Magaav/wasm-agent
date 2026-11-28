@@ -43,7 +43,11 @@ end
 local function slots_held()
   local held = 0
   for _, id in ipairs(running) do
-    local state = dispatch('operation', { action = 'status', id = id })
+    -- wait_ms = 0: THIS ROW OWNS THE WAIT (29/11). A status of a running operation now blocks up to 5 s, so a row
+    -- with its own 20 s budget spent it inside six probes and saw "0 of 6 running". The wait belongs to the loop
+    -- below, which is the thing being measured; the read must be a plain snapshot (the contract documents wait_ms=0
+    -- as exactly that).
+    local state = dispatch('operation', { action = 'status', id = id, wait_ms = 0 })
     if type(state) == 'table' and tostring(state.state) == 'running' then held = held + 1 end
   end
   return held
@@ -80,7 +84,8 @@ local decided, decided_ms = first, 0
 while decided == 'accepted' and decided_ms < 5000 do
   if host.sleep then host.sleep(20) end
   decided_ms = decided_ms + 20
-  local now = dispatch_b('operation', { action = 'status', id = op })
+  -- The second session's read is a snapshot too, for the same reason: its own loop owns the waiting.
+  local now = dispatch_b('operation', { action = 'status', id = op, wait_ms = 0 })
   decided = type(now) == 'table' and (now.queue_state == 'timed_out' and 'queued' or tostring(now.state)) or 'unknown'
 end
 check(decided == 'queued', 'its supervisor queues it behind the six: ' .. decided .. ' after ' .. decided_ms .. ' ms')
