@@ -59,7 +59,7 @@ say "sums $(cat "$OUT/SHA256SUMS")"
 # NO DEFAULT KEY, deliberately. A publisher that quietly signs with whatever key happens to sit in the tree
 # signs a release with a WORKER'S test key - a signature that exists and means nothing, which is worse than a
 # refusal because every downstream check passes. The key comes from the caller or the part is not published.
-[ -n "${WA_RELEASE_KEYS:-}" ] || die 'lua_part_no_signing_key: set WA_RELEASE_KEYS to the keys file this node trusts (the vault keys in a release build, tests/fixtures/release-sign/keys.txt only in a row)'
+[ -n "${WA_RELEASE_KEYS:-}" ] || die 'lua_part_no_signing_key: set WA_RELEASE_KEYS to the keys file this node trusts - a release passes the vault keys, and only a test row may pass test keys'
 [ -f "$WA_RELEASE_KEYS" ] || die "lua_part_no_signing_key: WA_RELEASE_KEYS=$WA_RELEASE_KEYS is not a file"
 python3 scripts/lib/release-fixture-sign.py "$OUT" >/dev/null 2>&1 || die "lua_part_sign_failed: the signer refused ($OUT)"
 [ -f "$OUT/SHA256SUMS.sig" ] || die 'lua_part_unsigned: the signer wrote no SHA256SUMS.sig'

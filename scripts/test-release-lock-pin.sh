@@ -215,4 +215,20 @@ else
   esac
 fi
 
+# 17. NO SHIPPING PATH SIGNS WITH A TEST KEY. This row exists because the publisher DID: it defaulted
+# WA_RELEASE_KEYS to tests/fixtures/release-sign/keys.txt, so a release would have signed a real part with a worker's
+# test key and every check downstream would still have passed. Reviewing that one line fixed the instance; this check
+# closes the CLASS. It judges EXECUTABLE mentions, not prose: a comment that names the fixture directory (several do,
+# explaining the verifier) is not a default, and a check that cannot tell them apart is a check people delete.
+offenders=""
+for f in $(grep -rl 'tests/fixtures/release-sign' --include='*.sh' scripts/ 2>/dev/null | grep -v '^scripts/test-'); do
+  case "$f" in scripts/lib/release-signing.sh|scripts/lib/release_verify.py|scripts/lib/release-fixture-sign.py) continue ;; esac
+  hits=$(grep -n 'tests/fixtures/release-sign' "$f" | grep -v '^[0-9]*:[[:space:]]*#' || true)
+  [ -n "$hits" ] && offenders="$offenders $f"
+done
+if [ -n "$offenders" ]; then
+  fail "a shipping script USES the fixture keys, not just names them in a comment: $offenders"
+fi
+checks=$((checks+1)); echo "ok 17: no shipping script uses the fixture key directory (comments are not defaults)"
+
 printf 'release lock pin ok (%s checks)\n' "$checks"
