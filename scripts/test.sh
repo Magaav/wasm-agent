@@ -3097,6 +3097,11 @@ gate_run node scripts/test-node-wake-facts.cjs "$BIN"
 # scripts/verify-install.sh, and the same rule in jq), plus the green case. Not a copy of the rule: a row that
 # re-implemented it would pass while the shipped judge was wrong.
 gate_run node scripts/test-health-wakes-rule.cjs "$BIN"
+# A FACTORY SERVICE RUNS THE CLONE'S factory/ SCRIPT, NEVER A HAND COPY (factory-is-small-and-tested, 27/11): the
+# health loop ran ~/Work/missions/_orch/health-loop.sh, so queues #123 and #142 changed nothing for three hours. This
+# row names every unit whose ExecStart runs a factory script from outside a clone, and lists the _orch copies that
+# have a factory/ twin.
+gate_run node scripts/test-factory-runs-from-a-clone.mjs
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
   run_proof_fixture sentinelInstall 30 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
