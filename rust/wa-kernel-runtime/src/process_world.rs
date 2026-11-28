@@ -483,6 +483,20 @@ mod rows {
             .unwrap_or_else(|error| panic!("a granted guest must instantiate: {error:?}"));
     }
 
+
+    /// ROW: a node that installed no runner says so BY NAME - `process_runner_absent` is what an operator greps for,
+    /// so the code is pinned here rather than left to a hang or an empty answer.
+    #[test]
+    fn a_missing_runner_is_refused_by_name() {
+        let refusal = runner().map(|_| ()).is_none();
+        assert!(refusal, "no runner must be installed in this test binary");
+        let message = record("read", &serde_json::json!({"id": "op-1"})).unwrap_err();
+        assert!(
+            message.starts_with("process_runner_absent"),
+            "the refusal must lead with its code, got: {message}"
+        );
+    }
+
     /// ROW: the world is GRANTED by the runner, beside terminal and vision.
     #[test]
     fn the_runner_grants_the_process_world() {
