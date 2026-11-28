@@ -159,4 +159,25 @@ else
   printf 'skipped 11-13: no WA_BIN (a host binary) - the signature gate is judged by scripts/test-lua-part-signature.sh in the gate\n'
 fi
 
+# 14. THE WHOLE PATH A NODE TAKES, end to end and dark: nothing held -> the decision asks for the pin -> the part
+# that arrived is verified against the lock -> fill puts it in a directory -> the tree is THERE and its interface is
+# the host's. This is the sequence a real fetch would drive (items 2 and 3), judged in one place so the pieces cannot
+# agree with each other only apart.
+fresh=$WORK/node
+mkdir -p "$fresh"
+decision=$(wa_lua_part_fetch_decision "$LOCK" '') || fail 'the decision refused a first install'
+[ "$decision" = "lua-core $pin_sha $pin_bytes" ] || fail "a first install asked for the wrong part: $decision"
+out=$(wa_lua_part_verify_file "$part" "$LOCK" 2>&1) || fail "the fetched part did not verify: $out"
+# The fill path takes FOUR positional values: part, lock, destination, host interface. The project record before me
+# left one out and the function answered with the empty fifth slot instead of a sentence - so the call is written out
+# here rather than abbreviated.
+# FIVE values, not four: part, lock, destination, host interface, and THE VERIFIER PROGRAM (the host that will run
+# the part - passed in, never looked up on PATH). The signature is checked first inside the fill, which is why this
+# row signup above is not decoration.
+signed_part="$sig_dir/lua-core-part.tar.gz"
+[ -f "$signed_part" ] || fail 'no signed part to fill with (run with WA_BIN to sign it)'
+out=$(wa_lua_part_fill "$signed_part" "$LOCK" "$fresh/lua-core" "$pin_iface" "$WA_BIN" 2>&1) || fail "fill refused the pinned part: $out"
+[ -f "$fresh/lua-core/lua/core/init.lua" ] || fail 'the filled tree has no lua/core/init.lua'
+checks=$((checks+1)); echo "ok 14: a first install goes decision -> verify -> fill and lands the pinned tree"
+
 printf 'release lock pin ok (%s checks)\n' "$checks"
