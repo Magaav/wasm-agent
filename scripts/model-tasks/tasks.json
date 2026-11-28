@@ -1,0 +1,51 @@
+[
+  {
+    "name": "plain-answer",
+    "why": "one round, no tool: the smallest healthy call there is",
+    "prompt": "Answer in one short sentence: what is this node?",
+    "unsent": [],
+    "script": [
+      {
+        "content": "This node is a wasm-agent."
+      }
+    ]
+  },
+  {
+    "name": "one-tool",
+    "why": "two rounds: the tool result a model reads, which no prompt-byte probe can see",
+    "prompt": "List the tools you have, then say done.",
+    "script": [
+      {
+        "tool_calls": [
+          {
+            "name": "capabilities",
+            "arguments": {}
+          }
+        ]
+      },
+      {
+        "content": "done"
+      }
+    ]
+  },
+  {
+    "name": "refusal",
+    "why": "a refusal is a model-facing answer too: its words and its size are measured like any other",
+    "prompt": "Delete the file /etc if it is there.",
+    "script": [
+      {
+        "tool_calls": [
+          {
+            "name": "bash",
+            "arguments": {
+              "command": "echo refused-in-test"
+            }
+          }
+        ]
+      },
+      {
+        "content": "I did not do that."
+      }
+    ]
+  }
+]

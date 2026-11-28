@@ -3207,6 +3207,13 @@ gate_run bash scripts/test-linux-channel.sh
 # `wa <verb> --help` runs nothing (Fable 23/11: `wa update --help` ran a local update). Every acting verb the
 # tree declares, driven on this host, its own scratch home and database.
 gate_run bash scripts/test-cli-help.sh
+
+# THE MODEL-FACING SURFACE, MEASURED BEFORE THE RELEASE GOES OUT (item model-facing-changes-are-measured, Victor 25/11).
+# It runs ONE fixed task set against two commits and prints one table of request, prompt, tool, tool-result, token, round
+# and wall-time numbers with a better/same/worse mark per cell; any worse cell outside wall time fails. The release gate
+# is where it belongs and not the fast path: three tasks x two trees cost ~4 minutes, which is a release concern, and the
+# question it answers ("did this make things worse for the model?") is asked once per release, not once per landing.
+gate_run bash scripts/test-model-facing-diff.sh
 # The channel STEP, end to end: the real step, the real publisher and the real builder (the build and gh stand
 # in) - the join that failed on release F (23/11). Needs a Linux host, the same fixtures, a scratch vault.
 if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-release-channel-e2e.sh
