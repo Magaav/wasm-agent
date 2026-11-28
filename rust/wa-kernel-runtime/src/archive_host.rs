@@ -128,7 +128,12 @@ fn engine() -> Result<Engine, String> {
 ///
 /// `wasm` is the artifact's bytes: the caller resolved them (the node's component directory, a development
 /// override), so this module never reads a path of its own.
-pub fn serve(wasm: &[u8], request: &str) -> Result<String, String> {
+/// One archive question, answered by the installed component.
+///
+/// `wasm` is the artifact's bytes and `preopen` is the directory the path-bound operations (`list`,
+/// `cut`, `restore`, `expire`) work in: the caller resolves both, so this module reads no path of its
+/// own. The directory appears in the guest as `/archive`, and a request names it that way.
+pub fn serve(wasm: &[u8], request: &str, preopen: Option<&std::path::Path>) -> Result<String, String> {
     if !host_installed() {
         return Err(missing());
     }
@@ -137,7 +142,15 @@ pub fn serve(wasm: &[u8], request: &str) -> Result<String, String> {
     let mut store = Store::new(
         &engine,
         Bridges {
-            wasi: WasiCtxBuilder::new().build(),
+            wasi: {
+                let mut builder = WasiCtxBuilder::new();
+                if let Some(dir) = preopen {
+                    builder
+                        .preopened_dir(dir, "/archive", wasmtime_wasi::FsPerms::ReadWrite)
+                        .map_err(|error| format!("archive_dir_unavailable:{error}"))?;
+                }
+                builder.build()
+            },
             limits: StoreLimitsBuilder::new().memory_size(64 << 20).build(),
             table: ResourceTable::new(),
         },
@@ -155,7 +168,12 @@ pub fn serve(wasm: &[u8], request: &str) -> Result<String, String> {
 
 /// The answer as JSON, or the failure in the same shape every other door uses.
 pub fn answer(wasm: &[u8], request: &str) -> Value {
-    match serve(wasm, request) {
+    answer_in(wasm, request, None)
+}
+
+/// The same answer with a directory preopened for the path-bound operations.
+pub fn answer_in(wasm: &[u8], request: &str, preopen: Option<&std::path::Path>) -> Value {
+    match serve(wasm, request, preopen) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| json!({"ok": false, "error": format!("archive_answer_invalid:{error}")})),
         Err(error) => json!({"ok": false, "error": error}),
     }
@@ -233,6 +251,16 @@ mod tests {
         let due = answer(&wasm, r#"{"op":"due","args":{"now_ms":1000,"keep_days":30}}"#);
         assert_eq!(due["ok"], json!(true), "{due}");
         assert_eq!(due["month"], Value::Null, "an empty store has no month to cut: {due}");
+        // A PATH-BOUND op: the directory is preopened, so the component reads it through its own
+        // filesystem view. An empty directory has no months, and `expire` finds nothing to remove.
+        let dir = std::env::temp_dir().join(format!("wa-archive-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let listed = answer_in(&wasm, r#"{"op":"list","args":{"dir":"/archive"}}"#, Some(dir.as_path()));
+        assert_eq!(listed["ok"], json!(true), "{listed}");
+        assert_eq!(listed["months"].as_array().map(|m| m.len()), Some(0), "{listed}");
+        let expired = answer_in(&wasm, r#"{"op":"expire","args":{"dir":"/archive","now_ms":1000}}"#, Some(dir.as_path()));
+        assert_eq!(expired["ok"], json!(true), "{expired}");
+        let _ = std::fs::remove_dir_all(&dir);
         // And a month the caller names is due when it is older than the window.
         let is_due = answer(&wasm, r#"{"op":"is_due","args":{"month":"2020-01","now_ms":1764547200000,"keep_days":30}}"#);
         assert_eq!(is_due["due"], json!(true), "{is_due}");

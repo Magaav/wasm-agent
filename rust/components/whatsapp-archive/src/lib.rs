@@ -88,6 +88,47 @@ fn answer(request: &str) -> Value {
             let bytes = args.get("bytes_hex").and_then(Value::as_str).and_then(unhex).unwrap_or_default();
             json!({"ok": true, "sha256": archive::sha256_hex(&bytes)})
         }
+        // The path-bound operations: a month's file is read and written in the directory the request
+        // names, which the host preopens for this call. Every answer is the library's.
+        "list" => {
+            let dir = std::path::PathBuf::from(text(&args, "dir"));
+            match archive::ops::list(&Store, &dir) {
+                Ok(months) => json!({"ok": true, "months": months.iter().map(|month| json!({
+                    "month": month.month, "path": month.path, "bytes": month.bytes, "chats": month.chats,
+                    "messages": month.messages, "entries": month.entries, "sha256": month.sha256,
+                })).collect::<Vec<_>>()}),
+                Err(error) => json!({"ok": false, "error": error}),
+            }
+        }
+        "cut" => {
+            let dir = std::path::PathBuf::from(text(&args, "dir"));
+            let build = archive::Build {
+                component_version: text(&args, "component_version"),
+                schema: text(&args, "schema"),
+            };
+            match archive::ops::cut(&Store, &Keys, &dir, &month, number(&args, "now_ms"), &build) {
+                Ok(cut) => json!({"ok": true, "cut": {"month": cut.month, "chats": cut.chats,
+                    "messages": cut.messages, "entries": cut.entries, "bytes": cut.bytes,
+                    "sha256": cut.sha256, "path": cut.path.display().to_string(), "written": cut.written}}),
+                Err(error) => json!({"ok": false, "error": error}),
+            }
+        }
+        "restore" => {
+            let dir = std::path::PathBuf::from(text(&args, "dir"));
+            match archive::ops::restore(&Store, &Keys, &dir, &month, number(&args, "now_ms")) {
+                Ok(restored) => json!({"ok": true, "restored": {"month": restored.month,
+                    "entries": restored.entries, "messages": restored.messages,
+                    "sha256": restored.sha256, "again": restored.again}}),
+                Err(error) => json!({"ok": false, "error": error}),
+            }
+        }
+        "expire" => {
+            let dir = std::path::PathBuf::from(text(&args, "dir"));
+            match archive::ops::expire(&Store, &dir, number(&args, "now_ms")) {
+                Ok(months) => json!({"ok": true, "expired": months}),
+                Err(error) => json!({"ok": false, "error": error}),
+            }
+        }
         other => json!({"ok": false, "error": format!("unknown_op:{other}")}),
     }
 }
