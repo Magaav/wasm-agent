@@ -463,6 +463,12 @@ local function request_release(record)
     -- ...and WHO ASKED, exported for the same reason: a var=value prefix on its own line runs `value` as a
     -- command, and upgrade.sh reads this one to record the caller in installed.txt.
     'export WA_UPGRADE_VIA=remote-update.sh',
+    -- A PATH IS CHECKED BEFORE IT IS EXECUTED (25/11, item 11 of installer-refuses-a-target): on a node installed from a
+    -- release bundle, a release door that stayed open across an install with no scripts/release-install.sh exec'd a
+    -- missing file, bash exited 127, and the door said "failed" - a word that names nothing an operator can act on. The
+    -- guard runs ON THE PEER, before the exec, and answers by name with a code of its own.
+    'if [ ! -f ' .. quote(script) .. ' ]; then echo "release_install_missing: ' .. quote(script) ..
+      ' is not on this node, so this release door has nothing to run; install the release bundle or name an install with one" >&2; exit 78; fi',
     'exec bash ' .. quote(script) .. ' ' .. quote(record.target_commit),
   }
   return request_run(record, 'release', body, 'release install')

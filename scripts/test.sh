@@ -212,7 +212,11 @@ gate_run bash scripts/test-deploy-refusal-keeps-the-running-result.sh
 WA_BIN="$BIN" gate_run bash scripts/test-health-names-its-install.sh
 # A ROW BUILDS ITS ENVIRONMENT ONCE (installer-refuses-a-target, item 10): a statement that runs an installer through a
 # line continuation lost its env prefix to one stray line on 25/11 and deployed to the LIVE install.
-gate_run bash scripts/test-rows-build-one-environment.sh  # a row that writes a git repository must clear git's redirect (or say why)
+gate_run bash scripts/test-rows-build-one-environment.sh
+# A RELEASE DOOR NAMES A MISSING INSTALL BEFORE IT EXECS ANYTHING (installer-refuses-a-target, item 11): a node
+# installed from a bundle with no scripts/release-install.sh answered bash 127 and a mute "failed"; it now answers
+# release_install_missing with a code of its own.
+gate_run bash scripts/test-release-door-names-a-missing-install.sh  # a row that writes a git repository must clear git's redirect (or say why)
 
 # The node's build heat and build seeding (change/gate-speed, 21/11). Both are about the gate itself, so
 # they belong in the gate: one heavy build at a time with a bounded job count, and a NEW target dir
