@@ -278,6 +278,13 @@ stub "$UPGDIR/wa" "$H40" false 0
 CANDIDATE="$WORK/vendor-candidate"
 printf '#!/bin/sh\ncase "$1" in\n  --version) echo "wasm-agent 9.9.9 (vendor build, no stamp)" ;;\n  *) exit 1 ;;\nesac\n' > "$CANDIDATE"
 chmod +x "$CANDIDATE"
+# AND THE PROGRAM THAT DRAWS THE TERMINAL, beside it: a real vendor artifact ships wa-term next to the node
+# binary, and upgrade.sh refuses the pair-missing case by name (term_program_missing, measured: without this the
+# six override cases below never ran - the run refused before reaching the rule they are about).
+printf '#!/bin/sh\nexit 0\n' > "$WORK/wa-term"; chmod +x "$WORK/wa-term"
+# The supervisor too: since 03579b19 a node that installs without wa-operations-supervisor loses every bash, so
+# upgrade.sh refuses that pair by name as well (operations_supervisor_missing) before any rule below is reached.
+printf '#!/bin/sh\nexit 0\n' > "$WORK/wa-operations-supervisor"; chmod +x "$WORK/wa-operations-supervisor"
 # Two ports nothing is using, asked of the kernel rather than guessed: upgrade.sh installs nothing here, but a
 # run that reached the port step must not collide with the /health server above.
 free_port() { python3 -c 'import socket\ns=socket.socket()\ns.bind(("127.0.0.1",0))\nprint(s.getsockname()[1])\ns.close()' 2>/dev/null; }
