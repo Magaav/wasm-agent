@@ -945,6 +945,9 @@ end
 -- dispatch is `dispatch`, and the arguments are validated against the schema the node holds now.
 local function component_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts)
  local session=host.uuid()
+ -- WHO DRIVES THIS LOOP, behind an env var: one `run` call was measured opening TWO component sessions, and the
+ -- loop has a single call site, so the second is a caller. The traceback names it in one run.
+ if host.getenv('WA_CODEMODE_TRACE_OPENS') then print('[codemode-run] session='..session..' caller='..(debug and debug.traceback('who', 1) or 'no-debug')) end
  -- The lookup the globals this loop owns are answered through, exactly as the native loop builds it:
  -- `capabilities()`, a `searchTools` call the seam hands back, and `describeTool` all dispatch through
  -- here, so the two paths answer one implementation.
