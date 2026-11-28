@@ -1283,6 +1283,56 @@ fn stall_exit_seconds() -> u64 {
 /// running (and which step), done, or failed. The watcher writes one small file per request; this reads
 /// them so the window can show the queue and its failures instead of the operator having to read
 /// sentinel.log. Reading is the node's job here because /health is the one endpoint every client polls.
+/// WHAT THIS NODE IS INSTALLED FROM, AND WHO IS SUPERVISING IT (installer-refuses-a-target, item 4 - 25/11).
+///
+/// Two facts an operator cannot get from anywhere else, each the shape of a measured incident:
+///   * `runtime_worktree.txt` names the tree the node runs from (written at install time). On 24/11 it named a path
+///     that no longer existed and nothing said so - the node answered /health, drew a prompt and could not update.
+///   * the supervisor is only watching THIS node when its own record names this home and its pid is alive. That same
+///     night the live unit was rewritten to a scratch binary and port, so the live node had NO supervisor for 38
+///     minutes while every endpoint it served looked healthy.
+///
+/// `known: false` is a named answer here too: a missing record is not "no supervisor", it is "nobody can say".
+fn install_health() -> serde_json::Value {
+    let home = wa_host_support::paths::resolve_home();
+    let home_path = std::path::Path::new(&home);
+    // The install directory: `WA_INSTALL_DIR` when an installer named one, else the platform default this node
+    // writes its records to (`<home>/.local/bin` on unix). Read, never invented.
+    let install = std::env::var("WA_INSTALL_DIR").ok().filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home_path.join(".local").join("bin"));
+    let worktree_file = install.join("runtime-worktree.txt");
+    let worktree = std::fs::read_to_string(&worktree_file).ok().map(|text| text.trim().to_string()).filter(|t| !t.is_empty());
+    let (worktree_state, worktree_exists) = match worktree.as_deref() {
+        None => ("no_record", false),
+        Some(path) if std::path::Path::new(path).exists() => ("ok", true),
+        Some(_) => ("missing", false),
+    };
+    let sentinel_record = home_path.join(".wasm-agent").join("sentinel").join("node.json");
+    let (supervisor_state, supervisor_pid) = match std::fs::read_to_string(&sentinel_record)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    {
+        None => ("unknown", None),
+        Some(record) => {
+            let recorded_home = record.get("home").and_then(|v| v.as_str()).unwrap_or("");
+            let pid = record.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+            let alive = pid > 0 && std::path::Path::new(&format!("/proc/{pid}")).exists();
+            let state = if recorded_home != home { "watching_another_home" } else if alive { "watching" } else { "stale_record" };
+            (state, Some(pid))
+        }
+    };
+    serde_json::json!({
+        "install_dir": install.display().to_string(),
+        "runtime_worktree": worktree,
+        "runtime_worktree_state": worktree_state,
+        "runtime_worktree_exists": worktree_exists,
+        "supervisor": supervisor_state,
+        "supervisor_pid": supervisor_pid,
+        "known": true,
+    })
+}
+
 fn sentinel_queue_health() -> serde_json::Value {
     fn text(value: Option<&serde_json::Value>) -> String {
         value.and_then(|v| v.as_str()).unwrap_or("").chars().take(240).collect()
@@ -2056,6 +2106,10 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
         // The sentinel queue: every request it was asked to perform, its state, its current step and
         // its failures. Without this the only account of a queued restart was a log line.
         "sentinel": sentinel_queue_health(),
+        // WHAT THIS NODE IS INSTALLED FROM, AND WHO IS SUPERVISING IT (installer-refuses-a-target, item 4): a
+        // runtime-worktree.txt naming a path that no longer exists, and a supervisor whose record names another home -
+        // the 24/11 shape - said nothing before this field.
+        "install": install_health(),
         // THE NODE'S OWN WAKE STATE (Fable 24/11, from the live stall): the last placement tick's outcome by name
         // (`ok` / `selfloop_tick_failed`), the due and dispatchable counts, the age of the oldest dispatchable
         // due row and the last dispatch time. Additive: nothing above moved. `known: false` is a named answer,
