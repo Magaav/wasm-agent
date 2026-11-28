@@ -82,7 +82,7 @@ cleanup() {
   # match is on the scratch path itself.
   for p in $(ps -eo pid= 2>/dev/null); do
     [ "$p" = "$$" ] && continue
-    cmd="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)" || continue
+    cmd="$( { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null )" || continue
     case "$cmd" in *"$S"*) kill "$p" 2>/dev/null; sleep 0.1; kill -9 "$p" 2>/dev/null ;; esac
   done
   # THE WATCHER IS KILLED BY PID: `stop` asks, and a watcher that is already confused does not answer - which is exactly
