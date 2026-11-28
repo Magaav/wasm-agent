@@ -57,7 +57,12 @@ local builders = {
   -- and the transcript) - so mid-run a row does not carry `run`, and the list is a read: it shows every
   -- session's state and age while the turn keeps running, and the switch is made when the turn ends.
   ["/sessions"] = function(opts)
-    local view = dofile("lua/core/sessions_view.lua")
+    -- DECLINES, never raises (the rule every builder here follows, said at `M.collect`): a snapshot taken
+    -- for the reader must not become a refusal in the node's log, and `scripts/test-local-views.lua`
+    -- counts refusals - a builder that threw where its store is absent would make that count wrong for a
+    -- reason that has nothing to do with the panel. No store, no page: nothing published, nothing said.
+    local loaded, view = pcall(dofile, "lua/core/sessions_view.lua")
+    if not loaded or type(view) ~= "table" or type(view.page) ~= "function" then return nil end
     local built, page = pcall(view.page, { session_id = opts.session_id, user_id = opts.user_id or "master",
       limit = 200, back = opts.back })
     if not built or type(page) ~= "table" then return nil end
