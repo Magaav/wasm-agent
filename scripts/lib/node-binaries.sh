@@ -951,7 +951,10 @@ wa_node_release_digest_search() {
     out="$(wa_node_verify_signature "$repo" "$tag" "$tmp" 2>&1)"; rc=$?
     if [ "$rc" != 0 ]; then rm -rf "$tmp"; printf '%s\n' "$out" >&2; return "$rc"; fi
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    for file in $(wa_node_bundle_members "$entry" "$triple" "$short"); do
+    # THE DIRECTORY JUST FETCHED, NOT THE CACHE ENTRY (measured): $entry does not exist yet here, so its manifest
+    # cannot be read and the member list collapses to wa + wa-sentinel - the program the manifest pins is never
+    # fetched, and the staging refuses the set one line later (node_binary_missing .../wa-term).
+    for file in $(wa_node_bundle_members "$tmp" "$triple" "$short"); do
       if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "$(wa_node_tag_base "$tag")" 2>&1)"; then
         rm -rf "$tmp"
         printf 'node_binary_missing: %s pins %s but the release does not carry it (%s)\n' "$tag" "$file" "$out" >&2
