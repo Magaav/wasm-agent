@@ -31,7 +31,9 @@ fail() { printf 'release_install: %s\n' "$*" >&2; exit 2; }
 COMMIT="${1:-}"
 [ "$#" -gt 0 ] && shift
 COVER_COMMIT=""
-LUA_INPUTS="${WA_RELEASE_LUA_INPUTS:-}"
+LUA_INPUTS=""   # NO INHERITED SOURCE (decision 27/11): "which Lua tree is release X" has one owner, and it is
+               # not an environment variable. --lua-inputs stays, because an operator stating the target's Lua is a
+               # decision that has to be typed; an environment variable is a default nobody chose.
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --cover-commit) [ "$#" -ge 2 ] || fail 'cover_commit_value_required'; COVER_COMMIT="$2"; shift 2 ;;
