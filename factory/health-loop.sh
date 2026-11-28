@@ -60,7 +60,12 @@ while true; do
   # resolved the published bundle in 76 s, no build. This loop's fallback is a fifteen-minute cargo build, so a
   # longer scan is the cheap answer; a warm stage is unaffected because it answers before the scan runs.
   export WA_NODE_RELEASE_DIGEST_SECONDS=${WA_NODE_RELEASE_DIGEST_SECONDS:-120}
-  if ! WA_BIN=$(wa_main_binary "$N"); then
+  # NOT IN A COMMAND SUBSTITUTION (28/11). wa_main_binary names the step it used by EXPORTING WA_MAIN_BINARY_STEP,
+  # and `WA_BIN=$(wa_main_binary ...)` runs it in a subshell, so the export died and every graded line read
+  # "with unknown" - measured 00:53Z on a tip that WAS graded: "grading 242e69c4 with unknown (pinned/.../wa)".
+  # The binary goes to a file and is read back, so the step survives in this shell, where the line is written.
+  WA_BIN=""
+  if ! wa_main_binary "$N" > "$M/_orch/health-binary.out" 2> "$M/_orch/health-binary.err"; then
     echo "$(date -u +%H:%MZ) orch(health): NOT GRADED for ${N:0:8}: no binary of main's own (the installed one is not used)" >> $H
     # A WATCHDOG THAT NEVER BARKS IS WORSE THAN NONE: one ungraded tip can be a release still publishing, two in
     # a row is a resolver that cannot see anything, and that must reach the operator instead of scrolling by in
@@ -71,6 +76,8 @@ while true; do
     fi
     sleep 300; continue
   fi
+  # READ BACK HERE, in the shell that writes the line, so WA_MAIN_BINARY_STEP (exported by the lib) is still set.
+  WA_BIN=$(head -1 "$M/_orch/health-binary.out" 2>/dev/null)
   wa_note_graded $M/_orch
   # WHICH STEP GAVE THE BINARY, on the line that records the grading, so "graded" is never mistaken for "built".
   echo "$(date -u +%H:%MZ) orch(health): grading ${N:0:8} with ${WA_MAIN_BINARY_STEP:-unknown} (${WA_BIN})" >> $H
