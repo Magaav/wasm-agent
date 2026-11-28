@@ -529,7 +529,12 @@ wa_node_bundle_members() { # <dir> <triple> <short>
   local dir="$1" triple="$2" short="$3" fields
   printf 'wa-%s-%s\nwa-sentinel-%s-%s\n' "$triple" "$short" "$triple" "$short"
   [ -f "$dir/node-$short.manifest" ] || return 0
-  fields="$(awk -v t="$triple" 'index(\$1,"="){next} \$1==t{print NF; exit}' "$dir/node-$short.manifest" 2>/dev/null)"
+  fields="$(awk -v t="$triple" '$1==t{print NF; exit}' "$dir/node-$short.manifest" 2>/dev/null)"
+  # wa-term IS A MEMBER TOO, and by the same rule: the manifest names its columns (wa-term_sha256/wa-term_bytes)
+  # from the release that carries it, so SEVEN fields means the program travels with the node and FIVE means the
+  # release predates it. Without this line the fetch loop never asked for the program, and the staging then
+  # refused the set it had just downloaded: node_binary_missing: <cache>/<short>/<triple>/wa-term (measured).
+  [ "${fields:-0}" -ge 7 ] 2>/dev/null && printf 'wa-term-%s-%s\n' "$triple" "$short"
   [ "${fields:-0}" -ge 9 ] 2>/dev/null && printf 'wa-operations-supervisor-%s-%s\n' "$triple" "$short"
   return 0
 }
