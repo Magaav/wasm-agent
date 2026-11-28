@@ -94,6 +94,70 @@ impl wa::terminal::document::HostWithStore<Host> for Host {
     }
 }
 
+
+/// The document, spoken over `wa-term-proto`: the SAME wire `screen.rs:762` uses. It takes the call as a closure so
+/// the adapter is testable without the program - `screen.rs` passes its own `call`, a test passes a recorder.
+pub struct ProtoDocument {
+    call: Box<dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send>,
+    dirty: bool,
+}
+
+impl ProtoDocument {
+    pub fn new(call: Box<dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send>) -> ProtoDocument {
+        ProtoDocument { call, dirty: false }
+    }
+
+    fn ask(&mut self, method: &str, args: serde_json::Value) -> Result<serde_json::Value, Fault> {
+        match (self.call)(method, args) {
+            Ok(value) => {
+                self.dirty = true;
+                Ok(value)
+            }
+            Err(message) => Err(Fault::Failed(message)),
+        }
+    }
+}
+
+impl Document for ProtoDocument {
+    fn write(&mut self, text: &str) -> Result<(), Fault> {
+        self.ask("write", serde_json::json!([text]))?;
+        Ok(())
+    }
+
+    fn block(&mut self, open: bool) -> Result<(), Fault> {
+        self.ask("block", serde_json::json!([open]))?;
+        Ok(())
+    }
+
+    fn code_block(&mut self) -> Result<(), Fault> {
+        self.ask("code_block", serde_json::json!([]))?;
+        Ok(())
+    }
+
+    fn head(&mut self, text: &str) -> Result<u32, Fault> {
+        let value = self.ask("head", serde_json::json!([text]))?;
+        value.as_u64().map(|line| line as u32).ok_or_else(|| Fault::Failed("head answered no line".to_string()))
+    }
+
+    fn rewrite(&mut self, line: u32, text: &str) -> Result<u32, Fault> {
+        let value = self.ask("rewrite", serde_json::json!([line, text]))?;
+        value.as_u64().map(|line| line as u32).ok_or_else(|| Fault::Failed("rewrite answered no line".to_string()))
+    }
+
+    fn pin_toggle(&mut self) -> Result<Option<bool>, Fault> {
+        let value = self.ask("pin_toggle", serde_json::json!([]))?;
+        Ok(value.as_bool())
+    }
+
+    /// Whether anything changed since the last frame. The program carries this flag on every reply; here it is the
+    /// adapter's own bookkeeping - any successful call marks the document changed, and asking clears it.
+    fn dirty(&mut self) -> bool {
+        let changed = self.dirty;
+        self.dirty = false;
+        changed
+    }
+}
+
 #[cfg(test)]
 mod rows {
     use super::*;
@@ -140,6 +204,38 @@ mod rows {
         fn dirty(&mut self) -> bool {
             self.dirty
         }
+    }
+
+
+    /// ROW: the adapter speaks the program's OWN method names over the wire - `write`, `block`, `head`,
+    /// `pin_toggle` - because those are what `rust/wa-term/src/session.rs` answers. A recorder stands in for the
+    /// program, so the mapping is asserted without one.
+    #[test]
+    fn the_adapter_speaks_the_programs_method_names() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let mut document = ProtoDocument::new(Box::new(move |method, args| {
+            record.lock().unwrap().push((method.to_string(), args));
+            Ok(serde_json::json!(3))
+        }));
+
+        document.write("hello").unwrap();
+        document.block(true).unwrap();
+        assert_eq!(document.head("title").unwrap(), 3);
+        assert_eq!(document.rewrite(2, "new").unwrap(), 3);
+        document.pin_toggle().unwrap();
+
+        let calls = seen.lock().unwrap();
+        let names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["write", "block", "head", "rewrite", "pin_toggle"]);
+        assert_eq!(calls[0].1, serde_json::json!(["hello"]));
+        assert_eq!(calls[3].1, serde_json::json!([2, "new"]));
+
+        // The dirty flag follows the writes and is cleared by asking.
+        assert!(document.dirty());
+        assert!(!document.dirty());
     }
 
     /// ROW: the document seam answers in the program's own terms - a heading lands where the program says it did,
