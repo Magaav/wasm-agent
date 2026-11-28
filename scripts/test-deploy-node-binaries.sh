@@ -314,7 +314,8 @@ schema=wasm-agent-node-binaries/1
 source_commit=$HEAD_SHA
 glibc_floor=2.31
 codemode=embedded
-$X64 $(mksha "$head_release/wa-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-sentinel-$X64-$HEAD_SHORT")
+# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes
+$X64 $(mksha "$head_release/wa-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-term-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-term-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-operations-supervisor-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-operations-supervisor-$X64-$HEAD_SHORT")
 MANIFEST
 sign_release "$head_release"
 
@@ -457,9 +458,14 @@ mk_release() { # a `-` digest writes a manifest with no compiled_inputs row (an 
     printf 'schema=wasm-agent-node-binaries/1\nsource_commit=%s\n' "$commit"
     [ "$digest" = - ] || printf 'compiled_inputs=%s\n' "$digest"
     printf 'glibc_floor=2.31\ncodemode=embedded\n'
-    printf '%s %s %s %s %s\n' "$X64" \
+    # NINE COLUMNS: a release this publisher can make pins the program and the supervisor too, and the deploy
+    # refuses a prebuilt set without wa-term (it would install a node that cannot draw a prompt).
+    printf '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes\n'
+    printf '%s %s %s %s %s %s %s %s %s\n' "$X64" \
       "$(wa_node_sha256 "$wa")" "$(wc -c < "$wa" | tr -d '[:space:]')" \
-      "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')"
+      "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-term-$X64-$short")" "$(wc -c < "$dir/wa-term-$X64-$short" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-operations-supervisor-$X64-$short")" "$(wc -c < "$dir/wa-operations-supervisor-$X64-$short" | tr -d '[:space:]')"
   } > "$dir/node-$short.manifest"
   # The tag directory IS this release's base for the digest search (`wa_node_tag_base`), so the sums and
   # their signature live beside the manifest here.
