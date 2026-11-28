@@ -2065,6 +2065,60 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     local answer = json.decode(raw)
+    -- A STATUS OF A RUNNING OPERATION WAITS, IT DOES NOT SNAP (28/11, waiting-costs-no-turns).
+    -- MEASURED: `operation action="status" wait_ms=5000` on a running operation answered in 30 ms, ignoring the
+    -- budget, while `action="wait"` on the same operation blocked 2.75 s until it settled. So a session that wanted to
+    -- know how a long job was doing had to spend a WHOLE MODEL TURN per look - the turn-level cost this mission is
+    -- named after. The ledger agrees about the shape: over 2 days, 59 of 6,917 rounds were spent asking again for
+    -- something a wait would have delivered (0.85% of rounds, 0.92% of tokens).
+    --
+    -- The fix is here and nowhere else: a status of an operation that is still running BLOCKS for a bounded budget and
+    -- answers with the settled record when it settles inside it. The budget is the caller's wait_ms when given, else
+    -- WA_OPERATION_STATUS_WAIT_MS (default 5000 ms, 0 disables and restores the old snapshot), clamped to the wait_ms
+    -- ceiling the schema already states so the tool cannot outlive its own contract.
+    do
+      local act = tostring(args.action or "")
+      local state = type(answer) == "table" and tostring(answer.state or "") or ""
+      local running = (state == "running" or state == "accepted" or state == "pending" or state == "queued")
+      -- THE ID MAY COME FROM THE ANSWER OR FROM THE CALL: a status answer carries state and status but not always the
+      -- id it was asked about (measured 28/11: the branch never fired because answer.operation_id was nil while args.id
+      -- held it, so the wait was silently skipped and the row caught it in the first assertion).
+      local opid = answer.operation_id or args.id
+      if act == "status" and running and opid then
+        local budget = tonumber(args.wait_ms)
+        if budget == nil then
+          budget = tonumber(host.getenv("WA_OPERATION_STATUS_WAIT_MS") or "") or 5000
+        end
+        if budget > 10000 then budget = 10000 end
+        if budget > 0 then
+          -- A LOOP, NOT ONE WAIT: measured 28/11, a wait on an operation that is still `accepted` (spawned, not yet
+          -- running) returns at once, so a single wait here would hand back the same snapshot the caller already had and
+          -- the turn would still be spent for nothing. The loop spends the BUDGET and stops at the first answer that is
+          -- no longer a running state, so one status call now covers whatever the job does inside those seconds.
+          local function clock()
+            if host.monotonic_ms then return host.monotonic_ms() end
+            return os.time() * 1000
+          end
+          local deadline = clock() + budget
+          local slice = math.min(budget, 1000)
+          while true do
+            -- THROUGH THE TOOL, NOT AROUND IT. MEASURED 28/11: `host.operation("wait", ...)` from here answers
+            -- operation_not_yours, because a direct host call carries no session of its own; the tool dispatch
+            -- does, and it is the same path codemode_pending uses for its waits. action="wait" cannot re-enter
+            -- this branch, which only fires for status.
+            local decoded = M.dispatch(memory, "operation",
+              { action = "wait", id = opid, wait_ms = slice, tool = "operation" }, role, ctx)
+            if type(decoded) ~= "table" or decoded.error ~= nil then break end
+            answer = decoded
+            local st = tostring(decoded.state or "")
+            if decoded.settled == true or (st ~= "running" and st ~= "accepted" and st ~= "pending" and st ~= "queued") then break end
+            local left = deadline - clock()
+            if left <= 0 then break end
+            slice = math.min(left, 1000)
+          end
+        end
+      end
+    end
     -- A command that just SETTLED may have removed a file this run wrote: the record is where the
     -- card's lines come from (announce_gone above). One flag read per recorded file per poll, and only
     -- after a settle, so the display costs a reader nothing until there is something to show.
