@@ -19,4 +19,4 @@
 #
 # Built by: bash scripts/lua-part-build.sh --tree <checkout> --commit <sha> --interface "$(wa --interface)" --out <dir>
 # Judged by: bash scripts/test-release-lock-pin.sh
-lua-core 8c3690e4f505ffe178589ba2564c23ddafe6404ec7b7e386995a66888eff0f1a 1738769 interface=8a0b442ebe3d62a3653dbc5354599b3435e57f49fe4611137f913b59001694e6
+lua-core 6c8f2296feb52c35d44059eac36f4c70da29eb8c07507df3c09a80eb68441afe 1738771 interface=8a0b442ebe3d62a3653dbc5354599b3435e57f49fe4611137f913b59001694e6
