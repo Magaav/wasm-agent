@@ -17,6 +17,11 @@
 # Usage:
 #   scripts/upgrade.sh [path-to-new-binary]
 #   WA_PORT=8799 WA_INSTALL_DIR=/usr/local/bin scripts/upgrade.sh ./rust/target/release/wa
+# INHERITED GIT VARIABLES ARE NOT THIS INSTALLER'S (25/11, item 7 of installer-refuses-a-target): a deploy or
+# an upgrade started from a shell that carries GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (a git hook hands them to every
+# child) would resolve somebody else's repository as its ROOT. scripts/lib/git-env.sh is the one owner; the clear
+# runs before this script's FIRST git call, which the row scripts/test-installer-clears-git-env.sh asserts.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh" && wa_git_isolate
 set -uo pipefail
 
 # A VERDICT IS NOT INHERITED (Fable 26/11). WA_ANCESTRY_REUSED and WA_ANCESTRY_WHY are THIS process's answer about THIS

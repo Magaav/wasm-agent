@@ -198,7 +198,15 @@ run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mj
 run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
 run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
 gate_run node scripts/test-wave-withdrawal.mjs
-gate_run node scripts/test-rows-clear-git-env.mjs  # a row that writes a git repository must clear git's redirect (or say why)
+gate_run node scripts/test-rows-clear-git-env.mjs
+# AN INSTALLER DOES NOT INHERIT A GIT REPOSITORY (installer-refuses-a-target, item 7): deploy.sh, upgrade.sh and the
+# bootstraps must clear GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE before their first git call, because a git hook hands
+# them to every child and the installer would then resolve somebody else's repository as its ROOT.
+gate_run bash scripts/test-installer-clears-git-env.sh
+# A REFUSED DEPLOY DOES NOT WRITE THE RUNNING DEPLOY'S RESULT (installer-refuses-a-target, item 6): a refusal that never
+# took the running-state record writes only its own request, so a follower of the first deploy never reads the
+# second one's refusal as its own failure.
+gate_run bash scripts/test-deploy-refusal-keeps-the-running-result.sh  # a row that writes a git repository must clear git's redirect (or say why)
 
 # The node's build heat and build seeding (change/gate-speed, 21/11). Both are about the gate itself, so
 # they belong in the gate: one heavy build at a time with a bounded job count, and a NEW target dir

@@ -21,6 +21,7 @@
 #
 # Usage: the one-liner in the README, or from a checkout:
 #   bash scripts/termux/bootstrap.sh [--checkout DIR] [--repo URL] [--upstream URL] [--check]
+. "$(cd "$(dirname "$0")/../.." && pwd)/scripts/lib/git-env.sh" && wa_git_isolate  # an inherited GIT_DIR is not this install (installer row, item 7)
 set -euo pipefail
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
