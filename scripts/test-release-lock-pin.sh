@@ -90,4 +90,32 @@ else
   checks=$((checks+1)); echo "ok 6: a foreign interface refused by name ($(printf '%s' "$out" | head -1))"
 fi
 
+# 7. THE FETCH DECISION ANSWERS FOR THE DIGEST A NODE INSTALLED (slice 2, item 2). It compares like with like:
+# the lock pins the digest of the part FILE, so what a node reports is the digest it installed, not a hash of the
+# tree it unpacked (those are different numbers - measured: hashing an unpacked tree can never equal the part).
+if out=$(wa_lua_part_fetch_decision "$LOCK" "$pin_sha" 2>&1); then
+  [ -z "$out" ] || fail "a_node_holding_the_pinned_part_asked_to_download_again: $out"
+  checks=$((checks+1)); echo "ok 7: a node holding the pinned part asks for no download"
+else
+  fail "fetch_decision_refused_the_pinned_digest: $out"
+fi
+out=$(wa_lua_part_fetch_decision "$LOCK" '1111111111111111111111111111111111111111111111111111111111111111' 2>&1) || fail "fetch_decision_failed: $out"
+case "$out" in
+  "lua-core $pin_sha $pin_bytes") checks=$((checks+1)); echo "ok 8: a node holding another part asks for exactly the pin" ;;
+  *) fail "a_node_with_another_digest_asked_for: ${out:-nothing}" ;;
+esac
+out=$(wa_lua_part_fetch_decision "$LOCK" '' 2>&1) || fail "fetch_decision_failed_on_a_first_install: $out"
+case "$out" in
+  "lua-core $pin_sha $pin_bytes") checks=$((checks+1)); echo "ok 9: a first install (nothing held) asks for the pin" ;;
+  *) fail "a_first_install_asked_for: ${out:-nothing}" ;;
+esac
+if out=$(wa_lua_part_fetch_decision "$LOCK" 'not-a-digest' 2>&1); then
+  fail 'a_malformed_digest_was_accepted'
+else
+  case "$out" in
+    *lua_part_digest_malformed*) checks=$((checks+1)); echo "ok 10: a malformed held digest is refused by name" ;;
+    *) fail "a_malformed_digest_was_refused_without_a_name: $out" ;;
+  esac
+fi
+
 printf 'release lock pin ok (%s checks)\n' "$checks"

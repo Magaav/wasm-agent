@@ -51,7 +51,7 @@ MADE_MANIFEST=0
 [ -f "$MANIFEST" ] || MADE_MANIFEST=1
 {
   printf 'capabilities %s\n' "$INTERFACE"
-  printf 'commit %s\n' "${COMMIT:-unknown}"
+  # No commit line: it moved to the lock line (see the header), because a value that changes with every commit cannot live inside bytes that must not change.
   ( cd "$TREE" && find lua -type f | LC_ALL=C sort | while IFS= read -r path; do
       printf '%s  %s\n' "$(sha256sum < "$path" | awk '{print $1}')" "$path"
     done )

@@ -220,3 +220,29 @@ wa_lua_part_host_interface() {
 ' "$answer"
   return 0
 }
+
+# <lock> <the part digest this node INSTALLED, or empty> -> the part it must FETCH, or nothing when what it holds is
+# already the pinned bytes.
+# Printed as one line, `lua-core <sha256> <bytes>`, so a fetcher needs to understand no second format:
+#
+#   lua_part_fetch_decision "$lock" "$versions/$id/lua-core"   -> nothing (already pinned) | the line | a refusal
+#
+# WHAT IT IS FOR (slice 2, item 2): a node must download ONLY the parts whose digest moved. Today the number is
+# wa_version_need_bytes (a count) and the NAMES are wa_version_changed_members; this is the part-level answer the
+# fetcher acts on, and it agrees with the verifier by construction - same lock reader, same fields, so a part it
+# says to fetch is exactly the part wa_lua_part_verify_file will accept afterwards.
+#
+# Refusals, by name: lua_part_not_pinned (the lock has no line), lua_part_tree_unreadable (the directory is not a
+# Lua tree), lua_part_digest_unreadable (its bytes cannot be hashed - a half-written tree is not a cache hit).
+wa_lua_part_fetch_decision() {
+  local lock="${1:?lock}" have="${2:-}" want_sha want_bytes
+  want_sha="$(wa_lua_part_lock_value "$lock" lua-core sha256)" || { printf 'lua_part_not_pinned: %s has no lua-core line\n' "$lock" >&2; return 3; }
+  want_bytes="$(wa_lua_part_lock_value "$lock" lua-core bytes)"
+  if [ -n "$have" ] && [ "${#have}" != 64 ]; then
+    printf 'lua_part_digest_malformed: %s is not a sha256 the node could have installed\n' "$have" >&2
+    return 5
+  fi
+  [ "$have" = "$want_sha" ] && return 0
+  printf 'lua-core %s %s\n' "$want_sha" "$want_bytes"
+  return 0
+}
