@@ -76,7 +76,10 @@ pub(crate) fn validate(chat: &str, text: &str, reply_to: Option<&str>, mentions:
     .ok_or_else(|| json!({"ok": false, "error": "outbox_component_absent", "effect": "none",
         "detail": "this node runs no outbox component, so it cannot validate a send"}))?;
     if answer["ok"] != json!(true) {
-        return Err(json!({"ok": false, "error": answer["code"].as_str().unwrap_or("bad_chat"),
+        // The tool's own word for a refusal is `whatsapp_send_<code>` (the contract's `Refusal::error`),
+        // so the seam keeps the vocabulary a caller already branches on.
+        let word = format!("whatsapp_send_{}", answer["code"].as_str().unwrap_or("bad_chat"));
+        return Err(json!({"ok": false, "error": word,
             "detail": answer["detail"].as_str().unwrap_or("the send did not pass the exact-JID rule"),
             "effect": "none"}));
     }
