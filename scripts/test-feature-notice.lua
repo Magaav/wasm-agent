@@ -114,4 +114,19 @@ feature_notice.notice(NOW + 160, { sender = sender })
 local elsewhere = feature_health.red(NOW + 160)
 eq(#elsewhere, 0, "an off-node feature is not in the red list")
 
+-- 8. THE NOTICE KEEPS ITS TIME WHEN NOBODY PASSES ONE (28/11). land.lua calls notice() with no argument,
+--    and the record it wrote on this node said "at":0 - a stopped feature with no time, which is the one
+--    fact the brief asks for beside the stage. Measured on the live node before the fix: the only notice
+--    ever written there carries at:0.
+feature_health.record("first", false, { at = os.time(), stage = "clock" })
+local clocked = feature_notice.notice(nil, { sender = sender })
+eq(clocked.sent, true, "a notice with no 'now' still speaks")
+local state_ok, state_text = pcall(host.read_file, feature_notice.state_path())
+check(state_ok and type(state_text) == "string", "the notice state is readable: " .. tostring(state_text))
+local state_doc = dofile("lua/vendor/json.lua").decode(state_text)
+local recorded_at = tonumber(state_doc.at) or 0
+check(recorded_at > 0, "the notice records a real time, not 0 (got " .. tostring(state_doc.at) .. ")")
+local drift = math.abs(os.time() - recorded_at)
+check(drift <= 5, "the recorded time is the clock's, within 5 s (drift " .. drift .. ")")
+
 print(string.format("feature-notice ok (%d checks)", checks))

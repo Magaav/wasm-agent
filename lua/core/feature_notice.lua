@@ -74,8 +74,15 @@ function M.default_sender(text)
 end
 
 -- One notice per incident. `opts.sender` is the test's: a function(text) -> ok, detail.
+--
+-- `now` DEFAULTS TO THE CLOCK (28/11). The brief asks for the notice "once, with the stage and the TIME",
+-- and land.lua calls `notice()` with no argument at all - measured on this node: the only notice ever
+-- written carries `"at":0`, so the record says a feature stopped and cannot say when. A missing time is
+-- not a cosmetic loss here: "stopped since when" is the whole difference between a fresh break and a
+-- week-old one, and the state file is the only memory of it.
 function M.notice(now, opts)
   opts = opts or {}
+  now = tonumber(now) or os.time()
   local red, why = feature_health.red(now)
   if not red then return { sent = false, reason = 'unreadable', detail = why } end
   local state = read_state()
