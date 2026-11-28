@@ -1292,6 +1292,9 @@ check health-graded bash scripts/test-health-graded.sh
 check health-settles bash scripts/test-health-settles.sh
 # EVERY TIP ENDS IN ONE LINE (28/11): green, red, or NO VERDICT with SIGTERM, budget or LOCK HOLDER named.
 check health-verdict bash scripts/test-health-verdict.sh
+# MAIN-HEALTH GRADES THE TIP IT IS TOLD (28/11): the loop said "grading 12379703" while the suite graded the
+# checkout's stale local main (9eaa1dbc). Fixture repo with a stale main and a newer origin/main, fake fast path.
+check main-health-grades-the-tip bash scripts/test-main-health-grades-the-tip.sh
 # A FORGOTTEN SWAP IS A LINE, NOT AN AFTERNOON (28/11): the loop runs a copy under _orch that a human swaps, and a
 # stale lib made every tip print NOT GRADED while the fix sat landed in main. This row exercises the self-check.
 check health-swap-visible bash scripts/test-health-swap-visible.sh

@@ -161,7 +161,9 @@ while true; do
   # budget" line and no verdict. 3600 s is 2.4x the measured run, which leaves room for a loaded node without letting a
   # truly hung suite sit for an hour and a half.
   SUITE_BUDGET=${WA_HEALTH_SUITE_SECONDS:-3600}
-  timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1; RC=$?
+  # THE TIP THIS LOOP CLAIMED IS THE TIP THAT MUST BE GRADED (28/11): without --sha the suite graded the
+# checkout's local main, which lags, and the verdict named a commit nobody had measured.
+  timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh --sha "$N" > $M/_orch/health-loop-run.out 2>&1; RC=$?
   TOOK=$(( $(date +%s) - TIP_STARTED ))
   # ONE LINE, ALWAYS. When the suite did not produce a readable verdict - killed, out of space, lock, budget - the reason
   # is named here instead of leaving the "resolving" line as the last word for half an hour.
