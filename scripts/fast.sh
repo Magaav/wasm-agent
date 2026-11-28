@@ -1370,6 +1370,13 @@ check status-resets env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-
   # violation FAILS this row. python3 is required by the row itself: absent, the check fails with
   # "python3: command not found" instead of being counted as a skip nobody reads.
   check status-icon-metrics python3 scripts/test-status-icon-metrics.py
+  # THE CLAUDE SUBSCRIPTION ROUTE (change/anthropic-subscription): the real vault/wa_vault.py in-process
+  # against one local stub (OAuth token endpoint + Messages API + an OpenAI endpoint for comparison), the
+  # pi OAuth flow, refresh, a refused refresh, two accounts and a switch, then /login + /model
+  # (scripts/lib/anthropic-subscription-login.lua) and one turn whose request carries the Bearer, the
+  # OAuth betas, wa's own prompt and the run tool alone - identical to the opencode-go turn's - and the
+  # cache breakpoints moving forward with a byte-stable prefix. Scratch homes, nothing leaves the machine.
+  WA_BIN="$bin" check anthropic-subscription python3 scripts/test-anthropic-subscription.py
   # THE RUN BLOCK AS THE OPERATOR READS IT (change/tui-run-block): the script streams while the
   # fixture sends the code argument in paced deltas, the output is shown once (one compact result
   # row that a click opens and folds, one row per call), and the scrollbar is one bar while a call

@@ -28,11 +28,15 @@ end
 
 function M.usage_of(raw)
   if type(raw) ~= "table" then return nil end
+  local read = tonumber(raw.cache_read_input_tokens) or 0
+  local write = tonumber(raw.cache_creation_input_tokens) or 0
   return {
-    input_tokens = tonumber(raw.input_tokens) or 0,
+    -- This protocol's `input_tokens` counts only the uncached part; the record's input is the whole
+    -- prompt (what telemetry.normalize reads, with the cached share inside it).
+    input_tokens = (tonumber(raw.input_tokens) or 0) + read + write,
     output_tokens = tonumber(raw.output_tokens) or 0,
-    cache_read_tokens = tonumber(raw.cache_read_input_tokens) or 0,
-    cache_write_tokens = tonumber(raw.cache_creation_input_tokens) or 0,
+    cache_read_tokens = read,
+    cache_write_tokens = write,
     reasoning_tokens = 0,
   }
 end
@@ -166,6 +170,155 @@ function M.from_stream(payloads)
   record.no_events = not saw_event
   record.cut = (not saw_stop) or finish == nil
   return record
+end
+
+-- ---------------------------------------------------------------- the request side
+--
+-- wa assembles every request in the OpenAI chat shape (a `system` message first, `tool_calls` on the
+-- assistant, a `tool` role for results, `image_url` data parts). This folds that one shape onto
+-- POST /v1/messages without adding, removing or rewording a byte of wa's own text: the system
+-- message becomes `system`, each tool schema keeps its name, description and parameters (as
+-- `input_schema`), and a tool result keeps its content.
+local OBJECT = { __json_empty = "object" }
+
+-- The Messages API version header. pi sends it through @anthropic-ai/sdk, whose default it is.
+M.API_VERSION = "2023-06-01"
+
+-- WHAT A CLAUDE SUBSCRIPTION (OAuth) REQUEST MUST CARRY, in one place, all of it from pi
+-- (github.com/earendil-works/pi, formerly badlogic/pi-mono, commit 356d346e48a8,
+-- packages/ai/src/api/anthropic-messages.ts):
+--   * the two betas an OAuth token needs: line 1279, `features.push("claude-code-20250219", "oauth-2025-04-20")`;
+--   * the client identity headers pi sends with an OAuth token: lines 1186-1191
+--     (`accept: application/json`, `anthropic-dangerous-direct-browser-access: true`,
+--     `user-agent: claude-cli/${claudeCodeVersion}`, `x-app: cli`), with claudeCodeVersion = "2.1.322" (line 110).
+-- The Bearer token itself is NOT here: wa-vault sets `Authorization` on the way out (vault/wa_vault.py),
+-- so this process only ever sends the placeholder.
+M.SUBSCRIPTION_BETAS = { "claude-code-20250219", "oauth-2025-04-20" }
+M.SUBSCRIPTION_HEADERS = {
+  ["Accept"] = "application/json",
+  ["anthropic-dangerous-direct-browser-access"] = "true",
+  ["User-Agent"] = "claude-cli/2.1.322",
+  ["x-app"] = "cli",
+}
+
+-- THE ONE PROMPT PREFIX (reported to the owner; delete this and the call in M.request to drop it).
+-- pi, packages/ai/src/api/anthropic-messages.ts:1375-1381: "For OAuth tokens, we MUST include Claude Code
+-- identity" (line 1375) - a first system block with exactly this text (line 1380), before the caller's own system prompt, which
+-- follows unchanged as the second block. Applied only to Anthropic-subscription requests.
+M.SUBSCRIPTION_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
+
+-- The headers for one subscription request, added to the route's common ones.
+function M.subscription_headers(headers)
+  for name, value in pairs(M.SUBSCRIPTION_HEADERS) do headers[name] = value end
+  headers["anthropic-version"] = M.API_VERSION
+  headers["anthropic-beta"] = table.concat(M.SUBSCRIPTION_BETAS, ",")
+  return headers
+end
+
+local function text_of(content)
+  if type(content) == "string" then return content end
+  local parts = {}
+  for _, part in ipairs(type(content) == "table" and content or {}) do
+    if type(part) == "table" and part.type == "text" and type(part.text) == "string" then parts[#parts + 1] = part.text end
+  end
+  return table.concat(parts, "\n")
+end
+
+-- One OpenAI content value as a list of Messages blocks: text stays text, a data-URL image becomes a
+-- base64 image block. An empty string is no block at all (the API refuses an empty text block).
+local function blocks_of(content)
+  local out = {}
+  if type(content) == "string" then
+    if content ~= "" then out[1] = { type = "text", text = content } end
+    return out
+  end
+  for _, part in ipairs(type(content) == "table" and content or {}) do
+    if type(part) == "table" then
+      if part.type == "text" and type(part.text) == "string" and part.text ~= "" then
+        out[#out + 1] = { type = "text", text = part.text }
+      elseif part.type == "image_url" then
+        local url = type(part.image_url) == "table" and part.image_url.url or part.image_url
+        local mime, data = tostring(url or ""):match("^data:([^;,]+);base64,(.*)$")
+        if mime and data then
+          out[#out + 1] = { type = "image", source = { type = "base64", media_type = mime, data = data } }
+        end
+      end
+    end
+  end
+  return out
+end
+
+local function push(messages, role, blocks)
+  if #blocks == 0 then return end
+  local last = messages[#messages]
+  -- Consecutive turns of one role are one message here (several tool results answer one assistant turn).
+  if last and last.role == role then
+    for _, block in ipairs(blocks) do last.content[#last.content + 1] = block end
+  else
+    messages[#messages + 1] = { role = role, content = blocks }
+  end
+end
+
+-- The Messages body for wa's request. `opts`: model, max_tokens, stream, subscription (bool).
+function M.request(messages, tools, opts)
+  opts = opts or {}
+  local system, out = {}, {}
+  for index, message in ipairs(messages or {}) do
+    local role = message.role
+    if role == "system" and #out == 0 then
+      system[#system + 1] = text_of(message.content)
+    elseif role == "system" then
+      -- A system note in the middle of a conversation has no place of its own in this protocol; its
+      -- text goes to the model unchanged as user content.
+      push(out, "user", blocks_of(message.content))
+    elseif role == "assistant" then
+      local blocks = blocks_of(message.content)
+      for _, call in ipairs(message.tool_calls or {}) do
+        local fn = type(call["function"]) == "table" and call["function"] or {}
+        local ok, input = pcall(json.decode, fn.arguments or "{}")
+        if not ok or type(input) ~= "table" or next(input) == nil then input = setmetatable({}, OBJECT) end
+        blocks[#blocks + 1] = { type = "tool_use", id = tostring(call.id or ("toolu_" .. index)),
+          name = tostring(fn.name or ""), input = input }
+      end
+      push(out, "assistant", blocks)
+    elseif role == "tool" then
+      local content = blocks_of(message.content)
+      if #content == 0 then content = { { type = "text", text = "(no output)" } } end
+      push(out, "user", { { type = "tool_result", tool_use_id = tostring(message.tool_call_id or ""), content = content } })
+    else
+      push(out, "user", blocks_of(message.content))
+    end
+  end
+  local body = { model = opts.model, max_tokens = math.floor(tonumber(opts.max_tokens) or 32000), messages = out }
+  local system_blocks = {}
+  if opts.subscription then system_blocks[1] = { type = "text", text = M.SUBSCRIPTION_SYSTEM_PREFIX } end
+  local system_text = table.concat(system, "\n\n")
+  if system_text ~= "" then system_blocks[#system_blocks + 1] = { type = "text", text = system_text } end
+  -- PROMPT CACHING, placed as pi places it (packages/ai/src/api/anthropic-messages.ts): Anthropic caches
+  -- only up to a block that carries `cache_control`, so the request marks four breakpoints - each system
+  -- block (:1381, :1388), the last tool definition (:1825) and the last block of the last message when it
+  -- is the user's (:1682-1705). The last one moves forward every round, so each round reads the whole
+  -- previous round from the cache. The marker is not part of the cached content, and nothing before it
+  -- changes between rounds: the same messages fold to the same blocks, and the encoder sorts keys.
+  if #system_blocks > 0 then
+    for _, block in ipairs(system_blocks) do block.cache_control = { type = "ephemeral" } end
+    body.system = system_blocks
+  end
+  local last = out[#out]
+  if last and last.role == "user" and #last.content > 0 then last.content[#last.content].cache_control = { type = "ephemeral" } end
+  if tools and #tools > 0 then
+    body.tools = {}
+    for _, tool in ipairs(tools) do
+      local fn = type(tool["function"]) == "table" and tool["function"] or tool
+      local schema = fn.parameters
+      if type(schema) ~= "table" or next(schema) == nil then schema = { type = "object", properties = setmetatable({}, OBJECT) } end
+      body.tools[#body.tools + 1] = { name = fn.name, description = fn.description, input_schema = schema }
+    end
+    body.tools[#body.tools].cache_control = { type = "ephemeral" }
+    body.tool_choice = { type = "auto" }
+  end
+  if opts.stream then body.stream = true end
+  return body
 end
 
 return M
