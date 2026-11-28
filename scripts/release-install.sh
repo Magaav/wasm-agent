@@ -120,13 +120,16 @@ CANDIDATE="$DIR/wa-$TRIPLE-$SOURCE_SHORT"
 # so without this a cover install refuses term_program_missing for a set it has just verified and signature-
 # checked - measured: every cover install ended in release_install: upgrade_refused. The names are copies of
 # the bytes already verified in $DIR; upgrade.sh keeps ONE naming rule and nothing here renames an asset.
-for _member in wa-term wa-operations-supervisor; do
-  _src="$DIR/$_member-$TRIPLE-$SOURCE_SHORT"
-  [ -f "$_src" ] || continue
-  cp -f "$_src" "$DIR/$_member" || fail "release_stage_failed: $DIR/$_member could not be staged beside $CANDIDATE"
-  chmod +x "$DIR/$_member" 2>/dev/null || true
+# THE MEMBERS COME FROM THE ONE LIST (law 17), never from a pair spelled here: wa_node_bundle_members answers what
+# this release pins (wa, wa-sentinel, wa-term, and the supervisor when the manifest carries its columns), so a
+# sibling added to WA_BUNDLE_MEMBERS is staged here without this block being edited again.
+for _asset in $(wa_node_bundle_members "$DIR" "$TRIPLE" "$SOURCE_SHORT"); do
+  _runtime="${_asset%-$TRIPLE-$SOURCE_SHORT}"
+  [ -f "$DIR/$_asset" ] || continue
+  cp -f "$DIR/$_asset" "$DIR/$_runtime" || fail "release_stage_failed: $DIR/$_runtime could not be staged beside $CANDIDATE"
+  chmod +x "$DIR/$_runtime" 2>/dev/null || true
 done
-unset _member _src
+unset _asset _runtime
 
 say "upgrading: bash scripts/upgrade.sh $CANDIDATE --release $DIR"
 # THE TWO FACTS THE INSTALLER CANNOT COMPUTE ON A TREE-LESS NODE, handed to the one place that judges a cover
