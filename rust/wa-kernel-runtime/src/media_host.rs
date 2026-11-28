@@ -26,6 +26,15 @@ wasmtime::component::bindgen!({
     world: "media-service",
 });
 
+/// Load the INSTALLED component by name - `components::load` verifies its bytes against the pin beside it,
+/// and `service_components_v2::compiled` compiles it through the node's cache, so a second call costs nothing.
+/// A caller that named a path instead would bypass the pin, which is the one thing installation exists for.
+pub fn load(engine: &Engine, name: &str) -> Result<Component, String> {
+    let installed = crate::components::load(name).map_err(|error| error.to_string())?;
+    crate::service_components_v2::compiled(engine, &installed.sha256, &installed.bytes)
+        .map_err(|error| format!("compile:{error}"))
+}
+
 struct Host {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -337,11 +346,8 @@ mod tests {
     /// node has neither, because a test that silently passes on no input is worse than one that says so.
     #[test]
     fn the_installed_component_answers_and_its_files_verify() {
-        let (Ok(component_path), Ok(file)) = (
-            std::env::var("WA_MEDIA_TEST_COMPONENT"),
-            std::env::var("WA_MEDIA_TEST_FILE"),
-        ) else {
-            eprintln!("skipped: set WA_MEDIA_TEST_COMPONENT and WA_MEDIA_TEST_FILE to run this");
+        let Ok(file) = std::env::var("WA_MEDIA_TEST_FILE") else {
+            eprintln!("skipped: set WA_MEDIA_TEST_FILE to run this (the component comes from the node's install dir)");
             return;
         };
         let out = std::env::var("WA_MEDIA_TEST_OUT").unwrap_or_else(|_| {
@@ -364,7 +370,11 @@ mod tests {
             ],
         };
         let engine = crate::service_components_v2::engine().expect("engine");
-        let component = Component::from_file(&engine, &component_path).expect("component");
+        // The installed component, pin verified - the same bytes the node would run, not a path from the shell.
+        let component = match std::env::var("WA_MEDIA_TEST_COMPONENT") {
+            Ok(path) => Component::from_file(&engine, &path).expect("component"),
+            Err(_) => load(&engine, "media").expect("media installed"),
+        };
         let guest_source = format!("/media/{}", source.file_name().expect("name").to_string_lossy());
 
         let description = probe(&engine, &component, &grant, &guest_source, source).expect("probe");

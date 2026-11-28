@@ -20,7 +20,11 @@ typedef struct {
     AVCodecContext *decoder;
     AVCodecContext *encoder;
     SwrContext *resampler;
-    AVPacket *packet;
+    /* TWO packets, one for each direction. With one, `avcodec_receive_packet` inside the encoder loop
+     * overwrote the packet the reader was still holding, and the unref that followed freed the encoder's
+     * buffer - which surfaced as a trap inside av_frame_unref on the next frame. */
+    AVPacket *in_packet;
+    AVPacket *out_packet;
     AVFrame *frame;
     AVFrame *converted;
     int stream_index;
@@ -32,7 +36,8 @@ typedef struct {
 static void release(AudioWork *work) {
     av_frame_free(&work->converted);
     av_frame_free(&work->frame);
-    av_packet_free(&work->packet);
+    av_packet_free(&work->in_packet);
+    av_packet_free(&work->out_packet);
     swr_free(&work->resampler);
     avcodec_free_context(&work->encoder);
     avcodec_free_context(&work->decoder);
@@ -101,11 +106,12 @@ static int write_converted(AudioWork *work) {
     status = avcodec_send_frame(work->encoder, work->converted);
     if (status < 0) return status;
     while (1) {
-        status = avcodec_receive_packet(work->encoder, work->packet);
+        status = avcodec_receive_packet(work->encoder, work->out_packet);
         if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) return 0;
         if (status < 0) return status;
-        status = av_interleaved_write_frame(work->output, work->packet);
-        av_packet_unref(work->packet);
+        status = av_interleaved_write_frame(work->output, work->out_packet);
+        av_packet_unref(work->out_packet);
+        if (status < 0) return status;
         if (status < 0) return status;
     }
 }
@@ -147,10 +153,11 @@ int wa_write_audio(const char *path, int sample_rate, int channels, const char *
         return status;
     }
 
-    work.packet = av_packet_alloc();
+    work.in_packet = av_packet_alloc();
+    work.out_packet = av_packet_alloc();
     work.frame = av_frame_alloc();
     work.converted = av_frame_alloc();
-    if (!work.packet || !work.frame || !work.converted) {
+    if (!work.in_packet || !work.out_packet || !work.frame || !work.converted) {
         release(&work);
         return AVERROR(ENOMEM);
     }
@@ -160,13 +167,13 @@ int wa_write_audio(const char *path, int sample_rate, int channels, const char *
 
     long long samples = 0;
     work.samples = 0;
-    while (av_read_frame(work.input, work.packet) >= 0) {
-        if (work.packet->stream_index != work.stream_index) {
-            av_packet_unref(work.packet);
+    while (av_read_frame(work.input, work.in_packet) >= 0) {
+        if (work.in_packet->stream_index != work.stream_index) {
+            av_packet_unref(work.in_packet);
             continue;
         }
-        if (avcodec_send_packet(work.decoder, work.packet) >= 0) {
-            av_packet_unref(work.packet);
+        if (avcodec_send_packet(work.decoder, work.in_packet) >= 0) {
+            av_packet_unref(work.in_packet);
             while (avcodec_receive_frame(work.decoder, work.frame) >= 0) {
                 status = write_converted(&work);
                 if (status < 0) break;
@@ -174,7 +181,7 @@ int wa_write_audio(const char *path, int sample_rate, int channels, const char *
                 av_frame_unref(work.frame);
             }
         } else {
-            av_packet_unref(work.packet);
+            av_packet_unref(work.in_packet);
         }
         if (status < 0) break;
     }
@@ -191,9 +198,9 @@ int wa_write_audio(const char *path, int sample_rate, int channels, const char *
     }
     if (status >= 0) {
         avcodec_send_frame(work.encoder, NULL);
-        while (avcodec_receive_packet(work.encoder, work.packet) >= 0) {
-            av_interleaved_write_frame(work.output, work.packet);
-            av_packet_unref(work.packet);
+        while (avcodec_receive_packet(work.encoder, work.out_packet) >= 0) {
+            av_interleaved_write_frame(work.output, work.out_packet);
+            av_packet_unref(work.out_packet);
         }
         status = av_write_trailer(work.output);
     }
