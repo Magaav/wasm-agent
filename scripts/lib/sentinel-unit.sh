@@ -92,6 +92,36 @@ WantedBy=default.target
 UNIT
 }
 
+# DOES EVERY INSTALL SHAPE START THE NODE AT BOOT, OR ONLY WHEN SOMEONE LOGS IN? (29/11, Victor: "the reboot fix
+# should be built in from the installation, for any instance".)
+#
+# A systemd --user unit is enabled in default.target, but that target belongs to the USER MANAGER, and on a machine
+# nobody logs into (a server, a container host, a box that reboots at 3am) that manager only exists when the user is
+# lingering. MEASURED before this: every shape wrote and enabled the unit and NOT ONE enabled lingering - so a reboot
+# with nobody at the keyboard started nothing, the same symptom as the container incident: the node is down until a
+# person types `wa`.
+#
+# Best effort by design, and it says so: `loginctl enable-linger` can need polkit, and an install that is refused it
+# must still install. A refusal is named (`linger_failed` / `linger_unavailable`) so it is a fact in the deploy log and
+# not a silence, and the caller prints it.
+wa_sentinel_unit_linger() {
+  local loginctl_bin="${WA_SENTINEL_UNIT_LOGINCTL:-loginctl}"
+  local user="${USER:-$(id -un 2>/dev/null)}" out
+  [ -n "$user" ] || { printf 'sentinel_unit: linger_unknown_user\n' >&2; return 5; }
+  if ! command -v "$loginctl_bin" >/dev/null 2>&1; then
+    printf 'sentinel_unit: linger_unavailable: no %s on PATH, so the user manager will not start at boot\n' "$loginctl_bin" >&2
+    return 5
+  fi
+  case "$("$loginctl_bin" show-user "$user" -p Linger --value 2>/dev/null)" in
+    yes) printf 'linger_unchanged\n'; return 0 ;;
+  esac
+  if ! out="$("$loginctl_bin" enable-linger "$user" 2>&1)"; then
+    printf 'sentinel_unit: linger_failed: %s\n' "$(printf '%s' "$out" | tr '\r\n' '  ')" >&2
+    return 5
+  fi
+  printf 'linger_enabled\n'
+}
+
 # wa_sentinel_unit_ensure <prefix> <env_file> <port> <client_port> <autostart> <path>
 #
 # Writes the unit when its bytes differ, asks the manager to reload, and enables it. It does NOT start or
@@ -154,6 +184,9 @@ wa_sentinel_unit_ensure() {
     return 4
   fi
   printf 'unit_enabled\n'
+  # AND IT MUST START AT BOOT, NOT ONLY WHEN SOMEONE LOGS IN (29/11). A refusal here does not undo the unit:
+  # the install succeeded and the operator is told exactly what is missing.
+  wa_sentinel_unit_linger || true
 }
 
 # Does a UNIT start the node - the system manager's or this user's? That is the question the unit's

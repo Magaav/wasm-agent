@@ -67,6 +67,19 @@ fi
 exit 0
 STUB
 chmod +x "$WORK/bin/systemctl"
+# THE LOGINCTL STUB (29/11): enabling the unit is half of "it comes up at boot"; the other half is the user
+# manager existing before anyone logs in. STUB_LINGER=yes answers as an already-lingering user does;
+# STUB_LINGER_FAIL makes the verb refuse the way polkit does.
+cat > "$WORK/bin/loginctl" <<'STUB'
+#!/usr/bin/env bash
+printf 'loginctl %s\n' "$*" >> "$STUB_LOG"
+case "$*" in
+  *show-user*) printf '%s\n' "${STUB_LINGER:-no}"; exit 0 ;;
+  *enable-linger*) [ -n "${STUB_LINGER_FAIL:-}" ] && { echo 'stub: polkit refused' >&2; exit 1; }; exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$WORK/bin/loginctl"
 STUB_LOG="$WORK/calls.log"; export STUB_LOG
 export PATH="$WORK/bin:$PATH"
 
@@ -128,6 +141,15 @@ contains "$calls" '--user enable wa-sentinel.service' 'the unit is enabled, so a
 absent "$calls" 'restart' 'ensure does not perform a lifecycle verb: starting is wa-sentinel own decision'
 : > "$STUB_LOG"
 out="$(wa_sentinel_unit_ensure "$PREFIX" "$CONFIG/env" 8799 8800 1 "$UNIT_PATH" 2>&1)" || fail "second ensure failed: $out"
+# A UNIT ENABLED IN default.target STARTS WITH THE USER MANAGER, AND THAT MANAGER NEEDS LINGERING ON A MACHINE
+# NOBODY LOGS INTO (29/11). Measured before this: every shape wrote and enabled the unit and none enabled
+# lingering, so a reboot with nobody at the keyboard started nothing - the container incident's symptom on a host.
+case "$out" in *linger_enabled*) ;; *) fail "the installer did not ask for lingering, so the unit starts only after a login: [$out]" ;; esac
+case "$(cat "$STUB_LOG")" in *"loginctl enable-linger"*) ;; *) fail 'loginctl enable-linger was never called' ;; esac
+out="$(STUB_LINGER=yes wa_sentinel_unit_ensure "$PREFIX" "$CONFIG/env" 8799 8800 1 "$UNIT_PATH" 2>&1)" || fail "ensure with an already-lingering user failed: $out"
+case "$out" in *linger_unchanged*) ;; *) fail "an already-lingering user was not recognised: [$out]" ;; esac
+out="$(STUB_LINGER_FAIL=1 wa_sentinel_unit_ensure "$PREFIX" "$CONFIG/env" 8799 8800 1 "$UNIT_PATH" 2>&1)" || fail 'a refused linger made the whole install fail, and the unit is still the fix'
+case "$out" in *linger_failed*) ;; *) fail "a refused linger was not named: [$out]" ;; esac
 contains "$out" 'unit_unchanged' 'the same bytes are not rewritten'
 
 # ---- 4. the refusals, each by name --------------------------------------------------------------------

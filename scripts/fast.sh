@@ -1307,6 +1307,9 @@ check sentinel-home bash scripts/test-sentinel-home.sh
 # TURNING THE INSTANCE ON MUST MAKE IT REACHABLE (29/11, Victor): on work a stale sentinel.pid said 16, pid 16 was
 # alive again in the new container namespace, and the watcher refused to start until a person typed `wa`.
 check sentinel-boot-reachable bash scripts/test-sentinel-boot-reachable.sh
+# EVERY INSTALL SHAPE STARTS THE NODE AT BOOT (29/11, Victor): the shapes are listed in docs/BOOT-REACHABLE.md and
+# each one is either brought up here from a scratch home or named as the gap it is (--no-service, windows, macos).
+check sentinel-boot-shapes bash scripts/test-sentinel-boot-shapes.sh
 # THE WATCHER LINE ASKS THE SENTINEL (28/11): `wa status` said "not running" while `wa-sentinel status` said up
 # with a pid - two answers to one question. This row needs no real sentinel: a fixture executable answers.
 check status-watcher-line env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-status-watcher-line.lua" "$bin" --db "$work/status-watcher-line.db"
