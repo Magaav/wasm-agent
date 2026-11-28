@@ -28,7 +28,10 @@ loop=factory/health-loop.sh
 [ -r "$loop" ] || fail "$loop is missing"
 grep -Eq '^[[:space:]]*(if[[:space:]]+!?[[:space:]]*)?WA_BIN=\$\(wa_main_binary' "$loop" && fail 'the loop captures wa_main_binary in a subshell, so WA_MAIN_BINARY_STEP dies and the line says unknown'
 grep -q 'health-binary.out' "$loop" || fail 'the loop does not read the binary back from a file, so it cannot name the step'
-grep -q 'READ BACK HERE' "$loop" || fail 'the loop does not say why the read-back exists; the next editor will put the substitution back' 
+grep -q 'READ BACK HERE' "$loop" || fail 'the loop does not say why the read-back exists; the next editor will put the substitution back'
+# AND IT MUST SAY THAT A GRADING IS UNDER WAY: resolution takes seconds to fifteen minutes, and silence is
+# indistinguishable from a stuck loop (measured 01:23Z-01:30Z: a build was running and only `ps` showed it).
+grep -q 'grading ${N:0:8} - resolving a binary' "$loop" || fail 'the loop says nothing while it resolves a binary, so a long build looks like a stuck loop'  
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/settle.XXXXXX") || fail 'no temp dir'
 trap 'rm -rf "$work"' EXIT
