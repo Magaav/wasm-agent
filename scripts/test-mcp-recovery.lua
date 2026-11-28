@@ -3,7 +3,10 @@ local json=dofile('lua/vendor/json.lua');local memory=dofile('lua/core/memory.lu
 local mcp=dofile('lua/core/mcp.lua');local envelope=dofile('lua/core/envelope.lua');local tools=dofile('lua/core/tools.lua')
 local root=assert(host.getenv('MCP_TEST_SOURCE'));local phase=assert(host.getenv('MCP_RECOVERY_PHASE'));local home=dofile('lua/core/paths.lua').data()
 local checks=0;local function check(v,label)assert(v,label);checks=checks+1 end
-local function uncertain()return json.decode(host.sql_query("SELECT key,value FROM meta WHERE key LIKE 'mcp.read_uncertain.v1:%'",'[]'))end
+-- A reservation is TWO rows since 330ecf440 (the 120 s read expiry): the marker itself and its `:at` stamp. This
+-- counter means "reservations", so it must not count the stamp - before 330ecf440 there was no stamp and the plain
+-- LIKE was right; afterwards it made every count one too high and the row read as a release that never happened.
+local function uncertain()return json.decode(host.sql_query("SELECT key,value FROM meta WHERE key LIKE 'mcp.read_uncertain.v1:%' AND key NOT LIKE '%:at'",'[]'))end
 local function config()return json.decode(assert(host.read_file(home..'/recovery-input.json')))end
 local function ctx(kind)return {user_id='master',role='master',session_id='recovery-'..kind}end
 if phase=='submit' then
