@@ -66,4 +66,19 @@ eq(count, 1, "`wa status` carries exactly one watcher line")
 says(found, "not running - start it: ", "and with no watcher on this scratch node it says so")
 says(found, "/.local/bin/wa-sentinel start", "naming the installed sentinel's absolute path and its start verb")
 
+-- 5. IT ASKS THE OWNER (law 17, 28/11): `wa-sentinel status` is the one that knows, and said "up" while this page said
+-- "not running" on the live laptop. Here the fixture IS a sentinel: an executable that answers the sentence the real one
+-- answers. No seam (no read_file, no alive) - the production path must query it.
+local fixture_bin = os.tmpname()
+do
+  local f = assert(io.open(fixture_bin, "w"))
+  f:write("#!/bin/sh\nprintf '  sentinel:  up    watching (pid 9999)  no port of its own\n'\n")
+  f:close()
+end
+os.execute("chmod +x '" .. fixture_bin .. "'")
+local from_owner = status.watcher_line({ config = CONFIG, sentinel = fixture_bin })
+eq(from_owner, "watcher   running (pid 9999)",
+  "the page must take its answer from the sentinel, the owner of the fact")
+os.remove(fixture_bin)
+
 print("status watcher line ok (" .. checks .. " checks): `wa status` always says whether the watcher runs, and its absence names the one command that starts it")

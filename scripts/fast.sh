@@ -1301,6 +1301,9 @@ check operation-status-waits env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scri
 # A SENTINEL TOLD WHERE ITS HOME IS MUST NEVER OPEN THE OPERATOR ONE (28/11, P0): with WASM_AGENT_HOME set it
 # reports that home, writes its tree there, and leaves HOME alone.
 check sentinel-home bash scripts/test-sentinel-home.sh
+# THE WATCHER LINE ASKS THE SENTINEL (28/11): `wa status` said "not running" while `wa-sentinel status` said up
+# with a pid - two answers to one question. This row needs no real sentinel: a fixture executable answers.
+check status-watcher-line env WASM_AGENT_LUA_ROOT="$PWD" WA_SCRIPT="$PWD/scripts/test-status-watcher-line.lua" "$bin" --db "$work/status-watcher-line.db"
 # THE REPORT CITED A QUERY THAT DID NOT EXIST (27/11): docs/missions/reports/waiting-costs-no-turns.md names
 # wct-query.sql as its after-measurement, and the file was never in the tree. The row checks the query exists,
 # parses, still counts the four numbers the before was taken with, and answers a real 1-day window.
