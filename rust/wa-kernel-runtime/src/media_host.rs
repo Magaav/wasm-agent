@@ -123,6 +123,19 @@ fn host_path_for(guest: &str, grants: &[DirGrant]) -> Result<PathBuf, Unverified
     Ok(Path::new(&grant.host).join(rest.trim_start_matches('/')))
 }
 
+/// The out-dir must be a directory the caller was granted, and it is checked BEFORE the component runs.
+///
+/// Measured the hard way: a fixture asked the capability to write into `/out`, which no grant named. The nested
+/// component had no preopen for that guest path, so the write failed with WASI ENOENT (-44) - a missing grant
+/// wearing the clothes of a media bug. A name the grant does not have is `no_such_grant`, said here.
+pub fn granted_directory(out_dir: &str, dirs: &[DirGrant]) -> Result<(), Unverified> {
+    let wanted = out_dir.trim_end_matches('/');
+    if dirs.iter().any(|dir| dir.guest.trim_end_matches('/') == wanted) {
+        return Ok(());
+    }
+    Err(Unverified::NoSuchGrant(out_dir.to_string()))
+}
+
 /// Prove that what the component said about a written file is what is on disk.
 pub fn verify_file(
     claimed_path: &str,
@@ -247,6 +260,7 @@ pub async fn frames(
     max_pixels: u32,
     guest_out: &str,
 ) -> Result<Vec<(u64, VerifiedFile)>, String> {
+    granted_directory(guest_out, dirs).map_err(|error| error.to_string())?;
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
     let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;
@@ -302,6 +316,7 @@ pub async fn audio(
     channels: u32,
     guest_out: &str,
 ) -> Result<(VerifiedFile, u64), String> {
+    granted_directory(guest_out, dirs).map_err(|error| error.to_string())?;
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
     let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;

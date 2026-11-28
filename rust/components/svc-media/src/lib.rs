@@ -32,14 +32,14 @@ impl exports::wa::kernel::service::Guest for Service {
                     description.duration_ms,
                     description.streams.len()
                 ));
-                match media::frames("/in/clip.mp4".to_string(), vec![1000, 5000], 640 * 360, "/out".to_string()).await {
+                match media::frames("/in/clip.mp4".to_string(), vec![1000, 5000], 640 * 360, "/media-out".to_string()).await {
                     Ok(stills) => {
                         let bytes: u64 = stills.iter().map(|still| still.bytes).sum();
                         line(&format!("media stills={} bytes={bytes}", stills.len()));
                     }
                     Err(error) => line(&format!("media stills-error={error:?}")),
                 }
-                match media::audio("/in/clip.mp4".to_string(), 16_000, 1, "/out".to_string()).await {
+                match media::audio("/in/clip.mp4".to_string(), 16_000, 1, "/media-out".to_string()).await {
                     Ok(track) => line(&format!("media audio bytes={} ms={}", track.bytes, track.duration_ms)),
                     Err(error) => line(&format!("media audio-error={error:?}")),
                 }
