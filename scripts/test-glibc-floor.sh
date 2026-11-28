@@ -202,6 +202,12 @@ printf '#!/bin/sh\necho installed\n' > "$inst/wa"; chmod +x "$inst/wa" 2>/dev/nu
 printf 'commit=0000000000000000000000000000000000000000\nbranch=main\n' > "$inst/installed.txt"
 inst_sha="$(sha "$inst/wa")"
 candidate="$WORK/candidate"; mkelf "$candidate" 3e GLIBC_2.2.5 GLIBC_2.39; chmod +x "$candidate" 2>/dev/null || true
+
+# THE SIBLINGS A CANDIDATE SHIPS WITH. upgrade.sh refuses a candidate whose wa-term or
+# wa-operations-supervisor is missing (term_program_missing, operations_supervisor_missing) BEFORE the floor check,
+# so a lone candidate never reaches the rule this case is about: measured, it answered 2 instead of 3.
+printf '#!/bin/sh\nexit 0\n' > "$WORK/wa-term"; chmod +x "$WORK/wa-term"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/wa-operations-supervisor"; chmod +x "$WORK/wa-operations-supervisor"
 # A fixture tree stands in for the checkout, with ONE stubbed lib: turn-guard.sh. upgrade.sh refuses to run
 # inside a turn on the node it would replace (correctly - that is the node this suite is running in), and
 # that refusal is about the caller, not about the bytes; the glibc guard is what this case is measuring.
