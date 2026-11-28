@@ -155,6 +155,9 @@ const EPOCH_TICKS: u64 = 3_000;
 /// Build the store the component runs in, from the grant: the directories it may touch, and nothing else.
 fn store(engine: &Engine, dirs: &[DirGrant]) -> Result<Store<Host>, String> {
     let mut builder = WasiCtxBuilder::new();
+    if std::env::var_os("WA_MEDIA_TRACE_DIRS").is_some() {
+        eprintln!("[media_host] preopens: {:?}", dirs.iter().map(|d| (d.guest.clone(), d.host.clone(), d.write)).collect::<Vec<_>>());
+    }
     for dir in dirs {
         let perms = if dir.write { FsPerms::ReadWrite } else { FsPerms::ReadOnly };
         builder

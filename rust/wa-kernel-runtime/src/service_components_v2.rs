@@ -1210,7 +1210,6 @@ mod tests {
     #[test]
     fn the_v2_call_sites_charge_what_the_v1_runner_charges() {
         let root = std::env::temp_dir().join(format!("wa-v2-governance-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("audit")).unwrap();
         std::fs::write(
             root.join("policy.json"),
@@ -1399,8 +1398,7 @@ mod tests {
         fn filesystem_is_the_granted_preopen_and_nothing_else() {
             let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let root = std::env::temp_dir().join(format!("wa-wasi-fs-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(root.join("data")).unwrap();
+                std::fs::create_dir_all(root.join("data")).unwrap();
             std::fs::write(root.join("data").join("note.txt"), "hello from the preopen").unwrap();
             // The file a `../` escape would reach, if the preopen leaked one level up.
             std::fs::write(root.join("escape.txt"), "outside").unwrap();
@@ -1436,8 +1434,7 @@ mod tests {
             let outcome = refused("svc-wasi-fs", "wasi_import_", Duration::from_secs(10));
             assert_eq!(outcome, "wasi_import_import_not_granted:wasi:filesystem/types@0.3.0", "{outcome}");
             stop("svc-wasi-fs");
-            let _ = std::fs::remove_dir_all(&root);
-        }
+            }
 
         /// `wasi:sockets`: an outbound connect to the granted address works, another host is refused
         /// by the host's address check, and a name lookup has its own `dns` grant.
@@ -1534,23 +1531,22 @@ mod tests {
     /// stills and extract the track, then asks for a path that walks out of its grant. Everything asserted here is
     /// read from ITS LOG, not from a return value - a kernel that answered correctly and told the guest something
     /// else would pass a return-value test and fail this one.
-    // IGNORED for ONE remaining reason, and the rest of the path is measured to work:
+    // IGNORED, and here is exactly how far it gets. The policy question is settled by running on a scratch home
+    // (`WA_GRANT_POLICY` names a file that does not exist, the documented manifest mode, so the manifest grant is
+    // the only gate - never the operator's live policy.json).
     //
-    //   the guest's log reads `media probe=mov 30000ms streams=2` - the capability reached ffmpeg through the
-    //   kernel and answered - and `media refused=...outside_the_grant:/in/../../../etc/passwd`, so a path
-    //   outside the grant is refused rather than resolved.
+    // The guest's log, measured:
     //
-    //   the stills and the track fail with `averror -44`, which is the same gate named earlier in the log:
-    //   `[policy] svc-media wasi.filesystem -> deny(no_policy)`. Both components need the policy entry the
-    //   other wasi-probe fixtures have before they may touch their granted directories at all.
+    //   media probe=mov 30000ms streams=2                         <- the capability answers through the kernel
+    //   media stills-error=...no frame at 1000 ms (averror -44)   <- -44 is WASI ENOENT, on WRITE only
+    //   media audio-error=...averror -44
+    //   media refused=...outside_the_grant:/in/../../../etc/passwd <- the grant check works
     //
-    // Getting even this far cost four real fixes, all in the code rather than the test: the media contract and
-    // its impls became `async func`; media_host instantiates with `instantiate_async`, links WASI with
-    // add_to_linker_async and calls through `store.run_concurrent(...)`; the awaited answer is
-    // `Result<Result<T, Error>, Error>` (measured with a deliberate type error, not guessed); and `/out` had to
-    // become `/media-out`, because the runner already grants a guest path `/out` for the component's own log -
-    // a collision that silently resolved stills to the wrong host directory.
-    #[ignore = "needs the wasi.filesystem policy entry for svc-media and media; the capability itself answers"]
+    // The media component's preopens are right - traced: `[("/in", ".../svc-media.in", true), (".../svc-media.media-out",
+    // true)]` - and READING through /in works, so the open question is specifically a write through a preopen
+    // from a component the kernel instantiates INSIDE another component's call. That is the next thing to
+    // understand; nothing about it is guessed here.
+    #[ignore = "writes through a granted preopen from a nested component invocation answer ENOENT; probe and refusal work"]
     #[test]
     fn fixture_media_describes_stills_tracks_and_refuses_a_path_outside_the_grant() {
         use crate::services::{logs, start, status, stop, support};
@@ -1565,21 +1561,25 @@ mod tests {
             eprintln!("skipped: set WA_MEDIA_TEST_FILE to a container to run this");
             return;
         };
-        let root = std::env::temp_dir().join(format!("wa-media-fixture-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let inside = root.join("in");
-        let outside = root.join("out");
+        // The RUNNER owns the directories: a manifest that declares `capabilities.dirs` gets host dirs beside
+        // the installed components (`svc-media.<leaf>`), and passing host paths of my own as well would preopen
+        // the same guest path twice - which is how the stills first landed in the wrong place. So the clip goes
+        // where the runner looks, and the assertions read from where it writes.
+        let components = std::path::PathBuf::from(std::env::var("WA_COMPONENTS_DIR").expect("components dir"));
+        let inside = components.join("svc-media.in");
+        let outside = components.join("svc-media.media-out");
         std::fs::create_dir_all(&inside).expect("in dir");
         std::fs::create_dir_all(&outside).expect("out dir");
+        for entry in std::fs::read_dir(&outside).into_iter().flatten().flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
         std::fs::copy(&clip, inside.join("clip.mp4")).expect("copy the clip into the grant");
+        // A SCRATCH HOME, never the node's: `WA_GRANT_POLICY` names a file that does not exist, which is the
+        // documented manifest mode - the component's own manifest grant is then the only gate. Pointing a test
+        // at ~/.wasm-agent/policy.json would put the operator's live policy in the path of a test run.
+        std::env::set_var("WA_GRANT_POLICY", components.join("no-policy-here.json"));
 
-        let started = start(&serde_json::json!({
-            "name": "svc-media",
-            "dirs": [
-                {"host": inside.display().to_string(), "guest": "/in"},
-                {"host": outside.display().to_string(), "guest": "/media-out", "write": true},
-            ],
-        }));
+        let started = start(&serde_json::json!({"name": "svc-media"}));
         assert_eq!(started["ok"], serde_json::json!(true), "start: {started}");
 
         let log = support::wait_for_log("svc-media", "media refused=", std::time::Duration::from_secs(180));
@@ -1598,7 +1598,7 @@ mod tests {
         let written = std::fs::read_dir(&outside).expect("out dir").count();
         assert!(written >= 3, "two stills and a track are in the out-dir, found {written}: {log}");
         assert_eq!(stopped["ok"], serde_json::json!(true), "stop: {stopped}");
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = &components;
     }
 
 }
