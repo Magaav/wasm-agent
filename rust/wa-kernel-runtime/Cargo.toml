@@ -91,3 +91,7 @@ features = ["ring", "std", "logging"]
 [dev-dependencies.wa-tls]
 path = "../wa-tls"
 features = ["scratch"]
+
+[dev-dependencies]
+# a component built from WAT inside a row, for the hosted-world grant rows
+wat = "1"
