@@ -85,10 +85,12 @@ fn main() {
         access.file(native.join("ffmpeg_access.c"));
         // wasi-libc on wasm32-wasip2 has no `clock`, and libavutil/random_seed.c calls it.
         access.file(native.join("wasi_compat.c"));
+        access.file(native.join("ffmpeg_frames.c"));
         access.compile("ffmpeg_access");
         println!("cargo:rustc-link-lib=static=ffmpeg_access");
         println!("cargo:rerun-if-changed={}", native.join("ffmpeg_access.c").display());
         println!("cargo:rerun-if-changed={}", native.join("wasi_compat.c").display());
+        println!("cargo:rerun-if-changed={}", native.join("ffmpeg_frames.c").display());
     }
     println!("cargo:rerun-if-changed={}", list.display());
 }

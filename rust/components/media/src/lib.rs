@@ -12,6 +12,7 @@
 #![allow(non_camel_case_types, non_snake_case, dead_code, clippy::all)]
 
 mod ffi;
+mod sha256;
 
 wit_bindgen::generate!({
     path: "wit",
@@ -136,11 +137,73 @@ impl exports::wa::media::probe::Guest for Component {
 
 impl exports::wa::media::frames::Guest for Component {
     fn take(
-        _request: exports::wa::media::frames::Request,
+        request: exports::wa::media::frames::Request,
     ) -> Result<Vec<exports::wa::media::frames::Still>, wa::media::types::Error> {
-        Err(wa::media::types::Error::Again(
-            "frames is not implemented in this slice: the stills are PPM until the JPEG encoder question is answered (docs/missions/reports/media-is-a-component.md)".to_string(),
-        ))
+        let source = CString::new(request.source.path.clone()).map_err(|_| {
+            wa::media::types::Error::Failure(failure(
+                "bad_path",
+                "the file path has a NUL in it".to_string(),
+            ))
+        })?;
+        // No `out-dir` is not "write somewhere sensible": a component writes where it was granted, and a
+        // request that names no grant is answered rather than guessed.
+        if request.out_dir.is_empty() {
+            return Err(wa::media::types::Error::Failure(failure(
+                "no_out_dir",
+                "the request names no out-dir; the host grants the directory the stills go in".to_string(),
+            )));
+        }
+        let mut stills = Vec::new();
+        for moment in &request.moments {
+            let mut out_path = format!(
+                "{}/still-{}.ppm",
+                request.out_dir.trim_end_matches('/'),
+                moment.at_ms
+            );
+            if request.out_dir == "/" {
+                out_path = format!("/still-{}.ppm", moment.at_ms);
+            }
+            let out = CString::new(out_path.clone()).map_err(|_| {
+                wa::media::types::Error::Failure(failure("bad_path", "the destination has a NUL".to_string()))
+            })?;
+            let status = unsafe {
+                ffi::wa_write_frame(
+                    source.as_ptr(),
+                    moment.at_ms as i64,
+                    request.max_pixels as i32,
+                    out.as_ptr(),
+                )
+            };
+            if status < 0 {
+                return Err(wa::media::types::Error::Failure(failure(
+                    "frame_failed",
+                    format!(
+                        "no frame at {} ms could be written (averror {})",
+                        moment.at_ms,
+                        error_code(status)
+                    ),
+                )));
+            }
+            // The digest and the size are of the file that is actually on disk, not of what was intended:
+            // the host recomputes both, and a component that reports its own intention would hide the very
+            // disagreement this check exists to catch.
+            let bytes = std::fs::read(&out_path).map_err(|error| {
+                wa::media::types::Error::Failure(failure(
+                    "write_lost",
+                    format!("the still was written but cannot be read back: {error}"),
+                ))
+            })?;
+            stills.push(exports::wa::media::frames::Still {
+                at_ms: moment.at_ms,
+                image: wa::media::types::File {
+                    path: out_path,
+                    bytes: bytes.len() as u64,
+                    sha256: sha256::hex(&bytes),
+                    mime: "image/x-portable-pixmap".to_string(),
+                },
+            });
+        }
+        Ok(stills)
     }
 }
 
