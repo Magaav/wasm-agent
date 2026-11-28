@@ -2460,8 +2460,9 @@ async fn backfill(request: &seam::Verified) -> Result<serde_json::Value, String>
         // Retryable: a node that is (re)connecting answers the same question once it is up.
         return Err("not_connected".to_string());
     };
-    let chat = request.chat.as_ref().map(|chat| chat.jid());
-    let anchors = history::anchors(&IndexKv, chat.as_deref(), request.limit).await?;
+    // The index's accepted chat IS a JID string now (`d73978315`), so there is nothing to convert.
+    let chat = request.chat.as_deref();
+    let anchors = history::anchors(&IndexKv, chat, request.limit).await?;
     if anchors.is_empty() {
         return Ok(seam::answer(
             seam::Op::Backfill,
