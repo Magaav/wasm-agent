@@ -1534,18 +1534,23 @@ mod tests {
     /// stills and extract the track, then asks for a path that walks out of its grant. Everything asserted here is
     /// read from ITS LOG, not from a return value - a kernel that answered correctly and told the guest something
     /// else would pass a return-value test and fail this one.
-    // IGNORED, with the two reasons measured rather than guessed:
+    // IGNORED for ONE remaining reason, and the rest of the path is measured to work:
     //
-    //  1. the runner panics inside the guest with "Cannot start a runtime from within a runtime":
-    //     media_host's entry points use wasmtime's SYNC api, and a `HostWithStore` call already runs on the
-    //     node's runtime, so instantiating the media component there blocks a thread that is driving the async
-    //     guest. The fix is async entry points (instantiate_async + awaiting the call), not a bigger stack.
-    //  2. `[policy] svc-media wasi.filesystem -> deny(no_policy)`: the fixture needs the same policy entry the
-    //     other wasi-probe fixtures get before it can read its granted directory at all.
+    //   the guest's log reads `media probe=mov 30000ms streams=2` - the capability reached ffmpeg through the
+    //   kernel and answered - and `media refused=...outside_the_grant:/in/../../../etc/passwd`, so a path
+    //   outside the grant is refused rather than resolved.
     //
-    // Both are real work, neither is a mystery; the test is written so the day they are fixed it proves the
-    // capability end to end: probe, two stills, a track, and a path outside the grant refused.
-    #[ignore = "needs async media_host entry points and a policy entry for the fixture"]
+    //   the stills and the track fail with `averror -44`, which is the same gate named earlier in the log:
+    //   `[policy] svc-media wasi.filesystem -> deny(no_policy)`. Both components need the policy entry the
+    //   other wasi-probe fixtures have before they may touch their granted directories at all.
+    //
+    // Getting even this far cost four real fixes, all in the code rather than the test: the media contract and
+    // its impls became `async func`; media_host instantiates with `instantiate_async`, links WASI with
+    // add_to_linker_async and calls through `store.run_concurrent(...)`; the awaited answer is
+    // `Result<Result<T, Error>, Error>` (measured with a deliberate type error, not guessed); and `/out` had to
+    // become `/media-out`, because the runner already grants a guest path `/out` for the component's own log -
+    // a collision that silently resolved stills to the wrong host directory.
+    #[ignore = "needs the wasi.filesystem policy entry for svc-media and media; the capability itself answers"]
     #[test]
     fn fixture_media_describes_stills_tracks_and_refuses_a_path_outside_the_grant() {
         use crate::services::{logs, start, status, stop, support};
@@ -1572,7 +1577,7 @@ mod tests {
             "name": "svc-media",
             "dirs": [
                 {"host": inside.display().to_string(), "guest": "/in"},
-                {"host": outside.display().to_string(), "guest": "/out", "write": true},
+                {"host": outside.display().to_string(), "guest": "/media-out", "write": true},
             ],
         }));
         assert_eq!(started["ok"], serde_json::json!(true), "start: {started}");

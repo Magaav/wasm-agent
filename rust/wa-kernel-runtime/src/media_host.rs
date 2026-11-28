@@ -175,7 +175,7 @@ fn store(engine: &Engine, dirs: &[DirGrant]) -> Result<Store<Host>, String> {
 
 fn linker(engine: &Engine) -> Result<Linker<Host>, String> {
     let mut linker = Linker::new(engine);
-    wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|error| format!("linker:{error}"))?;
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| format!("linker:{error}"))?;
     Ok(linker)
 }
 
@@ -188,7 +188,7 @@ pub struct Description {
 }
 
 /// Run `probe.describe` for one file inside the granted directories.
-pub fn probe(
+pub async fn probe(
     engine: &Engine,
     component: &Component,
     dirs: &[DirGrant],
@@ -198,7 +198,8 @@ pub fn probe(
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
     let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;
-    let bindings = MediaService::instantiate(&mut store, component, &linker)
+    let bindings = MediaService::instantiate_async(&mut store, component, &linker)
+        .await
         .map_err(|error| format!("instantiate:{error}"))?;
     let source = wa::media::types::File {
         path: guest_source.to_string(),
@@ -206,27 +207,34 @@ pub fn probe(
         sha256: String::new(),
         mime: String::new(),
     };
-    let answer = bindings
-        .wa_media_probe()
-        .call_describe(&mut store, &source)
+    // `run_concurrent` is what lets an async export suspend: the closure gets the store, and the call is a
+    // future inside it. Calling through `&mut Store` directly is what wasmtime rejects for an async store.
+    let answer = store
+        .run_concurrent(async move |store| {
+            bindings.wa_media_probe().call_describe(store, source).await
+        })
+        .await
         .map_err(|error| format!("call:{error}"))?;
-    match answer {
-        Ok(description) => Ok(Description {
-            format: description.format,
-            duration_ms: description.duration_ms,
-            streams: description
-                .streams
-                .iter()
-                .map(|stream| (stream.kind.clone(), stream.codec.clone(), stream.width, stream.height))
-                .collect(),
-            has_audio: description.has_audio,
-        }),
-        Err(error) => Err(format!("refused:{error:?}")),
-    }
+    // Two levels: `run_concurrent` answers with the CALL's outcome, and inside it is the guest's own answer.
+    // Two levels, measured rather than assumed: `run_concurrent` answers `Result<Result<T, Error>, Error>` -
+    // the concurrent call, then the guest's own answer.
+    let description = answer
+        .map_err(|error| format!("call:{error}"))?
+        .map_err(|error| format!("refused:{error:?}"))?;
+    Ok(Description {
+        format: description.format,
+        duration_ms: description.duration_ms,
+        streams: description
+            .streams
+            .iter()
+            .map(|stream| (stream.kind.clone(), stream.codec.clone(), stream.width, stream.height))
+            .collect(),
+        has_audio: description.has_audio,
+    })
 }
 
 /// Run `frames.take` and prove every still it answered.
-pub fn frames(
+pub async fn frames(
     engine: &Engine,
     component: &Component,
     dirs: &[DirGrant],
@@ -239,7 +247,8 @@ pub fn frames(
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
     let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;
-    let bindings = MediaService::instantiate(&mut store, component, &linker)
+    let bindings = MediaService::instantiate_async(&mut store, component, &linker)
+        .await
         .map_err(|error| format!("instantiate:{error}"))?;
     let request = exports::wa::media::frames::Request {
         source: wa::media::types::File {
@@ -255,12 +264,19 @@ pub fn frames(
         max_pixels,
         out_dir: guest_out.to_string(),
     };
-    let answer = bindings
-        .wa_media_frames()
-        .call_take(&mut store, &request)
+    // `run_concurrent` is what lets an async export suspend: the closure gets the store, and the call is a
+    // future inside it. Calling through `&mut Store` directly is what wasmtime rejects for an async store.
+    let answer = store
+        .run_concurrent(async move |store| {
+            bindings.wa_media_frames().call_take(store, request).await
+        })
+        .await
         .map_err(|error| format!("call:{error}"))?;
-    match answer {
-        Ok(stills) => {
+    let stills = answer
+        .map_err(|error| format!("call:{error}"))?
+        .map_err(|error| format!("refused:{error:?}"))?;
+    {
+        {
             let mut verified = Vec::new();
             for still in stills {
                 let file = verify_file(&still.image.path, still.image.bytes, &still.image.sha256, dirs)
@@ -269,12 +285,11 @@ pub fn frames(
             }
             Ok(verified)
         }
-        Err(error) => Err(format!("refused:{error:?}")),
     }
 }
 
 /// Run `audio.extract` and prove the track it answered.
-pub fn audio(
+pub async fn audio(
     engine: &Engine,
     component: &Component,
     dirs: &[DirGrant],
@@ -287,7 +302,8 @@ pub fn audio(
     let bytes = std::fs::metadata(host_source).map(|meta| meta.len()).unwrap_or(0);
     let mut store = store(engine, dirs)?;
     let linker = linker(engine)?;
-    let bindings = MediaService::instantiate(&mut store, component, &linker)
+    let bindings = MediaService::instantiate_async(&mut store, component, &linker)
+        .await
         .map_err(|error| format!("instantiate:{error}"))?;
     let request = exports::wa::media::audio::Request {
         source: wa::media::types::File {
@@ -300,18 +316,20 @@ pub fn audio(
         channels,
         out_dir: guest_out.to_string(),
     };
-    let answer = bindings
-        .wa_media_audio()
-        .call_extract(&mut store, &request)
+    // `run_concurrent` is what lets an async export suspend: the closure gets the store, and the call is a
+    // future inside it. Calling through `&mut Store` directly is what wasmtime rejects for an async store.
+    let answer = store
+        .run_concurrent(async move |store| {
+            bindings.wa_media_audio().call_extract(store, request).await
+        })
+        .await
         .map_err(|error| format!("call:{error}"))?;
-    match answer {
-        Ok(track) => {
-            let file = verify_file(&track.audio.path, track.audio.bytes, &track.audio.sha256, dirs)
-                .map_err(|error| error.to_string())?;
-            Ok((file, track.duration_ms))
-        }
-        Err(error) => Err(format!("refused:{error:?}")),
-    }
+    let track = answer
+        .map_err(|error| format!("call:{error}"))?
+        .map_err(|error| format!("refused:{error:?}"))?;
+    let file = verify_file(&track.audio.path, track.audio.bytes, &track.audio.sha256, dirs)
+        .map_err(|error| error.to_string())?;
+    Ok((file, track.duration_ms))
 }
 
 
@@ -354,12 +372,12 @@ fn refusal(reason: String) -> KError {
 
 /// The engine and the component, loaded once per call through the node's compiled cache: `load` verifies the
 /// pin, so the bytes served are the bytes that were installed.
-fn call_probe(dirs: &[crate::components::DirGrant], guest_path: &str, host_path: &std::path::Path)
+async fn call_probe(dirs: &[crate::components::DirGrant], guest_path: &str, host_path: &std::path::Path)
     -> Result<kernel_media::wa::kernel::media::Description, String>
 {
     let engine = crate::service_components_v2::engine().map_err(|error| format!("engine:{error}"))?;
     let component = load(&engine, "media")?;
-    let description = probe(&engine, &component, dirs, guest_path, host_path)?;
+    let description = probe(&engine, &component, dirs, guest_path, host_path).await?;
     Ok(kernel_media::wa::kernel::media::Description {
         duration_ms: description.duration_ms,
         format: description.format,
@@ -392,7 +410,7 @@ impl kernel_media::wa::kernel::media::HostWithStore<State> for State {
         let out = async {
             gate(&name, "media.read")?;
             let host_path = host_path_for(&path, &dirs).map_err(|error| refusal(error.to_string()))?;
-            call_probe(&dirs, &path, &host_path).map_err(refusal)
+            call_probe(&dirs, &path, &host_path).await.map_err(refusal)
         }
         .await;
         call.outcome(&out);
@@ -416,6 +434,7 @@ impl kernel_media::wa::kernel::media::HostWithStore<State> for State {
             let engine = crate::service_components_v2::engine().map_err(|error| refusal(format!("engine:{error}")))?;
             let component = load(&engine, "media").map_err(refusal)?;
             let stills = frames(&engine, &component, &dirs, &path, &host_path, &moments_ms, max_pixels, &out_dir)
+                .await
                 .map_err(refusal)?;
             Ok(stills
                 .into_iter()
@@ -450,6 +469,7 @@ impl kernel_media::wa::kernel::media::HostWithStore<State> for State {
             let component = load(&engine, "media").map_err(refusal)?;
             let (file, duration_ms) =
                 audio(&engine, &component, &dirs, &path, &host_path, sample_rate, channels, &out_dir)
+                    .await
                     .map_err(refusal)?;
             Ok(kernel_media::wa::kernel::media::Track {
                 path: file.host_path.display().to_string(),
@@ -569,16 +589,22 @@ mod tests {
         };
         let guest_source = format!("/media/{}", source.file_name().expect("name").to_string_lossy());
 
-        let description = probe(&engine, &component, &dirs, &guest_source, source).expect("probe");
+        // The entry points are async: the runner drives them on a runtime, and so does this test.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let description = runtime
+            .block_on(probe(&engine, &component, &dirs, &guest_source, source))
+            .expect("probe");
         assert!(!description.format.is_empty(), "a container has a name");
         assert!(!description.streams.is_empty(), "and at least one stream");
 
-        let stills = frames(&engine, &component, &dirs, &guest_source, source, &[1000], 640 * 360, "/out")
+        let stills = runtime
+            .block_on(frames(&engine, &component, &dirs, &guest_source, source, &[1000], 640 * 360, "/out"))
             .expect("frames");
         assert_eq!(stills.len(), 1);
         assert_eq!(stills[0].1.bytes, std::fs::metadata(&stills[0].1.host_path).unwrap().len());
 
-        let (track, duration_ms) = audio(&engine, &component, &dirs, &guest_source, source, 16_000, 1, "/out")
+        let (track, duration_ms) = runtime
+            .block_on(audio(&engine, &component, &dirs, &guest_source, source, 16_000, 1, "/out"))
             .expect("audio");
         assert!(track.bytes > 0);
         assert!(duration_ms > 0, "a track has a length");
