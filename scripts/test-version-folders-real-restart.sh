@@ -19,8 +19,13 @@ n=0
 ok()  { n=$((n+1)); printf '  ok   %s\n' "$*"; }
 fail(){ echo "FAIL test-version-folders-real-restart: $*" >&2; exit 1; }
 
-WA_BIN="${WA_TEST_BINARY:-${HOME}/.local/bin/wa}"
-SENTINEL="${WA_SENTINEL_BINARY:-${HOME}/.local/bin/wa-sentinel}"
+# THE ROW RUNNER HANDS EVERY ROW WA_BIN (ROW-CONTRACT row-runner8): the program IT built for this commit. A row that looks
+# only in $HOME/.local/bin SKIPs inside the runner while passing on a workstation - measured: rc=0-SKIP.
+WA_BIN="${WA_TEST_BINARY:-${WA_BIN:-${HOME}/.local/bin/wa}}"
+# THE SENTINEL AND THE SUPERVISOR ARE LOOKED FOR BESIDE WA_BIN FIRST: a build tree keeps the three together, and the
+# runner's target directory is the only place they can be for a commit that is not installed.
+SENTINEL="${WA_SENTINEL_BINARY:-$(dirname "$WA_BIN")/wa-sentinel}"
+[ -x "$SENTINEL" ] || SENTINEL="${HOME}/.local/bin/wa-sentinel"
 SUPERVISOR="${WA_SUPERVISOR_BINARY:-}"
 if [ ! -x "$SUPERVISOR" ]; then
   for candidate_sup in "$(dirname "$0")/../rust/target/release/wa-operations-supervisor" \
