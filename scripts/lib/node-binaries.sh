@@ -545,7 +545,7 @@ wa_node_asset_names() {
   # `wa-wa-sentinel-...` - every publish would have shipped wrong names.)
   local member names=""
   for member in $WA_BUNDLE_MEMBERS; do names="$names $member-$triple-$short"; done
-  printf 'node-%s.manifest%s\n' "$short" "$names""
+  printf 'node-%s.manifest%s\n' "$short" "$names"
 }
 
 # <repo> <tag> <asset> <dest> [base]
