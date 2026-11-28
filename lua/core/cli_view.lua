@@ -91,7 +91,12 @@ local PALETTE = {
   -- The BANDS behind a removed/added row of the diff block (Victor 20/11: a red band and a green band,
   -- full width). Dark enough that the role's own foreground stays readable on them, and painted only
   -- when the view is live: the plain rendering carries the +/- marker instead.
-  toolDiffAddedBand = "12301c", toolDiffRemovedBand = "3a1620",
+  -- MEASURED 27/11 (scripts/test-diff-card-contrast-pty.mjs): on 12301c a COMMENT inside an added
+  -- line (`syntaxComment` 6a9955, the darkest body colour a row can carry) reached only 4.30:1 -
+  -- under the 4.5:1 plain text needs. 0f2a18 lifts it to 4.63:1 and lifts every other role on the
+  -- band with it (the added role goes 5.83 -> 6.27:1). The removed band already cleared it (4.79:1)
+  -- and is unchanged.
+  toolDiffAddedBand = "0f2a18", toolDiffRemovedBand = "3a1620",
   syntaxComment = "6a9955", syntaxKeyword = "569cd6", syntaxFunction = "dcdcaa",
   syntaxString = "ce9178", syntaxNumber = "b5cea8", syntaxType = "4ec9b0",
   -- The reasoning ramp, darkest to brightest: how much thinking the model was asked for.
@@ -922,7 +927,13 @@ function M.diff_block(change, width, live)
           painted[#painted + 1] = paint(text, style and { style, band } or base, live)
         end)
       end
-      out[#out + 1] = paint(row.lead, { "mdCodeBlockBorder", band }, live)
+      -- The lead is TWO colours, not one (measured 27/11 in a pty: the border role on the band gave
+      -- 3.20:1 for the line number and the +/- marker, under the 4.5:1 body text needs - the marker
+      -- is the row's own change sign, not frame decoration). The border glyph stays the border's,
+      -- the number and the marker take the row's own role, and the band goes under both.
+      local border, rest = row.lead:sub(1, 3), row.lead:sub(4)
+      out[#out + 1] = paint(border, { "mdCodeBlockBorder", band }, live)
+        .. paint(rest, { row.role or "text", band }, live)
         .. (#painted > 0 and table.concat(painted) or paint(body, base, live))
     end
   end
