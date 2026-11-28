@@ -102,7 +102,10 @@ try {
 
   // A REAL MOUSE PRESS on the icon: SGR 1006, left button, 1-based row and column.
   tmux(['send-keys', '-t', SESSION, '-l', `\x1b[<0;${iconCol + 1};${iconRow + 1}M`]);
-  await sleep(500);
+  // THE NOTICE IS THE SIGNAL, not a stopwatch (27/11 health red): a fixed 500 ms is what made
+  // this row go red on a loaded machine - the press landed, the balloon had not drawn yet. The
+  // wait is on the words the balloon itself writes, so a slow machine waits and a broken one fails.
+  await waitFor(rows => rows.some(r => /Copied \d+ characters?/.test(r)), 'the copy notice after the press');
   const during = screen();
   const words = during.findIndex(r => /Copied \d+ characters?/.test(r));
   const title = during.findIndex(r => r.includes('Copied') && !/\d+ characters?/.test(r));
@@ -117,7 +120,10 @@ try {
     during.filter((row, at) => at >= 4 && before[at - 4] === row).length > 2,
     'the chat is four rows lower while the balloon shows');
 
-  await sleep(2600);
+  // ITS OWN EXPIRY IS THE SIGNAL: the notice holds for a fixed time by design, and this row used to
+  // sleep past it. It now waits for the words to be GONE, so the check is about the behaviour and
+  // not about a stopwatch that a busy machine can outrun.
+  await waitFor(rows => !rows.some(r => /Copied \d+ characters?/.test(r)), 'the notice to expire');
   const after = screen();
   check('and the space comes back when it expires', !after.some(r => /Copied \d+ characters?/.test(r)),
     'the notice is gone');
