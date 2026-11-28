@@ -636,19 +636,10 @@ fn main() {
       // the files on disk - which is how two tests in the image branch passed while
       // loading code that did not contain the feature they were testing. The fallback
       // stays for the shipping case, where no root is set at all.
-    let bootstrap = "LOADED_SOURCES = {}; function dofile(path) \
-         local root = host.getenv('WASM_AGENT_LUA_ROOT'); \
-         if root and root ~= '' then \
-           local text = host.read_file(root .. '/' .. path); \
-           if not text then error('lua_root_unreadable: ' .. root .. '/' .. path) end; \
-           LOADED_SOURCES[path] = host.sha256(text); \
-             return assert(load(text, '@' .. root .. '/' .. path))() \
-         end; \
-         local source = EMBEDDED[path]; \
-         if not source then error('embedded module missing: ' .. tostring(path)) end; \
-         LOADED_SOURCES[path] = host.sha256(source); \
-         return assert(load(source, '@' .. path))() end; \
-         pcall(function() dofile('lua/core/path_guard.lua').install(host) end)";
+    let bootstrap = format!(
+        "{}\n         pcall(function() dofile('lua/core/path_guard.lua').install(host) end)",
+        "LOADED_SOURCES = {}; DOFILE_CHUNKS = {}; DOFILE_COMPILES = 0; DOFILE_HASHES = 0; function dofile(path) local root = host.getenv('WASM_AGENT_LUA_ROOT'); local key, text, name; if root and root ~= '' then key = root .. '/' .. path; text = host.read_file(key); if not text then error('lua_root_unreadable: ' .. key) end; name = '@' .. key else key = path; text = EMBEDDED[path]; if not text then error('embedded module missing: ' .. tostring(path)) end; name = '@' .. path end; local cached = DOFILE_CHUNKS[key]; if cached and cached.text == text then return cached.chunk() end; LOADED_SOURCES[path] = host.sha256(text); DOFILE_HASHES = DOFILE_HASHES + 1; DOFILE_COMPILES = DOFILE_COMPILES + 1; local chunk = assert(load(text, name)); DOFILE_CHUNKS[key] = { text = text, chunk = chunk }; return chunk() end"
+    );
     // Every interpreter gets the path guard before anything runs in it, and this is the one place that
     // reaches all of them: `boot_state` builds the main interpreter, every pool node-thread, every
     // subagent child and every `--core-component` run. It used to be installed by `lua/core/init.lua`
@@ -662,7 +653,7 @@ fn main() {
     // Installed from the same module the CLI loads, so there is one rule and not two, and `pcall` keeps a
     // binary whose tree predates the module running its scripts: the guard is then simply absent, and
     // the canary names that gap instead of every script failing.
-    if let Err(error) = lua.do_string(bootstrap, "bootstrap") {
+    if let Err(error) = lua.do_string(&bootstrap, "bootstrap") {
         eprintln!("lua error: {error}");
         std::process::exit(1);
     }
