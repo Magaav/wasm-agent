@@ -345,3 +345,12 @@ tz 6bcbe3543793625d0da9de931d636e5c38c85c1a884f16a4b7b85227aa6ecaa0 160247
 # either rebuilt the node. The host now asks this for validate/chat/status/constants
 # (rust/wa-capabilities/src/outbox_component.rs) and `cargo tree -p wa-host` no longer lists the crate.
 outbox 3674c717e9c9ec2d64e2723b66aed603acbc5d1855f6aa343a3f943bf87bca44 232613
+# 28/11 first pin of whatsapp-archive (change/whatsapp-archive-is-a-component): the archive's OPERATIONS as a
+# component - which month is due, which are restored, a file's name and expiry, the seal context and sha256 -
+# over `wit/archive`, which imports the two things those ops need from outside: the store an index lives behind
+# (`Kv`) and the keystore's seal/open (`Sealer`). A host answers both through a callback, the shape
+# `wa-kernel-runtime/src/sandbox_host.rs` established for codemode.
+# NOT YET CALLED BY ANYONE: the host's side is `wa-capabilities/src/whatsapp_archive.rs`, which this branch may
+# not touch (whatsapp-leaves-the-host's ground). The component is built and pinned so that seam is all that is
+# left.
+whatsapp-archive d199a9ac4eca29c3b3372bac5ee94bdd5ae061b55ca7a00a8416900ccf47140a 285460

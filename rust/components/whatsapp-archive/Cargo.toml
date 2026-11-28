@@ -1,0 +1,27 @@
+[package]
+name = "whatsapp-archive"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The WhatsApp archive as a WASI component (everything-is-a-component).
+#
+# `rust/wa-whatsapp-archive` holds the operations; this crate is the component that answers them over
+# `wit/archive`, importing the two things they need from outside - the store an index lives behind
+# (`Kv`) and the keystore's seal/open (`Sealer`) - which a host answers through a callback, the shape
+# `wa-kernel-runtime/src/sandbox_host.rs` established.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The WIT bindings: the same crate every component in this tree uses.
+wit-bindgen = "0.63"
+wa-whatsapp-archive = { path = "../../wa-whatsapp-archive" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

@@ -1,0 +1,40 @@
+/// `wa:archive` - the WhatsApp archive as a component (everything-is-a-component, `_orch/move-list.md`
+/// row: archive).
+///
+/// The archive's OPERATIONS are what this component answers: which month is due to be cut, which months
+/// are restored, what a month's file is called, when one expires, and the seal/open a body passes through.
+/// The two things they need from the outside are declared here as IMPORTS, exactly the two traits the
+/// library already had (`wa_whatsapp_archive::Kv` and `Sealer`): the store an index lives behind, and the
+/// keystore's keyless seal/open. A host answers both through a callback - the shape
+/// `wa-kernel-runtime/src/sandbox_host.rs` established for codemode - so no storage redesign is involved.
+///
+/// Path-bound operations (`cut`, `restore`, `expire`, `push`) are NOT in this world yet: they need a
+/// preopened directory, and they stay in the library until a caller requires them here.
+package wa:archive@0.1.0;
+
+/// The four kv calls an index lives behind (`wa_whatsapp_archive::Kv`).
+interface store {
+    get: func(key: list<u8>) -> result<option<list<u8>>, string>;
+    set: func(key: list<u8>, value: list<u8>) -> result<_, string>;
+    del: func(key: list<u8>) -> result<_, string>;
+    /// Entries under `prefix`, ordered by key, after `cursor` (exclusive).
+    scan: func(prefix: list<u8>, cursor: option<list<u8>>, limit: u32) -> result<list<tuple<list<u8>, list<u8>>>, string>;
+}
+
+/// The keystore's keyless seal/open, as the node's root key is used: never a key in hand.
+interface sealer {
+    seal: func(context: string, plaintext: list<u8>) -> result<list<u8>, string>;
+    open: func(context: string, sealed: list<u8>) -> result<list<u8>, string>;
+}
+
+/// One archive question, one answer: `request` is JSON `{op, ...}` and the answer is JSON - the same door
+/// shape the codemode component serves (`wit/codemode`, `interface control`).
+interface control {
+    serve: func(request: string) -> string;
+}
+
+world archive-component {
+    import store;
+    import sealer;
+    export control;
+}
