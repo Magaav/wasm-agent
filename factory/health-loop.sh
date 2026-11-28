@@ -165,7 +165,9 @@ while true; do
   TOOK=$(( $(date +%s) - TIP_STARTED ))
   # ONE LINE, ALWAYS. When the suite did not produce a readable verdict - killed, out of space, lock, budget - the reason
   # is named here instead of leaving the "resolving" line as the last word for half an hour.
-  if [ "$RC" != 0 ] || ! jq -e . $M/main-health.json >/dev/null 2>&1; then
+  # THE JSON DECIDES (28/11): rc=1 with a readable report is MAIN RED, and its rows must reach the attribution below.
+  # Only a report that cannot be read is a tip with no verdict at all.
+  if ! jq -e . $M/main-health.json >/dev/null 2>&1; then
     rm -f "$M/_orch/health-open"
     echo "$(date -u +%H:%MZ) orch(health): $(wa_health_verdict_line "$N" "$RC" "$TOOK" "$M/_orch/health-loop-run.out" "$M/main-health.json" "$SUITE_BUDGET")" >> $H
     TIP_STARTED=0
@@ -187,7 +189,7 @@ while true; do
     P=$M/_orch/REVERT-PROPOSAL-${S:0:8}.txt
     { echo "new red on ${S:0:8} (still red alone): $STILL"; echo "last green: ${GREEN:0:8}"; echo "landings since:"; $G log --first-parent --format='%h %s' ${GREEN:-$S~1}..$S; } > $P
     rm -f "$M/_orch/health-open"
-    echo "$(date -u +%H:%MZ) orch(health): NEW RED on ${S:0:8} after ${TOOK}s: $STILL -> $P (attribute + propose revert)" >> $H
+    echo "$(date -u +%H:%MZ) orch(health): MAIN RED on ${S:0:8} after ${TOOK}s: $STILL -> $P (attribute + propose revert)" >> $H
   fi
   TIP_STARTED=0
   sleep 60

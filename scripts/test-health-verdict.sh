@@ -84,7 +84,14 @@ cat > "$work/red.json" <<'JSON'
 {"sha":"deadbeefdeadbeef","counts":{"passed":408,"checks":425},"failed":[{"row":"test-done-gate"},{"row":"test-cli-notice"}]}
 JSON
 out=$(line 0 300 "$work/empty.out" "$work/red.json")
-case "$out" in *"NEW RED: test-cli-notice test-done-gate"*) ;; *) fail "a red tip did not name its rows: [$out]" ;; esac
+case "$out" in *"MAIN RED (408/425): test-cli-notice test-done-gate"*) ;; *) fail "a red tip did not name its rows: [$out]" ;; esac
+
+# 2b) THE CASE THAT BIT US (28/11): the suite runs to the end, finds rows red, and EXITS rc=1. That is a verdict.
+# MEASURED at d96264a3: ten rows red at load 16, and the line said "NO VERDICT rc=1" instead of MAIN RED with the rows.
+out=$(line 1 1800 "$work/empty.out" "$work/red.json")
+case "$out" in *"MAIN RED"*) ;; *) fail "rc=1 with a readable report is not reported as MAIN RED: [$out]" ;; esac
+case "$out" in *"test-cli-notice"*) ;; *) fail "the red rows are not named when rc=1: [$out]" ;; esac
+case "$out" in *"NO VERDICT"*) fail "a readable report with red rows was called NO VERDICT: [$out]" ;; esac
 
 # 3) KILLED BY A UNIT RESTART: SIGTERM, and the evidence the log actually carries, plus how long it ran.
 printf 'Terminated   WA_FAST_RESULT=$result flock -o "$lock" nice -n 10 bash -c "cd tree && bash scripts/fast.sh"\n' > "$work/killed.out"

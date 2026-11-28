@@ -44,14 +44,19 @@ wa_health_verdict_reason() {
 wa_health_verdict_line() {
   local sha=${1:-} rc=${2:-0} took=${3:-0} out=${4:-} json=${5:-} budget=${6:-0}
   local passed checks rows why
-  if [ "$rc" = 0 ] && [ -r "$json" ] && command -v jq >/dev/null 2>&1 && jq -e . "$json" >/dev/null 2>&1; then
+  # A READABLE JSON DECIDES, NOT THE EXIT CODE (28/11, operator). MEASURED: a suite that ran to the end and found ten red
+  # rows exits rc=1, and this function only read the json when rc=0 - so a MAIN RED of ten rows was reported as
+  # "NO VERDICT rc=1" and the rows were never named. A run that names its failures HAS a verdict; only an unreadable
+  # json is a run with none.
+  if [ -r "$json" ] && command -v jq >/dev/null 2>&1 && jq -e . "$json" >/dev/null 2>&1; then
     passed=$(jq -r '.counts.passed // "?"' "$json" 2>/dev/null)
     checks=$(jq -r '.counts.checks // "?"' "$json" 2>/dev/null)
     rows=$(jq -r '.failed[]?.row' "$json" 2>/dev/null | sort -u | tr '\n' ' ')
     if [ -z "${rows// /}" ]; then
       printf '%s %s/%s green (%ss)\n' "${sha:0:8}" "$passed" "$checks" "$took"
     else
-      printf '%s NEW RED: %s(%ss)\n' "${sha:0:8}" "$rows" "$took"
+      # MAIN RED, in the operator's words, with the rows and the counts: a reader must be able to act on this line alone.
+      printf '%s MAIN RED (%s/%s): %s(%ss)\n' "${sha:0:8}" "$passed" "$checks" "$rows" "$took"
     fi
     return 0
   fi
