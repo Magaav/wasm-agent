@@ -1491,6 +1491,7 @@ end
 -- into a dead script, the one outcome worse than `pending`. Restored afterwards, so a ctx shared by
 -- later calls carries no stale deadline.
 function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
+  if host.getenv('WA_CODEMODE_TRACE_OPENS') then print('[codemode-run-tool] caller='..(debug and debug.traceback('who', 1) or 'no-debug')) end
   local budget_ms=tonumber(args and args.timeout_ms)
   if budget_ms then budget_ms=math.max(1,math.min(300000,budget_ms)) end
   local previous=type(ctx)=='table' and ctx.codemode_deadline or nil

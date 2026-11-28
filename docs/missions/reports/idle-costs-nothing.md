@@ -69,6 +69,11 @@ dispatched twice. That is one level above where the 23/11 report stopped looking
 AND ONE SUSPECT IS OUT: `sandbox_host::available()` - what the router asks before routing - hashes the artifact
 and does not instantiate, so the availability probe is not the second open.
 
+ONE LEVEL HIGHER, MEASURED: a traceback at `M.run` (`codemode.lua:1493`) shows BOTH invocations arriving from
+`lua/core/tools.lua:3416` - the `pcall(dispatch, ...)` inside `M.dispatch`. So the tool call reaches
+`M.dispatch` twice: the agent loop dispatches the same `run` call twice, and each dispatch drives a whole
+script (two sessions, as the trace shows). The seam, the loop and `run_script` are each entered once per
+dispatch; the duplication is in the dispatcher's caller.
 NOT FIXED, deliberately. Which of the two dispatches is redundant decides what to delete, and that is a
 behaviour question about the agent loop (a preview pass? a re-dispatch after a yielded `advance`?), not a
 performance one; getting it wrong drops a tool call. The next probe is a traceback at `M.run` and at
