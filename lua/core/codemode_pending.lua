@@ -70,7 +70,6 @@ M.MAX_WAIT_S = 300
 -- callers use it. Nothing outside this file may write a wait budget of its own, and nothing reads one from the
 -- environment: a product that lets an env var set a wait has two owners again.
 function M.clamp_wait_s(seconds)
-  if seconds == nil then return M.DEFAULT_WAIT_S end
   seconds = tonumber(seconds)
   if seconds == nil then return M.DEFAULT_WAIT_S end
   return math.max(0, math.min(M.MAX_WAIT_S, seconds))
