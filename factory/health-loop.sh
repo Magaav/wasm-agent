@@ -22,9 +22,25 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # HANDOVER had no way to tell. So the loop now says which copies it is running, and how far behind the landed ones they
 # are, on every start and once per grading: a swap that was forgotten is a line, not an afternoon.
 wa_factory_selfcheck() {
-  local mine_lib=$HERE/lib/main-binary.sh landed_lib=$C/factory/lib/main-binary.sh note=""
-  if [ -r "$landed_lib" ] && [ -r "$mine_lib" ] && ! cmp -s "$mine_lib" "$landed_lib"; then
-    note="the running lib differs from the landed one ($(stat -c %y "$mine_lib" 2>/dev/null | cut -d. -f1) vs $(stat -c %y "$landed_lib" 2>/dev/null | cut -d. -f1)); swap _orch per factory/MAP.md and restart"
+  local mine_lib=$HERE/lib/main-binary.sh note="" landed_sha landed_date running_sha running_mtime
+  [ -r "$mine_lib" ] || { printf '%s\n' ""; return 0; }
+  # COMPARED WITH origin/main, NOT WITH THE CHECKOUT'S WORKING TREE (28/11). The first version of this check read
+  # $C/factory/lib/main-binary.sh, and on the first real swap it accused a copy that was NEWER than the thing it
+  # compared to: _orch was swapped at 21:53 while the checkout sat commits behind main at 16:32, so the loop wrote
+  # "the running lib differs - swap _orch" about work somebody had just done. Truth comes from the landed blob.
+  landed_sha=$(git -C "$C" show origin/main:factory/lib/main-binary.sh 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')
+  [ -n "$landed_sha" ] || { printf '%s\n' ""; return 0; }
+  running_sha=$(sha256sum "$mine_lib" 2>/dev/null | awk '{print $1}')
+  [ "$running_sha" = "$landed_sha" ] && { printf '%s\n' ""; return 0; }
+  # They differ: the USEFUL fact is which one is behind, so compute it instead of guessing from two mtimes.
+  landed_date=$(git -C "$C" log -1 --format=%ct origin/main -- factory/lib/main-binary.sh 2>/dev/null)
+  running_mtime=$(stat -c %Y "$mine_lib" 2>/dev/null)
+  case "$landed_date" in ''|*[!0-9]*) landed_date=0 ;; esac
+  case "$running_mtime" in ''|*[!0-9]*) running_mtime=0 ;; esac
+  if [ "$landed_date" -gt "$running_mtime" ]; then
+    note="the running lib is STALE: main changed it $(date -u -d "@$landed_date" +%Y-%m-%dT%H:%MZ) and this copy is $(date -u -d "@$running_mtime" +%Y-%m-%dT%H:%MZ); swap _orch per factory/MAP.md and restart"
+  else
+    note="the running lib is AHEAD of origin/main ($(date -u -d "@$running_mtime" +%Y-%m-%dT%H:%MZ) vs $(date -u -d "@$landed_date" +%Y-%m-%dT%H:%MZ)) - nothing to swap; check the checkout is on main before swapping anything"
   fi
   printf '%s\n' "$note"
 }
