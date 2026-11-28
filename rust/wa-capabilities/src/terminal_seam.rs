@@ -1,59 +1,38 @@
-//! The `wa:terminal` seam, on the pattern the process host proved: a TRAIT where the surface comes from, so the
-//! node wires `wa-term` in and a test wires a script, and the event path is a unit test rather than a live tty.
+//! The `wa:terminal` seam: the DOCUMENT the node paints, behind a trait so the node wires `wa-term`'s program in
+//! (over `wa-term-proto`) and a test wires a script.
+//!
+//! The world was reshaped on 28/11 after reading the program's own dispatcher: it answers a document (write,
+//! block, code_block, head, rewrite, pin_toggle) and no `open` - a pty is the operations runner's job (law 17).
 
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use wasmtime::component::{
-    Access, Accessor, Destination, HasData, Resource, ResourceTable, StreamProducer, StreamReader, StreamResult,
-};
-use wasmtime::{AsContextMut, StoreContextMut};
+use std::future;
+use wasmtime::component::{Access, Accessor, HasData, ResourceTable};
 
 wasmtime::component::bindgen!({
     world: "terminal-client",
     path: "../../wit/terminal",
-    imports: {
-        "wa:terminal/session.[method]surface.events": store | trappable,
-        "wa:terminal/session.[method]surface.write": store | trappable,
-        "wa:terminal/session.[method]surface.resize": store | trappable,
-        "wa:terminal/session.[method]surface.close": store | trappable,
-    },
-    with: {
-        "wa:terminal/session.surface": SurfaceHandle,
-    },
 });
 
-use wa::terminal::types::{Error as Fault, Event, Size};
+use wa::terminal::types::Error as Fault;
 
-/// Where a surface's events come from: the node backs this with `wa-term`, a test with a script.
-pub trait Surface: Send {
-    fn next_event(&mut self) -> Option<Event>;
-    fn write(&mut self, data: &[u8]) -> Result<u64, Fault>;
-    fn resize(&mut self, size: Size) -> Result<Size, Fault>;
-    fn close(&mut self) -> Result<(), Fault>;
-}
-
-/// Creating a surface is not a property of an existing one, so the host carries a factory.
-pub type SurfaceFactory = Arc<dyn Fn(Size, String) -> Result<Box<dyn Surface>, Fault> + Send + Sync>;
-
-/// One surface, as the guest holds it. `backing` is taken when the guest asks for the event stream: a stream can be
-/// consumed once, and taking it makes that structural instead of a comment.
-pub struct SurfaceHandle {
-    backing: Option<Box<dyn Surface>>,
-}
-
-impl HasData for SurfaceHandle {
-    type Data<'a> = &'a mut SurfaceHandle;
+/// Where the document comes from: the node backs this with the terminal program, a test with a script.
+pub trait Document: Send {
+    fn write(&mut self, text: &str) -> Result<(), Fault>;
+    fn block(&mut self, open: bool) -> Result<(), Fault>;
+    fn code_block(&mut self) -> Result<(), Fault>;
+    fn head(&mut self, text: &str) -> Result<u32, Fault>;
+    fn rewrite(&mut self, line: u32, text: &str) -> Result<u32, Fault>;
+    fn pin_toggle(&mut self) -> Result<Option<bool>, Fault>;
+    fn dirty(&mut self) -> bool;
 }
 
 pub struct Host {
     pub table: ResourceTable,
-    pub factory: SurfaceFactory,
+    pub document: Box<dyn Document>,
 }
 
 impl Host {
-    pub fn new(factory: SurfaceFactory) -> Host {
-        Host { table: ResourceTable::new(), factory }
+    pub fn new(document: Box<dyn Document>) -> Host {
+        Host { table: ResourceTable::new(), document }
     }
 }
 
@@ -62,186 +41,122 @@ impl HasData for Host {
 }
 
 impl wa::terminal::types::Host for Host {}
-impl wa::terminal::session::Host for Host {}
 
-impl wa::terminal::session::HostSurface for Host {
-    fn drop(&mut self, _rep: Resource<SurfaceHandle>) -> wasmtime::Result<()> {
-        Ok(())
+/// The one sync verb: whether the document changed since the last frame.
+impl wa::terminal::document::Host for Host {
+    fn dirty(&mut self) -> bool {
+        self.document.dirty()
     }
 }
 
-impl wa::terminal::session::HostSurfaceWithStore<Host> for Host {
-    fn open(
-        access: &Accessor<Host, Host>,
-        size: Size,
-        title: String,
-    ) -> impl std::future::Future<Output = std::result::Result<Resource<SurfaceHandle>, Fault>> + Send + '_ {
-        async move {
-            let backing = access.with(|mut access| (access.data_mut().factory)(size, title));
-            match backing {
-                Ok(backing) => {
-                    let handle = access
-                        .with(|mut access| access.data_mut().table.push(SurfaceHandle { backing: Some(backing) }))
-                        .map_err(|error| Fault::Failed(error.to_string()))?;
-                    Ok(handle)
-                }
-                Err(fault) => Err(fault),
-            }
-        }
+/// The async verbs. They resolve FLAT to the WIT error - no `wasmtime::Result` layer, unlike the resource methods
+/// of the process world, which nest.
+impl wa::terminal::document::HostWithStore<Host> for Host {
+    fn write<'a>(
+        access: &'a Accessor<Host, Host>,
+        text: String,
+    ) -> impl future::Future<Output = Result<(), Fault>> + Send + 'a {
+        async move { access.with(|mut access| access.data_mut().document.write(&text)) }
     }
 
-    fn events(
-        mut access: Access<'_, Host, Host>,
-        self_: Resource<SurfaceHandle>,
-    ) -> wasmtime::Result<StreamReader<Event>> {
-        let backing = match access.data_mut().table.get_mut(&self_) {
-            Ok(handle) => handle.backing.take(),
-            Err(_) => None,
-        };
-        match backing {
-            Some(backing) => StreamReader::new(access.as_context_mut(), EventStream { backing }),
-            None => Err(wasmtime::Error::msg("surface handle gone or already streaming")),
-        }
+    fn block<'a>(
+        access: &'a Accessor<Host, Host>,
+        open: bool,
+    ) -> impl future::Future<Output = Result<(), Fault>> + Send + 'a {
+        async move { access.with(|mut access| access.data_mut().document.block(open)) }
     }
 
-    fn write(
-        access: &Accessor<Host, Host>,
-        self_: Resource<SurfaceHandle>,
-        data: Vec<u8>,
-    ) -> impl std::future::Future<Output = wasmtime::Result<std::result::Result<u64, Fault>>> + Send + '_ {
-        async move {
-            let answer = access.with(|mut access| match access.data_mut().table.get_mut(&self_) {
-                Ok(handle) => match handle.backing.as_mut() {
-                    Some(backing) => backing.write(&data),
-                    None => Err(Fault::Closed),
-                },
-                Err(_) => Err(Fault::Closed),
-            });
-            Ok(answer)
-        }
+    fn code_block<'a>(
+        access: &'a Accessor<Host, Host>,
+    ) -> impl future::Future<Output = Result<(), Fault>> + Send + 'a {
+        async move { access.with(|mut access| access.data_mut().document.code_block()) }
     }
 
-    fn resize(
-        access: &Accessor<Host, Host>,
-        self_: Resource<SurfaceHandle>,
-        size: Size,
-    ) -> impl std::future::Future<Output = wasmtime::Result<std::result::Result<Size, Fault>>> + Send + '_ {
-        async move {
-            let answer = access.with(|mut access| match access.data_mut().table.get_mut(&self_) {
-                Ok(handle) => match handle.backing.as_mut() {
-                    Some(backing) => backing.resize(size),
-                    None => Err(Fault::Closed),
-                },
-                Err(_) => Err(Fault::Closed),
-            });
-            Ok(answer)
-        }
+    fn head<'a>(
+        access: &'a Accessor<Host, Host>,
+        text: String,
+    ) -> impl future::Future<Output = Result<u32, Fault>> + Send + 'a {
+        async move { access.with(|mut access| access.data_mut().document.head(&text)) }
     }
 
-    fn close(
-        access: &Accessor<Host, Host>,
-        self_: Resource<SurfaceHandle>,
-    ) -> impl std::future::Future<Output = wasmtime::Result<std::result::Result<(), Fault>>> + Send + '_ {
-        async move {
-            let answer = access.with(|mut access| match access.data_mut().table.get_mut(&self_) {
-                Ok(handle) => match handle.backing.as_mut() {
-                    Some(backing) => backing.close(),
-                    None => Err(Fault::Closed),
-                },
-                Err(_) => Err(Fault::Closed),
-            });
-            Ok(answer)
-        }
+    fn rewrite<'a>(
+        access: &'a Accessor<Host, Host>,
+        line: u32,
+        text: String,
+    ) -> impl future::Future<Output = Result<u32, Fault>> + Send + 'a {
+        async move { access.with(|mut access| access.data_mut().document.rewrite(line, &text)) }
     }
-}
 
-/// The events, streamed into the guest until the session ends.
-pub struct EventStream {
-    backing: Box<dyn Surface>,
-}
-
-impl StreamProducer<Host> for EventStream {
-    type Item = Event;
-    type Buffer = Option<Event>;
-
-    fn poll_produce<'a>(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        _store: StoreContextMut<'a, Host>,
-        mut destination: Destination<'a, Self::Item, Self::Buffer>,
-        _finish: bool,
-    ) -> Poll<wasmtime::Result<StreamResult>> {
-        match self.backing.next_event() {
-            Some(event) => {
-                destination.set_buffer(Some(event));
-                Poll::Ready(Ok(StreamResult::Completed))
-            }
-            None => Poll::Ready(Ok(StreamResult::Dropped)),
-        }
+    fn pin_toggle<'a>(
+        access: &'a Accessor<Host, Host>,
+    ) -> impl future::Future<Output = Result<Option<bool>, Fault>> + Send + 'a {
+        async move { access.with(|mut access| access.data_mut().document.pin_toggle()) }
     }
-}
-
-/// Every event this surface yields, in order - assertable without a store.
-fn collect(mut backing: Box<dyn Surface>) -> Vec<Event> {
-    let mut all = Vec::new();
-    while let Some(event) = backing.next_event() {
-        all.push(event);
-    }
-    all
 }
 
 #[cfg(test)]
 mod rows {
     use super::*;
 
+    #[derive(Default)]
     struct Script {
-        events: Vec<Event>,
+        lines: Vec<String>,
+        pinned: Option<bool>,
+        dirty: bool,
     }
 
-    impl Surface for Script {
-        fn next_event(&mut self) -> Option<Event> {
-            if self.events.is_empty() {
-                None
-            } else {
-                Some(self.events.remove(0))
-            }
-        }
-
-        fn write(&mut self, data: &[u8]) -> Result<u64, Fault> {
-            Ok(data.len() as u64)
-        }
-
-        fn resize(&mut self, size: Size) -> Result<Size, Fault> {
-            Ok(size)
-        }
-
-        fn close(&mut self) -> Result<(), Fault> {
+    impl Document for Script {
+        fn write(&mut self, text: &str) -> Result<(), Fault> {
+            self.lines.push(text.to_string());
+            self.dirty = true;
             Ok(())
         }
+
+        fn block(&mut self, _open: bool) -> Result<(), Fault> {
+            Ok(())
+        }
+
+        fn code_block(&mut self) -> Result<(), Fault> {
+            Ok(())
+        }
+
+        fn head(&mut self, text: &str) -> Result<u32, Fault> {
+            self.lines.push(text.to_string());
+            Ok(self.lines.len() as u32)
+        }
+
+        fn rewrite(&mut self, line: u32, text: &str) -> Result<u32, Fault> {
+            if line == 0 || line as usize > self.lines.len() {
+                return Err(Fault::Refused("no such line".to_string()));
+            }
+            self.lines[line as usize - 1] = text.to_string();
+            Ok(line)
+        }
+
+        fn pin_toggle(&mut self) -> Result<Option<bool>, Fault> {
+            Ok(self.pinned)
+        }
+
+        fn dirty(&mut self) -> bool {
+            self.dirty
+        }
     }
 
-    /// ROW: a surface's events reach the guest in order and the stream ends when the session does - the same seam
-    /// shape the process host uses, so a tty can be a script in a test and `wa-term` in the node.
+    /// ROW: the document seam answers in the program's own terms - a heading lands where the program says it did,
+    /// a rewrite of a line that does not exist is a refusal rather than a silent nothing, and `dirty` follows the
+    /// writes. This is the shape `wa-term-proto` carries, tested without the program.
     #[test]
-    fn surface_events_stream_in_order() {
-        let script = Script {
-            events: vec![
-                Event::Data(b"hel".to_vec()),
-                Event::Data(b"lo".to_vec()),
-                Event::Resized(Size { columns: 120, rows: 40 }),
-                Event::Closed(Some(0)),
-            ],
-        };
-        let events = collect(Box::new(script));
-        assert_eq!(events.len(), 4);
-        match &events[0] {
-            Event::Data(bytes) => assert_eq!(bytes, b"hel"),
-            other => panic!("the first event must be data, got {other:?}"),
+    fn document_verbs_answer_in_the_programs_terms() {
+        let mut document = Script::default();
+        assert_eq!(document.head("one").unwrap(), 1);
+        assert_eq!(document.head("two").unwrap(), 2);
+        document.write("three").unwrap();
+        assert!(document.dirty());
+        assert_eq!(document.rewrite(2, "second").unwrap(), 2);
+        match document.rewrite(9, "nowhere") {
+            Err(Fault::Refused(_)) => {}
+            other => panic!("rewriting a missing line must be refused, got {other:?}"),
         }
-        match &events[2] {
-            Event::Resized(size) => assert_eq!((size.columns, size.rows), (120, 40)),
-            other => panic!("the third event must be a resize, got {other:?}"),
-        }
-        assert!(matches!(events[3], Event::Closed(Some(0))));
+        assert_eq!(document.pin_toggle().unwrap(), None);
     }
 }
