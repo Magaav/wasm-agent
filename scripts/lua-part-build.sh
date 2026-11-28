@@ -54,7 +54,13 @@ MANIFEST="$TREE/manifest.txt"
 
 mkdir -p "$OUT" || die "lua_part_out_unwritable: $OUT"
 RAW="$OUT/.lua-core-part.tar.gz"
-( cd "$TREE" && tar czf "$RAW" manifest.txt lua ) || die "lua_part_tar_failed: $RAW"
+# REPRODUCIBLE BYTES, and this line is why: a plain `tar czf` embeds every file's mtime and gzip embeds its own
+# timestamp, so two builds of the SAME tree produced three different parts in a row (1746153, 1746155, 1746157
+# bytes, three digests, measured 28/11 while pinning the part). A part whose bytes move cannot be pinned at all:
+# the lock would name a file nobody can rebuild. So the archive is sorted, stamped at the epoch, owned by 0 and
+# gzipped with -n (no name, no time).
+( cd "$TREE" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --format=gnu -cf - manifest.txt lua \
+    | gzip -n -9 > "$RAW" ) || die "lua_part_tar_failed: $RAW"
 SHA="$(sha256sum < "$RAW" | awk '{print $1}')"
 BYTES="$(wc -c < "$RAW" | tr -d '[:space:]')"
 FINAL="$OUT/lua-core-${SHA:0:12}.tar.gz"

@@ -1,0 +1,22 @@
+# THE PARTS OF A RELEASE, pinned by digest (Fable 25/11, _queue/lua-core-is-a-signed-part).
+#
+# WHY a file of its own, and not components.lock: components.lock is the WEBASSEMBLY bundle's lock, and
+# scripts/publish-components.sh reads it by looking for <name>.wasm and <name>.json for every pinned name. A
+# `lua-core` line there would make the publish build fail `component_missing` - the same failure that turned
+# publishing red on 27/11 (q#119) when a pin had no artifact behind it. The Lua tree is a PART of the program,
+# not a component, so it is pinned here and read by scripts/lib/lua-part.sh (verify) and nothing else yet.
+#
+# THE SHAPE is components.lock's own, with one field this part needs:
+#
+#   <part> <sha256 of the part file> <bytes> interface=<the host's declared interface digest>
+#
+# `interface=` is the VERSION the part requires (`wa --interface` states the one the host offers); a part whose
+# interface is not the host's is refused BY NAME before it is installed, in both directions.
+#
+# DARK: nothing in the release, publish or start path reads this file yet. The part is built and pinned, not
+# used - which is the precondition: the signature check and its rows come first (scripts/lib/lua-part.sh,
+# scripts/test-lua-part.sh 21 checks, scripts/test-lua-part-signature.sh 17 checks), and only then a switch.
+#
+# Built by: bash scripts/lua-part-build.sh --tree <checkout> --commit <sha> --interface "$(wa --interface)" --out <dir>
+# Judged by: bash scripts/test-release-lock-pin.sh
+lua-core 8c3690e4f505ffe178589ba2564c23ddafe6404ec7b7e386995a66888eff0f1a 1738769 interface=8a0b442ebe3d62a3653dbc5354599b3435e57f49fe4611137f913b59001694e6
