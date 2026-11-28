@@ -29,7 +29,16 @@ wa_factory_refresh_self() {
   local before after
   before="$(sha256sum "$self" 2>/dev/null | cut -d' ' -f1)"
   # The clone is the script's own repository directory: <clone>/factory/<script>.sh
-  bash "$here/clone.sh" --refresh --quiet 2>/dev/null || return 1
+  # A REFRESH THAT FAILS MUST BE VISIBLE (28/11). It used to be `--quiet 2>/dev/null || return 1`: a clone that could not
+  # fast-forward - local changes in it, an unreachable origin - left the loop running yesterday's code FOR HOURS with not one
+  # line in the journal, which is exactly how "the refresh never took effect" was reported. The loop still is not stopped by
+  # it (the next iteration retries), but the reason is now in the log with the iteration's own timestamp.
+  local problem
+  if ! problem="$(bash "$here/clone.sh" --refresh --quiet 2>&1)"; then
+    printf '%s factory: refresh failed, still running %s: %s\n' "$(date -u +%FT%TZ)" "$self" \
+      "$(printf '%s' "$problem" | tail -1)" >&2
+    return 1
+  fi
   after="$(sha256sum "$self" 2>/dev/null | cut -d' ' -f1)"
   if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
     echo "$(date -u +%FT%TZ) factory: $self changed (${before:0:8} -> ${after:0:8}); re-executing between iterations" >&2
