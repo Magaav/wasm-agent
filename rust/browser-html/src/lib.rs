@@ -13,6 +13,8 @@
 //! justify. A construct it does not implement is refused BY NAME ([`Refusal`]), never rendered as if it worked - the
 //! rule this factory keeps paying for.
 
+pub mod net;
+
 use std::fmt;
 
 /// What a reader refuses, by name.
