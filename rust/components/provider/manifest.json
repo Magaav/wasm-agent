@@ -1,0 +1,8 @@
+{
+  "name": "provider",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "The provider module (/login and /model behind wa:provider): lists the accounts this node is signed in to, walks a login flow, lists a model list, and streams a model call. Providers themselves are other components behind the same interface",
+  "capabilities": {"net": ["api.anthropic.com:443", "api.opencode.ai:443"], "storage": true},
+  "limits": {"memory_mb": 64}
+}

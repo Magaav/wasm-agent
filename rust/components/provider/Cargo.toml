@@ -1,0 +1,25 @@
+[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# THE PROVIDER COMPONENT (claude-inside-wa, split A slice 2): /login and /model behind the contract in
+# wit/provider/provider.wit. Accounts and models belong together - a model id means nothing without the
+# account that reaches it, and a login is finished by choosing a model - so one component serves both verbs.
+#
+# This crate is deliberately EMPTY OF PROVIDERS: it owns the contract's shape and the two verbs, and each
+# provider is its own component behind the same interface. Nothing here names an endpoint, a header or a
+# model id.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true
