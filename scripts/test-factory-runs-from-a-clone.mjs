@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const factoryDir = 'factory';
 const scripts = new Set(fs.readdirSync(factoryDir).filter((f) => f.endsWith('.sh')));
@@ -92,6 +93,27 @@ for (const script of loopScripts) {
   const body = fs.readFileSync(path.join(factoryDir, script), 'utf8');
   if (!body.includes('wa_factory_refresh_self')) {
     fail.push(`factory/${script} is a loop-shaped service with no wa_factory_refresh_self: with only ExecStartPre it runs the code it started with (factory/lib/refresh-self.sh)`);
+  }
+}
+
+// A LOOP THAT CANNOT REFRESH MUST SAY SO (28/11): the helper used to swallow the refresh's stderr, so a clone that could
+// not fast-forward left the loop running old code with not one journal line - reported as "the refresh never takes effect".
+// This drives the real helper with a stub clone that fails and requires the named line.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-refresh-row-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'factory', 'lib'), { recursive: true });
+    fs.copyFileSync(path.join(factoryDir, 'lib', 'refresh-self.sh'), path.join(dir, 'factory', 'lib', 'refresh-self.sh'));
+    fs.writeFileSync(path.join(dir, 'factory', 'clone.sh'), ['#!/bin/bash',
+      'echo "factory clone: cannot fast-forward: local changes present" >&2', 'exit 1', ''].join('\n'));
+    fs.writeFileSync(path.join(dir, 'factory', 'loop.sh'), ['#!/bin/bash', 'echo body', ''].join('\n'));
+    const out = spawnSync('bash', ['-c', `. "${dir}/factory/lib/refresh-self.sh"; wa_factory_refresh_self "${dir}/factory/loop.sh"`], { encoding: 'utf8' });
+    const said = `${out.stdout || ''}${out.stderr || ''}`;
+    if (!/refresh failed/.test(said) || !/local changes present/.test(said)) {
+      fail.push(`factory/lib/refresh-self.sh does not name a failed refresh (a long-running loop has that line instead of a journal of silence): got ${JSON.stringify(said.slice(0, 160))}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
