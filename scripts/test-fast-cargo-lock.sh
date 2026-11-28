@@ -15,7 +15,7 @@
 # memberless workspace with an untouched lock answered 0 until it was dropped).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-WORK=$(mktemp -d /tmp/wa-lockcheck.XXXXXX)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/wa-lockcheck.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 checks=0; failed=0
 fail() { echo "FAIL test-fast-cargo-lock: $*" >&2; failed=$((failed + 1)); }
