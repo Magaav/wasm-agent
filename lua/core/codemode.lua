@@ -945,9 +945,6 @@ end
 -- dispatch is `dispatch`, and the arguments are validated against the schema the node holds now.
 local function component_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts)
  local session=host.uuid()
- -- WHO DRIVES THIS LOOP, behind an env var: one `run` call was measured opening TWO component sessions, and the
- -- loop has a single call site, so the second is a caller. The traceback names it in one run.
- if host.getenv('WA_CODEMODE_TRACE_OPENS') then print('[codemode-run] session='..session..' caller='..(debug and debug.traceback('who', 1) or 'no-debug')) end
  -- The lookup the globals this loop owns are answered through, exactly as the native loop builds it:
  -- `capabilities()`, a `searchTools` call the seam hands back, and `describeTool` all dispatch through
  -- here, so the two paths answer one implementation.
@@ -1491,7 +1488,6 @@ end
 -- into a dead script, the one outcome worse than `pending`. Restored afterwards, so a ctx shared by
 -- later calls carries no stale deadline.
 function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
-  if host.getenv('WA_CODEMODE_TRACE_OPENS') then print('[codemode-run-tool] caller='..(debug and debug.traceback('who', 1) or 'no-debug')) end
   local budget_ms=tonumber(args and args.timeout_ms)
   if budget_ms then budget_ms=math.max(1,math.min(300000,budget_ms)) end
   local previous=type(ctx)=='table' and ctx.codemode_deadline or nil
