@@ -1147,6 +1147,15 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # Same shape as the fence card above it: the REAL binary in a private tmux pty against a local
   # SSE fixture that plays the model, and a failure (never a pass) when the fixture served nothing.
   WA_BIN="$bin" check diff-card-pty node scripts/test-diff-card-pty.mjs
+  # A CHANGED LINE IS READABLE ON ITS BAND (item 3 of the same brief): reads the escape sequences a real
+  # terminal received and measures every glyph of a changed row against the band under it - 4.5:1 for
+  # text, 3:1 for the frame glyph - including a comment, the darkest colour a body row can carry, and it
+  # re-measures once the card is no longer the newest block.
+  WA_BIN="$bin" check diff-card-contrast-pty node scripts/test-diff-card-contrast-pty.mjs
+  # THE COPY NOTICE IS A BALLOON (q99, Victor 23/11): the notice reserves rows at the top, pushes the
+  # chat down and gives the space back. A mouse press on a fence icon opens it, which only a real pty
+  # with SGR 1006 can exercise - wired here 27/11, it landed declared nowhere.
+  WA_BIN="$bin" check copied-notice-pty node scripts/test-copied-notice-pty.mjs
   # The TWO BLOCKS OF change/tui-reflow-blocks FOLLOW THE WINDOW (Victor 22/11): a ```bash card and a
   # ```js run block, drawn at 120, 60, 120 and 60 columns in a real pty. Each is whole and unmarked where
   # it fits, cut with ONE mark in the left gutter of the row the line goes on where it does not (the run
