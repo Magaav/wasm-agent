@@ -1,0 +1,73 @@
+-- A FEATURE THAT CANNOT WORK SAYS SO, IN WORDS (features-never-break-silently, item 5: "a test per
+-- feature that removes its dependency and asserts a visible message").
+--
+-- The mission's promise is that no feature goes quiet. This row takes the classes whose dependency can be
+-- removed in a scratch home - no peer, no component, no credential - removes it, and holds the ANSWER: not
+-- the bare code, a sentence naming the cause and what to do about it.
+--
+-- WHY IT IS NEEDED. The mission report (docs/missions/reports/features-never-break-silently.md, section 8)
+-- names this as NOT DONE: the canaries answer in named stages, but nothing asserted that the CALL a user makes
+-- answers a message. A feature that was switched off, or whose component is missing, could answer "{}" and
+-- every test would still pass.
+--
+--   WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=<scratch> WA_SCRIPT=scripts/test-features-never-silent.lua wa
+--   -> prints "features-never-silent ok (N checks)"
+--
+-- Costs about 1 s: no child process, no network, no peer (a peer call here would be an external effect).
+if not host then error("this test runs under the node (WA_SCRIPT), not plain Lua") end
+local refusal = dofile("lua/core/refusal.lua")
+local feature_health = dofile("lua/core/feature_health.lua")
+
+local checks = 0
+local function check(value, what)
+  checks = checks + 1
+  if not value then error(what, 2) end
+end
+local function contains(text, needle, what)
+  checks = checks + 1
+  if not tostring(text or ""):find(needle, 1, true) then
+    error(what .. ": expected to find '" .. tostring(needle) .. "' in: " .. tostring(text), 2)
+  end
+end
+
+-- 1. THE GRAPH, SWITCHED OFF (its default on a fresh node): a call answers a named refusal WITH a next step.
+--    This is the real capability, not a stub: what a user's graph_query gets when nobody switched graph on.
+local ok, answer = pcall(host.graph_query, 'MATCH (n) RETURN n LIMIT 1')
+check(ok, "graph_query answers instead of raising: " .. tostring(answer))
+-- The capability answers a JSON STRING (measured on this node), so decode before reading the fields: a
+-- reader that assumed a table would find no 'next' and conclude the message was silent.
+local decoded = answer
+if type(decoded) == 'string' then
+  local ok_json, parsed = pcall(dofile('lua/vendor/json.lua').decode, decoded)
+  if ok_json and type(parsed) == 'table' then decoded = parsed end
+end
+local text = type(decoded) == 'table' and tostring(decoded.error or decoded.message or '') or tostring(decoded)
+local next_step = type(decoded) == 'table' and tostring(decoded.next or '') or ''
+check(text:find('graph_dormant', 1, true) ~= nil,
+  "a graph call on a node with graph off names graph_dormant, got: " .. text)
+check(#next_step > 20, "it carries a sentence to act on, got: " .. next_step)
+contains(next_step, 'OFF by default', "the sentence says the feature is off, not broken")
+contains(next_step, 'policy.json', "and names where to switch it on")
+
+-- 2. EVERY FEATURE'S REFUSAL HAS WORDS. The vocabulary every tool refusal crosses (lua/core/refusal.lua) must
+--    render a sentence and a fix for the codes a feature emits - the shape fallback covers a code nobody has
+--    taught it, so a code from tomorrow is still not silence.
+local registry, why = feature_health.load()
+check(type(registry) == 'table', "the registry is readable: " .. tostring(why))
+check(#registry.features > 0, "the registry lists features")
+local empty_placeholder = string.rep('`', 2)
+for _, row in ipairs(registry.features) do
+  local code = tostring(row.name):gsub('%-', '_') .. '_unavailable'
+  local built = refusal.build(code, {}, { origin = 'scripts/test-features-never-silent.lua', tool = row.name })
+  check(type(built) == 'table', row.name .. ": a refusal is built for " .. code)
+  check(type(built.message) == 'string' and #built.message > 20,
+    row.name .. ": the message is a sentence, not the code (" .. tostring(built.message) .. ")")
+  check(type(built.fix) == 'string' and #built.fix > 10,
+    row.name .. ": the fix says what to do (" .. tostring(built.fix) .. ")")
+  check(built.message ~= code, row.name .. ": the message is not the bare code")
+  -- A template that lost a value reads as the placeholder twice - the exact silence this row is against.
+  check(not built.message:find(empty_placeholder, 1, true), row.name .. ": no empty placeholder in the message")
+  check(not built.fix:find(empty_placeholder, 1, true), row.name .. ": no empty placeholder in the fix")
+end
+
+print('features-never-silent ok (' .. checks .. ' checks)')
