@@ -1209,6 +1209,10 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # text, 3:1 for the frame glyph - including a comment, the darkest colour a body row can carry, and it
   # re-measures once the card is no longer the newest block.
   WA_BIN="$bin" check diff-card-contrast-pty node scripts/test-diff-card-contrast-pty.mjs
+  # `/sessions` OPENS WHILE A TURN RUNS (Victor, 28/11): the list is published through host.local_view, so the
+  # reader thread draws it mid-run; this row measures the open, the close, the reopen and that the held turn
+  # keeps running across all of it.
+  WA_BIN="$bin" check sessions-midrun-pty node scripts/test-sessions-midrun-pty.mjs
   # THE COPY NOTICE IS A BALLOON (q99, Victor 23/11): the notice reserves rows at the top, pushes the
   # chat down and gives the space back. A mouse press on a fence icon opens it, which only a real pty
   # with SGR 1006 can exercise - wired here 27/11, it landed declared nowhere.

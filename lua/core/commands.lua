@@ -45,7 +45,8 @@ M.modes = {
 -- accepts and the parity check therefore also requires an arm for.
 M.commands = {
   { name = "/session", usage = "/session", hint = "print the session id (resume with wa --resume <id>)" },
-  { name = "/sessions", usage = "/sessions", hint = "the sessions on this node: pick one, c copies its id, r renames it" },
+  { name = "/sessions", usage = "/sessions", local_view = true, -- drawn by the client mid-run (28/11)
+    hint = "the sessions on this node: pick one, c copies its id, r renames it" },
   { name = "/status", usage = "/status", hint = "this session's id, the model, and each provider's usage and limits" },
   { name = "/turns", usage = "/turns [N]", hint = "the last N <turn> notes of this session (#33): what hurt, what it buys, what to focus on" },
   { name = "/wakes", usage = "/wakes", hint = "list this session's pending self-wakes (next due, cadence, last error)" },

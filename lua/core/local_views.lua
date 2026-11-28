@@ -47,6 +47,22 @@ local builders = {
     if type(view) ~= "table" or view.ok == false then return nil end
     return command.views(view, { max_pages = M.MAX_PANELS })
   end,
+  -- `/sessions` (Victor, 28/11): "open the session list while a turn is running ... and come back". It was
+  -- the one read-only day-to-day panel still QUEUED behind the turn: the reader typed it, the host read
+  -- the line, and nothing appeared until the last token. The page is the SAME `sessions_view.page` the
+  -- blocking walk draws, so the mid-run list and the between-runs list cannot disagree.
+  --
+  -- WHAT THE CLIENT CANNOT DO, said here because the panel is where a reader would look for it: choosing a
+  -- session SWITCHES this process's REPL, and that is an operation (it moves the agent, the ledger cursor
+  -- and the transcript) - so mid-run a row does not carry `run`, and the list is a read: it shows every
+  -- session's state and age while the turn keeps running, and the switch is made when the turn ends.
+  ["/sessions"] = function(opts)
+    local view = dofile("lua/core/sessions_view.lua")
+    local built, page = pcall(view.page, { session_id = opts.session_id, user_id = opts.user_id or "master",
+      limit = 200, back = opts.back })
+    if not built or type(page) ~= "table" then return nil end
+    return { command = "/sessions", captured_at = host.now(), views = { page } }
+  end,
   ["/login"] = function(opts)
     local manager = dofile("lua/core/provider_management.lua")
     local pages = manager.login_views(manager.state("local-operator"), {})
