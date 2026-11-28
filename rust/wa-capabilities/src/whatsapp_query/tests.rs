@@ -353,6 +353,59 @@ fn every_op_the_seam_defines_is_a_host_capability() {
     }
 }
 
+/// The capabilities of this world that are answered by the NODE, not by a question to the component.
+///
+/// `whatsapp_approve` reads and decides the drafts waiting for an operator: it enqueues a send when a
+/// draft is approved and queues nothing when it is rejected. It is a policy capability over the world's
+/// own traffic, so there is no op for it in the seam and there should not be one.
+const NODE_SIDE_CAPABILITIES: &[&str] = &[
+    // The three generic doors: each forwards its argument document to whichever op it names, so the
+    // world is reachable through one capability per effect class rather than one per op.
+    "whatsapp_index",
+    "whatsapp_file",
+    "whatsapp_request",
+    // The send and its state travel the outbox queue (`whatsapp.outbox`), not an op on the query queue:
+    // the component consumes that queue on a tick of its own.
+    "whatsapp_send",
+    "whatsapp_send_status",
+    // A policy capability over the world's own traffic: it decides the drafts waiting for an operator and
+    // enqueues the send when one is approved, so there is nothing for the component to answer.
+    "whatsapp_approve",
+    // Index archives are this node's files (cut a month into a sealed file, list, push with its sha256),
+    // handled by the node because the component never sees a sealed archive.
+    "whatsapp_archive",
+];
+
+#[test]
+fn every_host_capability_of_the_world_is_a_seam_op_or_a_named_node_side_capability() {
+    // The other direction of `every_op_the_seam_defines_is_a_host_capability`, which the tree did not
+    // have: that row proves every seam op has a host capability, and this one proves the converse for
+    // the world's own surface - so neither side can grow a name the other never hears about.
+    //
+    // It is NOT set equality, and the first version of this test found out why: `whatsapp_approve` is
+    // a capability of the world with no op behind it, because the node answers it itself. The
+    // exception is written down instead of being assumed, so a capability added here with no op and no
+    // entry in the list above fails this row - which is the decision its author has to make.
+    let declared: Vec<&str> = crate::capabilities::inventory()
+        .iter()
+        .map(|capability| capability.name)
+        .filter(|name| name.starts_with("whatsapp_"))
+        .collect();
+    for name in &declared {
+        if seam::Op::parse_tool(name).is_some() {
+            continue;
+        }
+        assert!(
+            NODE_SIDE_CAPABILITIES.contains(name),
+            "{name} is a capability of this world with no op in the seam: either it is a question to the              component that the seam is missing, or it is answered by the node and belongs in              NODE_SIDE_CAPABILITIES with the reason"
+        );
+    }
+    // And the list cannot rot: a name in it that is no longer a capability is a stale justification.
+    for name in NODE_SIDE_CAPABILITIES {
+        assert!(declared.contains(name), "{name} is listed as node-side but is no longer a capability");
+    }
+}
+
 #[test]
 fn a_settled_refusal_is_the_tools_own_error_and_not_a_dead_letter() {
     // The component answers a payload it can never read (`seam::terminal_refusal`): the job settles
