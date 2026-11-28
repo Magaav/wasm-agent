@@ -44,6 +44,11 @@ fi
 
 # The tree manifest, written here so the part is self-describing: what it needs, which commit, and every file.
 MANIFEST="$TREE/manifest.txt"
+# The manifest is an ARTIFACT of this build, so a tree that does not carry one must not keep one: written into the
+# tree it describes, left behind, it silently changes the next build (measured: a stray manifest.txt at the root
+# made two builds of the same commit differ by 2 bytes, which is exactly how a pin stops matching its own tree).
+MADE_MANIFEST=0
+[ -f "$MANIFEST" ] || MADE_MANIFEST=1
 {
   printf 'capabilities %s\n' "$INTERFACE"
   printf 'commit %s\n' "${COMMIT:-unknown}"
@@ -63,6 +68,7 @@ RAW="$OUT/.lua-core-part.tar.gz"
     | gzip -n -9 > "$RAW" ) || die "lua_part_tar_failed: $RAW"
 SHA="$(sha256sum < "$RAW" | awk '{print $1}')"
 BYTES="$(wc -c < "$RAW" | tr -d '[:space:]')"
+[ "$MADE_MANIFEST" = 1 ] && rm -f "$MANIFEST"
 FINAL="$OUT/lua-core-${SHA:0:12}.tar.gz"
 mv -f "$RAW" "$FINAL" || die "lua_part_out_unwritable: $FINAL"
 
