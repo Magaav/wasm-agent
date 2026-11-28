@@ -56,21 +56,6 @@ end
 function M.providers()
   local vaulted_go = vault.base("opencode-go")
   return {
-    -- THE OFFICIAL CLAUDE CLI AS A ROUTE (mission claude-inside-wa, part B, route 1). It speaks no HTTP: wa spawns
-    -- `claude -p --output-format stream-json --verbose` and maps its stream (lua/core/claude_cli.lua). The
-    -- credential is the CLI's own, in the operator's home - this route never sees a token, holds none, and has
-    -- nothing to print. `base_url` and `api_key` are deliberately absent: there is no endpoint to call and no key
-    -- to send.
-    {
-      id = "claude-cli",
-      label = "Anthropic (Claude subscription, via the official CLI)",
-      transport = "claude-cli",
-      models = { "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" },
-      key_less = true,
-      base_url = "claude-cli:",
-      default_model = "claude-sonnet-4-5",
-      api_key = "cli-owned",
-    },
     {
       id = "opencode-go",
       label = "OpenCode Go",
@@ -87,6 +72,42 @@ function M.providers()
       transport = "openai-completions",
       -- The key pi's store publishes this route's ids under.
       pi_provider = "opencode-go",
+    },
+    -- A CLAUDE SUBSCRIPTION (Pro/Max), signed in with `/login` (OAuth, the flow pi uses) and reached
+    -- ONLY through wa-vault: the vault holds the account tokens, renews them and sets the Bearer header,
+    -- so this route carries the placeholder like opencode-go does. With no vault there is nowhere to keep
+    -- the tokens, so the route is unconfigured (empty base URL) and `/login` says why.
+    -- The request is wa's own - its system prompt and the one `run` tool - folded onto POST /v1/messages
+    -- by lua/core/adapters/anthropic_messages.lua, which also owns everything a subscription request
+    -- must carry.
+    {
+      id = "anthropic",
+      label = "Anthropic (Claude subscription)",
+      base_url = vault.base("anthropic") or "",
+      api_key = vault.base("anthropic") and vault.PLACEHOLDER or "",
+      upstream_host = vault.ROUTES["anthropic"].upstream_host,
+      transport = "anthropic-messages",
+      subscription = true,
+      pi_provider = "anthropic",
+      -- pi's current ids (github.com/earendil-works/pi @356d346e48a8,
+      -- packages/ai/catalog/providers/anthropic.ts:18 MODELS_55, and :23 claude-fable-5-2).
+      models = { "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2" },
+      default_model = "claude-sonnet-5-5",
+    },
+    -- THE OFFICIAL CLAUDE CLI AS A ROUTE (mission claude-inside-wa, part B, route 1). It speaks no HTTP: wa spawns
+    -- `claude -p --output-format stream-json --verbose` and maps its stream (lua/core/claude_cli.lua). The
+    -- credential is the CLI's own, in the operator's home - this route never sees a token, holds none, and has
+    -- nothing to print. `base_url` and `api_key` are deliberately absent: there is no endpoint to call and no key
+    -- to send.
+    {
+      id = "claude-cli",
+      label = "Anthropic (Claude subscription, via the official CLI)",
+      transport = "claude-cli",
+      models = { "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" },
+      key_less = true,
+      base_url = "claude-cli:",
+      default_model = "claude-sonnet-4-5",
+      api_key = "cli-owned",
     },
   }
 end
@@ -607,6 +628,11 @@ local ATTRIBUTION = {
     -- (an operator can still point WASM_AGENT_LLM_BASE_URL at it).
     host = "api.openai.com",
   },
+  {
+    -- Anthropic routes nothing by a session header; a conversation stays warm through the
+    -- `cache_control` breakpoints the adapter places (lua/core/adapters/anthropic_messages.lua).
+    host = "api.anthropic.com",
+  },
 }
 
 -- The authority of a base URL, lowercased: "https://opencode.ai/zen/go/v1" gives
@@ -639,7 +665,8 @@ end
 function M.attribution_gaps()
   local gaps = {}
   for _, provider in ipairs(M.providers()) do
-    if not M.attribution_rule(provider) then
+    -- The claude-cli route spawns the official CLI and sends no HTTP request, so it has no headers to decide.
+    if provider.transport ~= "claude-cli" and not M.attribution_rule(provider) then
       gaps[#gaps + 1] = tostring(provider.id) .. " -> " ..
         tostring(base_host(provider.base_url) or provider.base_url)
     end
@@ -683,6 +710,14 @@ function M.list_models(id)
   local now = (host and host.now and host.now()) or 0
   local entry = M._cache[provider.id]
   if entry and (now - entry.at) < 300 then return entry.models end
+  -- A route that declares its ids lists them: the subscription has no catalogue door to ask.
+  if provider.transport == "anthropic-messages" and type(provider.models) == "table" then
+    local models = {}
+    for _, id in ipairs(provider.models) do
+      if M.serves(id, provider) ~= false then models[#models + 1] = id end
+    end
+    return models
+  end
 
   local models = {}
   if provider.api_key ~= "" then
@@ -1600,6 +1635,72 @@ local function http_problem(status, body, retry_after_ms)
   return redact.text(message)
 end
 
+-- A streamed POST /v1/messages (the Claude subscription). `host.http_stream` reads one dialect, the
+-- OpenAI chunk; this protocol's events are read here, a line at a time over `host.http_sse`, and
+-- folded by the adapter's own `from_stream`. While it streams, each text, thinking and tool-argument
+-- fragment goes to the window through the same `wa_stream_event` door the OpenAI stream feeds.
+function M.messages_stream(adapter, provider, model, url, headers, serialized, opts, binding)
+  local payloads, blocks, first_at = {}, {}, nil
+  local started = host.monotonic_ms and host.monotonic_ms() or nil
+  local forward = rawget(_G, "wa_stream_event")
+  local function emit(event)
+    if type(forward) == "function" then pcall(forward, json.encode(event)) end
+  end
+  local function on_line(line)
+    line = tostring(line or "")
+    if line:sub(1, 5) ~= "data:" then return true end
+    local data = line:sub(6):gsub("^ ", "")
+    payloads[#payloads + 1] = data
+    if not first_at and started then first_at = host.monotonic_ms() end
+    local decoded, event = pcall(json.decode, data)
+    if not decoded or type(event) ~= "table" then return true end
+    local index = tonumber(event.index) or 0
+    if event.type == "content_block_start" then
+      local block = type(event.content_block) == "table" and event.content_block or {}
+      blocks[index] = { id = tostring(block.id or ""), name = tostring(block.name or "") }
+    elseif event.type == "content_block_delta" then
+      local delta = type(event.delta) == "table" and event.delta or {}
+      if delta.type == "text_delta" then emit({ type = "delta", text = delta.text })
+      elseif delta.type == "thinking_delta" then emit({ type = "reasoning", text = delta.thinking })
+      elseif delta.type == "input_json_delta" then
+        local block = blocks[index] or {}
+        emit({ type = "tool_call_delta", index = index, call_id = block.id, name = block.name, arguments = delta.partial_json })
+      end
+    elseif event.type == "message_stop" then
+      return false
+    end
+    return true
+  end
+  local result = json.decode(host.http_sse("POST", url, json.encode(headers), serialized, on_line))
+  if result.error then
+    local problem = redact.text("provider_error: " .. tostring(result.error))
+    if M.is_stalled(problem) then pcall(M.announce_stalled, problem, opts) end
+    error(problem)
+  end
+  if tonumber(result.status) ~= 200 then
+    error(http_problem(result.status, result.body, result.retry_after_ms))
+  end
+  local record, problem = adapter.from_stream(payloads)
+  if not record then error(redact.text(tostring(problem))) end
+  return {
+    content = record.answer_text or "",
+    commentary = record.commentary or "",
+    final_phase = "",
+    reasoning = record.reasoning or "",
+    finish_reason = record.finish_reason,
+    tool_calls = record.tool_calls or {},
+    usage = record.usage,
+    normalized = record,
+    model = model,
+    serving_response_model = model,
+    request_id = record.request_id,
+    ttft_ms = first_at and started and (first_at - started) or nil,
+    stream_complete = not record.cut,
+    termination = result.termination,
+    chunks = #payloads,
+  }
+end
+
 -- `stream` forwards content deltas to the UI and still returns the whole
 -- message (content + tool_calls + usage) so the tool loop can continue.
 function M.complete(messages, tools, stream, opts)
@@ -1632,6 +1733,12 @@ function M.complete_with(model, messages, tools, stream, opts)
   local serving_request_binding=serving_request(provider,body.model)
   -- Pi's output cap and reasoning fields follow the model compatibility contract.
   local fields, effective = M.request_options(body.model,messages,opts)
+  -- The Messages protocol (the Claude subscription): the same messages and tools, folded by the adapter.
+  local messages_api = provider.transport == "anthropic-messages" and adapters.for_transport(provider.transport) or nil
+  if messages_api then
+    body = messages_api.request(messages, tools, { model = body.model, stream = stream,
+      max_tokens = fields.max_tokens or fields.max_completion_tokens, subscription = provider.subscription })
+  else
   for key,value in pairs(fields) do body[key]=value end
   if tools and #tools > 0 then
     body.tools = tools
@@ -1639,8 +1746,10 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
   for key, value in pairs(M.cache_params(opts)) do body[key] = value end
   if stream then body.stream=true; body.stream_options={include_usage=true} end
-  local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
+  end
+  local url = provider.base_url:gsub("/+$", "") .. (messages_api and "/v1/messages" or "/chat/completions")
   local headers, attribution = headers_for(provider, opts.session_id)
+  if messages_api and provider.subscription then messages_api.subscription_headers(headers) end
   local serialized=json.encode(body)
   local audit_started=telemetry.clock()
   local prefix_comparison=prefix_audit.observe(opts.session_id,opts.kind,body,{
@@ -1670,6 +1779,9 @@ function M.complete_with(model, messages, tools, stream, opts)
   -- Count the provider boundary, not a decision round or pre-request refusal.
   if opts.on_call_start then opts.on_call_start(opts.kind or "model_call",request_meta,M.budget(body.model).context) end
   local ok,result=pcall(function()
+  if stream and messages_api then
+    return M.messages_stream(messages_api, provider, body.model, url, headers, serialized, opts, serving_request_binding)
+  end
   if stream then
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized,
       json.encode({ first_response_seconds = M.first_response_seconds(opts.context_tokens) })))

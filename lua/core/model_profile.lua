@@ -56,6 +56,9 @@ M.DEFAULT_TRANSPORTS = {
   -- whose local edge refuses a request with no session (so the tool-call transport is what actually
   -- works there). Measured by the conformance suite on 19/11: the model acts through run() calls.
   ["opencode-go"] = M.TOOL_CALL,
+  -- The Claude subscription: the Messages API takes native tool_use calls, so the model acts through
+  -- the same one run() tool (lua/core/adapters/anthropic_messages.lua folds it onto that protocol).
+  ["anthropic"] = M.TOOL_CALL,
 }
 
 -- The transport this provider uses when no measured profile exists, or nil when nobody decided.

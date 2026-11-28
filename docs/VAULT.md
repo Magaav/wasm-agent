@@ -41,6 +41,15 @@ idle-safe service update, not an in-turn environment edit. Errors never authoriz
 Vaulted requests use `wa-vault-brokered`, not a key. Fixed routes:
 
 - `/opencode-go/v1` -> `https://opencode.ai/zen/go/v1`
+- `/anthropic/v1` -> `https://api.anthropic.com/v1` (a Claude Pro/Max subscription, OAuth)
+
+The Anthropic route holds OAuth tokens, not a key: `/login` -> "Anthropic (Claude subscription)" asks the vault
+for a sign-in link (`POST /login/anthropic/start`, PKCE made and kept in the vault), the person signs in in any
+browser and pastes the `code#state` Anthropic shows (`POST /login/anthropic/finish`); the vault exchanges it
+and keeps the tokens in `keys/anthropic-<account>.json` (0600). It refreshes an expired access token before
+use, marks an account refused when a refresh or the API refuses it (shown on its `/login` row), and keeps
+several accounts; `POST /login/anthropic/use` switches the active one without a new login. The flow and
+every constant are pi's (vault/wa_vault.py cites file and line). Covered by `scripts/test-anthropic-subscription.py`.
 
 Caller credential/Host/cookie/forwarding headers are dropped, redirects are not followed.
 No endpoint returns credentials.

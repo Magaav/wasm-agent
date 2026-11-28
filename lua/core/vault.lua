@@ -18,6 +18,9 @@ M.PLACEHOLDER = "wa-vault-brokered"
 -- rules in provider.lua, which belong to the service and not to the address we reach it by).
 M.ROUTES = {
   ["opencode-go"] = { path = "/opencode-go/v1", upstream_host = "opencode.ai" },
+  -- A Claude subscription (OAuth). The vault holds the account tokens, refreshes them and sets the
+  -- Bearer header; the node posts `<base>/v1/messages` with the placeholder (vault/wa_vault.py).
+  ["anthropic"] = { path = "/anthropic", upstream_host = "api.anthropic.com" },
 }
 
 function M.url(provider_id)
@@ -88,5 +91,12 @@ end
 -- A pasted API key, straight to the vault's key file (`<data>/keys/<provider>.key`). Replaces the one
 -- stored and turns the provider on; the answer is presence only.
 function M.set_key(provider_id, key) return call("POST", "/login/" .. provider_id, { key = key }, provider_id) end
+
+-- The Claude-subscription sign-in, in two steps, and the account switch. The vault makes the PKCE pair
+-- and keeps the verifier; the node gets the authorize URL to show, then hands back what the person
+-- pasted. Every answer is presence only: accounts, which is active, whether one was refused.
+function M.anthropic_login_start() return call("POST", "/login/anthropic/start", {}, "anthropic") end
+function M.anthropic_login_finish(code) return call("POST", "/login/anthropic/finish", { code = code }, "anthropic") end
+function M.anthropic_use(account) return call("POST", "/login/anthropic/use", { account = account }, "anthropic") end
 
 return M

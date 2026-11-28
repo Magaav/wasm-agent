@@ -62,6 +62,27 @@ STORE_PATH = os.path.join(DATA_DIR, "vault.json")
 # vault.json keeps what may be said about a key (when, enabled, generation) and never the key itself.
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 KEY_PROVIDERS = ("opencode-go",)
+
+# --- Anthropic: a Claude subscription (Pro/Max) over OAuth ------------------------------------------
+#
+# Every constant below is pi's (github.com/earendil-works/pi, formerly badlogic/pi-mono, commit
+# 356d346e48a8, packages/ai/src/auth/oauth/anthropic.ts), the open-source client this flow is copied from:
+ANTHROPIC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   # :14 (base64 there, decoded here)
+ANTHROPIC_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"  # :15
+ANTHROPIC_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"  # :16
+# The copy-code login (:200-235): the vault runs where no browser can reach a loopback callback, so the
+# person signs in in any browser and pastes the `code#state` Anthropic shows.
+ANTHROPIC_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"  # :23
+ANTHROPIC_SCOPES = ("org:create_api_key user:profile user:inference user:sessions:claude_code "
+                    "user:mcp_servers user:file_upload")  # :26-27
+# The API the tokens are used against (packages/ai/src/providers/anthropic.ts:78).
+ANTHROPIC_BASE = "https://api.anthropic.com"
+# pi stores `expires` five minutes before the server's own expiry (:136, :274); refreshed when that passes.
+ANTHROPIC_EXPIRY_MARGIN_MS = 5 * 60 * 1000
+# An authorize URL is good for this long; a code pasted after it is refused and the person starts again.
+ANTHROPIC_PENDING_MS = 30 * 60 * 1000
+_anthropic_pending = {}             # state -> {"verifier", "at"}: in memory only, a restart drops them
+_anthropic_lock = threading.Lock()  # one refresh at a time, so two turns never spend one refresh token twice
 ADMIN_TOKEN = os.environ.get("WA_VAULT_ADMIN_TOKEN", "")
 PROXY_PORT = int(os.environ.get("WA_VAULT_PROXY_PORT", "8810"))
 ADMIN_PORT = int(os.environ.get("WA_VAULT_ADMIN_PORT", "8801"))
@@ -71,7 +92,7 @@ BIND = os.environ.get("WA_VAULT_BIND", "0.0.0.0")
 ADMIN_BIND = os.environ.get("WA_VAULT_ADMIN_BIND", BIND)
 UPSTREAM_TIMEOUT = float(os.environ.get("WA_VAULT_UPSTREAM_TIMEOUT", "3600"))
 
-PROVIDERS = ("opencode-go",)
+PROVIDERS = ("opencode-go", "anthropic")
 
 # Headers never forwarded upstream: hop-by-hop, the node's own credential and identity, and anything
 # that could steer the request to another host.
@@ -79,7 +100,7 @@ DROP_REQUEST = {
     "host", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer",
     "upgrade", "content-length", "authorization", "chatgpt-account-id", "cookie", "proxy-authorization",
     "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip",
-    "x-vault-token", "x-vault-instance", "x-wa-vault-generation",
+    "x-vault-token", "x-vault-instance", "x-wa-vault-generation", "x-api-key",
 }
 DROP_RESPONSE = {
     "connection", "keep-alive", "transfer-encoding", "content-length", "set-cookie", "trailer",
@@ -227,6 +248,9 @@ def public_status(store, operator=False):
     """What may be said about the store: presence, timestamps and the account id. Never a value."""
     out = {}
     for provider in PROVIDERS:
+        if provider == "anthropic":
+            out[provider] = anthropic_status(store)
+            continue
         item = entry(store, provider)
         status = {"configured": configured(store, provider), "enabled": enabled(store, provider),
                   "set_at": item.get("set_at"),
@@ -616,6 +640,238 @@ def set_opencode_key(key, first_only=False, expected=None, operation=None, door=
     log("opencode-go key stored in its key file" + (" (from wa chat)" if door else ""))
 
 
+# --- Anthropic subscription accounts --------------------------------------------------------------
+#
+# One file per signed-in account, `keys/anthropic-<account>.json` ({access, refresh, expires}), mode 600,
+# never returned. vault.json keeps what may be said: the accounts, which one is active, when each was
+# signed in, and whether its last use was refused. Several accounts can be signed in; switching the
+# active one is a store edit, not a new login.
+
+def anthropic_token_path(account):
+    if not isinstance(account, str) or not re.match(r"^[A-Za-z0-9_.-]{1,64}$", account):
+        raise VaultError(400, "bad_account", "an account name is letters, digits, '.', '_' or '-'")
+    return os.path.join(KEYS_DIR, "anthropic-" + account + ".json")
+
+
+def anthropic_read_tokens(account):
+    try:
+        with open(anthropic_token_path(account), "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) and value.get("access") else None
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def anthropic_write_tokens(account, tokens):
+    os.makedirs(KEYS_DIR, mode=0o700, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".key-", dir=KEYS_DIR)
+    try:
+        os.chmod(temp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"access": tokens["access"], "refresh": tokens["refresh"], "expires": tokens["expires"]}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, anthropic_token_path(account))
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def anthropic_entry(store):
+    value = entry(store, "anthropic")
+    if not isinstance(value.get("accounts"), dict):
+        value["accounts"] = {}
+    return value
+
+
+def anthropic_status(store):
+    item = anthropic_entry(store)
+    accounts = []
+    for name in sorted(item["accounts"]):
+        meta = item["accounts"][name] if isinstance(item["accounts"][name], dict) else {}
+        accounts.append({"account": name, "label": meta.get("label") or name, "set_at": meta.get("set_at"),
+                         "signed_in": anthropic_read_tokens(name) is not None,
+                         "refused": meta.get("refused"), "generation": meta.get("generation")})
+    active = item.get("active") if item.get("active") in item["accounts"] else None
+    active_meta = item["accounts"].get(active) or {}
+    return {"configured": active is not None and anthropic_read_tokens(active) is not None,
+            "enabled": item.get("enabled", True) is not False,
+            "active": active, "accounts": accounts, "refused": active_meta.get("refused"),
+            "last_error": active_meta.get("refused"), "set_at": active_meta.get("set_at"),
+            "generation": active_meta.get("generation", "absent")}
+
+
+def anthropic_pkce():
+    # pi packages/ai/src/auth/oauth/pkce.ts:21-33: 32 random bytes, base64url without padding, and
+    # the S256 challenge of that verifier.
+    verifier = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    return verifier, challenge
+
+
+def anthropic_login_start():
+    """The authorize URL for one sign-in (pi oauth/anthropic.ts:200-216). The verifier stays here."""
+    verifier, challenge = anthropic_pkce()
+    # pi sends the verifier as `state` too (:210), and the pasted `code#state` carries it back.
+    params = {"code": "true", "client_id": ANTHROPIC_CLIENT_ID, "response_type": "code",
+              "redirect_uri": ANTHROPIC_REDIRECT_URI, "scope": ANTHROPIC_SCOPES,
+              "code_challenge": challenge, "code_challenge_method": "S256", "state": verifier}
+    with _anthropic_lock:
+        now = now_ms()
+        for key in [key for key, value in _anthropic_pending.items() if now - value["at"] > ANTHROPIC_PENDING_MS]:
+            _anthropic_pending.pop(key, None)
+        _anthropic_pending[verifier] = {"verifier": verifier, "at": now}
+    return ANTHROPIC_AUTHORIZE_URL + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+
+
+def anthropic_parse_code(text):
+    """pi oauth/anthropic.ts:29-57: a redirect URL, `code#state`, a query string, or the bare code."""
+    value = (text or "").strip() if isinstance(text, str) else ""
+    if not value:
+        return None, None
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme and parsed.netloc:
+        query = urllib.parse.parse_qs(parsed.query)
+        return (query.get("code") or [None])[0], (query.get("state") or [None])[0]
+    if "#" in value:
+        code, state = value.split("#", 1)
+        return code or None, state or None
+    if "code=" in value:
+        query = urllib.parse.parse_qs(value)
+        return (query.get("code") or [None])[0], (query.get("state") or [None])[0]
+    return value, None
+
+
+def anthropic_token_call(payload):
+    """One POST to the token endpoint (pi :76-94). (tokens, None) or (None, (status, code))."""
+    try:
+        status, body = http_request("POST", ANTHROPIC_TOKEN_URL, {
+            "Content-Type": "application/json", "Accept": "application/json"}, json.dumps(payload).encode())
+    except OSError as error:
+        return None, (502, "unreachable: " + type(error).__name__)
+    if status != 200:
+        # The body can quote the grant back; only a short error word is kept, never the body.
+        code = "HTTP %d" % status
+        try:
+            word = json.loads(body).get("error")
+            if isinstance(word, str) and re.match(r"^[a-z_]{1,64}$", word):
+                code += " " + word
+        except (ValueError, AttributeError):
+            pass
+        return None, (status, code)
+    try:
+        data = json.loads(body)
+        tokens = {"access": data["access_token"], "refresh": data["refresh_token"],
+                  "expires": now_ms() + int(data["expires_in"]) * 1000 - ANTHROPIC_EXPIRY_MARGIN_MS}
+    except (ValueError, KeyError, TypeError):
+        return None, (502, "the token endpoint answered something that is not a token")
+    if not all(isinstance(tokens[k], str) and tokens[k] for k in ("access", "refresh")):
+        return None, (502, "the token endpoint answered something that is not a token")
+    account = data.get("account") if isinstance(data.get("account"), dict) else {}
+    tokens["label"] = account.get("email_address") if isinstance(account.get("email_address"), str) else None
+    return tokens, None
+
+
+def anthropic_login_finish(text, account=None):
+    """Exchange a pasted code (pi :218-234, :96-138); store the account and make it the active one."""
+    code, state = anthropic_parse_code(text)
+    if not code:
+        raise VaultError(400, "missing_code", "paste the code Anthropic shows after you sign in")
+    with _anthropic_lock:
+        pending = _anthropic_pending.get(state) if state else None
+        if pending is None and not state and len(_anthropic_pending) == 1:
+            pending = next(iter(_anthropic_pending.values()))
+    if pending is None:
+        raise VaultError(409, "login_expired", "this code is not from the current sign-in - start /login again")
+    tokens, failure = anthropic_token_call({"grant_type": "authorization_code", "client_id": ANTHROPIC_CLIENT_ID,
+        "code": code, "state": state or pending["verifier"], "redirect_uri": ANTHROPIC_REDIRECT_URI,
+        "code_verifier": pending["verifier"]})
+    if failure:
+        raise VaultError(401 if failure[0] in (400, 401, 403) else 502, "login_refused",
+                         "Anthropic did not accept the code (" + failure[1] + ") - start /login again")
+    with _anthropic_lock:
+        _anthropic_pending.pop(pending["verifier"], None)
+
+    def put(store):
+        item = anthropic_entry(store)
+        name = account
+        if not name:
+            # Signing in to an account that is already here replaces its tokens instead of adding a twin.
+            for existing, meta in item["accounts"].items():
+                if tokens["label"] and isinstance(meta, dict) and meta.get("label") == tokens["label"]:
+                    name = existing
+            n = 1
+            while not name:
+                if "account-%d" % n not in item["accounts"]:
+                    name = "account-%d" % n
+                n += 1
+        anthropic_token_path(name)
+        anthropic_write_tokens(name, tokens)
+        item["accounts"][name] = {"label": tokens["label"] or name, "set_at": now_ms(),
+                                  "generation": str(uuid.uuid4()), "refused": None}
+        item["active"] = name
+        store["anthropic"] = item
+    update_store(put)
+    log("anthropic account signed in (from wa chat)")
+
+
+def anthropic_use(account):
+    def put(store):
+        item = anthropic_entry(store)
+        if account not in item["accounts"]:
+            raise VaultError(404, "unknown_account", "no signed-in Anthropic account is called " + str(account))
+        item["active"] = account
+        store["anthropic"] = item
+    update_store(put)
+    log("anthropic active account switched")
+
+
+def anthropic_mark(account, refused):
+    def put(store):
+        item = anthropic_entry(store)
+        if isinstance(item["accounts"].get(account), dict):
+            item["accounts"][account]["refused"] = refused
+            store["anthropic"] = item
+    update_store(put)
+
+
+def anthropic_credential(store):
+    """The active account's access token, refreshed first when it has expired (pi :240-276)."""
+    item = anthropic_entry(store)
+    account = item.get("active")
+    if account not in item["accounts"]:
+        raise VaultError(401, "vault_credential_absent", "no Anthropic account is signed in - use /login")
+    if item.get("enabled", True) is False:
+        raise VaultError(403, "vault_provider_disabled", "anthropic is disabled on the vault page")
+    with _anthropic_lock:
+        tokens = anthropic_read_tokens(account)
+        if tokens is None:
+            raise VaultError(401, "vault_credential_absent", "no Anthropic account is signed in - use /login")
+        if now_ms() < int(tokens.get("expires") or 0):
+            return account, tokens["access"]
+        fresh, failure = anthropic_token_call({"grant_type": "refresh_token", "client_id": ANTHROPIC_CLIENT_ID,
+                                               "refresh_token": tokens["refresh"]})
+        if failure is None:
+            anthropic_write_tokens(account, fresh)
+    if failure:
+        if failure[0] in (400, 401, 403):
+            anthropic_mark(account, "refresh refused (" + failure[1] + ")")
+            raise VaultError(401, "vault_credential_refused",
+                             "the Anthropic sign-in expired and could not be renewed - sign in again with /login")
+        raise VaultError(502, "vault_upstream_unreachable", "the Anthropic token refresh failed (" + failure[1] + ")")
+    log("anthropic access token refreshed")
+    if (item["accounts"][account] or {}).get("refused"):
+        anthropic_mark(account, None)
+    return account, fresh["access"]
+
+
 # --- the proxy (the node's side) ---------------------------------------------------------------
 
 def route(path):
@@ -631,6 +887,8 @@ def route(path):
         return None
     if parsed.path.startswith("/opencode-go/v1/"):
         return OPENCODE_BASE + parsed.path[len("/opencode-go/v1"):] + query, "opencode-go"
+    if parsed.path.startswith("/anthropic/v1/"):
+        return ANTHROPIC_BASE + parsed.path[len("/anthropic"):] + query, "anthropic"
     return None
 
 
@@ -716,6 +974,22 @@ class ProxyHandler(Handler):
                 # Check and mutation share _store_lock.
                 set_opencode_key(payload.get("key") if isinstance(payload, dict) else None, door=True)
                 return self.send_json(200, {"providers": public_status(read_store())})
+            if self.path in ("/login/anthropic/start", "/login/anthropic/finish", "/login/anthropic/use"):
+                try:
+                    payload = json.loads(body) if body else {}
+                except ValueError:
+                    raise VaultError(400, "bad_json", "the body is not JSON")
+                payload = payload if isinstance(payload, dict) else {}
+                # Same door and same named risk as opencode-go: the agent can reach it and place or switch a
+                # credential; no answer here ever carries a token.
+                if self.path == "/login/anthropic/start":
+                    return self.send_json(200, {"url": anthropic_login_start(),
+                                                "providers": public_status(read_store())})
+                if self.path == "/login/anthropic/finish":
+                    anthropic_login_finish(payload.get("code"), payload.get("account"))
+                else:
+                    anthropic_use(payload.get("account"))
+                return self.send_json(200, {"providers": public_status(read_store())})
         except VaultError as error:
             return self.send_error_json(error.status, error.code, error.message)
         self.send_error_json(404, "vault_no_route", "wa-vault has no route for " + self.path.split("?")[0])
@@ -736,12 +1010,16 @@ class ProxyHandler(Handler):
             expected = self.headers.get("X-Wa-Vault-Generation")
             if expected is not None and public_status(store)[provider]["generation"] != expected:
                 raise VaultError(409, "vault_stale_generation", "credential changed since run start; request not sent")
-            if not configured(store, provider):
-                raise VaultError(401, "vault_credential_absent",
-                                 "wa-vault holds no opencode-go key - paste it on the vault page")
-            if not enabled(store, provider):
-                raise VaultError(403, "vault_provider_disabled", "opencode-go is disabled on the vault page")
-            headers["Authorization"] = "Bearer " + read_key(provider)
+            if provider == "anthropic":
+                account, access = anthropic_credential(store)
+                headers["Authorization"] = "Bearer " + access
+            else:
+                if not configured(store, provider):
+                    raise VaultError(401, "vault_credential_absent",
+                                     "wa-vault holds no opencode-go key - paste it on the vault page")
+                if not enabled(store, provider):
+                    raise VaultError(403, "vault_provider_disabled", "opencode-go is disabled on the vault page")
+                headers["Authorization"] = "Bearer " + read_key(provider)
         except VaultError as error:
             return self.send_error_json(error.status, error.code, error.message)
 
@@ -761,6 +1039,11 @@ class ProxyHandler(Handler):
             connection.close()
             return self.send_error_json(502, "vault_upstream_unreachable",
                                         "wa-vault could not reach the %s upstream (%s)" % (provider, type(error).__name__))
+        if provider == "anthropic" and response.status == 401:
+            # A token the API refuses shows on its /login row, which offers to sign in again.
+            anthropic_mark(account, "refused by the API (HTTP 401)")
+        elif provider == "anthropic" and response.status == 200 and (anthropic_entry(store)["accounts"].get(account) or {}).get("refused"):
+            anthropic_mark(account, None)
         try:
             # Streamed back as it arrives (SSE), re-framed as chunked: the upstream's own framing was
             # decoded by http.client, and the body bytes are passed through untouched.

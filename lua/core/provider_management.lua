@@ -2,7 +2,7 @@
 local vault=dofile('lua/core/vault.lua')
 local M={}
 M.quota='OpenCode Go monthly GoUsageLimitError is account/workspace quota, not proof of an invalid key. Replacing a key from the same exhausted workspace may still fail. No automatic retry, compaction or provider switch.'
-M.routes={{id='opencode-go',label='OpenCode Go'}}
+M.routes={{id='opencode-go',label='OpenCode Go'},{id='anthropic',label='Anthropic (Claude subscription)',subscription=true}}
 local function operator_url(id)
   local url=host.getenv('WASM_AGENT_OPENCODE_GO_OPERATOR_URL') or host.getenv('WASM_AGENT_VAULT_OPERATOR_URL')
   if type(url)~='string' or url:find('[%s@?#]') then return nil end
@@ -65,7 +65,7 @@ function M.state(owner)
     result.embed_scope=host.sha256('provider-embed-v1:'..tostring(identity.node_id)..':'..owner)
   end
   for _,item in ipairs(M.routes) do
-    local row={id=item.id,label=item.label,source=vault.base(item.id) and 'vault' or 'native',entitlement='unknown',operator_url=operator_url(item.id)}
+    local row={id=item.id,label=item.label,subscription=item.subscription,source=vault.base(item.id) and 'vault' or 'native',entitlement='unknown',operator_url=operator_url(item.id)}
     if row.source=='vault' then
       local status,problem=vault_status(item.id)
       local entry=status and status.providers[item.id]
@@ -75,7 +75,12 @@ function M.state(owner)
         if item.id=='opencode-go' then row.embed_url=row.operator_url:gsub('/#vault=.*$','')..'/embed/go' end
       else row.operator_url=nil end
       if type(entry)=='table' then row.configured=entry.configured;row.enabled=entry.enabled;row.error=entry.last_error and 'vault_provider_error' or nil;row.generation=entry.generation;row.operation=entry.operation
+        -- A subscription's accounts, presence only: which are signed in, which is active, which was refused.
+        if item.subscription then row.accounts=type(entry.accounts)=='table' and entry.accounts or {};row.active=entry.active;row.refused=entry.refused end
       else row.error=problem and problem.code or 'vault_status_unknown' end
+    elseif item.subscription then
+      -- The tokens live in wa-vault or nowhere: without one this node has no place to keep a sign-in.
+      row.source='no vault';row.configured=false;row.enabled=false;row.accounts={}
     else
       row.source='legacy environment'
       local key=host.getenv('WASM_AGENT_LLM_API_KEY') or host.getenv('OPENCODE_GO_API_KEY') or host.getenv('OPENAI_API_KEY')
@@ -104,7 +109,22 @@ local balloon = dofile('lua/core/balloon.lua')
 
 local function trim(text) return (tostring(text or ''):gsub('^%s+', ''):gsub('%s+$', '')) end
 
+local function account_label(row, name)
+  for _, account in ipairs(row.accounts or {}) do
+    if account.account == name then return tostring(account.label or name) end
+  end
+  return tostring(name)
+end
+
 local function describe(row)
+  if row.subscription then
+    if row.source == 'no vault' then return 'needs wa-vault (set WASM_AGENT_VAULT_URL)' end
+    if row.refused then return CROSS .. ' sign-in refused (' .. tostring(row.refused) .. ') - sign in again' end
+    if row.configured == true then
+      local more = #(row.accounts or {}) > 1 and (' \194\183 ' .. #row.accounts .. ' accounts') or ''
+      return CHECK .. ' signed in as ' .. account_label(row, row.active) .. more .. ' \194\183 wa-vault'
+    end
+  end
   if row.configured == true then
     local text = CHECK .. ' signed in' .. (row.enabled == false and ', disabled on the vault page' or '')
     if row.error then text = text .. ' (last use failed)' end
@@ -161,8 +181,84 @@ local function key_page(row, io, lines, placeholder)
   })
 end
 
+-- THE CLAUDE SUBSCRIPTION SIGN-IN: the vault makes the link (OAuth with PKCE, the flow pi uses), the
+-- person opens it in any browser and signs in, Anthropic shows a code, and the code is pasted into a
+-- secret field here. It goes to wa-vault, which trades it for the account's tokens and keeps them;
+-- nothing in this process ever holds a token.
+local function code_page(row, io, lines)
+  return balloon.page({
+    title = row.label .. ' - paste the code',
+    lines = lines,
+    input = 'secret',
+    placeholder = 'code#state',
+    act = function(text)
+      local code = trim(text)
+      if code == '' then return code_page(row, io, { CROSS .. ' Nothing pasted. Paste the code Anthropic shows, or Esc.' }) end
+      local done, problem = vault.anthropic_login_finish(code)
+      code = nil
+      M.status_cache_clear()
+      if not done then
+        return code_page(row, io, { CROSS .. ' Not signed in: ' .. tostring(problem),
+          'Paste the code again, or Esc and start the sign-in again from /login.' })
+      end
+      local entry = type(done.providers) == 'table' and done.providers.anthropic or {}
+      row.accounts, row.active, row.configured, row.refused = entry.accounts or {}, entry.active, true, nil
+      return use(row, io, CHECK .. ' signed in as ' .. account_label(row, entry.active))
+    end,
+  })
+end
+
+local function sign_in(row, io)
+  local started, problem = vault.anthropic_login_start()
+  if not started or type(started.url) ~= 'string' then
+    return outcome(CROSS .. ' Could not start the sign-in: ' .. tostring(problem))
+  end
+  -- The link is too long for a box line, so it is printed whole, where it can be copied.
+  if io.print then io.print('Open this link in a browser and sign in to Claude:\n' .. started.url) end
+  return code_page(row, io, {
+    '1. Open the sign-in link printed above this box, in any browser.',
+    '2. Sign in with your Claude Pro/Max account and approve.',
+    '3. Anthropic shows a code: copy it and paste it here.',
+  })
+end
+
+local function switch_account(row, account)
+  local done, problem = vault.anthropic_use(account)
+  M.status_cache_clear()
+  if not done then return outcome(CROSS .. ' Could not switch: ' .. tostring(problem)) end
+  return outcome(CHECK .. ' ' .. row.label .. ' now uses ' .. account_label(row, account))
+end
+
+local function subscription_page(row, io)
+  local options = {}
+  if row.source == 'vault' then
+    options[#options + 1] = { label = row.refused and 'Sign in again' or (row.configured and 'Sign in to another account' or 'Sign in'),
+      hint = 'opens a sign-in link; the tokens stay in wa-vault', act = function() return sign_in(row, io) end }
+    for _, account in ipairs(row.accounts or {}) do
+      if account.account ~= row.active and account.signed_in ~= false then
+        options[#options + 1] = { label = 'Use ' .. tostring(account.label or account.account),
+          hint = account.refused and ('refused: ' .. tostring(account.refused)) or 'signed in, no new login',
+          act = function() return switch_account(row, account.account) end }
+      end
+    end
+  end
+  options[#options + 1] = { label = 'Use for this chat', hint = 'the next turns use it',
+    act = function() return use(row, io, '') end }
+  options[#options + 1] = { label = 'Back', hint = 'the provider list', back = true }
+  local lines = { describe(row) }
+  for _, account in ipairs(row.accounts or {}) do
+    lines[#lines + 1] = (account.account == row.active and '\226\150\184 ' or '  ') .. tostring(account.label or account.account)
+      .. (account.refused and (' - refused: ' .. tostring(account.refused)) or '')
+  end
+  if row.source ~= 'vault' then
+    lines[#lines + 1] = 'The sign-in tokens are kept only in wa-vault, and this node has none.'
+  end
+  return balloon.page({ title = row.label, lines = lines, options = options, selected = 1 })
+end
+
 -- One provider, as a page: how it stands, where the vault is, and what can be done from here.
 local function provider_page(row, io)
+  if row.subscription then return subscription_page(row, io) end
   local options = {}
   if row.configured == true then
     options[#options + 1] = { label = 'Replace the key', hint = 'wa-vault keys/' .. row.id .. '.key',
