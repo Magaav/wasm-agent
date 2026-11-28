@@ -124,6 +124,9 @@ ok "$(says "$plan" "lua inputs: $(wa_lua_tree_digest "$fixture" "$FIXTURE_SHA")"
 built="$R/built"
 mkdir -p "$built"
 elf b7 "$built/wa-$PUB_TRIPLE-$FIXTURE_SHORT" "$built/wa-sentinel-$PUB_TRIPLE-$FIXTURE_SHORT"
+  # The set a --from publish receives is the FOUR-member set the publisher now requires of any bundle: it copies
+  # the one member list, so a two-member directory cannot produce an installable bundle (binary_missing).
+  elf b7 "$built/wa-term-$PUB_TRIPLE-$FIXTURE_SHORT" "$built/wa-operations-supervisor-$PUB_TRIPLE-$FIXTURE_SHORT"
 write_manifest() { # <dir> [extra lines...]
   local dir="$1"; shift
   local line
@@ -135,9 +138,12 @@ write_manifest() { # <dir> [extra lines...]
     printf 'codemode=embedded\n'
     printf 'built_utc=2026-11-25T00:00:00Z\n'
     for line in "$@"; do printf '%s\n' "$line"; done
-    printf '%s %s %s %s %s\n' "$PUB_TRIPLE" \
+    printf '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes\n'
+    printf '%s %s %s %s %s %s %s %s %s\n' "$PUB_TRIPLE" \
       "$(wa_node_sha256 "$dir/wa-$PUB_TRIPLE-$FIXTURE_SHORT")" "$(wc -c < "$dir/wa-$PUB_TRIPLE-$FIXTURE_SHORT" | tr -d '[:space:]')" \
-      "$(wa_node_sha256 "$dir/wa-sentinel-$PUB_TRIPLE-$FIXTURE_SHORT")" "$(wc -c < "$dir/wa-sentinel-$PUB_TRIPLE-$FIXTURE_SHORT" | tr -d '[:space:]')"
+      "$(wa_node_sha256 "$dir/wa-sentinel-$PUB_TRIPLE-$FIXTURE_SHORT")" "$(wc -c < "$dir/wa-sentinel-$PUB_TRIPLE-$FIXTURE_SHORT" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-term-$PUB_TRIPLE-$FIXTURE_SHORT")" "$(wc -c < "$dir/wa-term-$PUB_TRIPLE-$FIXTURE_SHORT" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-operations-supervisor-$PUB_TRIPLE-$FIXTURE_SHORT")" "$(wc -c < "$dir/wa-operations-supervisor-$PUB_TRIPLE-$FIXTURE_SHORT" | tr -d '[:space:]')"
   } > "$dir/node-$FIXTURE_SHORT.manifest"
 }
 write_manifest "$built"
@@ -171,7 +177,16 @@ cover_release() { # <dir> <cover commit> [extra manifest lines...] -> the direct
   local short="${commit:0:12}" line
   rm -rf "$dir"; mkdir -p "$dir"
   elf 3e "$dir/wa-$TRIPLE-$short" "$dir/wa-sentinel-$TRIPLE-$short"
-  chmod +x "$dir/wa-$TRIPLE-$short" "$dir/wa-sentinel-$TRIPLE-$short"
+  # THE OTHER TWO MEMBERS: a release this publisher can produce carries wa-term and wa-operations-supervisor,
+  # and upgrade.sh refuses a set whose wa-term is not beside it before it reads the cover rule this row is about
+  # (term_program_missing, measured: the cover cases answered 2 instead of 3).
+  elf 3e "$dir/wa-term-$TRIPLE-$short" "$dir/wa-operations-supervisor-$TRIPLE-$short"
+  chmod +x "$dir/wa-$TRIPLE-$short" "$dir/wa-sentinel-$TRIPLE-$short" "$dir/wa-term-$TRIPLE-$short" "$dir/wa-operations-supervisor-$TRIPLE-$short"
+  # upgrade.sh resolves the siblings BY THE RUNTIME NAME, not the release asset name: it takes dirname of the
+  # binary it was handed and looks for a plain wa-term there (scripts/upgrade.sh:168-185). A release directory
+  # that carries only the suffixed files answers term_program_missing before the cover rule below is read.
+  cp -f "$dir/wa-term-$TRIPLE-$short" "$dir/wa-term"
+  cp -f "$dir/wa-operations-supervisor-$TRIPLE-$short" "$dir/wa-operations-supervisor"
   {
     printf 'schema=wasm-agent-node-binaries/1\n'
     printf 'source_commit=%s\n' "$commit"
@@ -180,10 +195,12 @@ cover_release() { # <dir> <cover commit> [extra manifest lines...] -> the direct
     for line in "$@"; do printf '%s\n' "$line"; done
     printf 'glibc_floor=2.31\n'
     printf 'codemode=embedded\n'
-    printf 'built_utc=2026-11-25T00:00:00Z\n'
-    printf '%s %s %s %s %s\n' "$TRIPLE" \
+    printf '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes wa-term_sha256 wa-term_bytes wa-operations-supervisor_sha256 wa-operations-supervisor_bytes\n'
+    printf '%s %s %s %s %s %s %s %s %s\n' "$TRIPLE" \
       "$(wa_node_sha256 "$dir/wa-$TRIPLE-$short")" "$(wc -c < "$dir/wa-$TRIPLE-$short" | tr -d '[:space:]')" \
-      "$(wa_node_sha256 "$dir/wa-sentinel-$TRIPLE-$short")" "$(wc -c < "$dir/wa-sentinel-$TRIPLE-$short" | tr -d '[:space:]')"
+      "$(wa_node_sha256 "$dir/wa-sentinel-$TRIPLE-$short")" "$(wc -c < "$dir/wa-sentinel-$TRIPLE-$short" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-term-$TRIPLE-$short")" "$(wc -c < "$dir/wa-term-$TRIPLE-$short" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$dir/wa-operations-supervisor-$TRIPLE-$short")" "$(wc -c < "$dir/wa-operations-supervisor-$TRIPLE-$short" | tr -d '[:space:]')"
   } > "$dir/node-$short.manifest"
   test_release_sign_dir "$dir" >/dev/null 2>&1 || skip "the fixture release $dir could not be signed"
   printf '%s\n' "$dir"
