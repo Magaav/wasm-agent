@@ -1,0 +1,18 @@
+[package]
+name = "wa-whatsapp-wire"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The WhatsApp index layout: the keys a message is stored under, the text rules a search folds and
+# tokenises by, and the month a conversation is addressed by.
+#
+# WHY IT IS ITS OWN CRATE (28/11, row 10). These three modules are a data format, not a rule: the archive
+# writes with them (`wa-whatsapp-archive`, on the host's write path) and the index reads with them (the
+# `wa-whatsapp` component). They lived in `wa-whatsapp-index`, so keeping the archive and the index in
+# agreement put that crate - and with it the whole query contract - into the node for a key builder alone.
+# The RULES (is a request valid, what does a refusal say, what is the dedupe key) moved to the
+# `whatsapp-index` component; what is left here is the shape both ends write down.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

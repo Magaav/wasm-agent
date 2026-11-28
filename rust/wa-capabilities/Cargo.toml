@@ -56,10 +56,10 @@ wa-grant-policy = { path = "../wa-grant-policy" }
 # the `wa-email` component that consumes the job.
 # The query seam (`whatsapp.query`): the request/answer shape, its bounds and the download manifest,
 # shared with the WA component that answers it (docs/SERVICE-COMPONENTS.md).
-wa-whatsapp-index = { path = "../wa-whatsapp-index" }
 # Retention's other half (`docs/WHATSAPP-ARCHIVE.md`): the monthly cut, the encrypted archive file,
 # the push and the restore. Pure (kv + sealer + a directory), so its own tests need no node.
 wa-whatsapp-archive = { path = "../wa-whatsapp-archive" }
+wa-whatsapp-wire = { path = "../wa-whatsapp-wire" }
 wa-keystore = { path = "../wa-keystore" }
 # The archive reads the component's kv namespace through the same adapter the host's own kv uses.
 wa-kv = { path = "../wa-kv" }
@@ -95,6 +95,11 @@ wa-email-index = { path = "../wa-email-index" }
 # dev-dependency because the tests assert the contract's own rules beside the seam.
 wa-email-outbox = { path = "../wa-email-outbox" }
 wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
+# The seam `whatsapp_index_component` mirrors the contract's op names and its op -> effect table, because a
+# caller has to name an op locally. That mirror is the one place the two can drift (28/11: `backfill` was
+# called read-only here and the call went to the wrong door), so the crate is a dev-dependency: the tests
+# compare the two tables and nothing else may use it.
+wa-whatsapp-index = { path = "../wa-whatsapp-index" }
 wat = "1"
 # `host.rs`'s classify_magic_tests (main, 3181d607) import this crate and no configuration
 # declared it, so `cargo test -p wa-capabilities` did not compile on main itself. A path

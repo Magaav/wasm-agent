@@ -22,6 +22,7 @@
 pub mod email_index_component;
 pub mod email_outbox_component;
 pub mod outbox_component;
+pub mod whatsapp_index_component;
 pub mod tz_component;
 pub mod audio;
 pub mod capabilities;
