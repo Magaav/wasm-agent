@@ -19,15 +19,17 @@ set -uo pipefail
 CLONE="${WA_FACTORY_CLONE:-$HOME/wasm-agent/factory-clone}"
 DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 APPLY=0
-for arg in "$@"; do
-  case "$arg" in
-    --apply) APPLY=1 ;;
-    --dir) DIR="$2"; shift 2 ;;
+# A `for arg in "$@"` loop cannot consume a VALUE (the value is visited as an argument of its own), so this parses with
+# shift. Measured 27/11: the first version refused `--dir <path>` with "unknown argument <path>".
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1; shift ;;
+    --dir) DIR="${2:-}"; [ -n "$DIR" ] || { echo "factory/units.sh: --dir needs a directory" >&2; exit 2; }; shift 2 ;;
     -h|--help)
       echo "usage: factory/units.sh [--apply] [--dir <systemd user dir>]"
       echo "  writes one unit per factory service; dry run unless --apply"
       exit 0 ;;
-    *) echo "factory/units.sh: unknown argument $arg" >&2; exit 2 ;;
+    *) echo "factory/units.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 
@@ -69,6 +71,11 @@ WantedBy=default.target
   fi
 done
 
-if [ "$APPLY" = 1 ]; then
+DEFAULT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+if [ "$APPLY" = 1 ] && [ "$DIR" = "$DEFAULT_DIR" ]; then
+  # Only the REAL unit directory reloads the daemon: a run against a temporary directory is a rehearsal and must not touch
+  # the user's systemd (measured 27/11: the first version reloaded for any --dir).
   systemctl --user daemon-reload && echo "daemon reloaded; start a unit when you mean to (this script never restarts one)"
+else
+  echo "written to $DIR (not the user unit directory, so no daemon reload)"
 fi
