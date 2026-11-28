@@ -127,6 +127,20 @@ run_record() { # calls [path-prefix] -> the record step's output; the prefix sha
     echo 'LUA_FAST=0'     # deploy.sh sets it before step 8; the record reads it (a fast-path deploy is 1)
     echo "WA_SERVICE_DIR=\"$INSTALL\""
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
+    # THE BLOCK'S OWN DEPENDENCIES (the same set scripts/test-deploy-node-binaries.sh needs): it runs OUT of
+    # deploy.sh here, so nothing deploy.sh sources or defines exists - a build-info reader (wa_build_info /
+    # wa_build_field, FIELD IS THE SECOND ARGUMENT), a note printer, a post-swap reporter, the compiled-inputs
+    # digest, the reuse probe, the running-identity probe, COMMIT_FULL and ROOT, plus the REAL wa_same_commit.
+    echo 'note() { echo "note: $*"; }'
+    echo 'post_swap_problem() { echo "note: $*" >&2; }'
+    echo 'wa_build_info() { echo "commit=${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}"; }'
+    echo 'wa_build_field() { case "$2" in commit) echo "${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
+    echo 'wa_compiled_inputs_digest() { echo deadbeef; }'
+    echo 'wa_node_binary_reuse() { return 1; }'
+    echo 'wa_running_identity() { :; }'
+    echo "COMMIT_FULL=\"${COMMIT:-}\""
+    echo "ROOT=\"${ROOT:-$(pwd)}\""
+    echo ". \"${ROOT:-$(pwd)}/scripts/lib/commit-id.sh\""
     cat "$WORK/record.sh"
     local i
     for i in $(seq 1 "$calls"); do echo 'record_installed'; done
@@ -242,6 +256,22 @@ run_upgrade_record() { # via [new-binary] [calls] -> the record_install block's 
     echo "SOURCE_COMMIT=\"$(git -C "$TREE" rev-parse HEAD)\""
     if [ -n "$1" ]; then echo "WA_UPGRADE_VIA=\"$1\""; fi
     echo 'WA_UPGRADE_REASON="an upgrade request"'
+    # THE UPGRADE BLOCK'S OWN DEPENDENCIES, the same way as the record block's: it runs OUT of upgrade.sh, so
+    # the running-identity facts and the helpers deploy.sh would have defined are supplied here.
+    echo 'WA_RUNNING_COMMIT=""'; echo 'WA_RUNNING_SOURCE=""'; echo 'WA_RUNNING_WHY=""'
+    echo 'SWAPPED=1'
+    echo 'COVER_LUA_VERIFIED=""'; echo 'COVER_LUA_WHY=""'; echo 'COVER_COMMIT=""'
+    echo 'note() { echo "note: $*"; }'
+    echo 'post_swap_problem() { echo "note: $*" >&2; }'
+    echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
+    echo 'wa_build_info() { echo "commit=${SOURCE_COMMIT:-}"; }'
+    echo 'wa_build_field() { case "$2" in commit) echo "${SOURCE_COMMIT:-}";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
+    echo 'wa_compiled_inputs_digest() { echo deadbeef; }'
+    echo 'wa_node_binary_reuse() { return 1; }'
+    echo 'wa_running_identity() { :; }'
+    echo 'COMMIT_FULL="${SOURCE_COMMIT:-}"'
+    echo "ROOT=\"${ROOT:-$(pwd)}\""
+    echo ". \"${ROOT:-$(pwd)}/scripts/lib/commit-id.sh\""
     echo 'file_hash() { [ -f "$1" ] && sha256sum < "$1" 2>/dev/null | awk "{print \$1}" || true; }'
     cat "$WORK/upgrade-previous.sh"
     cat "$WORK/upgrade-record.sh"

@@ -819,6 +819,12 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     echo 'set -uo pipefail'
     echo "INSTALL_DIR=\"$rec_install\""
     echo 'COMMIT=deadbee'                 # deliberately short: a prebuilt record must NOT name this
+    # THE 40-HEX OF THE TREE THIS DEPLOY INSTALLED: the block reads COMMIT_FULL for a covering prebuilt record,
+    # and without it the record falls to commit=unknown and refuses - which is what this row was reporting.
+    echo "COMMIT_FULL=$HEAD_SHA"
+    # deploy.sh reaches the record step AFTER the swap (SWAPPED=1): the 24/11 rule is a refusal BEFORE it and a
+    # recorded problem after it, so the harness must model that flag, not omit it.
+    echo "SWAPPED=${SWAPPED_RECORD:-0}"
     echo 'BRANCH=main'
     echo 'DIRTY=0'
     echo 'HASH=nodehash'
@@ -841,9 +847,9 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     # the REAL wa_same_commit out of scripts/lib/commit-id.sh - stubbing that one made the block refuse a commit
     # it had just accepted ("reports commit X but this deploy meant to install X"). Measured standalone first.
     echo 'note() { echo "note: $*"; }'
-    echo 'post_swap_problem() { :; }'
-    echo 'wa_build_info() { echo "commit=$BINARY_COMMIT"; }'
-    echo 'wa_build_field() { case "$2" in commit) echo "$BINARY_COMMIT";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
+    echo 'post_swap_problem() { echo "note: $*" >&2; }'
+    echo 'wa_build_info() { echo "commit=${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}"; }'
+    echo 'wa_build_field() { case "$2" in commit) echo "${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}";; tree) echo deadbeef;; dirty) echo 0;; *) echo unknown;; esac; }'
     echo 'wa_compiled_inputs_digest() { echo deadbeef; }'
     echo 'wa_node_binary_reuse() { return 1; }'
     echo 'wa_running_identity() { :; }'
@@ -865,11 +871,14 @@ contains "$record" "binary_source_commit=$HEAD_SHA" "the record names the source
 contains "$record" "sentinel_sha256=sentinelhash" "the record still names the installed supervisor's hash"
 if printf '%s' "$record" | grep -q '^commit=deadbee$'; then fail "the record named the short id instead of the 40-hex commit"; fi
 ok
-# A prebuilt record whose commit is not a 40-hex id is refused, and the record that was already there stands.
-out="$(run_record abc1234)"
-expect_status 3 "$?" "the record step for a prebuilt install with a short commit"
-contains "$out" "not a 40-hex commit id" "the refusal says what a prebuilt record must name"
-contains "$(cat "$rec_install/installed.txt")" "commit=$HEAD_SHA" "the refused write did not replace the good record"
+# A prebuilt record whose commit is not a 40-hex id is NOT refused here: the step is reached AFTER the swap
+# (deploy.sh rule 24/11 - a refusal before it, a recorded problem after it), so it records commit=unknown with
+# record_id_why beside it, which is what a later reader needs to know it cannot act on this record.
+out="$(SWAPPED_RECORD=1 run_record abc1234)"
+expect_status 0 "$?" "the record step, AFTER the swap, for a prebuilt install with a short commit"
+contains "$out" "not a 40-hex commit id" "the recorded problem says what a prebuilt record must name"
+contains "$(cat "$rec_install/installed.txt")" "record_id_why=commit=abc1234 is not a 40-hex commit id" "...and the record carries the why"
+contains "$(cat "$rec_install/installed.txt")" "commit=unknown" "...with commit= recorded as unknown, never guessed"
 
 # --- installed.txt for a DIGEST-FALLBACK install (job relmatch) ---------------------------------------
 # A docs-only commit is installed from an older commit's release: the record then has to name BOTH - the
@@ -883,10 +892,11 @@ contains "$record" "commit=$HEAD_SHA" "the digest-fallback record names the inst
 contains "$record" "binary_commit=$COMMIT" "...and the commit the bytes are a build of"
 contains "$record" "binary_source_commit=$COMMIT" "...under the name the deploy records (binary_source_commit=)"
 contains "$record" "binary_release=node-$HEAD_SHORT" "...beside the release that was used"
-out="$(run_record "$HEAD_SHA" abc1234)"
-expect_status 3 "$?" "the record step with a source commit that is not 40 hex"
-contains "$out" "binary_source_commit=abc1234" "the refusal names the value it would have written"
-contains "$(cat "$rec_install/installed.txt")" "binary_source_commit=$COMMIT" "the refused write did not replace the good record"
+out="$(SWAPPED_RECORD=1 run_record "$HEAD_SHA" abc1234)"
+expect_status 0 "$?" "the record step, AFTER the swap, with a source commit that is not 40 hex"
+contains "$out" "binary_source_commit=abc1234" "the recorded problem names the value it would have written"
+contains "$(cat "$rec_install/installed.txt")" "binary_commit=unknown" "...and binary_commit= is recorded as unknown, not guessed"
+contains "$(cat "$rec_install/installed.txt")" "binary_id_why=binary_source_commit=abc1234 is not a 40-hex commit id" "...with the why beside it"
 
 
 # --- the wiring in scripts/deploy.sh ------------------------------------------------------------------
@@ -895,7 +905,10 @@ contains "$(cat "$rec_install/installed.txt")" "binary_source_commit=$COMMIT" "t
 # line that only exists in the lib would pass every check above while changing nothing on a node.
 DEPLOY="$ROOT/scripts/deploy.sh"
 [ -f "$DEPLOY" ] || fail "no scripts/deploy.sh"
-grep -q 'for wa_lib_part in build-status build-requirements deploy-components node-binaries' "$DEPLOY"   || fail "deploy.sh does not source scripts/lib/node-binaries.sh"
+# THE CONSTRUCT, NOT THE LIST (measured): the exact string named five libraries, and three more were added since -
+# the assertion then failed on a deploy.sh that sources the lib perfectly well. What matters is that node-binaries
+# is among the parts sourced in that loop.
+grep -qE 'for wa_lib_part in [^;]*node-binaries' "$DEPLOY"   || fail "deploy.sh does not source scripts/lib/node-binaries.sh"
 ok
 grep -q 'wa_node_binaries_prepare "$ROOT"' "$DEPLOY" || fail "deploy.sh never calls wa_node_binaries_prepare"
 ok
@@ -913,7 +926,10 @@ grep -q 'binary_source_commit=%s' "$DEPLOY" || fail "deploy.sh does not record b
 ok
 grep -q 'wa_node_release_digest_search' "$ROOT/scripts/lib/node-binaries.sh" || fail "the lib has no digest search"
 ok
-grep -q 'wa_compiled_input "$changed_path"' "$DEPLOY" || fail "deploy.sh's fast path does not use the one compiled-input classification"
+# THE ONE CLASSIFICATION, not one spelling of it: deploy.sh no longer calls wa_compiled_input directly - it
+# asks wa_compiled_inputs_digest for the whole digest - so the pin accepts either entry point and still
+# refuses a deploy that grew a list of its own.
+grep -qE 'wa_compiled_input"? "|wa_compiled_inputs_digest' "$DEPLOY" || fail "deploy.sh's fast path does not use the one compiled-input classification"
 ok
 grep -q 'wa_compiled_inputs_digest' "$ROOT/scripts/publish-node-binaries.sh" || fail "the publisher records no compiled-inputs digest"
 ok

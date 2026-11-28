@@ -2316,14 +2316,14 @@ record_installed() {
       if [ "${#record_commit}" != 40 ] || [ -n "$(printf '%s' "$record_commit" | tr -d '0123456789abcdef')" ]; then
         # ONE ARGUMENT (25/11, Fable's C): the label and the sentence were two arguments, so the record kept
         # the word "recording" and lost what went wrong. The label belongs in the sentence.
-        post_swap_problem "recording: commit=$record_commit is not a 40-hex id, so the record names it as unknown with record_id_why="
+        post_swap_problem "recording: commit=$record_commit is not a 40-hex commit id, so the record names it as unknown with record_id_why="
         record_id_why="commit=$record_commit is not a 40-hex commit id"
         record_commit=unknown
       fi
       # ...and the commit the BYTES are a build of, when that is another one (the digest fallback): it is
       # the id a later fast-path deploy reads back as binary_commit=, so it is held to the same rule.
       if [ -n "${BINARY_SOURCE_COMMIT:-}" ] && { [ "${#BINARY_SOURCE_COMMIT}" != 40 ] || [ -n "$(printf '%s' "$BINARY_SOURCE_COMMIT" | tr -d '0123456789abcdef')" ]; }; then
-        post_swap_problem "recording: binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex id, so binary_commit= is recorded as unknown with binary_id_why="
+        post_swap_problem "recording: binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id, so binary_commit= is recorded as unknown with binary_id_why="
         BINARY_ID_WHY="binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id"
         BINARY_SOURCE_COMMIT=""
       fi ;;
@@ -2434,7 +2434,11 @@ record_installed() {
   local recorded_commit
   recorded_commit="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
   case "$recorded_commit" in
-    ''|unknown) fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
+    # RECORDED, NOT REFUSED (review 27/11): this step is reached AFTER the swap and deploy.sh's own rule is a
+    # refusal BEFORE it and a recorded problem after it - a fail here leaves the new bytes running under the
+    # interim record, the state that rule exists to prevent. The why is already on the record (record_id_why)
+    # from the non-40-hex path above; this line names the consequence for a reader.
+    ''|unknown) post_swap_problem "recording: installed.txt names commit=unknown, which a staleness check reads as nothing to do" ;;
   esac
 }
 # EXPORTED: upgrade.sh runs as a CHILD process (bash "$UPGRADE") and its staging path calls this writer,
