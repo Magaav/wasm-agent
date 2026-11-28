@@ -166,6 +166,14 @@ function fixture() {
     'echo "publish-node-binaries ok: node-fixture"',
     '',
   ].join('\n'));
+  // The component-pin gate a landing runs before it merges (added 27/11): the queue executes it FROM THE FIXTURE
+  // TREE, and the fixture predates it, so the call exited 127 and EVERY landing of a Lua move was refused
+  // component_not_reproducible (measured 28/11) - a green row turned red by a product rule it never heard of.
+  // This row judges the lane (locking, retest, deploy gate), not component pins, so the fixture answers the way a
+  // tree with nothing pinned would: no pinned component moved.
+  fs.writeFileSync(path.join(CANONICAL, "scripts/landing-component-gate.sh"),
+    "#!/usr/bin/env bash\necho \"landing-component-gate: no pinned component alive in this fixture\"\nexit 0\n");
+  fs.chmodSync(path.join(CANONICAL, "scripts/landing-component-gate.sh"), 0o755);
   git(CANONICAL, 'add', '-A');
   git(CANONICAL, 'commit', '-q', '-m', 'base');
   git(CANONICAL, 'remote', 'add', 'origin', ORIGIN);
