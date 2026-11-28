@@ -13,4 +13,5 @@ edition = "2021"
 # colour and the clipping belong to `wa-term` (Rust) and `lua/core/cli_view.lua` (Lua). This crate
 # is only the decision, so both renderers and the tests can share it.
 [dependencies]
+wa-tool-progress-format = { path = "../wa-tool-progress-format" }
 serde_json = "1"

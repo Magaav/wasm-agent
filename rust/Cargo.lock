@@ -2891,6 +2891,14 @@ name = "wa-tool-progress"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "wa-tool-progress-format",
+]
+
+[[package]]
+name = "wa-tool-progress-format"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
