@@ -23,6 +23,10 @@ grep -q 'wa_health_verdict_line "$N" "$RC" "$TOOK"' "$loop" || fail 'the loop ha
 # A LOCK WAIT MUST NAME ITS HOLDER: measured 02:14Z, a tip sat "resolving" for 39 minutes because .suite.lock was held
 # by an unrelated job, and only `fuser` could have said so.
 grep -q 'waiting for the suite lock' "$loop" || fail 'the loop waits for the suite lock in silence'
+# AND THE TERM MESSAGE MUST READ AS A WHOLE SENTENCE, whatever was running: the first live firing printed
+# "<sha>  NO VERDICT after 0s: this loop was TERMINATED (SIGTERM) while - a unit restart ..." with an empty sha.
+grep -q 'between tips - no tip was being graded' "$loop" || fail 'a SIGTERM between tips leaves the trap message half-written'
+grep -q 'what="while grading' "$loop" || fail 'the trap does not say what it was grading'
 grep -q 'fuser' "$loop" || fail 'the lock-wait line does not name the holder' 
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/verdict.XXXXXX") || fail 'no temp dir'

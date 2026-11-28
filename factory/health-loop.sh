@@ -59,9 +59,20 @@ GREEN=$(cat $M/_orch/health-green 2>/dev/null); KNOWN=" $(cat $M/_orch/health-kn
 # read as "stuck" for 30+ minutes. This trap writes what happened, with the elapsed time, before the process goes.
 TIP_STARTED=0; TIP_SHA=""
 wa_health_on_term() {
-  local took=$(($(date +%s) - TIP_STARTED))
-  [ "$TIP_STARTED" -gt 0 ] 2>/dev/null || took=0
-  echo "$(date -u +%H:%MZ) orch(health): ${TIP_SHA:0:8} NO VERDICT after ${took}s: this loop was TERMINATED (SIGTERM) while${TIP_SHA:+ grading $TIP_SHA} - a unit restart or an explicit kill ended the run" >> $H
+  local took=0 what
+  # MEASURED 02:29Z, the first time this trap fired: it printed "<sha>  NO VERDICT after 0s: this loop was TERMINATED
+  # (SIGTERM) while - a unit restart ..." - an empty sha gave a double space and the word "while" hung with nothing
+  # after it, because the signal arrived BETWEEN tips, when TIP_SHA is empty. A message that reads as half a sentence is
+  # the same failure as no message: say plainly what was interrupted, or that nothing was.
+  if [ "${TIP_STARTED:-0}" -gt 0 ] 2>/dev/null; then took=$(( $(date +%s) - TIP_STARTED )); fi
+  if [ -n "${TIP_SHA:-}" ] && [ "$took" -gt 0 ]; then
+    what="while grading ${TIP_SHA:0:8} (${took}s into the attempt)"
+  elif [ -n "${TIP_SHA:-}" ]; then
+    what="while grading ${TIP_SHA:0:8}"
+  else
+    what="between tips - no tip was being graded"
+  fi
+  echo "$(date -u +%H:%MZ) orch(health): NO VERDICT: this loop was TERMINATED (SIGTERM) ${what} - a unit restart or an explicit kill ended the run" >> $H
   exit 143
 }
 trap wa_health_on_term TERM INT
