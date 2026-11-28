@@ -49,6 +49,24 @@ check(#next_step > 20, "it carries a sentence to act on, got: " .. next_step)
 contains(next_step, 'OFF by default', "the sentence says the feature is off, not broken")
 contains(next_step, 'policy.json', "and names where to switch it on")
 
+-- 2. MAIL, WITH NO CONNECTOR (the dependency removed: this scratch home has no account, no connector).
+--    A search answers a NOTE that says the connector is not answering and names what to use instead - the
+--    user is told which thing is broken and where to go, not left with an empty result that reads like
+--    "no mail matches". Measured on this node with no connector: state=running plus that note.
+local mail_ok, mail_answer = pcall(host.email_search, '{"q":"canary","limit":1}')
+check(mail_ok, "email_search answers instead of raising: " .. tostring(mail_answer))
+local mail_text = tostring(mail_answer)
+local mail_decoded = mail_answer
+if type(mail_answer) == 'string' then
+  local ok_json, parsed = pcall(dofile('lua/vendor/json.lua').decode, mail_answer)
+  if ok_json and type(parsed) == 'table' then mail_decoded = parsed end
+end
+local mail_note = type(mail_decoded) == 'table'
+  and tostring(mail_decoded.note or mail_decoded.detail or mail_decoded.error or '') or ''
+check(#mail_note > 20, "a mail search with no connector says something, got: " .. mail_text:sub(1, 200))
+contains(mail_note, 'connector', "the note names the connector as the thing that is not answering")
+contains(mail_note, 'mcp_google_imap', "and names what to use instead")
+
 -- 2. EVERY FEATURE'S REFUSAL HAS WORDS. The vocabulary every tool refusal crosses (lua/core/refusal.lua) must
 --    render a sentence and a fix for the codes a feature emits - the shape fallback covers a code nobody has
 --    taught it, so a code from tomorrow is still not silence.
