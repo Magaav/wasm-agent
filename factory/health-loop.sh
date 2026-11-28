@@ -52,6 +52,26 @@ if [ -n "$FACTORY_NOTE" ]; then
   m="$(date -u +%H:%MZ) WATCHDOG: health runs a factory copy that is not the landed one - $FACTORY_NOTE"
   echo "$m" >> $M/ATTENTION; echo "$m" >> $H
 fi
+# A TIP THAT WAS OPENED AND NEVER VERDICTED IS REPORTED, ONCE (28/11, Victor).
+#
+# MEASURED: 03:11Z wrote "grading d6b73496 with waited-90s-build-sidecars-built", 03:24Z moved to 848d9ce1, and
+# d6b73496 got NO line at all - no green, no red, no NO VERDICT, no SIGTERM line - while _orch/health-loop-run.out was
+# 0 bytes with an mtime from hours earlier, i.e. the suite line was never reached. Some path between the grading line
+# and the suite kills the shell without a word (a `set -u` exit, a kill the trap cannot see, a restart mid-write), and
+# no amount of reading the code found it. So the loop no longer relies on understanding that path: it RECORDS the tip
+# it opened and, on the next pass, reports any tip that was left open. "superseded by <sha> before a verdict" is a
+# verdict line: it says which tip was dropped and by what.
+wa_health_open_note() { # <current-sha>  -> a line on stdout when a previous tip was left open
+  local now=${1:-} open="$M/_orch/health-open" prev
+  [ -r "$open" ] || return 0
+  prev=$(head -1 "$open" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$prev" ] || { rm -f "$open"; return 0; }
+  if [ "$prev" != "$now" ]; then
+    printf '%s NO VERDICT: superseded by %s before a verdict (opened, graded or resolving, and the loop moved on - see _orch/health-loop-run.out)\n'       "${prev:0:8}" "${now:0:8}"
+  fi
+  rm -f "$open"
+}
+
 G="env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git -C $C"
 GREEN=$(cat $M/_orch/health-green 2>/dev/null); KNOWN=" $(cat $M/_orch/health-known 2>/dev/null) "
 # A UNIT RESTART IS THE MOST COMMON KILLER, AND IT USED TO BE INVISIBLE. systemd stops the unit with SIGTERM to the
@@ -82,6 +102,8 @@ while true; do
   # THE TIP IS CLAIMED HERE, NOT AFTER RESOLUTION (28/11). Measured 02:48Z: a restart caught the loop while it was
   # resolving 4bc7b430 - fifteen minutes of legitimate work - and the trap said "between tips - no tip was being
   # graded", because TIP_SHA was only set after resolution. Resolution IS grading; a reader must not be told otherwise.
+  OPEN_NOTE=$(wa_health_open_note "$N")
+  if [ -n "$OPEN_NOTE" ]; then echo "$(date -u +%H:%MZ) orch(health): $OPEN_NOTE" >> $H; fi
   TIP_SHA="$N"; TIP_STARTED=$(date +%s)
   if [ "$N" = "$(cat $M/_orch/health-last 2>/dev/null)" ]; then sleep 300; continue; fi
   # A COLD STAGE NEEDS MORE THAN THE DEFAULT BOUND (28/11: every tip NOT GRADED while c1fcda27 WAS published).
@@ -115,6 +137,7 @@ while true; do
   WA_BIN=$(head -1 "$M/_orch/health-binary.out" 2>/dev/null)
   wa_note_graded $M/_orch
   # WHICH STEP GAVE THE BINARY, on the line that records the grading, so "graded" is never mistaken for "built".
+  echo "${N}" > "$M/_orch/health-open"
   echo "$(date -u +%H:%MZ) orch(health): grading ${N:0:8} with ${WA_MAIN_BINARY_STEP:-unknown} (${WA_BIN})" >> $H
   # The lib that produced that binary, named: a grading line is evidence only if a reader can tell WHICH factory said it.
   echo "$(date -u +%H:%MZ) orch(health): factory lib $(stat -c %y "$HERE/lib/main-binary.sh" 2>/dev/null | cut -d. -f1)${FACTORY_NOTE:+  [$FACTORY_NOTE]}" >> $H
@@ -135,6 +158,7 @@ while true; do
   # ONE LINE, ALWAYS. When the suite did not produce a readable verdict - killed, out of space, lock, budget - the reason
   # is named here instead of leaving the "resolving" line as the last word for half an hour.
   if [ "$RC" != 0 ] || ! jq -e . $M/main-health.json >/dev/null 2>&1; then
+    rm -f "$M/_orch/health-open"
     echo "$(date -u +%H:%MZ) orch(health): $(wa_health_verdict_line "$N" "$RC" "$TOOK" "$M/_orch/health-loop-run.out" "$M/main-health.json" "$SUITE_BUDGET")" >> $H
     TIP_STARTED=0
     sleep 300; continue
@@ -149,10 +173,12 @@ while true; do
     else STILL="$STILL$r "; fi
   done
   if [ -z "$STILL" ]; then echo $S > $M/_orch/health-green; GREEN=$S
+    rm -f "$M/_orch/health-open"
     echo "$(date -u +%H:%MZ) orch(health): ${S:0:8} $(jq -r '"\(.counts.passed)/\(.counts.checks)"' $M/main-health.json) green (${TOOK}s; reds rerun green: $(echo $R))" >> $H
   else
     P=$M/_orch/REVERT-PROPOSAL-${S:0:8}.txt
     { echo "new red on ${S:0:8} (still red alone): $STILL"; echo "last green: ${GREEN:0:8}"; echo "landings since:"; $G log --first-parent --format='%h %s' ${GREEN:-$S~1}..$S; } > $P
+    rm -f "$M/_orch/health-open"
     echo "$(date -u +%H:%MZ) orch(health): NEW RED on ${S:0:8} after ${TOOK}s: $STILL -> $P (attribute + propose revert)" >> $H
   fi
   TIP_STARTED=0
