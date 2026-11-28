@@ -1,0 +1,37 @@
+// The browser as a component: bytes in, text and an accessibility-style tree out. NO layout, NO rendering, NO
+// script, NO socket in this first half (mission agent-browser-from-scratch, stage 1, DARK).
+//
+// What a caller gets is what a reader uses: the text of a page, and the structure around it with the roles an
+// accessibility tree would carry. The `open` verb - HTTP through the host's sockets with a cookie jar and a
+// per-site allow-list - is the second half and is NOT declared here: a world that imports a socket the host does
+// not offer is a component that cannot be instantiated, and this factory has already paid for that class of
+// silence (a pin with no artifact, a row nobody runs).
+//
+// Refusals are values, not traps: `read` and `tree` answer `result<_, refusal>` and the refusal carries the NAMED
+// reason (`unclosed-raw-text`, `unparsable`, `too-deep`), so a caller can print it instead of guessing why it got
+// nothing.
+
+package wa:browser@0.1.0;
+
+interface page {
+
+  /// Why a document could not be read. The names are the contract; a caller prints them as they are.
+  variant refusal {
+    /// A raw-text element (script/style/textarea) was opened and never closed.
+      unclosed-raw-text(string),
+    /// The document could not be tokenized at all.
+      unparsable(string),
+    /// More nesting than the reader will follow.
+      too-deep,
+  }
+    /// The text a person sees, in document order, with block boundaries kept.
+    read: func(html: string) -> result<string, refusal>;
+
+    /// An accessibility-style tree, one node per line: `<depth> <role> <name>`, so a caller needs no JSON parser
+    /// and the bytes it carries stay small.
+    tree: func(html: string) -> result<string, refusal>;
+}
+
+world browser {
+    export page;
+}

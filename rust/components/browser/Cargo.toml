@@ -1,0 +1,23 @@
+[package]
+name = "browser"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The browser as a component (mission agent-browser-from-scratch, stage 1): the page-reading half of it -
+# text and an accessibility-style tree - with no layout, no rendering and no script. Request-shaped
+# (wasm32-wasip2), built by `scripts/build-components.sh`, never by the core build.
+#
+# It imports NOTHING yet. The second half (`open` through the host's sockets, a cookie jar, a per-site
+# allow-list) needs an import the host does not offer today; declaring it now would make a component that
+# cannot be instantiated, which is the failure this factory already paid for.
+[workspace]
+
+[lib]
+ crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+# The reading itself, shared with the unit tests and with the node, so the component and the tests cannot
+# disagree about what a page says.
+browser-html = { path = "../../browser-html" }

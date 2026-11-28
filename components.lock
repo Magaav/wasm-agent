@@ -361,3 +361,8 @@ email-outbox 1aeed47e2e035f5b9fd0f3aaaa71f25a40f732cad0f003589d104575197d5a05 22
 # 28/11 first pin of email-index (change/everything-is-a-component, row 14): the email-query contract - the
 # crate, so a change to either end rebuilt the node. `cargo tree -p wa-host` no longer lists `wa-email-index`;
 email-index 7c41a91aed440e1507504f3f7f0fa55a9df0f4381f358dc95f40dc31b0aa252e 209085
+
+# 28/11 first pin of browser (agent-browser-from-scratch stage 1): a page as text and as an accessibility-style
+# tree (wit/browser), with no layout, no rendering, no script and no socket. The `open` verb - HTTP through
+# the host sockets with a cookie jar and a per-site allow-list - is the second half and is NOT in this artifact.
+browser 45f5002faf54474212a48e746f325f6ca90607dc409ff6ad44dc625aa79a5a71 110954
