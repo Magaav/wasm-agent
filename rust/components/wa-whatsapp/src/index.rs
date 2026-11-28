@@ -2804,8 +2804,8 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
     let source = match (&narrowed_list, &request.kind, &request.from, &request.chat) {
         (Some(_), _, _, _) => None,
         (None, Some(kind), _, _) => Some(format!("{PREFIX}k/{kind}/")),
-        (None, None, Some(from), _) => Some(format!("{PREFIX}s/{}/", from.jid())),
-        (None, None, None, Some(chat)) => Some(format!("{PREFIX}m/{}/", chat.jid())),
+        (None, None, Some(from), _) => Some(format!("{PREFIX}s/{}/", from)),
+        (None, None, None, Some(chat)) => Some(format!("{PREFIX}m/{}/", chat)),
         (None, None, None, None) => None,
     };
     let mut list = match (narrowed_list, source) {
@@ -3151,7 +3151,7 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
 pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pace) -> Result<serde_json::Value, String> {
     let mut resolved: serde_json::Value = serde_json::Value::Null;
     let chat = match (&request.chat, &request.chat_name) {
-        (Some(chat), _) => chat.jid(),
+        (Some(chat), _) => chat.clone(),
         (None, Some(name)) => match resolve_chat(store, name).await? {
             Resolved::One(chat, score, matched, _source) => {
                 resolved = serde_json::json!({
@@ -3328,7 +3328,7 @@ pub async fn message<S: Store>(store: &S, request: &seam::Verified) -> Result<se
     let (Some(chat), Some(id)) = (&request.chat, &request.id) else {
         return Ok(seam::refusal(seam::Op::Message, "chat_and_id_required", "one message: pass chat and id"));
     };
-    let chat = chat.jid();
+    let chat = chat.clone();
     let Some(record) = load(store, &chat, id).await? else {
         return Ok(seam::refusal(seam::Op::Message, "not_found", "no message with that id in this chat"));
     };
@@ -3385,7 +3385,7 @@ pub async fn reactions<S: Store>(store: &S, request: &seam::Verified) -> Result<
     let (Some(chat), Some(id)) = (&request.chat, &request.id) else {
         return Ok(seam::refusal(seam::Op::Reactions, "chat_and_id_required", "one message: pass chat and id"));
     };
-    let chat = chat.jid();
+    let chat = chat.clone();
     let rows = fold_reactions(store, &chat, id).await?;
     Ok(seam::answer(
         seam::Op::Reactions,
@@ -3404,7 +3404,7 @@ pub async fn media<S: Store>(store: &S, request: &seam::Verified) -> Result<serd
     let (Some(chat), Some(id)) = (&request.chat, &request.id) else {
         return Ok(seam::refusal(seam::Op::Media, "chat_and_id_required", "one message: pass chat and id"));
     };
-    let chat = chat.jid();
+    let chat = chat.clone();
     let Some(record) = load(store, &chat, id).await? else {
         return Ok(seam::refusal(seam::Op::Media, "not_indexed", "no message with that id in this chat"));
     };
@@ -3476,7 +3476,7 @@ pub async fn download_plan<S: Store>(store: &S, request: &seam::Verified, node_m
     // The chat the request names, in the canonical spelling the writer stored it under: `Chat::jid` is
     // the same normalisation `chat::storable` applies on the write side (`c.us` -> `s.whatsapp.net`),
     // so a chat a caller names and a chat the index keys agree by construction.
-    let chat = chat.jid();
+    let chat = chat.clone();
     let id = id.clone();
     let Some(record) = load(store, &chat, &id).await? else {
         return Ok(DownloadPlan::Refused(seam::refusal(seam::Op::Download, "not_indexed", "no message with that id in this chat")));
@@ -3582,7 +3582,7 @@ fn record_of_epoch(value: i64) -> i64 {
 /// Does this record pass the filters that are not the free text?
 fn matches(record: &Record, request: &seam::Verified) -> bool {
     if let Some(chat) = &request.chat {
-        if record.chat != chat.jid() {
+        if record.chat != *chat {
             return false;
         }
     }
@@ -3592,7 +3592,7 @@ fn matches(record: &Record, request: &seam::Verified) -> bool {
         }
     }
     if let Some(from) = &request.from {
-        if !same_user(&record.sender, &from.jid()) && !same_user(&record.sender_alt, &from.jid()) {
+        if !same_user(&record.sender, from) && !same_user(&record.sender_alt, from) {
             return false;
         }
     }

@@ -374,7 +374,10 @@ pub struct Request {
 pub struct Verified {
     pub op: Op,
     pub q: Option<String>,
-    pub chat: Option<Chat>,
+    /// The exact JID, once `parse_chat` accepted it. A STRING and not `wa_whatsapp_outbox::Chat` (28/11):
+    /// the value is only ever used as its JID spelling, and naming the outbox type here kept that crate
+    /// linked into the host for a type alone - it is about to become a component.
+    pub chat: Option<String>,
     /// The chat as the caller named it when it was **not** an exact JID: a name to resolve against the
     /// index (`read` only). Exactly one of `chat`/`chat_name` can be set, never both: a caller that
     /// typed a JID gets that chat, and a caller that typed a name gets an answer about which chat it
@@ -382,7 +385,8 @@ pub struct Verified {
     pub chat_name: Option<String>,
     pub id: Option<String>,
     pub kind: Option<String>,
-    pub from: Option<Chat>,
+    /// The sender's exact JID, same rule as [`Verified::chat`].
+    pub from: Option<String>,
     pub since: Option<i64>,
     pub until: Option<i64>,
     pub before: Option<String>,
@@ -415,7 +419,7 @@ impl Request {
         let (chat, chat_name) = match self.chat.as_deref().map(str::trim) {
             None | Some("") => (None, None),
             Some(text) => match parse_chat(text) {
-                Ok(chat) => (Some(chat), None),
+                Ok(chat) => (Some(chat.jid()), None),
                 // An address-shaped string keeps the exact-JID rule's own word - `bad_chat` for a
                 // malformed one, `unsupported_chat` for a server this component cannot address - and
                 // is never re-read as a name. Only a string a human wrote ("Laura", a number) is.
@@ -424,7 +428,7 @@ impl Request {
             },
         };
         let from = match self.from.as_deref().map(str::trim) {            None | Some("") => None,
-            Some(text) => Some(parse_chat(text)?),
+            Some(text) => Some(parse_chat(text)?.jid()),
         };
         let id = match self.id.as_deref().map(str::trim) {
             None | Some("") => None,
@@ -615,11 +619,11 @@ impl Verified {
             "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.op.as_str(),
             self.q.as_deref().unwrap_or(""),
-            self.chat.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
+            self.chat.as_deref().unwrap_or_default(),
             self.chat_name.as_deref().unwrap_or(""),
             self.id.as_deref().unwrap_or(""),
             self.kind.as_deref().unwrap_or(""),
-            self.from.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
+            self.from.as_deref().unwrap_or_default(),
             self.since.map(|ms| ms.to_string()).unwrap_or_default(),
             self.until.map(|ms| ms.to_string()).unwrap_or_default(),
             self.before.as_deref().unwrap_or(""),
@@ -639,10 +643,10 @@ impl Verified {
             q: self.q.clone(),
             // A name goes back on the wire as it was typed: the component re-validates the payload
             // it took, and resolving it there is what keeps one answer for one string.
-            chat: self.chat.as_ref().map(|chat| chat.jid()).or_else(|| self.chat_name.clone()),
+            chat: self.chat.clone().or_else(|| self.chat_name.clone()),
             id: self.id.clone(),
             kind: self.kind.clone(),
-            from: self.from.as_ref().map(|chat| chat.jid()),
+            from: self.from.clone(),
             since: self.since,
             until: self.until,
             before: self.before.clone(),
@@ -1468,7 +1472,7 @@ mod tests {
 
         // A named chat is validated by the same exact-JID rule the send path uses.
         let named = Request { op: "backfill".into(), chat: Some("5511999999999@lid".into()), ..Request::default() };
-        assert_eq!(named.validate().unwrap().chat.as_ref().map(|chat| chat.jid()), Some("5511999999999@lid".to_string()));
+        assert_eq!(named.validate().unwrap().chat.clone(), Some("5511999999999@lid".to_string()));
         let bad = Request { op: "backfill".into(), chat: Some("5511999999999".into()), ..Request::default() };
         assert_eq!(bad.validate().unwrap_err().code, "bad_chat");
 

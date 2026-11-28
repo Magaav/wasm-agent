@@ -108,7 +108,7 @@ fn a_backfill_goes_in_as_a_request_and_comes_out_as_what_was_asked_for() {
             Op::Backfill,
             wa_whatsapp_index::backfill_answer(
                 vec![wa_whatsapp_index::BackfillChat {
-                    chat: verified.chat.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
+                    chat: verified.chat.clone().unwrap_or_default(),
                     count: verified.limit,
                     oldest_id: "3EB0OLDEST".into(),
                     oldest_ts: 1_700_000_000_000,
@@ -197,7 +197,7 @@ fn an_answer_too_big_for_one_result_is_bounded_before_it_is_settled() {
     let hits: Vec<serde_json::Value> = (0..4000)
         .map(|i| serde_json::json!({"chat": "5511999999999@lid", "id": format!("3EB0{i:05}"), "text": "x".repeat(240)}))
         .collect();
-    work_one(&queue, 1_000_000, |verified| answer(Op::Read, serde_json::json!({"messages": hits, "count": 4000, "chat": verified.chat.as_ref().map(|c| c.jid())})));
+    work_one(&queue, 1_000_000, |verified| answer(Op::Read, serde_json::json!({"messages": hits, "count": 4000, "chat": verified.chat.clone()})));
     let job = queue.job(wa_queue::JobId(1)).unwrap().unwrap();
     assert_eq!(job.state.as_str(), "done", "an oversized answer still settles: {:?}", job.last_error);
     let result = job.result.as_deref().unwrap();

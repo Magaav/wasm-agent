@@ -70,16 +70,16 @@ fn every_chat_a_search_hit_can_name_is_accepted_by_every_other_question() {
             let verified = request
                 .validate()
                 .unwrap_or_else(|refusal| panic!("{} {chat}: {}", op.tool(), refusal.detail));
-            assert_eq!(verified.chat.as_ref().map(Chat::jid).as_deref(), Some(chat.as_str()), "{} {chat}", op.tool());
+            assert_eq!(verified.chat.as_deref(), Some(chat.as_str()), "{} {chat}", op.tool());
             // The component re-validates the payload it took from the queue; the round trip through
             // the wire must not change the chat either.
             let back = seam::Request::decode(&verified.to_request().encode()).expect("payload");
-            assert_eq!(back.validate().expect("revalidated").chat.as_ref().map(Chat::jid).as_deref(), Some(chat.as_str()));
+            assert_eq!(back.validate().expect("revalidated").chat.as_deref(), Some(chat.as_str()));
         }
 
         // `from` is the same exact-JID rule (a search may narrow by sender).
         let from = seam::Request { op: "search".into(), q: Some("x".into()), from: Some(chat.clone()), ..Default::default() };
-        assert_eq!(from.validate().expect("from").from.map(|chat| chat.jid()).as_deref(), Some(chat.as_str()));
+        assert_eq!(from.validate().expect("from").from.as_deref(), Some(chat.as_str()));
 
         // And the send path: a chat the index reports is a chat the agent may answer.
         let send = wa_whatsapp_outbox::Request {
