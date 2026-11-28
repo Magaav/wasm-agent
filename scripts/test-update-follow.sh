@@ -33,6 +33,11 @@
 #   8. `--follow` attaches to the deploy already in flight and prints its final line.
 #
 # Prints `update follow ok`; any failed check exits 1 with the check named.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${WA_BIN:-$ROOT/rust/target/release/wa}"

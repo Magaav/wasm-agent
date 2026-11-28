@@ -7,6 +7,11 @@
 #   1. a tree that IS the fetched origin/main answers in well under a second;
 #   2. a tree that is BEHIND the fetched origin/main refuses, in the same under-a-second budget;
 #   3. the refusal names both commits and the exact commands that fix it, so nobody has to search for them.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BINDING="$ROOT/scripts/runtime-install-binding.mjs"

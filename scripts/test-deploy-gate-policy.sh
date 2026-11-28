@@ -14,6 +14,11 @@
 # reading the branch that would have run it.
 #
 # Hermetic: a temp repository per run, no cargo, no network, no sentinel, no model.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

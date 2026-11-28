@@ -5,6 +5,8 @@ set -euo pipefail
 # "smoke ok" over a run that skipped the UI tests claims more than it did.
 SKIPPED=0
 cd "$(dirname "$0")/.."
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh" && wa_git_isolate
+# ^ EVERY ROW THIS RUNNER STARTS INHERITS A CLEAN GIT ENVIRONMENT (27/11): one owner clears it before the first row.
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # The disk is a reserved resource too, and this is the reservation. It is read here - before the
@@ -196,6 +198,7 @@ run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mj
 run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
 run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
 gate_run node scripts/test-wave-withdrawal.mjs
+gate_run node scripts/test-rows-clear-git-env.mjs  # a row that writes a git repository must clear git's redirect (or say why)
 
 # The node's build heat and build seeding (change/gate-speed, 21/11). Both are about the gate itself, so
 # they belong in the gate: one heavy build at a time with a bounded job count, and a NEW target dir

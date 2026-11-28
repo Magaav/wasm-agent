@@ -30,6 +30,11 @@
 # absence of the proof lookup with a poisoned proof script.
 #
 # Hermetic: a temp directory per run, no cargo, no network, no sentinel, no model.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 # The node on this machine was STARTED by an upgrade, so it exports that upgrade's caller identity to every
 # shell it spawns - measured 2026-10-20: `WA_UPGRADE_VIA=deploy.sh` and a 16:58 deploy's reason were still in

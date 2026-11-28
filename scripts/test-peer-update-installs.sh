@@ -8,6 +8,11 @@
 # Both are predicates, and both are asserted here against the real code, not against a copy:
 #   1. the gate condition (git merge-base --is-ancestor) on a tree that is ON main but BEHIND its tip;
 #   2. the proof announces its section before the first thing that can fail, and the failure names the reason.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # NO OWNER PATH IN A ROW (landing queue, 27/11: the private-data gate refused this branch because the default below

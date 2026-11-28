@@ -21,6 +21,11 @@
 # one thing a refusal IS allowed to write is its own evidence record in an install directory that already
 # exists (`fail`/`note` append to `<install>/deploy.log` and rewrite `deploy-result.json` - that is the
 # project's stated rule, "a refusal is evidence"), so the assertions name exactly which files may exist.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

@@ -23,6 +23,11 @@
 #
 # Hermetic by construction: its own HOME, its own git repository, its own gh. No network, no vault, no cargo,
 # and it refuses to run when the home it was given is the operator's own.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/wa-linux-channel-test.XXXXXX") || { printf 'FAIL tmpdir_unavailable: cannot create a temp dir under %s (set TMPDIR)\n' "${TMPDIR:-/tmp}" >&2; exit 1; }

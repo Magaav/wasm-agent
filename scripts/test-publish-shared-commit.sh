@@ -10,6 +10,11 @@
 # implementation: scripts/lib/shared-commit.sh), and the fixture is a real bare remote with real pushes.
 #
 # Usage:  bash scripts/test-publish-shared-commit.sh
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PUBLISH="$ROOT/scripts/publish-node-binaries.sh"
