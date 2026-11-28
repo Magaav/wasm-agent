@@ -1,0 +1,9 @@
+{
+  "name": "browser",
+  "kind": "tool",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "A page as text and as an accessibility-style tree (wa:browser): no layout, no rendering, no script, no socket. Refuses by name (unclosed-raw-text, unparsable, too-deep). Stage 1 of the browser-as-a-component mission; the `open` verb with a cookie jar and a per-site allow-list is the second half.",
+  "capabilities": {},
+  "limits": {"memory_mb": 64}
+}
