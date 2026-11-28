@@ -57,7 +57,10 @@ WA_DIR="$(dirname "$WA_BIN")"
 build_companion wa-sentinel "$WA_DIR" || true
 build_companion wa-operations-supervisor "$WA_DIR" || true
 [ -x "$SENTINEL" ] || SENTINEL="${HOME}/.local/bin/wa-sentinel"
-SUPERVISOR="${WA_SUPERVISOR_BINARY:-}"
+# BESIDE WA_BIN FIRST, like the sentinel: the runner lays out what it built, and a copy of this row in a worktree has no
+# rust/target of its own, so the old repo-relative search found nothing and the row SKIPped with all three binaries present
+# (measured locally under env -i, which is the runner environment without the row-runner).
+SUPERVISOR="${WA_SUPERVISOR_BINARY:-$(dirname "$WA_BIN")/wa-operations-supervisor}"
 if [ ! -x "$SUPERVISOR" ]; then
   for candidate_sup in "$(dirname "$0")/../rust/target/release/wa-operations-supervisor" \
                        $(ls -t "$(dirname "$0")"/../rust/target/*/release/wa-operations-supervisor 2>/dev/null | head -1); do
