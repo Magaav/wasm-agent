@@ -1385,6 +1385,13 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  -- {state:"pending", op} and wait(op)/cancel(op) answer it. A wait is bounded by its own wait_s and by
  -- the sandbox's CPU guard, never by a wall clock (18/11: a script is not killed for waiting).
  local popts={ctx=ctx,scope=scope,session=ctx.session_id,dispatch=dispatch}
+ -- THE SCRIPT'S OWN SCOPE ON THE CONTEXT (28/11): a stop that tears this script down never reaches the pending
+ -- layer's own stop_work, and the records it left are in THIS scope's index (a hash), not the native one - so the
+ -- one place that can still answer for them is the stop closer, and it has to be told where to look.
+ if type(ctx) == 'table' then ctx.pending_scope = scope end
+ -- AND ON THE HOST, because the stop that ends the RUN is handled by lua/core/agent.lua's run_body, which has no
+ -- ctx: the host table is the one object every module instance shares (each dofile is its own instance).
+ if host then host.pending_scope = scope end
  -- A budget exists only when the caller asked for one, and it bounds COMPUTING: the sandbox pauses it
  -- while a call is in the host (rust/wa-capabilities/src/quickjs.rs). It is deliberately NOT used to
  -- bound a wait any more (18/11): a wall clock cannot say how much of a script's budget a wait spent,

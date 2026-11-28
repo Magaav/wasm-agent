@@ -2368,6 +2368,14 @@ function M:run(text, images)
       local pending_calls = dofile('lua/core/codemode_pending.lua')
       local note = type(stop_notice) == 'string' and stop_notice or nil
       pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil, note)
+      -- AND THE SCRIPT'S OWN RECORDS (28/11): work the turn started detached lives in the script's scope (a hash
+      -- lua/core/codemode.lua publishes on the host), and this is the only place left that can answer for it once
+      -- the script is torn down. It answers `still running: <command> (op <id>)` instead of closing it.
+      local script_scope = type(host) == 'table' and host.pending_scope or nil
+      if type(script_scope) == 'string' then
+        local _, script_said = pending_calls.close_open_native(script_scope, nil, note)
+        if script_said ~= nil then stop_notice = script_said end
+      end
     end)
   end
   -- Now the record, the event, the bus fact and (when a rerun can finish it) the one wake.
@@ -4194,6 +4202,19 @@ function M:run_body(text, images)
             local pending_calls = dofile('lua/core/codemode_pending.lua')
             local _, said = pending_calls.close_open_native('native:' .. tostring(self.session_id or 'session'), nil,
               dispatch_ctx and dispatch_ctx.stop_notice or nil)
+            -- AND THE SCRIPT'S OWN RECORDS (28/11): the work this turn started detached lives in the script's scope,
+            -- not the native one, so the same closer is asked there too - it answers for a detached record instead
+            -- of closing it (the work is still running and the line has to say so).
+            local script_scope = (type(host) == 'table' and host.pending_scope)
+              or (type(dispatch_ctx) == 'table' and dispatch_ctx.pending_scope) or nil
+            if type(script_scope) == 'string' then
+              local _, script_said = pending_calls.close_open_native(script_scope, nil,
+                dispatch_ctx.stop_notice or nil)
+              if script_said ~= nil then
+                dispatch_ctx.stop_notice = script_said
+                self.stop_notice = script_said
+              end
+            end
             if said ~= nil then
               if type(dispatch_ctx) == 'table' then dispatch_ctx.stop_notice = said end
               self.stop_notice = said

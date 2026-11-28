@@ -1843,12 +1843,14 @@ function M.close_open_native(scope, dispatch, note, tool)
   -- THE SENTENCE GOES BACK WITH THE COUNT: the caller (the tool loop, which still holds dispatch_ctx) puts it on the
   -- run so the reader's line can say what the stop stopped. Format decided 27/11: a count and the record's id -
   -- "stopped 1: bash; record <id>" - never the facts, which are read from the record on demand.
-  if closed > 0 then
-    -- THE DECIDED SHAPE INCLUDES THE RECORD ID: "stopped 1: bash; record <id>". Without it the reader has a
-    -- count and no way to read the facts, and the row's own contract is a count, the work, and the pointer.
-    return closed, ('stopped ' .. tostring(closed) .. ': ' .. tostring(last_tool or 'call')
-      .. '; record ' .. tostring(last_id or '?'))
-  end
+  -- WHAT IS STILL RUNNING COMES FIRST (28/11): work the turn started detached did not go with the stop, and a
+  -- reader told only "stopped 1: bash" would look for it. Both facts fit one line, the stopped count with its
+  -- record id and the detached work with its op.
+  local stopped_said = closed > 0
+    and ('stopped ' .. tostring(closed) .. ': ' .. tostring(last_tool or 'call')
+      .. '; record ' .. tostring(last_id or '?')) or nil
+  if left ~= nil and stopped_said ~= nil then return closed, left .. '; ' .. stopped_said end
+  if stopped_said ~= nil then return closed, stopped_said end
   if left ~= nil then return 0, left end
   return 0, nil
 end

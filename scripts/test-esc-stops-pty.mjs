@@ -807,7 +807,7 @@ function pendingStop(home) {
     // about the stopped one read the wrong work.
     for (const record of Object.values((parsed && parsed.ops) || {})
       .filter(r => r && r.stop)
-      .sort((a, b) => (b.started || 0) - (a.started || 0))) {
+      .sort((a, b) => (b.started || b.started_at || 0) - (a.started || a.started_at || 0))) {
       return facts ? Object.assign({}, record.stop, facts) : record.stop;
     }
   }
