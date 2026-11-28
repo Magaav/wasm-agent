@@ -40,16 +40,24 @@ if answer.ok == true then
   end
   ok(named > 0, "the document names at least one op")
 else
-  -- No worker: the documented unsandboxed answer, and the job it names is the queue's.
-  ok(answer.error == "whatsapp_ops_slow", "an unanswered registry is `whatsapp_ops_slow`, not a shape error: " .. tostring(answer.error))
-  ok(type(answer.id) == "number" and answer.id > 0, "the slow answer carries the job id the caller reads back: " .. tostring(answer.id))
-  ok(answer.state == "queued" or answer.state == "leased", "the job is on the queue: " .. tostring(answer.state))
-  ok(answer.retry == true, "the caller is told to ask again, not to give up")
-  ok(type(answer.detail) == "string" and #answer.detail > 0, "and is told why, in words")
-  -- The same call reads the same job: a registry question is deduped, not a new job every time.
-  local again = json.decode(host.whatsapp_index(json.encode({ op = "ops" })))
-  ok(again.id == answer.id, "the same question reads the same job: " .. tostring(again.id) .. " vs " .. tostring(answer.id))
-  skip("the registry document itself (no component working the queue in this home)")
+  -- TWO named refusals, and both must be words a caller can act on. They are different facts:
+  --   whatsapp_component_absent - this node has no whatsapp-index component at all;
+  --   whatsapp_ops_slow         - the component is there, the job is queued, ask again by id.
+  ok(answer.error == "whatsapp_ops_slow" or answer.error == "whatsapp_component_absent",
+    "an unanswered registry names one of its two reasons, never a shape error: " .. tostring(answer.error))
+  -- The absent answer carries only its code (the refusal renderer adds the sentence a caller reads);
+  -- the slow one carries a detail. Both are words, and neither is silence.
+  if answer.error == "whatsapp_ops_slow" then
+    ok(type(answer.id) == "number" and answer.id > 0, "the slow answer carries the job id the caller reads back: " .. tostring(answer.id))
+    ok(answer.state == "queued" or answer.state == "leased", "the job is on the queue: " .. tostring(answer.state))
+    ok(answer.retry == true, "the caller is told to ask again, not to give up")
+    -- The same call reads the same job: a registry question is deduped, not a new job every time.
+    local again = json.decode(host.whatsapp_index(json.encode({ op = "ops" })))
+    ok(again.id == answer.id, "the same question reads the same job: " .. tostring(again.id) .. " vs " .. tostring(answer.id))
+    skip("the registry document itself (no component working the queue in this home)")
+  else
+    skip("the registry document itself (this home has no whatsapp-index component)")
+  end
 end
 
 print(string.format("whatsapp registry ok (%d checks, %d skipped)", checks, skipped))

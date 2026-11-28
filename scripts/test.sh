@@ -1557,6 +1557,10 @@ rm -rf "$POSTING_HOME"
 # The node clock is its OS local time with a numeric offset, not a bare UTC value; the model must
 # be able to ask for it (`time`) and see the zone in its environment line.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-time.lua" "$BIN" --db "$DB.time" | grep 'node local time ok'
+# THE WHATSAPP REGISTRY DOOR, run where the components are: the door is a host capability and answers
+# `whatsapp_ops_slow` with the job it enqueued when no worker is up, so it needs its own home with the
+# whatsapp-index component in it - which is why it is excluded from the fast path and lives here.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-whatsapp-registry.lua" "$BIN" --db "$DB.whatsapp-registry" | grep 'whatsapp registry ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-telemetry-incremental.lua" "$BIN" --db "$DB.telemetry-incremental" | grep 'telemetry incremental ok'
 # The prompt index is an authored cue, not a slice of the schema description. Without this,
 # the same text is sent twice and nothing in the suite notices when the slicing returns.
