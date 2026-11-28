@@ -201,7 +201,20 @@ ok
 # landing IS its own commit.
 COMMIT_P=dddddddddddddddddddddddddddddddddddddddd; ID_P=dddddddddddd
 I6="$W/i6"; in_place "$I6" "$PREV_COMMIT"; echo ok > "$SEQ_MODE"
+# THE FIXTURE IS SIGNED, because the product now requires it (lib/lua-part.sh:150): a part is installed only when a
+# SHA256SUMS beside it lists it AND that sums carries a signature this node trusts. An unsigned "good" part could only
+# ever report lua_part_unsigned as a bug in the sequence. Signing is the publisher's own path - lib/release-signing.sh -
+# against a scratch wa-vault (lib/test-release-vault.sh), and the vault's key is trusted through WA_RELEASE_KEYS
+# (rust/wa-host/src/release.rs:key_files).
+. scripts/lib/test-release-vault.sh
+test_release_vault_start || { echo 'SKIP version-sequence part: no scratch vault (python3, curl or vault/wa_vault.py missing)'; exit 0; }
+trap 'test_release_vault_stop' EXIT
+. scripts/lib/release-signing.sh
+WA_RELEASE_KEYS="$TEST_RELEASE_VAULT_KEYS"; export WA_RELEASE_KEYS
 a_lua_part "$W/part-tree" "$W/lua-core-good.tar.gz" "$HOST_INT"
+( cd "$W" && sha256sum lua-core-good.tar.gz > SHA256SUMS )
+wa_release_sign_sums "$W/SHA256SUMS" "$W/SHA256SUMS.sig" || fail 'the fixture part could not be signed'
+[ -f "$W/SHA256SUMS.sig" ] || fail 'signing produced no SHA256SUMS.sig beside the part' 
 part_lock "$W/lua.part.lock" "$W/lua-core-good.tar.gz" "$HOST_INT"
 bash scripts/version-sequence.sh --install "$I6" --candidate "$I6/wa" --commit "$COMMIT_P" --root "$W/root" \
   --upgrade "$W/upgrade-stub.sh" --share "$W/share6" \
