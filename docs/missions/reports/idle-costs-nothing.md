@@ -50,18 +50,25 @@ compile **once**, hash **once**, and run the body three times; editing the modul
 runs the new body. That is the brief's test for (a), and it fails on main by construction — there is no cache
 there and `DOFILE_COMPILES` does not exist.
 
-## (b) The double open on a `run` call — not measured here, and why
+## (b) The double open on a `run` call - not measured, but the ground is cleared
 
-I did not get a measurement, so I am not claiming a fix. This build has **no code-mode assets**
-(`WA_CODEMODE_ALLOW_EMPTY=1`): `wa-capabilities/build.rs` refuses to build otherwise, and the prepared
-artifact comes from `node scripts/codemode-build.mjs build <absolute-source-root>` (docs/CODEMODE.md). With
-no assets the code-mode component cannot be opened at all, so opening it once or twice cannot be counted.
+I did not get a measurement, so I am not claiming a fix. What I did get is the build and one ruled-out cause.
 
-What the code says about where to look, for whoever picks it up: the run path reaches the guest twice — once
-for anything it needs before the script runs, and once for the run itself — and the 23/11 report measured
-`40 opens for 20 calls`. Settling it needs a build with prepared assets and a counting hook at the open site;
-this report does not have one.
+THE SUPPORTED BUILD WORKS HERE, and that was the blocker: the prepared, verified asset directory is the
+checkout's `.git/codemode-assets/pi-1.2.0-quickjs-3.6.2/`, and `node scripts/codemode-build.mjs build <tree>`
+resolves it from Git metadata and builds a binary that carries code mode (here
+`~/.wasm-agent/build/target/wt-idle-<hash>/release/wa`, sha256 `80385dae...`, with the embedded VM checker run).
+My first attempts failed because they bypassed that script with a bare `cargo build`, which has no assets and
+refuses; `WA_CODEMODE_ALLOW_EMPTY=1` is only for artifacts not meant to run code mode.
 
+ONE CANDIDATE CAUSE IS OUT. `wa_kernel_runtime::sandbox_host::available()` is what the router asks before it
+routes a script, and it hashes the artifact and returns - it does not instantiate. So the second open per call
+is not the availability probe. The run surface then goes through `dispatch("open"|"advance"|"finish")`
+(`sandbox_host.rs`) and the Lua policy around it (`lua/core/agent.lua`, `codemode_policy.lua`).
+
+WHAT COUNTING OPENS STILL NEEDS: a real turn with a provider, because the `run` tool is driven by the agent
+loop and a scratch node has no model. The seam reports every open itself (`{"op":"open","elapsed_ms":…}`), so
+the count is one hook away once a turn can run - the binary to run it with now exists.
 ## (c) A warm QuickJS instance or snapshot — skipped, with the reason
 
 Skipped deliberately. Code mode runs **model-authored code**, and the surface in front of it is exactly the
