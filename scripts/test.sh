@@ -209,7 +209,10 @@ gate_run bash scripts/test-installer-clears-git-env.sh
 gate_run bash scripts/test-deploy-refusal-keeps-the-running-result.sh
 # /health NAMES ITS INSTALL AND ITS SUPERVISOR (installer-refuses-a-target, item 4): a runtime-worktree.txt naming a
 # path that no longer exists, and a supervisor record naming another home - the 24/11 shape - are both answered.
-WA_BIN="$BIN" gate_run bash scripts/test-health-names-its-install.sh  # a row that writes a git repository must clear git's redirect (or say why)
+WA_BIN="$BIN" gate_run bash scripts/test-health-names-its-install.sh
+# A ROW BUILDS ITS ENVIRONMENT ONCE (installer-refuses-a-target, item 10): a statement that runs an installer through a
+# line continuation lost its env prefix to one stray line on 25/11 and deployed to the LIVE install.
+gate_run bash scripts/test-rows-build-one-environment.sh  # a row that writes a git repository must clear git's redirect (or say why)
 
 # The node's build heat and build seeding (change/gate-speed, 21/11). Both are about the gate itself, so
 # they belong in the gate: one heavy build at a time with a bounded job count, and a NEW target dir
