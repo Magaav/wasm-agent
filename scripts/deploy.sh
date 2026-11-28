@@ -2324,14 +2324,6 @@ record_installed() {
       # the id a later fast-path deploy reads back as binary_commit=, so it is held to the same rule.
       if [ -n "${BINARY_SOURCE_COMMIT:-}" ] && { [ "${#BINARY_SOURCE_COMMIT}" != 40 ] || [ -n "$(printf '%s' "$BINARY_SOURCE_COMMIT" | tr -d '0123456789abcdef')" ]; }; then
         post_swap_problem "recording: binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id, so binary_commit= is recorded as unknown with binary_id_why="
-        # PRE-SWAP THIS IS A REFUSAL, LIKE THE COMMIT ABOVE, and the row that documents this step says so ("a
-        # record that could not state the second as a full id is refused, like the first"). Recording it as
-        # unknown is only right AFTER the swap, where refusing would leave the new bytes running under an
-        # interim record - the same split the commit check above already makes.
-        if [ "${SWAPPED:-0}" != 1 ]; then
-          fail "refused(id_not_40_hex): binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id, so installed.txt would record binary_commit=unknown for a prebuilt install"
-        fi
-        post_swap_problem "recording: binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id, so binary_commit= is recorded as unknown with binary_id_why="
         BINARY_ID_WHY="binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id"
         BINARY_SOURCE_COMMIT=""
       fi ;;

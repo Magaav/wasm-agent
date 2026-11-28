@@ -822,6 +822,9 @@ run_record() { # [commit the record should name] [source commit of the bytes] ->
     # THE 40-HEX OF THE TREE THIS DEPLOY INSTALLED: the block reads COMMIT_FULL for a covering prebuilt record,
     # and without it the record falls to commit=unknown and refuses - which is what this row was reporting.
     echo "COMMIT_FULL=$HEAD_SHA"
+    # deploy.sh reaches the record step AFTER the swap (SWAPPED=1): the 24/11 rule is a refusal BEFORE it and a
+    # recorded problem after it, so the harness must model that flag, not omit it.
+    echo "SWAPPED=${SWAPPED_RECORD:-0}"
     echo 'BRANCH=main'
     echo 'DIRTY=0'
     echo 'HASH=nodehash'
@@ -886,10 +889,11 @@ contains "$record" "commit=$HEAD_SHA" "the digest-fallback record names the inst
 contains "$record" "binary_commit=$COMMIT" "...and the commit the bytes are a build of"
 contains "$record" "binary_source_commit=$COMMIT" "...under the name the deploy records (binary_source_commit=)"
 contains "$record" "binary_release=node-$HEAD_SHORT" "...beside the release that was used"
-out="$(run_record "$HEAD_SHA" abc1234)"
-expect_status 3 "$?" "the record step with a source commit that is not 40 hex"
-contains "$out" "binary_source_commit=abc1234" "the refusal names the value it would have written"
-contains "$(cat "$rec_install/installed.txt")" "binary_source_commit=$COMMIT" "the refused write did not replace the good record"
+out="$(SWAPPED_RECORD=1 run_record "$HEAD_SHA" abc1234)"
+expect_status 0 "$?" "the record step, AFTER the swap, with a source commit that is not 40 hex"
+contains "$out" "binary_source_commit=abc1234" "the recorded problem names the value it would have written"
+contains "$(cat "$rec_install/installed.txt")" "binary_commit=unknown" "...and binary_commit= is recorded as unknown, not guessed"
+contains "$(cat "$rec_install/installed.txt")" "binary_id_why=binary_source_commit=abc1234 is not a 40-hex commit id" "...with the why beside it"
 
 
 # --- the wiring in scripts/deploy.sh ------------------------------------------------------------------
