@@ -1,0 +1,14 @@
+[package]
+name = "wa-queue-contract"
+version = "0.1.0"
+edition = "2021"
+description = "The queue's contract: the request, the job, the states and the words. No Kv, no clock, no wasmtime."
+license = "MIT"
+
+# Deliberately dependency-free, like `wa-queue` itself: this is vocabulary, and a consumer that only
+# needs to speak it should not link a runtime to do so.
+[dependencies]
+
+[lib]
+name = "wa_queue_contract"
+path = "src/lib.rs"

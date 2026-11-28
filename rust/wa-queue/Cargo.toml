@@ -8,6 +8,7 @@ license = "MIT"
 # Deliberately dependency-free: the queue only needs bytes in a Kv and a clock. The host adapts
 # `wa:kernel/kv` (and its injected clock) to the two traits below; tests use the in-memory Kv.
 [dependencies]
+wa-queue-contract = { path = "../wa-queue-contract" }
 
 [lib]
 name = "wa_queue"
