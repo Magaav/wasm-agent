@@ -1574,6 +1574,20 @@ fi
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.
+# ---- the time budget (gate-stays-fast 2) --------------------------------------------------------------
+# Victor's number: the full suite on a quiet machine finishes inside ten minutes. A budget nobody checks is
+# a wish, so passing it FAILS the run - naming the rows that grew, measured against the archived runs this
+# runner keeps (scripts/rows-cost.sh). WA_SUITE_BUDGET_S overrides the number; a quiet machine is the only
+# place the verdict means anything, which is why the line says the seconds it measured.
+BUDGET_S=${WA_SUITE_BUDGET_S:-600}
+rows_total_ms=$(awk -F'\t' '$2 ~ /^[0-9]+$/ {s+=$2} END {print s+0}' "$work/lua.tsv" 2>/dev/null)
+if [ "${rows_total_ms:-0}" -gt $((BUDGET_S * 1000)) ]; then
+  fails=$((fails + 1))
+  echo "FAIL suite-budget (${rows_total_ms}ms of Lua rows): past the ${BUDGET_S}s budget for the full suite"
+  bash "$ROOT/scripts/rows-cost.sh" --rows 10 2>/dev/null | sed -n '/slowest rows/,/^$/p' | sed 's/^/fast: /'
+  bash "$ROOT/scripts/rows-cost.sh" --rows 10 2>/dev/null | sed -n '/got slower/,/^$/p' | sed 's/^/fast: /'
+fi
+
 if [ "$fails" = 0 ]; then
   exit_code=0
   verdict_line="fast path ok ($ran checks, $skipped skipped, ${elapsed}s)"

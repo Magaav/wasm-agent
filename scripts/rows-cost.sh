@@ -57,6 +57,26 @@ awk -F'\t' -v total="$total_ms" '$2 ~ /^[0-9]+$/ {printf "%8.1f  %5.1f%%  %s\n",
   | sort -rn | head -"$ROWS"
 
 echo
+echo "== rows that got slower than the runs before them (1.5x their median, the budget's own question)"
+if [ "${#files[@]}" -lt 2 ]; then
+  echo "   no earlier run archived yet, so nothing to compare"
+else
+  grew=$(awk -F'\t' '
+    FNR==1 { run++ }
+    $2 ~ /^[0-9]+$/ { if (run == 1) { now[$3] = $2 } else { prev[$3][++n[$3]] = $2 } }
+    END {
+      for (row in now) {
+        k = n[row]
+        if (k == 0) continue
+        for (i = 1; i <= k; i++) for (j = i + 1; j <= k; j++) if (prev[row][j] < prev[row][i]) { x = prev[row][i]; prev[row][i] = prev[row][j]; prev[row][j] = x }
+        median = (k % 2) ? prev[row][int(k/2)+1] : (prev[row][k/2] + prev[row][k/2+1]) / 2
+        if (median > 0 && now[row] > median * 1.5 && now[row] > 2000) printf "%8.1f -> %8.1f  (%4.1fx)  %s\n", median/1000, now[row]/1000, now[row]/median, row
+      }
+    }' "${files[@]}" | sort -k3 -rn | head -10)
+  if [ -n "$grew" ]; then printf '%s\n' "$grew"; else echo "   none over 1.5x, and none over 2 s"; fi
+fi
+
+echo
 echo "== rows over 20 s in the newest run (each needs a reason in its header)"
 over=$(awk -F'\t' '$2 ~ /^[0-9]+$/ && $2 > 20000 {printf "%8.1f  %s\n", $2/1000, $3}' "$newest" | sort -rn | head -20)
 if [ -n "$over" ]; then printf '%s\n' "$over"; else echo "   none"; fi

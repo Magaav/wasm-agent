@@ -41,4 +41,23 @@ printf '%s' "$empty" | grep -q 'no archived run'; check $? "an empty archive is 
 # header - not a keyword - is what tells a run apart from no run.
 printf '%s' "$empty" | grep -q 'seconds'; [ $? != 0 ]; check $? "an empty archive prints the run table as if a run had happened"
 
+# ---- the budget is ENFORCED, not printed (gate-stays-fast item 2) --------------------------------------
+# The suite must FAIL when it passes the budget, and name the rows that grew. The failure lives in
+# scripts/fast.sh; these two checks pin that it is wired there and that the growth list answers the
+# question it makes. (A live over-budget suite is not run here: rows-cost's own sections are what the
+# budget reads, and they are checked above on a fixture.)
+fast_sh="$ROOT/scripts/fast.sh"
+grep -q 'FAIL suite-budget' "$fast_sh"; check $? "scripts/fast.sh has no budget failure: a budget nobody checks is a wish"
+grep -q 'WA_SUITE_BUDGET_S' "$fast_sh"; check $? "scripts/fast.sh does not read WA_SUITE_BUDGET_S, so the number cannot be stated or overridden"
+grep -q 'rows-cost.sh' "$fast_sh"; check $? "the budget failure does not read the cost report, so it cannot name the rows that grew"
+
+G=$(mktemp -d "${TMPDIR:-/tmp}/rows-cost-grew.XXXXXX")
+printf '0\t1000\tscripts/test-a.lua\tok\tpass\n0\t1000\tscripts/test-b.lua\tok\tpass\n' > "$G/20260101T000000Z-old.tsv"
+printf '0\t1000\tscripts/test-a.lua\tok\tpass\n0\t9000\tscripts/test-b.lua\tok\tpass\n' > "$G/20260102T000000Z-new.tsv"
+grew=$(bash "$ROOT/scripts/rows-cost.sh" --dir "$G" --rows 2 2>&1 | sed -n '/got slower/,/^$/p')
+printf '%s' "$grew" | grep -q 'test-b.lua'; check $? "the growth list does not name the row that grew (1 s -> 9 s): [$grew]"
+printf '%s' "$grew" | grep -q '9.0x'; check $? "the growth list does not say how much it grew: [$grew]"
+printf '%s' "$grew" | grep -q 'test-a.lua'; [ $? != 0 ]; check $? "a row that did not grow is listed: [$grew]"
+rm -rf "$G"
+
 if [ "$failures" = 0 ]; then echo "rows-cost: $checks check(s), 0 failed"; else echo "rows-cost: $checks check(s), $failures FAILED"; exit 1; fi
