@@ -31,7 +31,18 @@ say() { printf '%s\n' "$*"; }
 # there - the same rule scripts/test-core-parity.sh obeys.
 root=$HOME/.wasm-agent/tmp/tz-component-$$
 mkdir -p "$root" || exit 1
-trap 'rm -rf "$root"' EXIT
+# STOP WHAT THIS ROW STARTS (orchestrator, 28/11: 388 orphaned wa-operations-supervisor processes came from a
+# worker's test runs). A node with no rendezvous spawns a supervisor of its own per home, and that supervisor
+# outlives the node by design - it is a service. A row that makes homes must therefore take their supervisors
+# with them, or every run leaves a process behind for ever.
+reap() {
+  for pid in $(ps -eo pid,cmd 2>/dev/null | grep 'wa-operations-supervisor' | grep -F -- "--rendezvous $root" \
+      | grep -v grep | awk '{print $1}'); do
+    kill "$pid" 2>/dev/null || true
+  done
+  rm -rf "$root"
+}
+trap reap EXIT
 run() { # run <home> <out>
   WASM_AGENT_LUA_ROOT="$ROOT" WASM_AGENT_HOME="$1" WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
     timeout 300 "$bin" --db "$1/t.db" --core-component "$core" "$ROOT/scripts/test-local-tz.lua" >"$2" 2>&1
