@@ -30,7 +30,13 @@ mkdir -p "$HOME" "$HOME/.config" "$HOME/.local/share"
 
 checks=0
 sleeper=
-cleanup() { [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null; rm -rf "$work"; }
+cleanup() {
+  # NOTHING OF OURS OUTLIVES THE ROW (canary 29/11): kill_watchers finds every watcher whose HOME or
+  # WASM_AGENT_HOME points inside this row scratch tree, so the unit own watcher is never eligible.
+  kill_watchers
+  [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null
+  rm -rf "$work"
+}
 trap cleanup EXIT
 ok() { checks=$((checks + 1)); }
 # NOTHING OF OURS OUTLIVES THE ROW (canary 29/11): a stop is a request, and a watcher that is still draining keeps a
