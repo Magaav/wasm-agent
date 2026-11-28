@@ -288,15 +288,13 @@ local function generic_sections(role, declared, available)
   -- The turn's own retrospective (operator's request, 10/11): what hurt the reasoning, what removing it
   -- would buy, and ONE harness optimisation to focus on - only when the turn exposed something. The
   -- estimate is required because it is the difference between spending steps and spending context.
-  -- THE LEAN NOTE (27/11, turn-note-is-lean; Fable+Victor "agreed, apply"): silent by default, and three short fields
-  -- when something did hurt. It SHRINKS this block from 1,106 to 317 bytes - the only prompt change in that mission,
-  -- and the reason the prompt cache is rebuilt once at this update.
   s.turn = table.concat({
-    "End every answer with a `<turn>` block, after the work and never inside it - and ONLY when something hurt:",
-    "- **tool** - the tool or part of wa;",
-    "- **cost** - a number: rounds or minutes;",
-    "- **hurt** - one sentence, including what would have removed it.",
-    "`buys` and `focus` remain optional. Nothing hurt: no block at all.",
+    "End every answer with a `<turn>` block, after the work itself and never inside it:",
+    "- **what hurt** - only what wa did to your reasoning (its tools, instructions, results or missing facts it should have given) and what would have removed it; your own mistakes and the project's own problems (its tests, scripts, fixtures) are not wa friction - leave them out;",
+    "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
+    "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
+    "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
+    "The block stays in your answer exactly where you write it - it is not removed from what the reader sees - and it is also stored in the run journal (session, mission, build, mode and the three fields) so the fleet can read the friction without parsing a transcript.",
   }, "\n")
   return s
 end
