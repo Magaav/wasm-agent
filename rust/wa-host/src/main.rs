@@ -338,6 +338,10 @@ fn main() {
     // paints through is THIS binary's client - the kernel runtime cannot reach it. Install it before anything can
     // import the world; a node that skipped this would answer `terminal_document_absent` instead of painting.
     wa_kernel_runtime::terminal_host::install(Box::new(wa_capabilities::screen::document(None)));
+
+    // `wa:process` is granted by the kernel runtime; the supervisor seam it runs on is THIS binary's, installed
+    // beside the terminal document for the same reason: the kernel runtime cannot reach the node's own client.
+    wa_kernel_runtime::process_world::install(Box::new(wa_capabilities::operations::SupervisorRunner));
     // `wa dev` before anything that touches the node. It builds and runs a component crate from its
     // own `.wa-dev/` directory, so it needs no database, no graph, no Lua tree, and - since it is a
     // development loop - no node environment file either: a dev run must not pick up a node's
