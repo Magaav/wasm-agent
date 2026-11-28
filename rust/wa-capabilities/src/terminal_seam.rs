@@ -28,16 +28,23 @@ pub trait Document: Send {
 pub struct Host {
     pub table: ResourceTable,
     pub document: Box<dyn Document>,
+    pub wasi: wasmtime_wasi::WasiCtx,
 }
 
 impl Host {
     pub fn new(document: Box<dyn Document>) -> Host {
-        Host { table: ResourceTable::new(), document }
+        Host { table: ResourceTable::new(), document, wasi: wasmtime_wasi::WasiCtxBuilder::new().build() }
     }
 }
 
 impl HasData for Host {
     type Data<'a> = &'a mut Host;
+}
+
+impl wasmtime_wasi::WasiView for Host {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+    }
 }
 
 impl wa::terminal::types::Host for Host {}
@@ -297,6 +304,70 @@ mod rows {
         let worker = worker_thread.lock().unwrap().expect("the worker must have started");
         assert_ne!(worker, caller_thread, "the client must be created on the worker thread, not the caller's");
         assert_eq!(*recorded.lock().unwrap(), vec!["write", "head"]);
+    }
+
+
+    /// ROW: a real component that imports `wa:terminal/document` LINKS against this host. The fixture crate is built
+    /// in the test (its own target dir), granted WASI and the document interface, and instantiated ASYNC - this store
+    /// is `component-model-async`, so `Linker::instantiate` is refused outright.
+    #[test]
+    fn a_guest_that_paints_links_against_the_document_seam() {
+        struct Noop;
+        impl std::task::Wake for Noop {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        fn block_on<F: std::future::Future>(future: F) -> F::Output {
+            let waker = std::task::Waker::from(std::sync::Arc::new(Noop));
+            let mut cx = std::task::Context::from_waker(&waker);
+            let mut future = Box::pin(future);
+            loop {
+                match future.as_mut().poll(&mut cx) {
+                    std::task::Poll::Ready(value) => return value,
+                    std::task::Poll::Pending => std::thread::yield_now(),
+                }
+            }
+        }
+
+        let fixture = std::path::Path::new("../components/test-terminal-document");
+        assert!(fixture.is_dir(), "the fixture crate must exist");
+
+        let target = std::env::temp_dir().join("wa-terminal-fixture-target");
+        let built = std::process::Command::new("cargo")
+            .current_dir(fixture)
+            .env("CARGO_TARGET_DIR", &target)
+            .args(["build", "--offline", "--target", "wasm32-wasip2", "--release"])
+            .output()
+            .expect("cargo must run");
+        assert!(
+            built.status.success(),
+            "the fixture must build: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+
+        let artifact = target.join("wasm32-wasip2/release/test_terminal_document.wasm");
+        let engine = wasmtime::Engine::default();
+        let component = wasmtime::component::Component::from_file(&engine, &artifact)
+            .expect("the fixture must load as a component");
+
+        struct Quiet;
+        impl Document for Quiet {
+            fn write(&mut self, _text: &str) -> Result<(), Fault> { Ok(()) }
+            fn block(&mut self, _open: bool) -> Result<(), Fault> { Ok(()) }
+            fn code_block(&mut self) -> Result<(), Fault> { Ok(()) }
+            fn head(&mut self, _text: &str) -> Result<u32, Fault> { Ok(1) }
+            fn rewrite(&mut self, line: u32, _text: &str) -> Result<u32, Fault> { Ok(line) }
+            fn pin_toggle(&mut self) -> Result<Option<bool>, Fault> { Ok(None) }
+            fn dirty(&mut self) -> bool { false }
+        }
+
+        let mut linker = wasmtime::component::Linker::<Host>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("WASI must link");
+        TerminalClient::add_to_linker::<Host, Host>(&mut linker, |host: &mut Host| host)
+            .expect("the document seam must be grantable");
+        let mut store = wasmtime::Store::new(&engine, Host::new(Box::new(Quiet)));
+
+        block_on(linker.instantiate_async(&mut store, &component))
+            .unwrap_or_else(|error| panic!("a granted painter must instantiate: {error:?}"));
     }
 
     /// ROW: the document seam answers in the program's own terms - a heading lands where the program says it did,

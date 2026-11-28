@@ -1,0 +1,18 @@
+package wa:test-terminal-document@0.1.0;
+
+/// A TEST FIXTURE, never shipped: it imports the terminal world the node serves (the DOCUMENT seam) and exports an
+/// interface a host-side test drives, so the seam is exercised from a real component rather than from Rust calls.
+interface painter {
+  record painted {
+    lines-written: u32,
+    last-line: u32,
+    dirty: bool,
+  }
+
+  paint: async func(title: string, body: string) -> result<painted, string>;
+}
+
+world fixture {
+  import wa:terminal/document@0.1.0;
+  export painter;
+}
