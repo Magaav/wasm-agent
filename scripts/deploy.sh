@@ -200,15 +200,21 @@ write_result() { # ok detail [verdict] [problems]
   [ -n "$verdict" ] || { [ "$1" = true ] && verdict=installed || verdict=failed; }
   # THE SHARED RESULT BELONGS TO THE DEPLOY THAT HOLDS THE RECORD (25/11, item 6): a refusal that never touched the
   # install writes its own request's result and a log line, never this file.
-  if [ "${HOLDS_ALIVE:-1}" = 1 ]; then
-  printf '{"verdict":"%s","problems":%s,"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s","phases":%s}\n' \
+  local record
+  record="$(printf '{"verdict":"%s","problems":%s,"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s","phases":%s}' \
     "$verdict" "$problems" "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
     "${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-}}" "$(_esc "$2")" "$(_esc "$REASON")" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_esc "$REQUEST_ID")" "$(_esc "$EXPECTED_SHA")" "$(wa_phases_json)" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_esc "$REQUEST_ID")" "$(_esc "$EXPECTED_SHA")" "$(wa_phases_json)")"
+  if [ "${HOLDS_ALIVE:-1}" = 1 ]; then
+    printf '%s\n' "$record" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
   fi
+  # THIS REQUEST'S OWN RESULT IS ITS OWN (25/11, Fable's read of 6c361037): the copy below used to take the SHARED file, so a
+  # refused request whose shared write was skipped published the RUNNING deploy's verdict as its own ("installed") and the
+  # refusal disappeared. A request that does not hold the record writes its own JSON directly - verdict failed, its own
+  # detail - and never copies anybody else's.
   if [ -n "$REQUEST_ID" ]; then
     mkdir -p "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID"
-    cp "$INSTALL_DIR/deploy-result.json" "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID/result.json" 2>/dev/null || true
+    printf '%s\n' "$record" > "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID/result.json" 2>/dev/null || true
   fi
 }
 
