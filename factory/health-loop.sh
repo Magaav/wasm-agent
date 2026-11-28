@@ -104,6 +104,16 @@ while true; do
   # The lib that produced that binary, named: a grading line is evidence only if a reader can tell WHICH factory said it.
   echo "$(date -u +%H:%MZ) orch(health): factory lib $(stat -c %y "$HERE/lib/main-binary.sh" 2>/dev/null | cut -d. -f1)${FACTORY_NOTE:+  [$FACTORY_NOTE]}" >> $H
   export WA_BIN
+  # A LOCK WAIT IS NOT SILENCE, IT IS A WAIT WITH A HOLDER (28/11). Measured 02:14Z: the tip 8b8b6400 had been
+  # "resolving" for 39 minutes because .suite.lock was held by an unrelated job (a row run for diff-card-reads), and
+  # nothing in the handover said so - the reader could only have learned it from `fuser`. Name the holder before waiting.
+  SUITE_LOCK=$M/.suite.lock
+  if [ -e "$SUITE_LOCK" ] && command -v fuser >/dev/null 2>&1; then
+    HOLDERS=$(fuser "$SUITE_LOCK" 2>/dev/null | tr -s ' ' ' ' | sed 's/^ //;s/ $//')
+    if [ -n "$HOLDERS" ]; then
+      echo "$(date -u +%H:%MZ) orch(health): ${N:0:8} waiting for the suite lock ($SUITE_LOCK held by pid $HOLDERS) before the rows can start" >> $H
+    fi
+  fi
   TIP_SHA="$N"; TIP_STARTED=$(date +%s)
   SUITE_BUDGET=${WA_HEALTH_SUITE_SECONDS:-2400}
   timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh > $M/_orch/health-loop-run.out 2>&1; RC=$?

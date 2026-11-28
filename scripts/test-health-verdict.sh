@@ -20,6 +20,10 @@ grep -q 'trap wa_health_on_term TERM' "$loop" || fail 'the loop does not trap TE
 grep -q 'WA_HEALTH_SUITE_SECONDS' "$loop" || fail 'the suite has no budget, so a hang is indistinguishable from slow'
 grep -q 'timeout "$SUITE_BUDGET" bash $C/scripts/main-health.sh' "$loop" || fail 'the suite is not run under the budget'
 grep -q 'wa_health_verdict_line "$N" "$RC" "$TOOK"' "$loop" || fail 'the loop has a path that runs the suite without printing a verdict'
+# A LOCK WAIT MUST NAME ITS HOLDER: measured 02:14Z, a tip sat "resolving" for 39 minutes because .suite.lock was held
+# by an unrelated job, and only `fuser` could have said so.
+grep -q 'waiting for the suite lock' "$loop" || fail 'the loop waits for the suite lock in silence'
+grep -q 'fuser' "$loop" || fail 'the lock-wait line does not name the holder' 
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/verdict.XXXXXX") || fail 'no temp dir'
 trap 'rm -rf "$work"' EXIT
@@ -55,6 +59,12 @@ case "$out" in *Terminated*) ;; *) fail "the log's own evidence of the kill is n
 # 4) KILLED BY THE BUDGET: the budget is named as the killer, not the log.
 out=$(line 124 2400 "$work/empty.out" "$work/missing.json" 2400)
 case "$out" in *"2400s budget"*) ;; *) fail "a budget kill does not name the budget: [$out]" ;; esac
+
+# 4b) LOCK: a suite that never started because the lock was taken says so.
+printf 'flock: .suite.lock is held by pid 1058005
+' > "$work/lock.out"
+out=$(line 1 12 "$work/lock.out" "$work/missing.json")
+case "$out" in *lock*) ;; *) fail "a lock-blocked run does not name the lock: [$out]" ;; esac
 
 # 5) rc=0 BUT NO READABLE JSON: that is a NO VERDICT, not a green.
 out=$(line 0 90 "$work/empty.out" "$work/missing.json")
