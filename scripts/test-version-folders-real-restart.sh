@@ -190,7 +190,9 @@ case "$KEPT" in *bbbbbbbbbbbb*) ok 'and the new version is sealed and kept' ;; *
 # failed restart moves `current` back by one rename and keeps the new version sealed - the property the whole design rests on
 # and the first-install run above cannot show (it says "no previous version to move back to").
 OUT2="$S/seq2.log"
-timeout 250 bash scripts/version-sequence.sh --install "$INSTALL" --candidate "$S/cand/wa" \
+# THE SECOND SEQUENCE IS THE SLOW ONE: step 2 health-checks the candidate and step 4 waits 90 s for a node it will not get,
+# so 250 s killed it (measured: "the second upgrade exited 124").
+timeout 700 bash scripts/version-sequence.sh --install "$INSTALL" --candidate "$S/cand/wa" \
   --commit cccccccccccccccccccccccccccccccccccccccc --root "$(pwd)" --upgrade "$(pwd)/scripts/upgrade.sh" \
   --lua-part "$S/lua-core.tar.gz" --lua-lock "$S/lua.lock" --sentinel-fail-expected > "$OUT2" 2>&1
 rc2=$?
