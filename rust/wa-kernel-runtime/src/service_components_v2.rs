@@ -1531,22 +1531,10 @@ mod tests {
     /// stills and extract the track, then asks for a path that walks out of its grant. Everything asserted here is
     /// read from ITS LOG, not from a return value - a kernel that answered correctly and told the guest something
     /// else would pass a return-value test and fail this one.
-    // IGNORED, and here is exactly how far it gets. The policy question is settled by running on a scratch home
-    // (`WA_GRANT_POLICY` names a file that does not exist, the documented manifest mode, so the manifest grant is
-    // the only gate - never the operator's live policy.json).
-    //
-    // The guest's log, measured:
-    //
-    //   media probe=mov 30000ms streams=2                         <- the capability answers through the kernel
-    //   media stills-error=...no frame at 1000 ms (averror -44)   <- -44 is WASI ENOENT, on WRITE only
-    //   media audio-error=...averror -44
-    //   media refused=...outside_the_grant:/in/../../../etc/passwd <- the grant check works
-    //
-    // The media component's preopens are right - traced: `[("/in", ".../svc-media.in", true), (".../svc-media.media-out",
-    // true)]` - and READING through /in works, so the open question is specifically a write through a preopen
-    // from a component the kernel instantiates INSIDE another component's call. That is the next thing to
-    // understand; nothing about it is guessed here.
-    #[ignore = "writes through a granted preopen from a nested component invocation answer ENOENT; probe and refusal work"]
+    // It passes end to end: probe, two stills, the track, the refusal, and three files on disk in the granted
+    // directory. It took a day to get here because the fixture asked the capability to write into `/out`, which
+    // was NOT one of the directories its grant named - so the nested component had no preopen for that guest path
+    // and the write answered WASI ENOENT (-44), which reads like a media bug and is a missing grant.
     #[test]
     fn fixture_media_describes_stills_tracks_and_refuses_a_path_outside_the_grant() {
         use crate::services::{logs, start, status, stop, support};
