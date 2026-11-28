@@ -76,6 +76,15 @@ BASE="${WA_ROW_SCRATCH_ROOT:-${HOME}/.cache/wa-row}"
 case "$BASE" in */.wasm-agent|*/.wasm-agent/*) BASE=/tmp ;; esac
 S=$(mktemp -d "$BASE/wa-vfrestart-XXXXXX") || { echo 'FAIL: no scratch' >&2; exit 2; }
 cleanup() {
+  # AND SO IS EVERYTHING THAT NAMES THIS SCRATCH: step 4's restart attempt starts the node and its supervisor, and
+  # when the restart is refused they are still running. The runner counts that as leftovers and calls it a row defect
+  # (measured: leftovers=3, all three from the staged and sealed trees). Nothing outside this scratch is touched - the
+  # match is on the scratch path itself.
+  for p in $(ps -eo pid= 2>/dev/null); do
+    [ "$p" = "$$" ] && continue
+    cmd="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)" || continue
+    case "$cmd" in *"$S"*) kill "$p" 2>/dev/null; sleep 0.1; kill -9 "$p" 2>/dev/null ;; esac
+  done
   # THE WATCHER IS KILLED BY PID: `stop` asks, and a watcher that is already confused does not answer - which is exactly
   # how one run's watcher survived into the next run and made its `status` hang (measured: 2 green runs, then hangs).
   timeout 5 "$S/install/wa-sentinel" stop >/dev/null 2>&1
