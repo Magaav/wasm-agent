@@ -263,15 +263,56 @@ local function iso_seconds(text)
   return days * 86400 + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(se)
 end
 
+-- THE COUNTDOWN (Victor, 28/11): '28d 02h 08m 01s', zero-padded hh/mm/ss, days never padded.
+--
+-- WHY NOT THE OLD '%.1fh'. Three reasons, all of them his: a reader cannot subtract 3.0h from a clock; the
+-- shape changed with the size (2m, 3.0h, 1.4d), so a column of them did not line up; and an ISO timestamp
+-- that the parser did not recognise was printed raw, end to end, which is what a /status row showed.
+--
+-- THE RULE, in one place: the largest unit that is not zero starts the string, every unit after it is two
+-- digits, and only DAYS are ever unpadded (a feature nobody wants read as "0d"). Under a minute reads "08s".
+-- CELLS, NOT BYTES: every bar glyph is three bytes, so a width computed with # puts the second column
+-- three times too far right (measured: an 68-cell header line at a 60-column width).
+local function cells(text)
+  local n = 0
+  for _ in tostring(text or ''):gmatch('[%z\1-\127\194-\244][\128-\191]*') do n = n + 1 end
+  return n
+end
+
+function M.countdown(seconds)
+  local s = math.max(0, math.floor(tonumber(seconds) or 0))
+  local d = math.floor(s / 86400)
+  local h = math.floor((s % 86400) / 3600)
+  local m = math.floor((s % 3600) / 60)
+  local sec = s % 60
+  if d > 0 then return string.format("%dd %02dh %02dm %02ds", d, h, m, sec) end
+  if h > 0 then return string.format("%02dh %02dm %02ds", h, m, sec) end
+  if m > 0 then return string.format("%02dm %02ds", m, sec) end
+  return string.format("%02ds", sec)
+end
+
+-- WHEN THE WINDOW RESETS, from a number or an ISO timestamp WITH OR WITHOUT FRACTIONAL SECONDS.
+-- The fraction is what broke it: '2026-11-28T13:25:55.000Z' did not parse, so the row printed the raw string
+-- (measured on Victor's screen, 28/11). A value that still cannot be read answers nil, and the caller says so
+-- in words rather than printing a timestamp nobody asked for.
+local function reset_at(value)
+  local n = tonumber(value)
+  if n then
+    if n > 1e12 then n = n / 1000 end
+    return n
+  end
+  local text = tostring(value or "")
+  if text == "" then return nil end
+  text = text:gsub("(T%d%d:%d%d:%d%d)%.%d+", "%1")
+  return iso_seconds(text)
+end
+
 local function resets(value)
-  local at = tonumber(value) or iso_seconds(value)
+  local at = reset_at(value)
   if not at then return value and (" resets " .. tostring(value)) or "" end
-  if at > 1e12 then at = at / 1000 end
   local left = at - host.now()
   if left <= 0 then return " resets now" end
-  if left < 3600 then return string.format(" resets in %dm", math.ceil(left / 60)) end
-  if left < 172800 then return string.format(" resets in %.1fh", left / 3600) end
-  return string.format(" resets in %.1fd", left / 86400)
+  return " resets in " .. M.countdown(left)
 end
 
 -- A bar of `width` cells for `percent` (0-100), eighths for the partial cell. Coloured by how close
@@ -326,21 +367,92 @@ function M.age_text(seconds)
   return string.format("as of %d d ago", math.floor(s / 86400 + 0.5))
 end
 
--- The rows one provider's limits draw, as strings: `  5h  <bar>   4%  resets in 3.0h`. The ONE builder - the
--- `/status` page, the mid-run snapshot and its row all come through here (rust/wa-capabilities/src/limits.rs
--- row_texts is the console's port of it, and its test pins the two against each other).
-function M.limit_rows(limits, opts)
+-- THE BLOCK ONE PROVIDER DRAWS, IN TWO COLUMNS (Victor, 28/11). The ONE builder: the /status page, the mid-run
+-- snapshot and its row all come through here, and rust/wa-capabilities/src/limits.rs port of it is pinned to
+-- this by a test on both sides.
+--
+--   opencode-go  (in use)                  resets in
+--   5h  <bar>  5%                          28d 02h 08m 01s
+--   7d  <bar> 12%                          20d 04h 11m 30s
+--   just now
+--
+-- WHY TWO COLUMNS. One row carried the window, the bar, the percent AND the reset time, so at a narrow panel the
+-- console cut the LAST field - the one a reader cannot infer (measured 23/11: 43 cells and still cut at 52 wide
+-- once a bar grew). With the reset in its own column the header says what it is once, the rows line up, and the
+-- only thing that ever shrinks is the BAR - the columns keep their headers (Victor's rule for narrow width).
+--
+-- NO LEFT PADDING (his ask: it must fit a compact terminal). The old rows began with two spaces and the widest
+-- table this page draws has no margin.
+function M.limit_block(limits, opts)
   opts = opts or {}
-  local rows = {}
+  local windows = {}
   for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
     local entry = type(limits) == "table" and limits[window[2]]
     if type(entry) == "table" then
-      local percent = tonumber(entry.percent) or 0
-      local reset = resets(entry.resetsAt):gsub("^ ", "")
-      rows[#rows + 1] = (string.format("  %-3s %s %3.0f%%  %s", window[1], M.bar(percent, 16, opts.color), percent, reset)
-        :gsub("%s+$", ""))
+      windows[#windows + 1] = { label = window[1], percent = tonumber(entry.percent) or 0, at = reset_at(entry.resetsAt) }
     end
   end
+  local now = tonumber(opts.now) or host.now()
+  local right = {}
+  local right_width = #'resets in'
+  for i, window in ipairs(windows) do
+    local text
+    if window.at == nil then
+      text = 'unknown'
+    elseif window.at - now <= 0 then
+      text = 'now'
+    else
+      text = M.countdown(window.at - now)
+    end
+    right[i] = text
+    right_width = math.max(right_width, #text)
+  end
+  local widest_label = 3
+  for _, window in ipairs(windows) do widest_label = math.max(widest_label, cells(window.label)) end
+
+  -- RENDER, THEN MEASURE, THEN TRY AGAIN (28/11). The first cut computed the bar's room from a formula and was
+  -- two cells short at a 36-column width - a paragraph of arithmetic that disagreed with the line it produced.
+  -- Drawing it and measuring what came out cannot disagree: the bar gives way a cell at a time until the widest
+  -- line fits, and the columns (label and countdown) are never touched.
+  local function build(bar_width)
+    local lines = { { left = opts.title or '', right = 'resets in' } }
+    for i, window in ipairs(windows) do
+      lines[#lines + 1] = {
+        left = string.format('%-' .. tostring(widest_label) .. 's %s %3.0f%%',
+          window.label, M.bar(window.percent, bar_width, opts.color), window.percent),
+        right = right[i],
+      }
+    end
+    local widest = 0
+    for _, line in ipairs(lines) do widest = math.max(widest, cells(line.left)) end
+    local out = {}
+    for _, line in ipairs(lines) do
+      if line.left == '' then
+        out[#out + 1] = 'resets in'
+      else
+        out[#out + 1] = line.left .. string.rep(' ', widest - cells(line.left) + 2) .. line.right
+      end
+    end
+    return out, widest + 2 + right_width
+  end
+
+  local width = tonumber(opts.width) or 0
+  local bar_width = 16
+  local lines, widest_row = build(bar_width)
+  if width > 0 then
+    while widest_row > width and bar_width > 4 do
+      bar_width = bar_width - 1
+      lines, widest_row = build(bar_width)
+    end
+  end
+  return lines, #windows
+end
+
+-- The rows only (every caller that wants the block with its header calls M.limit_block).
+function M.limit_rows(limits, opts)
+  local lines = M.limit_block(limits, opts)
+  local rows = {}
+  for i = 2, #lines do rows[#rows + 1] = lines[i] end
   return rows
 end
 
@@ -407,7 +519,8 @@ function M.session_lines(session_id, opts)
   end
   for _, item in ipairs(reported_providers(settings.provider)) do
     lines[#lines + 1] = ""
-    lines[#lines + 1] = bold(item.id) .. (item.id == settings.provider and dim("  (in use)") or "")
+    -- THE PROVIDER LINE IS COLUMN 1'S HEADER (Victor, 28/11): 'opencode-go  (in use)' sits above the window
+    -- rows and the words 'resets in' sit above the countdowns, once, instead of on every row.
     -- A snapshot the CONSOLE draws mid-run names the rows it must fill itself: the interpreter is
     -- inside the turn then, so nothing here can repaint when the read lands. The marker is one line;
     -- the console expands it from the door on every draw (rust/wa-capabilities/src/limits.rs).
@@ -423,9 +536,13 @@ function M.session_lines(session_id, opts)
     --      (clip_cells(text, width - BOX_CHROME)); at 24 cells of bar the row measured 53 and the reset fell off a
     --      narrow panel - the exact shape this repo already recorded for the cost segment (55 cells, cut at 100
     --      columns, 23/11). A 16-cell bar costs nothing a reader used and keeps the reset inside 44 cells.
-    local rows = M.limit_rows(limits, opts)
-    local shown = #rows
-    for _, row in ipairs(rows) do lines[#lines + 1] = row end
+    -- The block draws its OWN header (the provider line, then 'resets in'), so the page adds nothing here but
+    -- the lines it returns; the freshness line below stays where it was.
+    local title = item.id .. (item.id == settings.provider and "  (in use)" or "")
+    local block = M.limit_block(limits, { width = opts and opts.width, title = title, now = opts and opts.now })
+    local shown = #block - 1
+    lines[#lines + 1] = bold(item.id) .. (item.id == settings.provider and dim("  (in use)") or "")
+    for i = 2, #block do lines[#lines + 1] = block[i] end
     if shown == 0 then
       -- Nothing to draw yet: say WHAT is happening, never "come back between runs" - the read is
       -- already on its way, on the host's own thread (Victor 25/11).
