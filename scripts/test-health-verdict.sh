@@ -120,4 +120,13 @@ out=$(line 2 5 "$work/nonexistent.out" "$work/missing.json")
 [ -n "$out" ] || fail 'an empty log and no json produced an empty line'
 case "$out" in *"NO VERDICT"*) ;; *) fail "the empty case is not a NO VERDICT: [$out]" ;; esac
 
+# 7) THE LINE NAMES THE SHA THAT WAS GRADED, NOT THE ONE THE LOOP CLAIMED (28/11, operator). MEASURED: the loop said
+#    "4851d511 NO VERDICT" while the report next to it said "MAIN RED at 9eaa1dbc" - two commits, one line. main-health
+#    stamps the sha it judged into the report, so with a readable report the stamp wins over the caller's claimed tip.
+printf '{"schema":1,"sha":"9eaa1dbc5a0e0000000000000000000000000000","ok":false,"counts":{"passed":431,"checks":437},"failed":[{"row":"bash-changes-pty"}],"seconds":12}
+' > "$work/sha.json"
+out=$(line 1 12 "$work/empty.out" "$work/sha.json")
+case "$out" in "9eaa1dbc "*) ;; *) fail "the verdict line names the claimed tip instead of the graded one: [$out]" ;; esac
+case "$out" in *4851d511*) fail "the verdict line still names the sha the loop claimed: [$out]" ;; esac
+
 echo "health verdict ok (green, red, SIGTERM, budget, no-json and nothing-at-all each end in exactly one named line)"

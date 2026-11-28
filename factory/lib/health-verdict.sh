@@ -49,6 +49,13 @@ wa_health_verdict_line() {
   # "NO VERDICT rc=1" and the rows were never named. A run that names its failures HAS a verdict; only an unreadable
   # json is a run with none.
   if [ -r "$json" ] && command -v jq >/dev/null 2>&1 && jq -e . "$json" >/dev/null 2>&1; then
+    # NAME THE SHA THAT WAS GRADED, NOT THE ONE THIS LOOP CLAIMED (28/11, operator). MEASURED: the line read
+    # "4851d511 NO VERDICT after 3244s" while the report beside it said "MAIN RED at 9eaa1dbc" - the loop claims
+    # N=rev-parse origin/main when it starts the run, and main-health rev-parses main again for itself, so a landing in
+    # between makes the two disagree and the line blames a tip nobody graded. main-health stamps the sha it judged into
+    # the report, so when the report is readable that stamp is the answer, and the claimed tip is only a fallback.
+    graded=$(jq -r '.sha // ""' "$json" 2>/dev/null)
+    [ -n "$graded" ] && sha=$graded
     passed=$(jq -r '.counts.passed // "?"' "$json" 2>/dev/null)
     checks=$(jq -r '.counts.checks // "?"' "$json" 2>/dev/null)
     rows=$(jq -r '.failed[]?.row' "$json" 2>/dev/null | sort -u | tr '\n' ' ')
