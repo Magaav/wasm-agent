@@ -13,14 +13,54 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 . scripts/lib/scratch-env.sh
 . scripts/lib/lua-part.sh
+. scripts/lib/sentinel-move.sh
 
 n=0
 ok()  { n=$((n+1)); printf '  ok   %s\n' "$*"; }
 fail(){ echo "FAIL test-version-folders-real-restart: $*" >&2; exit 1; }
 
-WA_BIN="${WA_TEST_BINARY:-${HOME}/.local/bin/wa}"
-SENTINEL="${WA_SENTINEL_BINARY:-${HOME}/.local/bin/wa-sentinel}"
-SUPERVISOR="${WA_SUPERVISOR_BINARY:-}"
+# THE ROW RUNNER HANDS EVERY ROW WA_BIN (ROW-CONTRACT row-runner8): the program IT built for this commit. A row that looks
+# only in $HOME/.local/bin SKIPs inside the runner while passing on a workstation - measured: rc=0-SKIP.
+WA_BIN="${WA_TEST_BINARY:-${WA_BIN:-${HOME}/.local/bin/wa}}"
+# THE SENTINEL AND THE SUPERVISOR ARE LOOKED FOR BESIDE WA_BIN FIRST: a build tree keeps the three together, and the
+# runner's target directory is the only place they can be for a commit that is not installed.
+SENTINEL="${WA_SENTINEL_BINARY:-$(dirname "$WA_BIN")/wa-sentinel}"
+# THE ROW BUILDS WHAT IT NEEDS FROM ITS OWN COMMIT. The runner builds `wa` for the requested commit and nothing else, so
+# asking it for wa-sentinel and wa-operations-supervisor can only SKIP (measured twice). Both live in this repository, and
+# CARGO_TARGET_DIR is already pointed at the mission target, so the three end up beside each other exactly as a release
+# install lays them out.
+build_companion() { # <bin name> <target dir>
+  local bin="$1" dir="$2" root
+  [ -x "$dir/$bin" ] && return 0
+  root="$(cd "$(dirname "$0")/.." && pwd)"
+  [ -f "$root/rust/Cargo.toml" ] || return 1
+  command -v cargo >/dev/null 2>&1 || return 1
+  # A VIRTUAL WORKSPACE NEEDS THE PACKAGE NAMED: `cargo build --bin X` from rust/ refuses, so the crate is named
+  # explicitly. Measured: without -p the build failed and the row SKIPped a third time.
+  # TWO SHAPES, TRIED IN ORDER: wa-operations-supervisor is a WORKSPACE MEMBER (-p works); wa-sentinel is its OWN crate
+  # under rust/wa-sentinel and `-p` cannot name it at all (measured: "package ID specification `wa-sentinel` did not match
+  # any packages"). A row that assumes one shape SKIPs on the other, four times in a row.
+  if [ -f "$root/rust/$bin/Cargo.toml" ]; then
+    ( cd "$root/rust/$bin" && timeout 900 cargo build --release --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
+  else
+    ( cd "$root/rust" && timeout 900 cargo build --release -p "$bin" --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
+  fi
+  # THE BUILD LANDS IN CARGO_TARGET_DIR, AND WA_BIN IS NOT ALWAYS THERE: measured - wa-sentinel built in 47.79 s into
+  # target/m-<mission>/release, while WA_BIN pointed at the runner's install directory, so `[ -x ]` said no and the row
+  # SKIPped with the binary sitting right beside it. Look in both places, and carry it over when it is the wrong one.
+  if [ ! -x "$dir/$bin" ] && [ -n "${CARGO_TARGET_DIR:-}" ] && [ -x "$CARGO_TARGET_DIR/release/$bin" ]; then
+    cp -f "$CARGO_TARGET_DIR/release/$bin" "$dir/$bin" 2>/dev/null || true
+  fi
+  [ -x "$dir/$bin" ]
+}
+WA_DIR="$(dirname "$WA_BIN")"
+build_companion wa-sentinel "$WA_DIR" || true
+build_companion wa-operations-supervisor "$WA_DIR" || true
+[ -x "$SENTINEL" ] || SENTINEL="${HOME}/.local/bin/wa-sentinel"
+# BESIDE WA_BIN FIRST, like the sentinel: the runner lays out what it built, and a copy of this row in a worktree has no
+# rust/target of its own, so the old repo-relative search found nothing and the row SKIPped with all three binaries present
+# (measured locally under env -i, which is the runner environment without the row-runner).
+SUPERVISOR="${WA_SUPERVISOR_BINARY:-$(dirname "$WA_BIN")/wa-operations-supervisor}"
 if [ ! -x "$SUPERVISOR" ]; then
   for candidate_sup in "$(dirname "$0")/../rust/target/release/wa-operations-supervisor" \
                        $(ls -t "$(dirname "$0")"/../rust/target/*/release/wa-operations-supervisor 2>/dev/null | head -1); do
@@ -36,6 +76,15 @@ BASE="${WA_ROW_SCRATCH_ROOT:-${HOME}/.cache/wa-row}"
 case "$BASE" in */.wasm-agent|*/.wasm-agent/*) BASE=/tmp ;; esac
 S=$(mktemp -d "$BASE/wa-vfrestart-XXXXXX") || { echo 'FAIL: no scratch' >&2; exit 2; }
 cleanup() {
+  # AND SO IS EVERYTHING THAT NAMES THIS SCRATCH: step 4's restart attempt starts the node and its supervisor, and
+  # when the restart is refused they are still running. The runner counts that as leftovers and calls it a row defect
+  # (measured: leftovers=3, all three from the staged and sealed trees). Nothing outside this scratch is touched - the
+  # match is on the scratch path itself.
+  for p in $(ps -eo pid= 2>/dev/null); do
+    [ "$p" = "$$" ] && continue
+    cmd="$( { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null )" || continue
+    case "$cmd" in *"$S"*) kill "$p" 2>/dev/null; sleep 0.1; kill -9 "$p" 2>/dev/null ;; esac
+  done
   # THE WATCHER IS KILLED BY PID: `stop` asks, and a watcher that is already confused does not answer - which is exactly
   # how one run's watcher survived into the next run and made its `status` hang (measured: 2 green runs, then hangs).
   timeout 5 "$S/install/wa-sentinel" stop >/dev/null 2>&1
@@ -85,15 +134,36 @@ ok 'the part is signed (scratch vault)'
 export WA_SHARE_ROOT="$S/share" WA_SENTINEL_SUPERVISOR=none WA_PORT="${WA_PORT:-8919}"
 timeout 30 "$INSTALL/wa-sentinel" start >"$S/sentinel.log" 2>&1 || true
 echo "  diag: sentinel start exit=$? log=[$(head -2 "$S/sentinel.log" | tr "\n" " ")]" || fail "the sentinel did not start: $(tail -2 "$S/sentinel.log")"
-# IT COMES UP A MOMENT AFTER start RETURNS: an immediate status read says down (measured), so the row waits.
-for _ in $(seq 1 20); do
-  timeout 10 "$INSTALL/wa-sentinel" status 2>&1 | grep -qE '^ *sentinel: *up' && break
-  sleep 0.5
-done
-# THE STATUS IS PRINTED, NOT SWALLOWED: `grep -q` hid the one line that explains a failure six hypotheses deep.
-SENT_STATE="$(timeout 10 "$INSTALL/wa-sentinel" status 2>&1)"
-printf '  sentinel status: %s\n' "$(printf '%s' "$SENT_STATE" | tr '\n' ' ' | cut -c1-170)"
-printf '%s\n' "$SENT_STATE" | grep -qE '^ *sentinel: *up' || fail 'the sentinel is not up'
+# READINESS IS THE PRODUCT'S OWN WAIT, NOT MY LOOP (law 17). scripts/lib/sentinel-move.sh already knows how to wait for a
+# sentinel to be ready - bounded, 0.1 s ticks, 15 s by default - and version-install.sh uses that same function. The row
+# uses it too, with the unit layer stubbed, so the readiness rule has ONE implementation and a start's exit code proves
+# nothing.
+cat > "$S/systemctl-stub" <<'STUB'
+#!/bin/sh
+# answers only the question the product's wait asks, from the sentinel's own status answer
+check() {
+  for a in "$@"; do
+    case "$a" in
+      is-active)
+        if "$ROW_SENTINEL" status 2>/dev/null | grep -qE '^ *sentinel: *up'; then echo active; else echo inactive; fi
+        exit 0 ;;
+    esac
+  done
+  echo inactive
+  exit 0
+}
+check "$@"
+STUB
+chmod +x "$S/systemctl-stub"
+export WA_SENTINEL_UNIT_SYSTEMCTL="$S/systemctl-stub" WA_SENTINEL_UNIT_DIR="$S/units"
+ROW_SENTINEL="$INSTALL/wa-sentinel"; export ROW_SENTINEL
+if wa_sentinel_move_active 15; then
+  ok "the product's own readiness wait (wa_sentinel_move_active) sees the sentinel up"
+else
+  SENT_STATE="$(timeout 10 "$INSTALL/wa-sentinel" status 2>&1)"
+  printf '  sentinel status: %s\n' "$(printf '%s' "$SENT_STATE" | tr '\n' ' ' | cut -c1-170)"
+  fail 'the product readiness wait never saw the sentinel up within 15s'
+fi
 ok 'the real sentinel supervises the scratch node'
 
 OUT="$S/seq.log"
@@ -104,7 +174,7 @@ rc=$?
 grep -q 'SEQSTEP 1 convert' "$OUT" && ok 'step 1 convert (the real versions-adopt)' || fail 'step 1 never ran'
 grep -q 'SEQSTEP 2 stage' "$OUT" && ok 'step 2 stage (the real upgrade.sh)' || fail 'step 2 never ran'
 grep -q 'lua_part_signed_ok' "$OUT" && ok 'the node verified the part signature (release verify)' \
-  || fail "the part was not accepted: $(grep -m1 lua_part "$OUT")"
+  || fail "step 2 did not stage; the deploy log says: $(tail -3 "$INSTALL/deploy-upgrade.log")"
 grep -q 'lua_part_filled' "$OUT" && ok 'and the part filled the lua-core member' || fail 'the part did not fill the member'
 grep -q 'SEQSTEP 3 seal and point' "$OUT" && ok 'step 3 seal and point (the real version-install.sh)' || fail 'step 3 never ran'
 grep -q 'SEQSTEP 4 restart through the pointer' "$OUT" && ok 'step 4 restart through the pointer (the real upgrade.sh)' || fail 'step 4 never ran'
