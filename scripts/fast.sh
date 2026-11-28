@@ -56,6 +56,8 @@
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh" && wa_git_isolate
+# ^ EVERY ROW THIS RUNNER STARTS INHERITS A CLEAN GIT ENVIRONMENT (27/11): one owner clears it before the first row.
 jobs=${WA_FAST_JOBS:-}; all_rust=0; docker_mode=0; binary_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in

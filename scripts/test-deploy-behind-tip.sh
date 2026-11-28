@@ -10,6 +10,11 @@
 #   2. the behind-count the note reports is the real distance (so the note says something true);
 #   3. a commit that is NOT on main is still refused - the rule keeps its direction;
 #   4. the deploy no longer has a `fail` on that count: the phrase it used is gone from scripts/deploy.sh.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 case "${TMPDIR:-/tmp}" in /home/*/.wasm-agent/*) TMPBASE="${TMPDIR}" ;; *) TMPBASE="$ROOT/.tmp" ;; esac

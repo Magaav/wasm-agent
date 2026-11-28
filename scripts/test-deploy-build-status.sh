@@ -8,6 +8,11 @@
 # it is on every deploy's path, so it is timed here, and a missing or too-old toolchain must be NAMED - by
 # reading rustup's manifest, never by invoking cargo. build.env is data: only its whitelisted keys are read.
 # No network, no cargo, no node required: every tool is a stub in a private HOME.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 checks=0

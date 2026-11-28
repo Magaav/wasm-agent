@@ -21,6 +21,11 @@
 #
 # Hermetic: its own WASM_AGENT_HOME, install directory, repository, ledger and git config; no node, no port, no
 # model, no network, no rendezvous, no fleet. SKIP (never a pass) when a binary it needs is not built.
+# ONE OWNER for "run git where this row means, not where the caller redirects git" (27/11): a suite started from a git
+# hook exports GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE, and a bare `git init`/`git config` then writes into the shared
+# repository instead of this row’s fixture. scripts/lib/git-env.sh is the one place that clears them.
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib/git-env.sh"
+git() { wa_git "$@"; }
 set -uo pipefail
 # This row never reads its caller's stdin: a child that inherited it would eat a row list (see
 # scripts/test-deploy-wait.sh, 22/11).
