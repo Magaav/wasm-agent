@@ -557,6 +557,8 @@ function deployGateRefusals() {
   const before = git(ORIGIN, 'rev-parse', 'refs/heads/main').trim();
   const refused = q(['land', '--branch', 'change/no-graph', '--owner', SESSION, '--checks', 'echo fixture-checks-ran']);
   check('a landing whose components.lock drops graph is refused', refused.status === 75, refused.stdout + refused.stderr);
+
+
   check('the refusal is named undeployable and quotes the deploy rule it breaks',
     /undeployable/.test(refused.stderr) && /component_lock_incomplete/.test(refused.stderr), refused.stderr);
   check('the deploy gate names what it refused, check by check',
@@ -771,7 +773,23 @@ try {
       git(CANONICAL, 'rev-parse', 'HEAD').trim() === headBefore && git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === headBefore);
     git(CANONICAL, 'worktree', 'remove', '--force', workerTree);
   }
-  console.log(`landing queue: ${passed} checks passed in ${Math.round((Date.now() - started) / 1000)}s`);
+  // A GATE THAT CANNOT BE RUN IS UNKNOWN, NOT A DRIFTING PIN (28/11). The gate is executed from the CANONICAL
+// checkout (landing-queue.mjs runs `bash <canonical>/scripts/landing-component-gate.sh`), so the case is a
+// canonical tree without it - not a branch that deletes it, which changes nothing. Before the fix the spawn
+// exited 127 and the queue blamed a pin nobody had compared to anything. LAST on purpose: it moves the
+// fixture's main under every case above.
+{
+  fs.unlinkSync(path.join(CANONICAL, 'scripts/landing-component-gate.sh'));
+  git(CANONICAL, 'add', '-A');
+  git(CANONICAL, 'commit', '-q', '-m', 'fixture: no component gate in this tree');
+  git(CANONICAL, 'push', '-q', 'origin', 'main');
+  const noGate = q(['land', '--branch', 'change/proven', '--owner', SESSION, '--checks', 'echo fixture-checks-ran']);
+  check('a tree whose component-pin gate cannot be run is refused as unknown, not as drift',
+    noGate.status === 75 && /component_gate_unknown/.test(noGate.stderr) && !/component_not_reproducible/.test(noGate.stderr),
+    noGate.stdout + noGate.stderr);
+}
+
+console.log(`landing queue: ${passed} checks passed in ${Math.round((Date.now() - started) / 1000)}s`);
   console.log(`fixture kept for evidence: ${WORK}`);
 } catch (error) {
   console.error(`landing queue: FAILED after ${passed} checks: ${error.message}`);

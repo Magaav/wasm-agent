@@ -1330,7 +1330,13 @@ async function commandLand(options) {
     const componentGate = spawnSync('bash', [path.join(canonical, 'scripts', 'landing-component-gate.sh'),
       resolveCommit(canonical, 'origin/main'), options.branch], {cwd: canonical, encoding: 'utf8', timeout: 45 * 60 * 1000});
     for (const line of String(componentGate.stdout || '').trim().split(/\r?\n/).filter(Boolean).slice(-6)) say(`#${id} ${line}`);
-    if (componentGate.status === 2) {
+    // A GATE THAT CANNOT BE EXECUTED IS NOT A GATE THAT SAID THE PIN DRIFTED (28/11). The gate is run FROM THE TREE
+    // IT JUDGES; a tree without scripts/landing-component-gate.sh made the spawn exit 127, which is neither 0 nor 2,
+    // so the branch below reported `component_not_reproducible` about a comment nobody had compared to anything -
+    // two rows (test-landing-queue, test-landing-baseline) went red for a reason that was a missing tool. 126 is
+    // "found but not executable" and 127 is "not found": both are unknown, and unknown is never a pass or a drift.
+    const unanswerable = componentGate.status === 2 || componentGate.status === 126 || componentGate.status === 127;
+    if (unanswerable) {
       const why = `component_gate_unknown: the component pin gate could not answer (${String(componentGate.stderr || componentGate.stdout || '').trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || 'no reason'}); nothing was merged`;
       finish('refused', why);
       throw new QueueError(why, 75, 'component_gate_unknown');
