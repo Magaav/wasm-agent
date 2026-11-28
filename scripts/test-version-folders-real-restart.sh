@@ -45,6 +45,12 @@ build_companion() { # <bin name> <target dir>
   else
     ( cd "$root/rust" && timeout 900 cargo build --release -p "$bin" --bin "$bin" > "${TMPDIR:-/tmp}/build-$bin.log" 2>&1 ) || return 1
   fi
+  # THE BUILD LANDS IN CARGO_TARGET_DIR, AND WA_BIN IS NOT ALWAYS THERE: measured - wa-sentinel built in 47.79 s into
+  # target/m-<mission>/release, while WA_BIN pointed at the runner's install directory, so `[ -x ]` said no and the row
+  # SKIPped with the binary sitting right beside it. Look in both places, and carry it over when it is the wrong one.
+  if [ ! -x "$dir/$bin" ] && [ -n "${CARGO_TARGET_DIR:-}" ] && [ -x "$CARGO_TARGET_DIR/release/$bin" ]; then
+    cp -f "$CARGO_TARGET_DIR/release/$bin" "$dir/$bin" 2>/dev/null || true
+  fi
   [ -x "$dir/$bin" ]
 }
 WA_DIR="$(dirname "$WA_BIN")"
